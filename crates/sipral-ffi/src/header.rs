@@ -3,22 +3,12 @@
 
 //! Header fields in, and header fields out.
 //!
-//! In: an array of [`SipralHeader`] beside its length, on
-//! `sipral_call_config_t` for the INVITE, on `sipral_account_config_t` for
-//! every REGISTER, and handed to `sipral_call_set_headers` for what a call
-//! sends afterwards. Every field is checked before anything is built: the name
-//! a token, the value one line of text, and not a field the stack writes itself
-//! on those messages. The list of those, with the reason for each, is
-//! `docs/04-ua.md`, and [`sipral_ua::HeadersFor`] is the one place it is kept.
-//! A refusal says which element it was.
+//! In: arrays of [`SipralHeader`], checked before anything is built (name a
+//! token, value one line, not a field the stack writes; that list is
+//! [`sipral_ua::HeadersFor`], reasons in `docs/04-ua.md`).
 //!
-//! Out: four accessors over the parser this library already runs, so that no
-//! binding writes one of its own to read `P-Asserted-Identity`, `Diversion` or
-//! an `X-` field out of the message an event carries. One of each pair counts
-//! and the other reaches an occurrence by index, and what comes back is an
-//! offset into the bytes they were given rather than a pointer, because those
-//! bytes are the caller's: a binding that copied them across the boundary holds
-//! its own copy, and an offset means the same thing in both.
+//! Out: accessors over the stack's own parser. They return offsets, not
+//! pointers, because the bytes are the caller's and a binding may hold a copy.
 
 use std::ffi::c_char;
 use std::slice;
@@ -39,10 +29,7 @@ record! {
     /// One header field an application hands over: a name and a value, UTF-8,
     /// neither NUL-terminated.
     ///
-    /// Always an element of an array whose length travels beside it, which is
-    /// why it carries no `size`: an array is strided by the length of its
-    /// element, so a member appended here would move every element after the
-    /// first. A header field is a name and a value, and this never grows.
+    /// No `size` member: it is an array element, so it never grows.
     #[derive(Clone, Copy)]
     pub struct SipralHeader {
         /// The field name, `X-Conversation-Id`. A compact form is the field it
@@ -58,12 +45,9 @@ record! {
     }
 }
 
-/// The fields a caller handed over, checked, borrowing the caller's memory for
-/// the length of the call.
+/// The caller's fields, checked, borrowing the caller's memory.
 ///
-/// `user_agent_written` says the stack writes a `User-Agent` of its own on
-/// these messages, from `sipral_stack_config_t::user_agent`, so that a second
-/// is refused like every other field the stack writes.
+/// `user_agent_written`: the stack writes its own `User-Agent`, so refuse one.
 ///
 /// # Safety
 ///
@@ -168,10 +152,7 @@ unsafe fn asked<'a>(
     Ok((whole, field))
 }
 
-/// The message, parsed the way the stack parses what arrives.
-///
-/// Lenient, because a message the stack took in and reported is not refused a
-/// second time on the way to reading it.
+/// Lenient, as on receive: what the stack let in is not refused when read back.
 fn parsed<'a>(whole: &'a [u8], scratch: &'a mut ParseScratch) -> Result<RawMessage<'a>, Fail> {
     parse(whole, scratch, ParseMode::Lenient).map_err(|error| {
         fail(
@@ -217,11 +198,8 @@ fn span_in(
     Ok((offset_in(whole, value)?, value.len()))
 }
 
-/// Where a slice of `within` starts inside it.
-///
-/// Every value the parser hands back is a slice of the buffer it parsed, so
-/// this is never refused; the check is there for the day that stops being so,
-/// which would otherwise be an offset pointing at somebody else's bytes.
+/// Where a slice of `within` starts inside it. Checked so a parser change can
+/// never yield an offset outside the caller's bytes.
 fn offset_in(within: &[u8], part: &[u8]) -> Result<usize, Fail> {
     part.as_ptr()
         .addr()
@@ -238,13 +216,8 @@ fn offset_in(within: &[u8], part: &[u8]) -> Result<usize, Fail> {
 entry! {
     /// How many lines a header field is on, in a whole SIP message.
     ///
-    /// The message is any SIP message in bytes: the one an event carries in
-    /// `sipral_event_t::message`, or one the application came by some other
-    /// way. The name is matched the way the parser matches it, without regard to
-    /// case, and a compact form and its long form are one field (RFC 3261
-    /// §7.3.3): `i` counts the `Call-ID` lines, and `Call-ID` counts a line
-    /// written `i:`. A field that is not there is a count of zero, not a
-    /// failure.
+    /// The name is case-insensitive and a compact form equals its long form
+    /// (RFC 3261 §7.3.3). An absent field counts zero, not a failure.
     ///
     /// # Safety
     ///
@@ -270,16 +243,10 @@ entry! {
 entry! {
     /// Where one line of a header field is, in a whole SIP message.
     ///
-    /// `index` counts from zero in the order the lines arrived, and has to be
-    /// below what `sipral_message_header_count` says for the same name: past it
-    /// is `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` then say
-    /// where the value sits inside `message`, trimmed at both ends and otherwise
-    /// as it arrived, a line fold included. An offset rather than a pointer,
-    /// because the bytes are the caller's, and a binding that copied them across
-    /// the boundary holds its own copy.
-    ///
-    /// One line of a field whose value is a comma-separated list may hold
-    /// several values; `sipral_message_header_element` reaches those.
+    /// `index` is in arrival order, below `sipral_message_header_count`, else
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` locate the
+    /// value inside `message`, trimmed, line folds kept. For single list values
+    /// use `sipral_message_header_element`.
     ///
     /// # Safety
     ///
@@ -314,16 +281,9 @@ entry! {
     /// How many values a field whose value is a comma-separated list holds,
     /// across every line it is on.
     ///
-    /// RFC 3261 §7.3.1 makes two values on one line, with a comma between them,
-    /// and the same two values on two lines one and the same message, and a
-    /// proxy is free to turn either into the other. So this counts values
-    /// rather than lines, split at every comma that is not inside quotes or
-    /// angle brackets. Otherwise as `sipral_message_header_count`.
-    ///
-    /// Only for a field defined as a list: `P-Asserted-Identity`, `Diversion`,
-    /// `Contact`, `Supported`. Any other is split at a comma its value holds as
-    /// text, like the one in a `Date` or the ones between the parameters of a
-    /// challenge, and `sipral_message_header_count` is the call for it.
+    /// Per RFC 3261 §7.3.1 one line with commas equals several lines, so this
+    /// splits at commas outside quotes and angle brackets. Only for list
+    /// fields (`Diversion`, `Contact`...); a `Date` would split wrongly.
     ///
     /// # Safety
     ///
@@ -348,9 +308,8 @@ entry! {
 entry! {
     /// Where one value of a list field is, across every line the field is on.
     ///
-    /// `index` counts values in the order they arrived, and has to be below what
-    /// `sipral_message_header_element_count` says for the same name. Otherwise
-    /// as `sipral_message_header`.
+    /// `index` is below `sipral_message_header_element_count`. Otherwise as
+    /// `sipral_message_header`.
     ///
     /// # Safety
     ///
@@ -391,9 +350,8 @@ mod tests {
     use std::ffi::c_char;
     use std::ptr;
 
-    /// A 200 with a field on two lines, one of them a list with a comma inside
-    /// quotes, a `Date` with a comma of its own, a `Call-ID` written compact
-    /// and a field with nothing after the colon.
+    /// A field on two lines with a quoted comma, a `Date`, a compact `Call-ID`
+    /// and an empty field.
     const MESSAGE: &[u8] = b"SIP/2.0 200 OK\r\n\
 Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-headers\r\n\
 From: <sip:alice@example.com>;tag=a\r\n\
@@ -634,9 +592,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_message_with_bare_lf_line_endings_is_read_the_way_the_stack_already_took_it_in() {
-        // the receive path this message would have arrived on accepts a bare
-        // LF (`ParseMode::Lenient`); an accessor reading it back a second time
-        // must not refuse what was already let in once
+        // receive accepts a bare LF, so reading back must too
         const BARE_LF: &[u8] = b"SIP/2.0 200 OK\nX-Loose: yes\n\n";
         assert_eq!(count(sipral_message_header_count, BARE_LF, "X-Loose"), 1);
         assert_eq!(

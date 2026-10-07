@@ -4,46 +4,18 @@
 //! A call announced by a push notification, and the binding refresh that goes
 //! with it (RFC 8599).
 //!
-//! On a phone the ringing screen exists before the call does. The operating
-//! system delivers a notification, the process gets one run loop to raise a
-//! call screen, and only then does anything SIP happen — a REGISTER to prove
-//! the path is up, and an INVITE that arrives some time afterwards, or never.
-//! `docs/15-mobile.md` is the whole story; this module is the doorway into it
-//! from C.
+//! On a phone the ringing screen exists before the call: the push arrives,
+//! then a REGISTER, then maybe an INVITE. See `docs/15-mobile.md`.
 //!
-//! [`sipral_account_announce`] is what an application calls the moment it is
-//! woken, with whoever the push said is calling. Two things happen: the
-//! binding is refreshed at once, because §4.1.3 makes that a MUST for a woken
-//! agent, and the INVITE that follows is matched to the announcement. Which of
-//! the two comes back depends on a race the application cannot control — the
-//! INVITE may already have arrived while the notification was still crossing —
-//! so both are written back and exactly one of them names something.
+//! [`sipral_account_announce`] refreshes the binding (a MUST for a woken agent,
+//! §4.1.3) and matches the following INVITE to the announcement. The INVITE may
+//! win the race, so it writes back both values and exactly one names something.
+//! [`sipral_account_refresh_binding`] is the refresh alone (§5.5);
+//! [`sipral_account_push_echo`] reads the registrar's `Feature-Caps` (§8.2).
 //!
-//! [`sipral_account_refresh_binding`] is the same refresh without an
-//! announcement, for the periodic wake-up a proxy sends to keep a suspended
-//! device reachable (§5.5).
-//!
-//! # What the registrar said back
-//!
-//! [`sipral_account_push_echo`] reads RFC 8599 §8.2's `Feature-Caps` answer:
-//! whether the network said it will actually ask for notifications of the
-//! type this account asked for, and how long before the binding lapses it
-//! insists on seeing a refresh. It matters more than it looks: a phone that
-//! lets itself be suspended because it believes the network will wake it, when
-//! the network never said so, is a phone that stops ringing.
-//!
-//! # The two events
-//!
-//! `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` says the INVITE for an announcement has
-//! arrived, and it is queued immediately before the
-//! `SIPRAL_EVENT_KIND_INCOMING_CALL` for the same call — never without one —
-//! so that an application reading its events in order is told which screen the
-//! call belongs to before it is told there is a call at all.
-//!
-//! `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` says one never arrived. It is
-//! not an error: a wake-up chain has a notification service, a proxy, a bucket
-//! timer and a radio in it, and this is the only place that says which end
-//! gave up. The screen the application raised can come down.
+//! `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` is queued right before the matching
+//! `SIPRAL_EVENT_KIND_INCOMING_CALL`, so the screen is named first.
+//! `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` says none arrived; not an error.
 
 use std::ffi::c_char;
 
@@ -66,24 +38,18 @@ record! {
     pub struct SipralPushEcho {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
-        /// Whether the network said it will ask for notifications of the type
-        /// this account asked for. Zero means it did not say so, which §4.1.1
-        /// makes "MUST NOT assume they are coming" rather than "they are not":
-        /// an application that suspends itself on the strength of a push it
-        /// was never promised stops ringing.
+        /// Whether the network promised pushes of the requested type. Zero
+        /// means not promised (§4.1.1): do not suspend relying on a push.
         pub accepted: u32,
         /// Whether `refresh_lead_ms` was sent at all.
         pub has_refresh_lead: u32,
-        /// How long before the binding lapses the network insists on seeing a
-        /// refresh, from a `sip.pnsreg` indicator (§4.1.4), in milliseconds.
-        /// Zero when the network sent none, which `has_refresh_lead` is how to
-        /// tell from a lead of zero.
+        /// How long before expiry the network wants a refresh, from
+        /// `sip.pnsreg` (§4.1.4), in milliseconds; zero when not sent.
         pub refresh_lead_ms: u64,
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and the library is the only one that fills it in.
+// Safety: plain data, filled only by the library.
 unsafe impl Versioned for SipralPushEcho {
     const NAME: &'static str = "sipral_push_echo";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPushEcho, refresh_lead_ms);
@@ -93,7 +59,6 @@ unsafe impl Versioned for SipralPushEcho {
     }
 }
 
-/// The announcement a handle names, or why it names nothing.
 fn announcement_of(
     state: &crate::stack::StackState,
     announcement: SipralHandle,
@@ -104,29 +69,18 @@ fn announcement_of(
 entry! {
     /// A call is expected on this account, announced by a push (C2).
     ///
-    /// `caller` is whoever the notification said is calling, as a SIP URI.
-    /// The binding is refreshed at once on whatever path exists — §4.1.3
-    /// makes that a MUST for a woken agent, and a transport the application
-    /// has not opened yet is the ordinary shape of a wake-up, so the REGISTER
-    /// is owed and goes the moment one is bound.
+    /// `caller` is the SIP URI the push named. The binding is refreshed at
+    /// once (§4.1.3); with no transport bound yet, the REGISTER goes when one
+    /// is. Without a registrar, only the matching happens.
     ///
-    /// Exactly one of the two values written back names something, and which
-    /// one is a race the caller cannot control:
+    /// Exactly one of the two outputs names something:
     ///
-    /// - `out_announcement` when nothing has arrived yet. The INVITE that
-    ///   matches will be reported as `SIPRAL_EVENT_KIND_CALL_ANNOUNCED`
-    ///   naming this announcement, immediately before the
-    ///   `SIPRAL_EVENT_KIND_INCOMING_CALL` for the same call; and
-    ///   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` when none does.
-    /// - `out_call` when the INVITE beat the push. The screen just raised
-    ///   belongs to that call handle, and no announcement was recorded for it
-    ///   to answer. A `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` still arrives for it
-    ///   when the incoming-call event has not been delivered yet, because the
-    ///   two are queued together and in that order; once it has, this return
-    ///   value is the only word about the match there will be.
-    ///
-    /// An account with no registrar has no binding to refresh, and for one of
-    /// those only the matching happens.
+    /// - `out_announcement` when nothing arrived yet. The matching INVITE
+    ///   raises `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` right before its
+    ///   `SIPRAL_EVENT_KIND_INCOMING_CALL`, or
+    ///   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` if none comes.
+    /// - `out_call` when the INVITE beat the push. If the incoming-call event
+    ///   was already delivered, this is the only report of the match.
     ///
     /// # Safety
     ///
@@ -187,23 +141,14 @@ entry! {
 entry! {
     /// Refresh the binding now, without announcing anything (C3).
     ///
-    /// For the periodic wake-up a proxy sends to keep a suspended device's
-    /// binding alive (RFC 8599 §5.5). A push is evidence that the path to the
-    /// proxy is working, so a back-off earned by an earlier outage is not
-    /// what to wait for now and is dropped.
+    /// For a proxy's periodic wake-up (RFC 8599 §5.5). A push proves the path
+    /// works, so any back-off from an earlier outage is dropped.
     ///
-    /// Nothing is sent when a REGISTER is already in flight, which is already
-    /// the fastest path, or when the registration has failed in a way trying
-    /// again cannot fix — repeating a password that was refused is how an
-    /// account gets locked out, and a push does not change that. Both of those
-    /// are `SIPRAL_STATUS_OK`: the refresh was asked for and the answer is
-    /// that nothing needed sending.
-    ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers,
-    /// which has no binding to refresh: it is the account that is wrong for
-    /// this call, not the build that is missing the feature. A send that could
-    /// not happen because no transport is bound yet is reported too, and is
-    /// not fatal: the refresh is remembered and goes out the moment one is.
+    /// `SIPRAL_STATUS_OK` without sending when a REGISTER is in flight or the
+    /// failure is permanent (retrying a refused password locks accounts out).
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers.
+    /// With no transport bound yet the failure is reported, and the refresh
+    /// goes out once one is.
     ///
     /// # Safety
     ///
@@ -220,12 +165,8 @@ entry! {
 }
 
 entry! {
-    /// Stop expecting an announced call.
-    ///
-    /// The user dismissed the screen, or the application decided the wake-up
-    /// was stale. `SIPRAL_STATUS_WRONG_STATE` when it had already been
-    /// fulfilled or had already expired, which is not a mistake: the event
-    /// that said so and this call can cross.
+    /// Stop expecting an announced call. `SIPRAL_STATUS_WRONG_STATE` when it
+    /// was already fulfilled or expired; the event and this call can cross.
     ///
     /// # Safety
     ///
@@ -247,12 +188,9 @@ entry! {
 }
 
 entry! {
-    /// What the registrar said about push, in the 2xx to the REGISTER that
-    /// asked for it.
-    ///
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` when this account did not ask for push,
-    /// or when no binding it could have been said about is standing — none
-    /// granted yet, one given up, or one that has lapsed.
+    /// What the registrar said about push in its 2xx to REGISTER.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` when the account did not ask for push or
+    /// has no standing binding.
     ///
     /// # Safety
     ///
@@ -306,7 +244,6 @@ mod tests {
         (text.as_ptr().cast::<c_char>(), text.len())
     }
 
-    /// An account woken through Apple's service, which is what a phone is.
     fn woken(handle: SipralHandle, wakes_itself: bool) -> SipralHandle {
         let mut config = crate::account::tests::account_config();
         (config.push_provider, config.push_provider_len) = as_text("apns");
@@ -320,7 +257,6 @@ mod tests {
         account
     }
 
-    /// The REGISTER an account sends, as text.
     fn registered(handle: SipralHandle, account: SipralHandle) -> String {
         assert_eq!(
             unsafe { sipral_account_register(handle, account, 1_000) },
@@ -336,16 +272,12 @@ mod tests {
         String::from_utf8_lossy(register).into_owned()
     }
 
-    /// A phone that is actually registered, which is what a woken one is: a
-    /// binding refresh is not sent while a REGISTER is still in flight,
-    /// because that is already the fastest path there is.
+    /// Registered, with the REGISTER transaction gone: a refresh is not sent
+    /// while one is in flight.
     fn bound(handle: SipralHandle, account: SipralHandle) {
         let register = registered(handle, account);
         deliver(handle, &accepted_push(&register).into_bytes(), 1_100);
         poll(handle, 1_100);
-        // and far enough past it that the REGISTER's own transaction has been
-        // let go of: a refresh asked for while one is still in flight is not
-        // sent, because that is already the fastest path there is
         poll(handle, 30_000);
         let _ = sent(handle);
     }
@@ -363,12 +295,8 @@ mod tests {
             .unwrap_or_else(|| panic!("no Contact in:\n{register}"));
         assert!(contact.contains(";pn-provider=apns"), "{contact}");
         assert!(contact.contains(";pn-param=org.example.phone"), "{contact}");
-        // §8.7: a token carrying characters the SIP grammar does not take is
-        // escaped rather than sent raw or refused. `=` is one of those and
-        // `/` is not -- RFC 3261 §25.1 puts `/` in `param-unreserved` -- so
-        // escaping it as well would be a second spelling of the same token,
-        // and a device token that does not round-trip is a phone that never
-        // rings
+        // §8.7: escape what the grammar refuses (`=`), but not `/`, which is
+        // `param-unreserved` (RFC 3261 §25.1); the token must round-trip
         assert!(
             contact.contains(";pn-prid=device%3Dtoken+with/reserved"),
             "the identifier did not survive the wire: {contact}"
@@ -430,8 +358,6 @@ mod tests {
         );
     }
 
-    /// The whole of C2: woken, a screen raised, the binding refreshed, and the
-    /// INVITE that follows named as the one the screen belongs to.
     #[test]
     fn an_announced_call_is_matched_to_the_invite_that_answers_it() {
         let mut observed = Observed::default();
@@ -492,8 +418,6 @@ mod tests {
         );
     }
 
-    /// The other half: nothing arrives, and the screen comes down on an event
-    /// rather than on a timer of the application's own.
     #[test]
     fn an_announced_call_that_never_arrives_is_reported_as_missing() {
         let mut observed = Observed::default();
@@ -519,7 +443,7 @@ mod tests {
             SipralStatus::Ok
         );
 
-        // twenty seconds is the window, and nothing came through it
+        // past the twenty-second window
         poll(handle, 31_000 + 21_000);
 
         assert!(
@@ -570,7 +494,6 @@ mod tests {
             SipralStatus::WrongState,
             "forgetting it twice was taken as a second announcement"
         );
-        // and nothing is waited for any more
         poll(handle, 31_000 + 21_000);
         assert!(
             !observed
@@ -595,8 +518,7 @@ mod tests {
             has_refresh_lead: 0,
             refresh_lead_ms: 0,
         };
-        // nothing has answered yet, and a guess would be the one thing that
-        // must not be made here
+        // no answer yet, so no guess
         assert_eq!(
             unsafe { sipral_account_push_echo(handle, account, &raw mut echo) },
             SipralStatus::NotSupported
@@ -647,7 +569,6 @@ mod tests {
         );
     }
 
-    /// An INVITE from the caller a push announced.
     fn invitation(caller: &str) -> Vec<u8> {
         format!(
             "INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
@@ -663,8 +584,7 @@ Content-Length: 0\r\n\r\n"
         .into_bytes()
     }
 
-    /// A 200 to the REGISTER that says the network will ask for notifications
-    /// of the type this account asked for (RFC 8599 §8.2).
+    /// A 200 to the REGISTER that accepts push (RFC 8599 §8.2).
     fn accepted_push(register: &str) -> String {
         let field = |name: &str| {
             register

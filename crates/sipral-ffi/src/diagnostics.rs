@@ -3,60 +3,36 @@
 
 //! What the stack decided, and the session it decided it about.
 //!
-//! Two artefacts, both meant to leave the process and both documented where
-//! they are built: the diagnostic record (`docs/14-diagnostics.md`), which is
-//! safe to send without being read, and a replay recording
-//! (`docs/18-replay.md`), which is not — a recording holds the messages
-//! themselves, and a message can hold whatever the peer put in it.
+//! The diagnostic record (`docs/14-diagnostics.md`) is safe to send unread. A
+//! replay recording (`docs/18-replay.md`) is not: it holds the messages, and a
+//! message can hold whatever the peer put in it.
 //!
 //! # The record
 //!
-//! [`sipral_call_record_json`] and [`sipral_stack_diagnostics_json`] are
-//! `Endpoint::call_record` and `Endpoint::endpoint_record`, serialised. Both
-//! copy into a caller's buffer the way [`crate::error::sipral_last_error_message`]
-//! does: `out_needed` always receives the number of bytes the text needs
-//! including the trailing NUL, and a buffer too small for the whole of it is
-//! `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written to it.
+//! [`sipral_call_record_json`] and [`sipral_stack_diagnostics_json`] serialise
+//! `Endpoint::call_record` and `Endpoint::endpoint_record`. They copy out like
+//! [`crate::error::sipral_last_error_message`]: `out_needed` always gets the
+//! length including the NUL, and a buffer too small is
+//! `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
 //!
 //! # The recording
 //!
-//! [`sipral_stack_recording_start`] and [`sipral_stack_recording_stop`] are
-//! [`sipral_ua::UserAgent`]'s own recorder, the one thing here that is new
-//! rather than a read of something the layer below already keeps: nothing
-//! before this needed a driver that fed a [`sipral_core::replay::Recorder`]
-//! beside every [`sipral_ua::UserAgent::receive`] and
-//! [`sipral_ua::UserAgent::handle_timeout`], so that driving is done inside
-//! `UserAgent` itself now, on a seed drawn for the recording from a stream
-//! derived one way from the one the agent was built with (`entropy` on
-//! `sipral_stack_create`), and it is done for every caller of this crate
-//! rather than once for this one.
+//! [`sipral_stack_recording_start`] and [`sipral_stack_recording_stop`] drive
+//! [`sipral_ua::UserAgent`]'s recorder, which feeds a
+//! [`sipral_core::replay::Recorder`] from [`sipral_ua::UserAgent::receive`] and
+//! [`sipral_ua::UserAgent::handle_timeout`], on a seed derived one way from
+//! `entropy`.
 //!
-//! **What it does not do, on purpose: it never records what this end sent.**
-//! [`sipral_ua::UserAgent::receive`] offers the recorder the input before
-//! touching it and [`sipral_ua::UserAgent::handle_timeout`] offers it the
-//! moment, and neither is ever offered a byte this stack wrote — there is no
-//! third call to make that offer from, because nothing else here reads a
-//! transmit queue. A caller's own negotiated SRTP key is written into the
-//! offer or the answer this end sends and nowhere else, so it never reaches
-//! the recorder and never reaches the file (8.2.4, `docs/18-replay.md`).
-//! What arrives from the far end is a different matter and is recorded
-//! exactly as it arrived, key included if the far end put one in its SDP —
-//! the same limit the core's own doc states, and this crate adds nothing
-//! that would make it worse.
+//! **It never records what this end sent.** Neither call is offered a byte this
+//! stack wrote, so this end's SRTP key never reaches the file (8.2.4,
+//! `docs/18-replay.md`). What the far end sent is recorded as it arrived, key
+//! included.
 //!
-//! Starting a recording that is already running replaces it rather than
-//! refusing, the one place this module's two features disagree in shape with
-//! [`crate::record`]'s per-call audio recording, which refuses a second
-//! `start` outright. The two are not the same decision to make: an audio
-//! recording is a file opened on this end's disk and a second `start` would
-//! leave one of the two files with only half a conversation in it, silently.
-//! A replay recording has no file yet — [`sipral_stack_recording_stop`] is
-//! the only place one is produced — so a second `start` costs nothing but the
-//! frames taken since the first, and a caller that meant to keep those would
-//! not have asked to start again. Stopping one that was never started is
-//! `SIPRAL_STATUS_WRONG_STATE`, the same as `sipral_media_record_stop`
-//! answers it, because both are "nothing here to stop" and a caller reads the
-//! same status for it whichever recording it asked about.
+//! A second start replaces the running recording; [`crate::record`] refuses a
+//! second audio `start` because its file is already open, while a replay
+//! recording has no file until [`sipral_stack_recording_stop`]. Stopping one
+//! never started is `SIPRAL_STATUS_WRONG_STATE`, as for
+//! `sipral_media_record_stop`.
 
 use std::ffi::c_char;
 use std::ptr;
@@ -71,14 +47,10 @@ use crate::text::text;
 
 /// Copy `text` into the caller's buffer, or say how much room it needs.
 ///
-/// The shape every entry point here that hands text back uses:
-/// [`crate::error::sipral_last_error_message`] set it, and this crate has had
-/// no second one to write text out with until now. `out_needed` always receives
-/// the number of bytes `text` needs including a trailing NUL, so a caller
-/// that passes a capacity of zero and a null buffer learns the length and
-/// gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer too
-/// small to hold the whole of it, so a multi-byte character is never cut in
-/// half.
+/// Set by [`crate::error::sipral_last_error_message`]. `out_needed` always
+/// gets the length including the NUL, so capacity zero with a null buffer
+/// learns the length (`SIPRAL_STATUS_BUFFER_TOO_SMALL`). A buffer too small
+/// gets nothing, so a multi-byte character is never cut.
 ///
 /// # Safety
 ///
@@ -106,8 +78,7 @@ pub(crate) unsafe fn copy_out(
             format!("{needed} bytes are needed to hold this and {capacity} were given"),
         ));
     }
-    // `needed` is at least one, so a capacity that reaches it is not zero and
-    // the buffer is therefore not null
+    // `needed` >= 1, so a capacity reaching it means a non-null buffer
     unsafe {
         ptr::copy_nonoverlapping(text.as_ptr().cast::<c_char>(), buffer, text.len());
         buffer.add(text.len()).write(0);
@@ -119,14 +90,9 @@ entry! {
     /// Copy one call's diagnostic record into `buffer`, as the JSON
     /// `docs/14-diagnostics.md` describes.
     ///
-    /// Readable at any point in the call's life, and for as long after it as
-    /// the endpoint has not evicted the record to make room for a newer one —
-    /// how many are kept is `sipral_stack_config_t::diagnostic_records`,
-    /// 32 when it is zero. A call whose
-    /// record has been evicted, or that has had nothing decided about it yet,
-    /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
-    /// record, and refusing to read one that happens to be empty would make
-    /// a caller unable to tell "nothing yet" from "something went wrong".
+    /// Readable during the call and after it, until the record is evicted
+    /// (`sipral_stack_config_t::diagnostic_records` are kept, 32 when zero).
+    /// An evicted or still empty record answers `SIPRAL_STATUS_OK` with `{}`.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
     /// document, with the length needed in `out_needed`.
@@ -165,12 +131,8 @@ entry! {
     /// Copy the whole diagnostic document into `buffer`: what a bug report
     /// carries, as the JSON `docs/14-diagnostics.md` describes.
     ///
-    /// That is the endpoint's own record — everything decided outside any
-    /// call — and then one record per call still held, in the same document,
-    /// with the number of records evicted to make room. It is deliberately
-    /// the whole of it rather than the endpoint's half: a report that arrives
-    /// without the calls it is about answers nothing, and
-    /// [`sipral_call_record_json`] is already the way to ask about one call.
+    /// The endpoint's own record (decisions outside any call), then one record
+    /// per call still held, and the count of evicted records.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
     /// document, with the length needed in `out_needed`.
@@ -191,23 +153,17 @@ entry! {
 }
 
 entry! {
-    /// Start recording the signalling this stack is fed from here on
-    /// (`docs/18-replay.md`), on a seed of its own. Starting moves every
-    /// branch, tag and `Call-ID` the stack draws from here on onto a fresh
-    /// seed, derived one way from the `entropy` `sipral_stack_create` was
-    /// given; the recording carries that seed and never `entropy`, and
-    /// stopping moves the stack on again, so nothing drawn after the stop
-    /// can be worked out from the file. Read `docs/18-replay.md` before
-    /// reaching for this: it records what arrives, exactly as it arrived,
-    /// and never what this end sent.
+    /// Start recording the signalling this stack is fed (`docs/18-replay.md`).
+    /// Starting moves the stack onto a fresh seed derived one way from
+    /// `entropy`; the recording carries that seed, never `entropy`, and
+    /// stopping moves the stack on again. It records what arrives, never what
+    /// this end sent.
     ///
     /// `note` is one line of prose for whoever opens the file later, or null
     /// for none.
     ///
-    /// A recording already running is replaced, not refused. Nothing is
-    /// written until `sipral_stack_recording_stop`, so a second start costs
-    /// only the frames taken since the first; `sipral_media_record_start`
-    /// refuses a second start because its file is already open on disk.
+    /// A running recording is replaced, not refused: nothing is written until
+    /// `sipral_stack_recording_stop`.
     ///
     /// # Safety
     ///
@@ -226,24 +182,14 @@ entry! {
     /// Stop the recording [`sipral_stack_recording_start`] began, and copy
     /// the text of it into `buffer` (`docs/18-replay.md`).
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` when no recording is running, the same
-    /// answer `sipral_media_record_stop` gives for the same question about
-    /// an audio recording. `SIPRAL_STATUS_WRONG_STATE` again, with the reason
-    /// in the last error, when something this session was fed could not go
-    /// in the recording — a message with a body that is not text is the one
-    /// way that happens — in which case nothing is written to `buffer` and
-    /// the recording is not produced at all: a text format that quietly left
-    /// out the one message it could not spell would replay into a different
-    /// session and say nothing about it.
+    /// `SIPRAL_STATUS_WRONG_STATE` when no recording is running. Also
+    /// `SIPRAL_STATUS_WRONG_STATE`, with the reason in the last error, when a
+    /// message could not go in the text format (a non-text body); then nothing
+    /// is produced, since a recording missing a message would replay differently.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// text, with the length needed in `out_needed` — asking again with a bigger
-    /// buffer answers the same recording rather than stopping a new one,
-    /// so a caller that does not yet know how big a buffer to bring may ask
-    /// twice: once to be told, once to be handed the text. Once a call here
-    /// copies the whole of it out, the recording is gone from the stack, the
-    /// same as `sipral_last_error_message` empties the slot it reads on a
-    /// call that succeeds.
+    /// text, with the length needed in `out_needed`; asking again returns the
+    /// same recording. Once copied out whole, the recording is gone from the stack.
     ///
     /// # Safety
     ///
@@ -265,8 +211,7 @@ entry! {
                 }
                 Some(Ok(recording)) => recording.to_text(),
                 Some(Err(error)) => {
-                    // an error is not a matter of buffer size, so there is no
-                    // second call to keep it alive for
+                    // not a buffer-size problem, so no retry to keep it for
                     state.agent.clear_stopped_recording();
                     return Err(fail(
                         SipralStatus::WrongState,
@@ -306,9 +251,8 @@ mod tests {
         (value.as_ptr().cast::<c_char>(), value.len())
     }
 
-    /// Call `read` with a null buffer to learn the length, then again with a
-    /// buffer that size — the two-call shape every text-out entry point here
-    /// answers to, proved once rather than at each call site.
+    /// Call `read` with a null buffer to learn the length, then with a buffer
+    /// that size.
     fn read_text(
         read: impl Fn(*mut c_char, usize, *mut usize) -> SipralStatus,
     ) -> (SipralStatus, String) {
@@ -354,9 +298,7 @@ mod tests {
         })
     }
 
-    /// D1: registering writes at least one decision — the REGISTER this
-    /// stack sent — into the endpoint's own record, and it comes back as
-    /// well-formed JSON naming the reason `docs/14-diagnostics.md` gives it.
+    /// D1: the REGISTER sent is recorded in the endpoint's record as JSON.
     #[test]
     fn the_endpoint_writes_down_a_register_it_sent() {
         let mut observed = Observed::default();
@@ -376,9 +318,8 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// D1: a call's own record is reachable by its handle and answers
-    /// `{}` before anything has been decided about a stack that has none —
-    /// proving the fallback rather than asserting it never runs.
+    /// D1: the endpoint record comes first with a null call id; no call handle
+    /// is invalid.
     #[test]
     fn a_stack_with_no_calls_has_an_empty_endpoint_record_and_no_call_to_ask_about() {
         let mut observed = Observed::default();
@@ -394,8 +335,7 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// D1: a buffer with no room at all reports how much it needs and writes
-    /// nothing, the same as `sipral_last_error_message` does.
+    /// D1: a buffer too small reports the length and writes nothing.
     #[test]
     fn a_buffer_too_small_is_said_and_nothing_is_written() {
         let mut observed = Observed::default();
@@ -423,9 +363,7 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// D2: stopping one that was never started is the same
-    /// `SIPRAL_STATUS_WRONG_STATE` `sipral_media_record_stop` answers for an
-    /// audio recording asked the same question.
+    /// D2: stopping a recording never started is `SIPRAL_STATUS_WRONG_STATE`.
     #[test]
     fn stopping_a_recording_that_was_never_started_says_so() {
         let mut observed = Observed::default();
@@ -441,10 +379,7 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// D2: starting a second recording replaces the first rather than
-    /// refusing it — the opposite of what `sipral_media_record_start`
-    /// answers for a second audio recording, and `crate::diagnostics` says
-    /// why the two features disagree.
+    /// D2: a second start replaces the first rather than refusing it.
     #[test]
     fn a_second_start_replaces_the_first_recording_rather_than_refusing_it() {
         let mut observed = Observed::default();
@@ -470,12 +405,9 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// D2, the reason this feature exists at all: a recording of a live,
-    /// answered SRTP call, taken from the caller's own side, does not carry
-    /// the key the caller's own offer put on the wire. Proved the same way
-    /// `sipral/src/tests.rs` proves it for the layer below — by reading the
-    /// key back out of the INVITE this stack actually sent, then reading the
-    /// finished recording and asserting that value is nowhere in it.
+    /// D2: a recording of an answered SRTP call does not carry the key this
+    /// end offered: the key is read from the INVITE sent and must be absent
+    /// from the recording.
     #[test]
     fn a_recorded_srtp_call_does_not_carry_the_key_this_end_offered() {
         let mut observed = Observed::default();
@@ -528,9 +460,7 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The base64 of this end's own `a=crypto` line, read the same way the
-    /// facade's own tests read one (`sipral/src/tests.rs`), so a test that
-    /// changed the SDP fixture above would change what this looks for too.
+    /// The base64 key of this end's `a=crypto` line.
     fn own_offered_key(sdp: &str) -> String {
         let line = sdp
             .lines()
@@ -549,10 +479,7 @@ mod tests {
             .to_owned()
     }
 
-    /// D2: a note that would not be one line of text is refused where it is
-    /// given, before a recorder is even made — the caller finds out from the
-    /// call that took the bad argument rather than from the one that tries
-    /// to stop a recording it never knew was spoiled.
+    /// D2: a multi-line note is refused at start, before a recorder is made.
     #[test]
     fn a_note_that_is_not_one_line_is_refused_before_anything_starts() {
         let mut observed = Observed::default();

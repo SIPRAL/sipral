@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Signalling across the boundary: the bytes out, the bytes in, and the news
-//! about the socket they travel on.
+//! Signalling across the boundary: bytes out, bytes in, and news about the socket.
 //!
-//! Until this module existed the C ABI could describe a call, negotiate its
-//! audio, record it and report what it cost — and it could not place one. The
-//! stack wrote its REGISTER into a queue that `sipral_stack_poll` emptied into
-//! nothing, and there was no way to hand back what arrived. Media I/O was ahead
-//! of signalling I/O: the ABI could carry a call's audio and not its INVITE.
-//!
-//! No socket here either, for the same reason as everywhere else in this tree.
-//! The application takes what the stack wants written
-//! ([`sipral_stack_poll_transmit`]) and writes it; it reads a datagram and hands
-//! it over ([`sipral_stack_receive_datagram`]) or a run of bytes off a
-//! connection ([`sipral_stack_receive_stream`]); and it says when a transport
-//! died ([`sipral_stack_transport_failed`]), when a connection closed
-//! ([`sipral_stack_stream_closed`]) and when one is open again
-//! ([`sipral_stack_transport_bind`]).
+//! There is no socket here. The application writes what [`sipral_stack_poll_transmit`] hands
+//! out, hands in datagrams ([`sipral_stack_receive_datagram`]) and stream reads
+//! ([`sipral_stack_receive_stream`]), and reports a dead transport
+//! ([`sipral_stack_transport_failed`]), a closed connection ([`sipral_stack_stream_closed`])
+//! and a reopened one ([`sipral_stack_transport_bind`]).
 //!
 //! # Placing a call, in the order it happens
 //!
@@ -38,109 +28,49 @@
 //! }
 //! ```
 //!
-//! `sipral_call_place` is the same shape one line further on, and the audio of
-//! that call rides the four calls in [`crate::media`] on a socket of its own.
-//! Nothing else has to be arranged: poll, drain, read, repeat.
+//! A call's audio uses the four calls in [`crate::media`] on its own socket.
 //!
-//! The order in that loop is the whole contract. A poll produces the messages
-//! that go out — a retransmission, a refresh, a response the stack wrote for
-//! itself — and handing bytes in produces them too, so both are followed by
-//! draining. What is produced waits until it is taken: nothing here throws away
-//! a message the stack has committed to, and a poll that happens in between
-//! leaves the queue where it was.
+//! The loop order is the contract: both polling and handing bytes in produce messages, so
+//! both are followed by draining. A produced message waits until taken; nothing committed
+//! is dropped, and a poll in between leaves the queue alone.
 //!
 //! # A table of transports, and the main one named
 //!
-//! A stack is bound to one transport at creation, [`SIPRAL_TRANSPORT_MAIN`],
-//! and every call here still names it by default — a caller that never binds
-//! a second one sees exactly the surface this crate always had. What changed
-//! (task 8.4.10) is that [`sipral_stack_transport_bind`] may now bind more:
-//! `transport` on `sipral_account_config_t` and `sipral_call_config_t` says
-//! which one an account's REGISTER, or a call's INVITE, goes out on, and zero
-//! keeps meaning [`SIPRAL_TRANSPORT_MAIN`] there too, so a caller that fills
-//! neither in gets exactly what it always got.
+//! A stack starts with [`SIPRAL_TRANSPORT_MAIN`]. [`sipral_stack_transport_bind`] adds more
+//! under numbers the caller chooses; `transport` on `sipral_account_config_t` and
+//! `sipral_call_config_t` selects one, zero meaning main. A call's `transport` is read only
+//! with an explicit `destination`. The table only grows: a failed or closed transport stops
+//! carrying traffic and resumes when bound again, without touching its accounts.
 //!
-//! A stack's transports are a table rather than a single id from the moment
-//! it is created, and the table only grows: [`SIPRAL_TRANSPORT_MAIN`] is in it
-//! first, and [`sipral_stack_transport_bind`] adds an entry the first time a
-//! number is bound and confirms it every time after. Numbers beyond the main
-//! one are the caller's own to choose — the layer below already documents a
-//! transport as "named by the caller" and never interprets what the number
-//! means — so `out_transport_id` on a bind hands back exactly the number that
-//! was asked for, which is a caller's one place to read the id it is about to
-//! put in an account or a call config, and reads the same after a rebind as
-//! before it.
-//!
-//! An account whose transport is later unbound is not retired with it: a
-//! failed or closed transport stops carrying traffic, the same as it always
-//! has, and starts again the moment [`sipral_stack_transport_bind`] brings it
-//! back — nothing about the account changes underneath it. A call with its
-//! own `transport` left at zero is the account's to route exactly as it
-//! always was: `destination` unset means the INVITE goes where the account
-//! registers, over the account's own transport, and `transport` is read only
-//! together with an explicit `destination`, since there is nothing else to
-//! combine it with.
-//!
-//! This is also where §18.1.1's promotion lands: a request too large for a
-//! datagram now arrives as [`crate::event::SipralEventKind::TransportWanted`]
-//! (event 18, previously reserved), naming where it was going and over what
-//! protocol, and the call that asked for it is refused with
-//! `SIPRAL_STATUS_NOT_SENT`. The application answers it with
-//! [`sipral_stack_transport_bind`] the same way it answers a network change
-//! that took a transport with it, and asks again — places the call, registers
-//! — once the bind succeeds: the request then leaves on that stream, and
-//! there is no separate "it went" event, the same as for a request that fit
-//! the first time.
-//!
-//! The answer to a challenge is where a request most often crosses the line,
-//! and there nobody asks again: the stack holds the retry itself and sends it
-//! the moment the bind succeeds. An application that cannot open the stream
-//! — the far end refused the connection, it timed out, or it opens none at
-//! all — says so with [`sipral_stack_transport_failed`] or
-//! [`sipral_stack_transport_failed_with`] naming the number it would have bound,
-//! and everything waiting stops waiting at once: a call's INVITE is tried
-//! once more over the datagram with one SDES suite per media stream, when
-//! that fits, and what still does not fit ends — a call with
-//! `SIPRAL_CALL_END_REASON_UNREACHABLE`, `cause_sip` 513 and a `cause_text`
-//! naming the size and the limit; a registration failed as unreachable with
-//! a 513. An application that says nothing gets the same ten seconds after
-//! the event (`sipral_ua::STREAM_WAIT`).
+//! A request too large for a datagram (RFC 3261 §18.1.1) raises
+//! [`crate::event::SipralEventKind::TransportWanted`] and the call that asked is refused with
+//! `SIPRAL_STATUS_NOT_SENT`. The application binds the stream and asks again; no separate
+//! "sent" event follows. An oversized challenge answer is retried by the stack itself once
+//! the bind succeeds. If the stream cannot be opened, [`sipral_stack_transport_failed`] or
+//! [`sipral_stack_transport_failed_with`] on the intended number ends the wait: an INVITE is
+//! retried over the datagram with one SDES suite per stream if that fits, otherwise the call
+//! ends with `SIPRAL_CALL_END_REASON_UNREACHABLE` and `cause_sip` 513 (a registration fails
+//! the same way). Silence gets the same after ten seconds (`sipral_ua::STREAM_WAIT`).
 //!
 //! # A datagram, a stream, and a WebSocket
 //!
-//! A datagram carries exactly one message and says where it came from. Stream
-//! bytes are a fragment of a framing the layer below reassembles on
-//! `Content-Length` (§18.3), arrive in whatever sizes the reads happened to come
-//! in, and carry no addresses at all: a connection has one far end and it was
-//! named when the transport was bound.
+//! A datagram carries one message and its source. Stream bytes are fragments, framed below
+//! on `Content-Length` (§18.3), with no addresses: the far end was named at bind time.
 //!
-//! A WebSocket is one of two things, and the bind says which. Bound as
-//! `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` *with* `remote`, it is a
-//! TCP connection (or a TLS one the application secured) that the stack makes
-//! a WebSocket of (RFC 6455, RFC 7118): the first thing
-//! [`sipral_stack_poll_transmit`] hands over is the opening handshake, every
-//! read off the connection goes to [`sipral_stack_receive_stream`] as it came,
-//! and what comes out to write is frames, pings and pongs included. When the
-//! WebSocket fails — the handshake refused, a frame that breaks the protocol,
-//! a close from the server, a ping not answered — the stack retires the
-//! transport and raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` saying why, and
-//! the connection should be closed. Bound *without* `remote`, the application
-//! did the handshake itself, and each frame's message goes in as a datagram:
-//! RFC 7118 §4.2 puts exactly one SIP message in each frame, so the framing is
-//! already done by the time the bytes reach here.
-//!
-//! The handshake asks for `/ws`, with the far end's address as its `Host`;
-//! the ABI has no field for either yet (`sipral_ua::websocket`).
+//! A WebSocket bound as `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` *with* `remote` is
+//! run by the stack (RFC 6455, RFC 7118): [`sipral_stack_poll_transmit`] first hands out the
+//! handshake, reads go to [`sipral_stack_receive_stream`], and output is frames. Any
+//! WebSocket failure retires the transport with `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; close
+//! the connection. Bound *without* `remote`, the application runs the WebSocket and hands
+//! each frame in as a datagram (one message per frame, RFC 7118 §4.2). The handshake asks
+//! for `/ws` with the far end as `Host`; the ABI cannot change either yet.
 //!
 //! # When a transport dies
 //!
-//! Both [`sipral_stack_transport_failed`] and [`sipral_stack_stream_closed`]
-//! retire the transport: every transaction waiting on it fails at once, the
-//! calls and registrations behind them are reported on the next poll, and
-//! nothing can be sent until [`sipral_stack_transport_bind`] brings a transport
-//! back. That is why neither is the thing to call for one refused `sendto`. A
-//! single ICMP unreachable is one destination saying no; a transport failure is
-//! the socket saying it is over.
+//! [`sipral_stack_transport_failed`] and [`sipral_stack_stream_closed`] retire the transport:
+//! its transactions fail at once, effects are reported on the next poll, and nothing is sent
+//! until [`sipral_stack_transport_bind`]. Do not call them for one refused `sendto`: an ICMP
+//! unreachable is one destination, not the socket.
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
@@ -160,43 +90,29 @@ use crate::versioned::{Versioned, read_versioned, write_versioned};
 constants! {
     /// The transport a stack is created with.
     ///
-    /// Never retired: [`sipral_stack_transport_failed`] and
-    /// [`sipral_stack_stream_closed`] can still stop it carrying traffic, and
-    /// [`sipral_stack_transport_bind`] is still what brings it back, exactly
-    /// as when this was the only number a stack had. Zero on
-    /// `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
-    /// means this one, so a caller that never binds a second transport fills
-    /// neither in and gets exactly what it always got.
+    /// Never removed from the table; failure stops it, [`sipral_stack_transport_bind`] restores
+    /// it. Zero in `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
+    /// means this one.
     pub const SIPRAL_TRANSPORT_MAIN: u32 = 0;
 
     /// The largest message that crosses in either direction.
     ///
-    /// The bound the layer below parses to, which is what stops a hostile peer
-    /// from making the parser do unbounded work. A caller's read buffer wants
-    /// to be this big on a stream, where one read can hold the end of one
-    /// message and the start of another, and 1500 bytes or so on a datagram
-    /// socket, where anything larger was fragmented on the way.
+    /// Bounds the parser's work against a hostile peer. Size stream read buffers to this; about
+    /// 1500 bytes suffices on a datagram socket.
     pub const SIPRAL_MESSAGE_BYTES: usize = 65_535;
 
-    /// The longest `sipral_transport_failure_t::detail` this library takes.
-    ///
-    /// A platform's sentence about a refused certificate is a line, not a
-    /// document; one longer than this is refused rather than cut, since a
-    /// sentence cut short can say something else.
+    /// The longest `sipral_transport_failure_t::detail` accepted. Longer is refused, not cut.
     pub const SIPRAL_TRANSPORT_DETAIL_BYTES: usize = 1_024;
 }
 
 codes! {
-    /// Why a transport could not deliver. Names for
-    /// [`sipral_stack_transport_failed`]'s `error`.
+    /// Why a transport could not deliver. Names for [`sipral_stack_transport_failed`]'s `error`.
     ///
-    /// Coarse on purpose, and it is the layer below that is coarse: a client
-    /// transaction informs its user and terminates on every one of these (§17), and
-    /// the detail belongs in the caller's log, where the real message still is.
+    /// Coarse on purpose: a client transaction terminates on every one of these (§17); the
+    /// detail belongs in the caller's log.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralTransportError: u32 {
-        /// Anything the caller could not classify. Zero, because a caller that
-        /// knows only that the write failed is telling the truth by saying nothing.
+        /// Anything the caller could not classify.
         Other = 0,
         /// Nothing is listening at the far end.
         ConnectionRefused = 1,
@@ -212,31 +128,23 @@ codes! {
 }
 
 codes! {
-    /// Why a TLS connection was refused, as the platform's TLS library said
-    /// it. Names for `sipral_transport_failure_t::tls` and
-    /// `sipral_transport_failed_event_t::tls`.
+    /// Why a TLS connection was refused, as the platform's TLS library said it. Names for
+    /// `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
     ///
-    /// Sipral links no TLS library (`docs/22-tls.md`), so these are the
-    /// application's words, mapped from its own library's error: the stack
-    /// only carries them to whoever reads the event, so that a user can be
-    /// told which of the four it was rather than "the connection closed".
-    /// A connection that was never answered is not one of them: that is
-    /// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
+    /// Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
+    /// classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
+    /// with this left at none.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralTlsFailure: u32 {
         /// Not a TLS failure, or one the application could not classify.
         None = 0,
-        /// No trusted authority stands behind the server's certificate: a
-        /// self-signed one, a private authority not handed over, or an
-        /// authority other than the one pinned.
+        /// No trusted authority: self-signed, an unprovided private CA, or not the pinned one.
         Untrusted = 1,
         /// The certificate is trusted and names another server.
         NameMismatch = 2,
         /// The certificate has expired, or is not valid yet.
         Expired = 3,
-        /// The handshake itself failed: no protocol version or cipher in
-        /// common, an alert from the server, or a server that does not speak
-        /// TLS on that port.
+        /// The handshake failed: no common version or cipher, a server alert, or no TLS there.
         HandshakeRefused = 4,
     }
 }
@@ -244,67 +152,46 @@ codes! {
 record! {
     /// One message on its way out, written into the caller's own buffers.
     ///
-    /// The caller fills in `size`, the three pointers and the three capacities; the
-    /// library fills in everything else. A `len` of zero means the stack had nothing
-    /// to send, which is how the draining loop ends.
-    ///
-    /// The two address buffers are checked before a message is taken, so the address
-    /// side is never the reason one is held. The payload buffer is not: a message
-    /// too long for it is kept and offered again, because a message the stack has
-    /// already committed to is not one this ABI may drop.
+    /// The caller fills `size`, the three pointers and the three capacities; the library fills
+    /// the rest. A `len` of zero means nothing to send, which ends the draining loop. Address
+    /// buffers are checked before a message is taken. A payload buffer too small leaves the
+    /// message queued and offered again: a committed message is never dropped.
     #[derive(Clone, Copy)]
     pub struct SipralTransmit {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// Which transport to write to: [`SIPRAL_TRANSPORT_MAIN`] for a stack
-        /// that never bound another, or the number
-        /// [`sipral_stack_transport_bind`] gave whichever account or call
-        /// this message belongs to.
+        /// Which transport to write to: [`SIPRAL_TRANSPORT_MAIN`], or a number
+        /// [`sipral_stack_transport_bind`] bound for the owning account or call.
         pub transport: u32,
-        /// What that transport speaks, as a `SipralTransport`.
-        ///
-        /// Carried because it is the message's and not the socket's: §18.1.1 lets a
-        /// request that outgrew a datagram go out on a stream instead, and the
-        /// transport it ends up on is the one this says. Zero for a protocol this
-        /// ABI has no number for.
+        /// What that transport speaks, as a `SipralTransport`. Per message, since §18.1.1
+        /// can move a request onto a stream. Zero for a protocol with no ABI number.
         pub protocol: Number<SipralTransport>,
-        /// Where to write the message. Nothing is written unless the whole of it
-        /// fits.
+        /// Where to write the message. Nothing is written unless all of it fits.
         pub data: *mut u8,
         /// How much room `data` has.
         pub capacity: usize,
-        /// How much was written — or, when the call answered
-        /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much room the message needs.
+        /// How much was written, or after `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much is needed.
         pub len: usize,
-        /// Where to write the destination, as `host:port` with a trailing NUL. Null
-        /// with a capacity of zero for a caller whose socket is connected and
-        /// already knows.
+        /// Where to write the destination, `host:port` with a trailing NUL. Null with capacity zero
+        /// for a connected socket.
         pub destination: *mut c_char,
-        /// How much room `destination` has. At least [`SIPRAL_ADDRESS_BYTES`] when
-        /// it is not null.
+        /// Room in `destination`: at least [`SIPRAL_ADDRESS_BYTES`] when not null.
         pub destination_capacity: usize,
         /// How many bytes of it were written, the NUL not counted.
         pub destination_len: usize,
-        /// Where to write the address to send *from*, in the same shape.
-        ///
-        /// RFC 3581 §4: "The response MUST be sent from the same address and port
-        /// that the corresponding request was received on", which a caller listening
-        /// on a wildcard address cannot work out for itself. Empty — a `source_len`
-        /// of zero — means the transport's own address, which is the answer for
-        /// every request this stack originates.
+        /// Where to write the address to send *from*, in the same shape. RFC 3581 §4: a response
+        /// leaves from the address its request arrived on, which a wildcard listener cannot tell.
+        /// `source_len` zero means the transport's own address.
         pub source: *mut c_char,
-        /// How much room `source` has. At least [`SIPRAL_ADDRESS_BYTES`] when it is
-        /// not null.
+        /// Room in `source`: at least [`SIPRAL_ADDRESS_BYTES`] when not null.
         pub source_capacity: usize,
         /// How many bytes of it were written, the NUL not counted.
         pub source_len: usize,
     }
 }
 
-// Safety: plain data with no invariant between the members. The three pointers
-// are the caller's own buffers, as in every other struct here, and all-zero is a
-// caller that brought none — which is refused by reading it, not by being
-// undefined.
+// Safety: plain data with no invariant between members. The pointers are caller buffers;
+// all-zero is refused when read, not undefined.
 unsafe impl Versioned for SipralTransmit {
     const NAME: &'static str = "sipral_transmit";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralTransmit, source_len);
@@ -315,36 +202,26 @@ unsafe impl Versioned for SipralTransmit {
 }
 
 record! {
-    /// A transport that failed, and why, for
-    /// [`sipral_stack_transport_failed_with`].
-    ///
-    /// The caller fills in all of it. `detail` is the platform's own sentence
-    /// — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
-    /// is optional; it travels to the event unread and unparsed, so a user's
-    /// report can quote it.
+    /// A failed transport and why, for [`sipral_stack_transport_failed_with`]. All caller-filled;
+    /// `detail` is the platform's own optional sentence, passed through unparsed.
     #[derive(Clone, Copy)]
     pub struct SipralTransportFailure {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// Which transport: [`SIPRAL_TRANSPORT_MAIN`], or a number
-        /// [`sipral_stack_transport_bind`] added.
+        /// Which transport: [`SIPRAL_TRANSPORT_MAIN`] or a bound number.
         pub transport: u32,
         /// A [`SipralTransportError`].
         pub error: Number<SipralTransportError>,
-        /// A [`SipralTlsFailure`]; `SIPRAL_TLS_FAILURE_NONE` for anything
-        /// that was not TLS refusing, and only that on a transport that does
-        /// not speak TLS.
+        /// A [`SipralTlsFailure`]; `SIPRAL_TLS_FAILURE_NONE` unless TLS refused.
         pub tls: Number<SipralTlsFailure>,
-        /// The platform's own words for it, not NUL-terminated. Null with a
-        /// length of zero for none.
+        /// The platform's words, not NUL-terminated. Null with length zero for none.
         pub detail: *const c_char,
         /// How many bytes of it; at most [`SIPRAL_TRANSPORT_DETAIL_BYTES`].
         pub detail_len: usize,
     }
 }
 
-// Safety: plain data with no invariant between the members; the one pointer
-// is the caller's and is read for as long as the call runs and no longer.
+// Safety: plain data; the one pointer is the caller's and is read only during the call.
 unsafe impl Versioned for SipralTransportFailure {
     const NAME: &'static str = "sipral_transport_failure";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralTransportFailure, detail_len);
@@ -355,35 +232,26 @@ unsafe impl Versioned for SipralTransportFailure {
 }
 
 record! {
-    /// The payload of `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a transport this
-    /// stack signals on stopped carrying traffic.
-    ///
-    /// The text is the library's, valid for as long as the callback runs.
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a signalling transport stopped carrying traffic.
+    /// The text is the library's, valid during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralTransportFailedEvent {
-        /// Which transport: [`SIPRAL_TRANSPORT_MAIN`], or a number
-        /// [`sipral_stack_transport_bind`] added.
+        /// Which transport: [`SIPRAL_TRANSPORT_MAIN`] or a bound number.
         pub transport: u32,
         /// What it spoke, as a `SipralTransport`.
         pub protocol: Number<SipralTransport>,
-        /// A [`SipralTransportError`]: what the application said went wrong,
-        /// `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
+        /// A [`SipralTransportError`]; `SIPRAL_TRANSPORT_ERROR_CLOSED` for a closed connection.
         pub error: Number<SipralTransportError>,
-        /// A [`SipralTlsFailure`]: why TLS refused, when that is what it was.
+        /// A [`SipralTlsFailure`], when TLS refused.
         pub tls: Number<SipralTlsFailure>,
-        /// The platform's own sentence, as the application handed it over.
-        /// Null with a length of zero when it gave none.
+        /// The platform's sentence as handed over. Null with length zero for none.
         pub detail: *const c_char,
         /// How many bytes of it.
         pub detail_len: usize,
     }
 }
 
-/// One transport lost, waiting for the next poll to say so.
-///
-/// Queued by the entry point that retired it and raised by the poll, before
-/// anything the layers below have to say about the transactions that failed
-/// with it: the cause comes before its effects.
+/// A lost transport, raised on the next poll before the transaction failures it caused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Lost {
     pub(crate) transport: u32,
@@ -415,28 +283,20 @@ impl Lost {
 entry! {
     /// Take the next message the stack wants written.
     ///
-    /// One at a time, like every other poll here: a caller loops until the
-    /// message comes back with a `len` of zero. Call it after every
-    /// `sipral_stack_poll` and after every call that hands bytes in, since both
-    /// are moments the stack writes at.
-    ///
-    /// A message longer than `capacity` is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
-    /// the length it needs in `len`, and it is *kept*: the next call with room
-    /// for it hands over that same message, before anything queued behind it. So
-    /// a caller that brought no buffer at all — a null `data` with a capacity of
-    /// zero — learns what to bring without losing the message it asked about.
+    /// Loop until `len` is zero, after every `sipral_stack_poll` and every call that hands bytes
+    /// in. A message longer than `capacity` is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the needed
+    /// length in `len` and is kept for the next call, ahead of the queue; a null `data` with
+    /// capacity zero thus asks for the length.
     ///
     /// # Safety
     ///
-    /// `transmit` must point at a `sipral_transmit_t` whose `size` member says
-    /// how long it is and whose buffers are writable for the capacities beside
-    /// them.
+    /// `transmit` must point at a `sipral_transmit_t` whose `size` member says how long it is and
+    /// whose buffers are writable for the capacities beside them.
     fn sipral_stack_poll_transmit(stack: SipralHandle, transmit: *mut SipralTransmit) {
         let mut out = unsafe { read_versioned(transmit) }?;
         prepare(&mut out)?;
         with_stack(stack, |state| {
-            // a STUN request for a signalling socket leaves by the transport
-            // that socket is, which is what makes the answer describe it
+            // a STUN request leaves by its socket's own transport, so the answer describes it
             let Some(pending) = state
                 .held
                 .take()
@@ -446,16 +306,13 @@ entry! {
                 return Ok(());
             };
             if pending.payload.len() > out.capacity {
-                // the length is written back even though the message was not,
-                // which is how the caller learns what to come back with
                 out.len = pending.payload.len();
                 state.held = Some(pending);
                 return Ok(());
             }
             let put = unsafe { put(&mut out, &pending) };
             if put.is_err() {
-                // it has been taken out of the queue by now, and a message that
-                // failed on its way into a buffer is not one to lose
+                // already out of the queue; keep it rather than lose it
                 state.held = Some(pending);
             } else {
                 state.log.sip_message(
@@ -483,12 +340,8 @@ entry! {
     }
 }
 
-/// Check the caller brought address buffers big enough for anything this can
-/// write, and empty the members it is about to fill in.
-///
-/// The lengths are cleared for the same reason the buffers are checked: they are
-/// the library's to write, and whatever the caller left in them must never read
-/// as a message that was produced.
+/// Check the address buffers are big enough and clear the library-written members, so stale
+/// caller values never read as a produced message.
 pub(crate) fn prepare(transmit: &mut SipralTransmit) -> Result<(), Fail> {
     transmit.transport = 0;
     transmit.protocol = 0;
@@ -533,8 +386,8 @@ pub(crate) fn prepare(transmit: &mut SipralTransmit) -> Result<(), Fail> {
 ///
 /// # Safety
 ///
-/// The buffers in `transmit` must be writable for the capacities beside them,
-/// which [`prepare`] has already been asked about, and the payload must fit.
+/// The buffers must be writable for their capacities, already checked by [`prepare`], and the
+/// payload must fit.
 unsafe fn put(transmit: &mut SipralTransmit, pending: &Transmit) -> Result<(), Fail> {
     if !pending.payload.is_empty() {
         unsafe {
@@ -560,8 +413,7 @@ unsafe fn put(transmit: &mut SipralTransmit, pending: &Transmit) -> Result<(), F
     Ok(())
 }
 
-/// Write one address, or an empty string for the one there is nothing to say
-/// about. `None` for a buffer the caller did not bring.
+/// Write one address, or an empty string. `None` for a buffer the caller did not bring.
 ///
 /// # Safety
 ///
@@ -578,8 +430,7 @@ pub(crate) unsafe fn write_address(
         .map(|address| address.to_string())
         .unwrap_or_default();
     if written.len() >= SIPRAL_ADDRESS_BYTES {
-        // an address longer than the room this ABI promises cannot happen: the
-        // longest a socket address prints as is a bracketed IPv6 and a port
+        // unreachable: a bracketed IPv6 and port fit the promised room
         return Err(fail(
             SipralStatus::BufferTooSmall,
             format!("{name} prints as {} bytes", written.len()),
@@ -593,27 +444,18 @@ pub(crate) unsafe fn write_address(
 }
 
 entry! {
-    /// Hand over one datagram, whole, and say where it came from.
+    /// Hand over one datagram, whole, with its source.
     ///
-    /// `from` is the far end, as `host:port`. `to` is the address the datagram
-    /// arrived on, which RFC 3581 §4 makes the address the response has to go
-    /// out from; a length of zero, whatever the pointer, means the address
-    /// this stack was created with, which is the answer for a socket bound to
-    /// one address.
+    /// `from` is the far end as `host:port`. `to` is the receiving address, which the response
+    /// leaves from (RFC 3581 §4); length zero means the stack's creation address. Frames from a
+    /// WebSocket the application runs come here too (RFC 7118 §4.2).
     ///
-    /// A WebSocket frame comes in here too, on one the application runs
-    /// itself (bound without `remote`): RFC 7118 §4.2 puts one SIP message in
-    /// each, so it arrives whole the way a datagram does. A WebSocket the
-    /// stack runs takes its reads through [`sipral_stack_receive_stream`].
-    ///
-    /// Bytes that are not a message are `SIPRAL_STATUS_INVALID_ARGUMENT` with
-    /// the parse error in the last error. That is an ordinary morning on a
-    /// public SIP port and costs exactly this one packet: log it and carry on.
+    /// Non-SIP bytes are `SIPRAL_STATUS_INVALID_ARGUMENT` with the parse error as last error;
+    /// only that packet is lost.
     ///
     /// # Safety
     ///
-    /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to`
-    /// for `to_len`.
+    /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to` for `to_len`.
     fn sipral_stack_receive_datagram(
         stack: SipralHandle,
         transport: u32,
@@ -631,9 +473,8 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let transport = named(state, transport)?;
             let local = arrived_on.unwrap_or(state.local);
-            // the STUN server's answer about this socket, when the stack asks
-            // one: the server's own address and a transaction this stack
-            // started, or it goes on to the parser like anything else
+            // a STUN answer from the server to this stack's own transaction is taken here; anything
+            // else goes to the parser
             let socket = crate::nat::Nat::socket_of(state, transport, local);
             if crate::nat::Nat::intercept(state, socket, remote, datagram, now) {
                 return Ok(());
@@ -658,22 +499,12 @@ entry! {
 }
 
 entry! {
-    /// Hand over bytes off a connection, in whatever sizes the reads came in.
+    /// Hand over bytes read off a connection, in whatever sizes the reads came in.
     ///
-    /// On a WebSocket the stack runs (bound with `remote`), the bytes are the
-    /// server's handshake answer and frames, read the same way; what is
-    /// inside them reaches the parser one message at a time.
-    ///
-    /// Not a message: a fragment of a framing the layer below reassembles on
-    /// `Content-Length` (§18.3), and one call may hold several messages, half of
-    /// one, or none at all. No addresses travel with it, because a connection
-    /// has one far end and it was named when the transport was bound.
-    ///
-    /// Framing that cannot be read is fatal to the connection, and unlike a
-    /// datagram it cannot be resynchronised: the transport is already retired by
-    /// the time this answers `SIPRAL_STATUS_INVALID_ARGUMENT`, and the socket
-    /// should be closed. A read of zero bytes is the far end closing, which is
-    /// [`sipral_stack_stream_closed`] and not this.
+    /// A fragment of the `Content-Length` framing (§18.3): may hold several messages or none. A
+    /// stack-run WebSocket's handshake and frames come here too. Unreadable framing cannot be
+    /// resynchronised: the transport is retired before `SIPRAL_STATUS_INVALID_ARGUMENT` returns;
+    /// close the socket. A zero-byte read is [`sipral_stack_stream_closed`], not this.
     ///
     /// # Safety
     ///
@@ -688,9 +519,7 @@ entry! {
         let read = unsafe { arrived(data, len, "a read") }?;
         with_stack_at(stack, now_ms, |state, now| {
             let transport = named(state, transport)?;
-            // a read is not a message: the endpoint's framing is what knows
-            // where each one ends, so the trace takes them from there, whole,
-            // and only while there is a trace to write them to
+            // the trace takes whole messages from the framing, only when tracing
             let tracing = state.log.enabled(sipral::LogLevel::Trace);
             state.agent.endpoint().tap_streams(tracing);
             let received = state
@@ -706,9 +535,7 @@ entry! {
                 }
             }
             if let Err(ReceiveError::Malformed(ref broken)) = received {
-                // the framing is lost with it and the endpoint has already
-                // forgotten the transport: a loss like any other, said the
-                // same way
+                // the framing is lost and the endpoint dropped the transport: report it as a loss
                 state.lost.push(Lost {
                     transport: transport.0,
                     protocol: protocol_number(state, transport.0),
@@ -723,52 +550,30 @@ entry! {
 }
 
 entry! {
-    /// Say that a transport is open and may be written to — the main one
-    /// again, or a further one this stack has not had before.
+    /// Say that a transport is open: the main one again, or a new one.
     ///
-    /// The one way back from [`sipral_stack_transport_failed`], the way a
-    /// stream stack names its far end, and the way a further transport enters
-    /// the table at all. `transport` is [`SIPRAL_TRANSPORT_MAIN`] to (re)bind
-    /// the main one, or any other number: one this stack already has rebinds
-    /// it, and one it does not opens it — the number is the caller's own
-    /// choice, the same as `sipral_account_config_t::transport` and
-    /// `sipral_call_config_t::transport` read it. `out_transport_id` may be
-    /// null; when it is not, it receives that same number, which is where a
-    /// caller answering
-    /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
-    /// reads back the id it just gave one of those two configs.
+    /// The way back after [`sipral_stack_transport_failed`] and the way new transports enter the
+    /// table. `transport` is [`SIPRAL_TRANSPORT_MAIN`] or any caller-chosen number; a known one
+    /// is rebound, an unknown one opened. `out_transport_id`, if not null, receives the same
+    /// number.
     ///
-    /// `protocol` is a [`crate::stack::SipralTransport`].
-    /// Rebinding an existing transport takes zero to mean "whatever it
-    /// already speaks" and anything else has to agree with that or this is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
-    /// according to what a transport was opened speaking, and changing that
-    /// underneath the timers would be a transport configured out of RFC 3261
-    /// §17 halfway through a call. Opening a new one needs a protocol to
-    /// speak, so zero there is the same refusal for the opposite reason:
-    /// nothing to fall back on.
+    /// `protocol` is a [`crate::stack::SipralTransport`]. On rebind, zero keeps the current
+    /// protocol and anything different is `SIPRAL_STATUS_INVALID_ARGUMENT`: switching it under
+    /// running RFC 3261 §17 timers is not allowed. Opening a new transport requires a protocol.
     ///
-    /// `local` is the address the far end reaches this one at, as `host:port`.
-    /// `remote` is the far end of a connection, and is refused on a datagram
-    /// transport, which has many; a length of zero, whatever the pointer,
-    /// leaves it out. On `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` it
-    /// says the stack is to make the connection a WebSocket itself: the
-    /// handshake is the next thing [`sipral_stack_poll_transmit`] hands over,
-    /// and the reads go to [`sipral_stack_receive_stream`].
+    /// `local` is the address the far end reaches, `host:port`. `remote` names a connection's far
+    /// end, is refused on a datagram transport, and length zero omits it. On WS/WSS, `remote`
+    /// makes the stack run the WebSocket: the handshake comes out of
+    /// [`sipral_stack_poll_transmit`] and reads go to [`sipral_stack_receive_stream`].
     ///
-    /// This is also how a request
-    /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
-    /// named gets to leave: the call that asked for it was refused with
-    /// `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
-    /// returns `SIPRAL_STATUS_OK` for the protocol and destination the event
-    /// gave, asking again — placing the call, registering — sends it on the
-    /// stream just bound. There is no further event about that one request.
+    /// After a
+    /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted),
+    /// binding what it named and asking again sends the request on the new stream.
     ///
     /// # Safety
     ///
-    /// `local` must be readable for `local_len` bytes, `remote` for
-    /// `remote_len`, and `out_transport_id`, when it is not null, must point
-    /// at one `uint32_t`.
+    /// `local` must be readable for `local_len` bytes, `remote` for `remote_len`, and
+    /// `out_transport_id`, when it is not null, must point at one `uint32_t`.
     fn sipral_stack_transport_bind(
         stack: SipralHandle,
         transport: u32,
@@ -811,8 +616,7 @@ entry! {
                 }
                 (None, asked) => crate::stack::transport_of(asked)?.protocol(),
             };
-            // a WebSocket's far end is named too: that is the one the stack
-            // then opens the WebSocket to, on the connection the caller made
+            // a WebSocket's far end is named too: the stack opens the WebSocket to it
             if connected.is_some() && !resolved.is_reliable() {
                 return Err(fail(
                     SipralStatus::InvalidArgument,
@@ -836,8 +640,6 @@ entry! {
             if transport == SIPRAL_TRANSPORT_MAIN {
                 state.local = advertised;
             }
-            // a datagram transport is kept mapped from the address it is
-            // bound at now, and not from the one it had before
             crate::nat::Nat::bound(state, id, resolved, advertised, now);
             if !out_transport_id.is_null() {
                 unsafe { out_transport_id.write(transport) };
@@ -848,33 +650,19 @@ entry! {
 }
 
 entry! {
-    /// Say that a transport failed, and that whatever was written to it did not
-    /// arrive.
+    /// Say that a transport failed and what was written to it did not arrive.
     ///
-    /// The transport is retired: every transaction waiting on it fails now, and
-    /// the calls and registrations behind them are reported on the next
-    /// `sipral_stack_poll` — nothing is delivered from inside this call, here as
-    /// everywhere else. Nothing can be sent until
-    /// [`sipral_stack_transport_bind`] brings one back.
+    /// The transport is retired: its transactions fail now, effects are reported on the next
+    /// `sipral_stack_poll`, and nothing is sent until [`sipral_stack_transport_bind`]. Not for one
+    /// refused `sendto`: retiring the socket over an ICMP unreachable drops healthy calls.
     ///
-    /// So this is not the call for one `sendto` that was refused. An ICMP
-    /// unreachable is one destination saying no, and a stack that retired its
-    /// socket over it would drop the calls that were fine. This is for the
-    /// socket that is over.
+    /// Also answers a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the application could not honour:
+    /// on the number it would have bound, waiting requests stop waiting (RFC 3261 §18.1.1:
+    /// trimmed into a datagram if it fits, else ended with 513). A never-bound number is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` when nothing waits.
     ///
-    /// It is also the answer to a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the
-    /// application could not honour: a failure told of a transport that is
-    /// not up — the number it would have bound the stream at, never bound or
-    /// retired — while the stack waits for that stream is a connection that
-    /// could not be opened, and every request waiting for it stops waiting
-    /// now (RFC 3261 §18.1.1: trimmed into a datagram when it then fits,
-    /// ended with a 513 naming the limit otherwise). A number never bound is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` while nothing is waiting.
-    ///
-    /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
-    /// of what the failure did to the registrations and calls on it.
-    /// [`sipral_stack_transport_failed_with`] is the same call with the TLS
-    /// library's reason carried along.
+    /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before the effects.
+    /// [`sipral_stack_transport_failed_with`] adds the TLS reason.
     ///
     /// # Safety
     ///
@@ -900,33 +688,20 @@ entry! {
 }
 
 entry! {
-    /// Say that a transport failed, and why, in the words of the TLS library
-    /// that refused it.
+    /// Say that a transport failed, with the TLS library's reason.
     ///
-    /// Everything [`sipral_stack_transport_failed`] does — the transport is
-    /// retired, the transactions on it fail, nothing is sent on it until
-    /// [`sipral_stack_transport_bind`] brings it back — and the reason is
-    /// carried to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: `failure->tls` for a
-    /// machine to switch on, `failure->detail` for a person to read. A
-    /// connection that never got as far as a handshake is told here too, so
-    /// that the application hears about it in the one place it hears about
-    /// every other loss; retiring a transport that carried nothing yet costs
-    /// nothing, and the bind that follows the reconnect undoes it. A
-    /// transport already down is not retired twice, and the failure is still
-    /// raised: that is how each attempt to connect again that fails is told.
-    /// A stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for and that
-    /// could not be opened is told here as well, as
-    /// [`sipral_stack_transport_failed`] says.
+    /// Does what [`sipral_stack_transport_failed`] does, and carries `failure->tls` and
+    /// `failure->detail` to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`. A connection that failed before
+    /// any handshake belongs here too. A transport already down is not retired again but the
+    /// event is still raised, so each failed reconnect is reported.
     ///
-    /// A TLS reason on a transport that does not speak TLS or WSS is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
-    /// [`SIPRAL_TRANSPORT_DETAIL_BYTES`] or not UTF-8; nothing is retired.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, retiring nothing, for a TLS reason on a non-TLS/WSS
+    /// transport, or a detail over [`SIPRAL_TRANSPORT_DETAIL_BYTES`] or not UTF-8.
     ///
     /// # Safety
     ///
-    /// `failure` must point at a `sipral_transport_failure_t` whose `size`
-    /// member says how long it is, and its `detail` must be readable for
-    /// `detail_len` bytes.
+    /// `failure` must point at a `sipral_transport_failure_t` whose `size` member says how long
+    /// it is, and its `detail` must be readable for `detail_len` bytes.
     fn sipral_stack_transport_failed_with(
         stack: SipralHandle,
         failure: *const SipralTransportFailure,
@@ -957,14 +732,10 @@ entry! {
 }
 
 entry! {
-    /// Say that a connection closed: the far end went away, or a read returned
-    /// zero.
+    /// Say that a connection closed: the far end left, or a read returned zero.
     ///
-    /// The same retirement as [`sipral_stack_transport_failed`], and a separate
-    /// call because it is a separate thing to have happened. An orderly close is
-    /// not an error the caller has to invent a kind for, and a stack that made it
-    /// one would have the two indistinguishable in a log for ever after. The
-    /// event the next poll raises says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
+    /// Retires like [`sipral_stack_transport_failed`], but kept separate so an orderly close is
+    /// distinguishable in logs. The event says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
     ///
     /// # Safety
     ///
@@ -988,16 +759,12 @@ entry! {
     }
 }
 
-/// Retire a transport, and queue the event that says so.
+/// Retire a transport and queue its event.
 ///
-/// A failure told of a transport that is not up — one never bound, or one
-/// already retired — is a connection that could not be opened. While the
-/// stack is waiting for the stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
-/// asked for, that is the answer to it, and everything waiting stops
-/// waiting now (`sipral_ua::UserAgent::stream_unavailable`). While an
-/// account on a connection of its own waits for one, the failure is raised
-/// with its reason and the account waits on, as its REGISTER would have. A
-/// number never bound is refused when nothing is waiting, as it always was.
+/// A failure on a transport that is not up is a connection that could not be opened. It
+/// answers a pending `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
+/// (`sipral_ua::UserAgent::stream_unavailable`), or is raised while an account waits for its
+/// own connection. Otherwise a never-bound number is refused.
 fn lose(
     state: &mut StackState,
     transport: u32,
@@ -1007,8 +774,6 @@ fn lose(
     now: std::time::Instant,
 ) -> Result<(), Fail> {
     let streaming = state.agent.wants_a_stream();
-    // an account's own connection that could not be opened is raised too,
-    // with its reason, while the account waits on for it as long as it would
     let waiting = streaming || state.agent.wants_a_flow();
     let Some(id) = state.transports.resolve(transport) else {
         if !waiting {
@@ -1027,8 +792,7 @@ fn lose(
         return Ok(());
     };
     let was_up = state.agent.endpoint().bound_transport(id).is_some();
-    // a transport already down is not retired twice, and the failure is
-    // still raised: an attempt to connect again that failed
+    // already down: raise again, retire once
     state
         .agent
         .receive(
@@ -1060,8 +824,7 @@ fn protocol_number(state: &StackState, transport: u32) -> u32 {
         .map_or(0, SipralTransport::named)
 }
 
-/// The platform's sentence, as text this library keeps.
-///
+/// The platform's sentence, copied.
 /// # Safety
 ///
 /// `detail`, when it is not null, must be readable for `len` bytes.
@@ -1082,11 +845,8 @@ unsafe fn detail_of(detail: *const c_char, len: usize) -> Result<String, Fail> {
 
 /// An address a caller may leave out, as one.
 ///
-/// Left out is a length of zero, with the pointer null or not: what every
-/// other optional piece of text in this ABI means by it, and the only way a
-/// binding that hands every string over as a buffer — an empty one included
-/// — has of saying "none".
-///
+/// Length zero means omitted, whatever the pointer: bindings that pass every string as a
+/// buffer have no null.
 /// # Safety
 ///
 /// `pointer`, when it is not null, must be readable for `len` bytes.
@@ -1101,11 +861,8 @@ pub(crate) unsafe fn optional_address(
     Ok(Some(unsafe { address(pointer, len, name) }?))
 }
 
-/// The transport a number names, or why it names none.
-///
-/// [`crate::lifecycle`] has the same check, as `transport_named`; it is not
-/// `pub(crate)` here for that, and the reason not to share it is written
-/// there.
+/// The transport a number names, or why it names none. Duplicated in [`crate::lifecycle`] on
+/// purpose; the reason is written there.
 pub(crate) fn named(state: &StackState, transport: u32) -> Result<TransportId, Fail> {
     state.transports.resolve(transport).ok_or_else(|| {
         fail(
@@ -1169,8 +926,7 @@ const fn kind_of(error: SipralTransportError) -> TransportErrorKind {
     }
 }
 
-/// What the layer below's failure is called here; the other way from
-/// `kind_of`. A kind this library has no name for yet is `Other`.
+/// The reverse of `kind_of`; unknown kinds are `Other`.
 pub(crate) const fn error_of(kind: TransportErrorKind) -> SipralTransportError {
     match kind {
         TransportErrorKind::ConnectionRefused => SipralTransportError::ConnectionRefused,
@@ -1197,11 +953,8 @@ fn tls_named(tls: u32) -> Result<SipralTlsFailure, Fail> {
     }
 }
 
-/// Why the layer below would not take what arrived.
-///
-/// The transport being unknown is the one that is not about the argument: this
-/// crate checked the number before it went down, so the transport was there and
-/// has since been retired, and what is wrong is the moment rather than the call.
+/// Why the layer below refused what arrived. An unknown transport here was retired after
+/// this crate checked it, so the moment is wrong, not the argument.
 fn received_badly(error: &ReceiveError) -> Fail {
     let status = match *error {
         ReceiveError::UnknownTransport => SipralStatus::WrongState,
@@ -1243,7 +996,7 @@ pub(crate) mod tests {
     const REGISTRAR: &str = "203.0.113.9:5060";
     const AOR: &str = "sip:alice@example.com";
 
-    /// What a PBX challenges a REGISTER with: its own, as a UAS (§22.2).
+    /// A PBX's REGISTER challenge, as a UAS (§22.2).
     const CHALLENGE: &str = "WWW-Authenticate: Digest realm=\"example.com\", \
                              nonce=\"abc123\", qop=\"auth\"\r\n";
 
@@ -1314,8 +1067,7 @@ pub(crate) mod tests {
         buffers.taken(&transmit)
     }
 
-    /// The same, keeping where each one was going: what a test that is about
-    /// an address rather than a message needs.
+    /// The same, keeping each message's destination.
     pub(crate) fn drain_addressed(stack: SipralHandle) -> Vec<(Vec<u8>, String)> {
         let mut buffers = Buffers::new();
         let mut all = Vec::new();
@@ -1468,9 +1220,7 @@ pub(crate) mod tests {
         account
     }
 
-    /// An account like [`line`]'s, but its own `aor`, pointed at `transport`
-    /// and answering at `registrar` instead of the shared [`REGISTRAR`], so
-    /// that two of these on one stack never share an identity or a wire.
+    /// An account with its own `aor`, on `transport`, registering at `registrar`.
     fn line_on(
         stack: SipralHandle,
         transport: u32,
@@ -1494,8 +1244,7 @@ pub(crate) mod tests {
         account
     }
 
-    /// A stack speaking something other than UDP, which is the only way to
-    /// reach the stream half of this surface.
+    /// A stack speaking something other than UDP, to reach the stream path.
     fn speaking(observed: &mut Observed, protocol: SipralTransport) -> SipralHandle {
         let mut config = config(record, observed);
         config.transport = protocol as u32;
@@ -1504,9 +1253,7 @@ pub(crate) mod tests {
         handle
     }
 
-    /// A whole registration, from the account being added to the binding being
-    /// reported, driven through the C ABI and nothing else: no test reaches
-    /// past it into the stack it is testing.
+    /// A whole registration driven through the C ABI alone.
     #[test]
     fn a_registration_goes_out_and_comes_back_through_the_abi_alone() {
         let mut observed = Observed::default();
@@ -1585,8 +1332,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Every 2xx a callback was handed on a registration that went live,
-    /// copied out while the callback was still running.
+    /// Every 2xx handed to a callback on a live registration, copied out during it.
     #[derive(Default)]
     struct Granted {
         messages: Vec<Vec<u8>>,
@@ -1608,9 +1354,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The 200 OK to a REGISTER reaches the callback whole, the way a refusal
-    /// always has. A Service-Route, the GRUUs and P-Associated-URI are read out
-    /// of `message`, and no binding needs a member of its own for any of them.
+    /// The 200 to a REGISTER reaches the callback whole; Service-Route, GRUUs and
+    /// P-Associated-URI are read from `message`.
     #[test]
     fn the_200_ok_to_a_register_reaches_the_callback_whole() {
         let mut observed = Observed::default();
@@ -1689,9 +1434,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// What poll used to do to the queue, and no longer does. The bytes a poll
-    /// produces are still there afterwards, or the loop in this module's
-    /// documentation would lose a message on every pass.
+    /// A poll does not drain the queue, or the module doc's loop would lose messages.
     #[test]
     fn polling_does_not_throw_away_what_the_stack_wanted_written() {
         let mut observed = Observed::default();
@@ -1709,8 +1452,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The whole of the buffer-too-small promise: the length needed comes back,
-    /// nothing is written, and the message is still there afterwards.
+    /// Buffer too small: length returned, nothing written, message kept.
     #[test]
     fn a_message_too_long_for_the_buffer_is_kept_rather_than_dropped() {
         let mut observed = Observed::default();
@@ -1743,8 +1485,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The ask-for-the-length-then-ask-for-the-bytes sequence, which is how a
-    /// caller that sizes its buffer at run time starts.
+    /// Ask for the length, then the bytes.
     #[test]
     fn a_caller_with_no_buffer_at_all_is_told_what_to_bring() {
         let mut observed = Observed::default();
@@ -1831,9 +1572,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The request every PBX sends its registered contacts on a timer, and the
-    /// one this stack answers by itself — so it is the one that produces a
-    /// response with nobody's help.
+    /// The OPTIONS ping a PBX sends; the stack answers it by itself.
     fn options(branch: &str) -> String {
         format!(
             "OPTIONS {AOR} SIP/2.0\r\n\
@@ -1847,8 +1586,7 @@ pub(crate) mod tests {
         )
     }
 
-    /// RFC 3581 §4: a response goes out from the address its request arrived on,
-    /// and a caller on a wildcard socket cannot work that out for itself.
+    /// RFC 3581 §4: a response leaves from the address its request arrived on.
     #[test]
     fn a_response_says_which_address_to_send_it_from() {
         let mut observed = Observed::default();
@@ -1871,9 +1609,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The other half of the same field: a caller listening on several
-    /// interfaces says which one a datagram landed on, and the answer goes back
-    /// from there rather than from the address the stack was created with.
+    /// A multi-homed caller names the arrival address; the answer leaves from it.
     #[test]
     fn the_address_a_datagram_arrived_on_is_the_one_the_answer_leaves_from() {
         let mut observed = Observed::default();
@@ -1899,10 +1635,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `to` left out as an empty buffer rather than a null pointer is left
-    /// out all the same, as every other optional text in this ABI is: a
-    /// binding that hands every string over as a buffer has no null to pass,
-    /// and was refused for passing the one thing it could.
+    /// `to` given as an empty buffer counts as omitted, like a null.
     #[test]
     fn an_empty_arrival_address_is_no_address_whatever_its_pointer() {
         let mut observed = Observed::default();
@@ -1953,9 +1686,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A request the parser refuses still gets an answer out of the ABI, the
-    /// way it would out of the core, and the status the caller gets back says
-    /// what was refused.
+    /// A request the parser refuses still gets an answer, and the status says why.
     #[test]
     fn a_request_past_a_parser_bound_is_answered_and_the_status_says_why() {
         let mut observed = Observed::default();
@@ -2004,9 +1735,8 @@ pub(crate) mod tests {
             assert_eq!(hand_in(handle, data, len), SipralStatus::InvalidArgument);
             assert!(last_error_text().contains("null"), "{}", last_error_text());
         }
-        // the length is answered from the length alone, before a byte behind
-        // the pointer is read: the second of these describes 64 KiB of a buffer
-        // that is one byte long, and reading it to find out would be the bug
+        // the length is checked before the pointer is read: the second case claims 64 KiB of a
+        // one-byte buffer
         for len in [0, SIPRAL_MESSAGE_BYTES + 1] {
             assert_eq!(
                 hand_in(handle, one.as_ptr(), len),
@@ -2079,10 +1809,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A transport that failed takes the transactions on it with it, which is
-    /// §17's "inform the TU and terminate" arriving where an application can
-    /// see it: the registration is reported failed rather than waiting out
-    /// 64·T1 for a reply that cannot come.
+    /// A failed transport fails its transactions (§17), so the registration fails now rather
+    /// than after 64·T1.
     #[test]
     fn a_transport_that_failed_fails_what_was_waiting_on_it() {
         let mut observed = Observed::default();
@@ -2156,8 +1884,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The way back: a socket re-opened after the network moved says so, and
-    /// every message from then on carries the address it was bound to.
+    /// A rebound socket's address is used in every later message.
     #[test]
     fn a_transport_bound_again_is_one_the_stack_can_send_on() {
         let mut observed = Observed::default();
@@ -2203,8 +1930,6 @@ pub(crate) mod tests {
             "the Via still names the old socket: {via}"
         );
 
-        // and the address a datagram is taken to have arrived on moved with it,
-        // for the caller that names none
         assert_eq!(
             feed(handle, REGISTRAR, options("options-3").as_bytes(), 1_400),
             SipralStatus::Ok,
@@ -2217,11 +1942,9 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// ABI 0.35: an account on a TLS connection of its own beside the
-    /// stack's UDP transport. Adding it asks for the connection, naming the
-    /// protocol and the account's server; registering waits for it; the
-    /// application binds it under a number of its own and the REGISTER
-    /// leaves on it. A protocol this ABI has no number for is refused.
+    /// An account on its own TLS connection beside the UDP transport: adding it asks for the
+    /// connection, registering waits, and the REGISTER leaves on the bound number. An unknown
+    /// protocol is refused.
     #[test]
     fn an_account_on_a_connection_of_its_own_asks_for_it_and_registers_over_it() {
         let mut observed = Observed::default();
@@ -2299,10 +2022,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The connection an account on a TLS connection of its own asked for,
-    /// told as one that could not be opened, is raised with the TLS
-    /// library's reason, as every other loss is; nothing goes out over the
-    /// stack's UDP meanwhile.
+    /// An account's TLS connection that cannot be opened is raised with the TLS reason; nothing
+    /// goes over UDP meanwhile.
     #[test]
     fn an_account_connection_that_could_not_be_opened_is_raised_with_its_reason() {
         let mut observed = Observed::default();
@@ -2394,8 +2115,6 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    // -- a WebSocket the stack runs -----------------------------------------
-
     fn stream_in(handle: SipralHandle, transport: u32, bytes: &[u8], now_ms: u64) {
         let status = unsafe {
             sipral_stack_receive_stream(handle, transport, bytes.as_ptr(), bytes.len(), now_ms)
@@ -2403,10 +2122,7 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
     }
 
-    /// Bound as WS with its far end named, the connection is the stack's to
-    /// make a WebSocket of: the handshake comes out first, the answer goes
-    /// in as stream bytes, and from then on a message in a frame is answered
-    /// in a masked frame.
+    /// WS with `remote`: handshake out, answer in as stream bytes, then messages in masked frames.
     #[test]
     fn a_websocket_bound_with_its_far_end_is_opened_and_framed_by_the_stack() {
         const WS: u32 = 5;
@@ -2447,7 +2163,6 @@ pub(crate) mod tests {
         let mut frame = vec![0x81, 126];
         frame.extend_from_slice(&u16::try_from(request.len()).unwrap().to_be_bytes());
         frame.extend_from_slice(request.as_bytes());
-        // a read that ends half-way through the frame, and the rest
         let (head, tail) = frame.split_at(9);
         stream_in(handle, WS, head, 1_020);
         stream_in(handle, WS, tail, 1_020);
@@ -2471,10 +2186,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    // -- the stream half -----------------------------------------------------
-
-    /// §18.3: a byte stream is framed on `Content-Length`, so a message split
-    /// across two reads is one message and neither half is one.
+    /// §18.3: a message split across two reads is one message.
     #[test]
     fn a_message_split_across_two_reads_is_one_message() {
         let mut observed = Observed::default();
@@ -2513,9 +2225,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The size is checked before the handle is even looked up: a stack that
-    /// was never created and a transmit struct too short to be any version of
-    /// this one both fail, and the size is the one this answers with.
+    /// The size is checked before the handle: both a missing stack and a short struct fail on
+    /// size.
     #[test]
     fn a_transmit_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
@@ -2557,8 +2268,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(stream) }, SipralStatus::Ok);
     }
 
-    /// A WebSocket carries one message per frame (RFC 7118 §4.2), so it is fed
-    /// in whole, the way a datagram is, and the framer never sees it.
+    /// A WebSocket frame holds one message (RFC 7118 §4.2), fed in whole like a datagram.
     #[test]
     fn a_websocket_frame_goes_in_as_a_datagram() {
         let mut observed = Observed::default();
@@ -2622,8 +2332,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A connection re-made after it dropped names its far end, which is what a
-    /// response to an inbound request over that connection goes back to.
+    /// A reconnected stream names its far end, where responses go.
     #[test]
     fn a_reconnected_stream_names_the_far_end_it_reached() {
         let mut observed = Observed::default();
@@ -2659,8 +2368,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The number is written out rather than derived, so that a limit which
-    /// moved in the layer below disagrees with a constant this ABI published.
+    /// Written out, not derived, so a changed limit below disagrees with the published constant.
     #[test]
     fn the_largest_message_is_the_one_the_parser_will_read() {
         assert_eq!(
@@ -2722,8 +2430,6 @@ pub(crate) mod tests {
         );
     }
 
-    // -- 8.4.10: a table of transports ---------------------------------------
-
     fn header_of(name: &'static str, value: &str) -> SipralHeader {
         let (name_ptr, name_len) = (name.as_ptr().cast::<c_char>(), name.len());
         SipralHeader {
@@ -2734,9 +2440,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A transport this stack has never bound is refused, and opening one
-    /// needs a protocol — the two ways `sipral_stack_transport_bind` can fail
-    /// before it ever touches the layer below.
+    /// Two refusals before the layer below: an unknown transport, and opening without a
+    /// protocol.
     #[test]
     fn a_new_transport_needs_a_protocol_and_an_existing_one_keeps_the_one_it_has() {
         let mut observed = Observed::default();
@@ -2762,8 +2467,7 @@ pub(crate) mod tests {
             last_error_text()
         );
 
-        // main already speaks UDP; asking it to speak TLS instead is refused
-        // rather than quietly changing the transport underneath its timers
+        // switching main from UDP to TLS under its timers is refused
         let status = unsafe {
             sipral_stack_transport_bind(
                 handle,
@@ -2786,10 +2490,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The acceptance test the task names: two accounts, two transports, one
-    /// stack, and each account's own traffic leaves on the transport it was
-    /// given — not on the other account's, and not on the stack's main one,
-    /// which neither of them uses at all.
+    /// Two accounts on two transports in one stack: each account's traffic leaves on its own,
+    /// never on the other or on main.
     #[test]
     fn two_accounts_on_two_transports_each_leave_on_their_own() {
         let mut observed = Observed::default();
@@ -2864,9 +2566,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// What a [`SipralEventKind::TransportWanted`] carried, copied out while
-    /// the callback was still running: the pointers in an event are the
-    /// library's and are valid for exactly that long.
+    /// What a [`SipralEventKind::TransportWanted`] carried, copied out during the callback.
     #[derive(Default)]
     struct Wanted {
         seen: Vec<(u32, String, usize, u32)>,
@@ -2901,12 +2601,8 @@ pub(crate) mod tests {
         ));
     }
 
-    /// B1, driven from C alone and end to end: a REGISTER too large for the
-    /// datagram it would have gone out on raises
-    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming where it was going and
-    /// over what protocol, nothing is put on the wire for it, the
-    /// application binds exactly that, and the very same call succeeds and
-    /// leaves on the transport it just bound.
+    /// B1 end to end from C: an oversized REGISTER raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`,
+    /// sends nothing, and after the bind the same call leaves on the new transport.
     #[test]
     fn a_request_too_large_for_a_datagram_is_promoted_once_a_stream_is_bound() {
         let mut observed = Observed::default();
@@ -3021,8 +2717,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The TLS library's reason reaches the event whole, and the event comes
-    /// before the registration that failed with the connection.
+    /// The TLS reason reaches the event whole, before the failed registration.
     #[test]
     fn a_tls_refusal_is_raised_with_its_reason_before_what_it_did() {
         let mut observed = Observed::default();
@@ -3078,8 +2773,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A request asked for while the transport is down is refused as that,
-    /// not as a request that could not be built, and goes once it is back.
+    /// A request while the transport is down is refused as such, and goes once it is back.
     #[test]
     fn a_request_on_a_transport_that_is_down_is_refused_until_it_is_bound_again() {
         let mut observed = Observed::default();
@@ -3118,8 +2812,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The two older calls raise the same event, with no TLS reason, and an
-    /// orderly close says closed.
+    /// The two older calls raise the same event without a TLS reason; a close says closed.
     #[test]
     fn a_failure_and_a_close_told_the_old_way_are_raised_too() {
         let mut observed = Observed::default();
@@ -3155,8 +2848,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Every attempt to connect again that fails is raised, the transport
-    /// down since the first, whichever of the two calls tells it.
+    /// Every failed reconnect is raised, through either call.
     #[test]
     fn each_attempt_to_connect_again_that_fails_is_raised() {
         let mut observed = Observed::default();
@@ -3193,8 +2885,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A stream that loses its framing is a transport lost like any other,
-    /// and said the same way.
+    /// A stream that loses its framing is reported as a lost transport.
     #[test]
     fn a_stream_that_carried_garbage_is_raised_as_lost() {
         let mut observed = Observed::default();
@@ -3226,9 +2917,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A TLS reason is refused on a transport that has no TLS in it, and so
-    /// is a detail too long, a reason with no name and a transport this
-    /// stack does not have; none of them retires anything.
+    /// Refused, retiring nothing: TLS reason on non-TLS, overlong detail, unnamed reason,
+    /// unknown transport.
     #[test]
     fn a_failure_that_cannot_be_what_it_says_retires_nothing() {
         let mut observed = Observed::default();
@@ -3269,8 +2959,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// What a call challenged past RFC 3261 §18.1.1's line said, copied out
-    /// while the callback ran: the stream asked for, and how the call ended.
+    /// A call challenged past RFC 3261 §18.1.1's limit: the stream asked for and the call's end.
     #[derive(Default)]
     struct Outgrown {
         wanted: Vec<(u32, String, usize, u32)>,
@@ -3319,8 +3008,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A stack whose call a PBX has just challenged with a nonce long enough
-    /// that the answer outgrows a datagram, driven through the C ABI alone.
+    /// A call challenged with a nonce long enough to outgrow a datagram, via the C ABI.
     fn challenged_past_the_line(seen: &mut Outgrown) -> SipralHandle {
         let (handle, out) = challenged(seen, |_| {});
         assert!(
@@ -3333,8 +3021,7 @@ pub(crate) mod tests {
         handle
     }
 
-    /// The same, on a stack `tune` configured, with what went out after the
-    /// challenge.
+    /// The same on a stack `tune` configured, with what went out after the challenge.
     fn challenged(
         seen: &mut Outgrown,
         tune: impl FnOnce(&mut crate::stack::SipralStackConfig),
@@ -3366,7 +3053,6 @@ pub(crate) mod tests {
                  qop=\"auth\"\r\n"
             ),
         );
-        // the To of a UAS's refusal carries its tag
         let challenge = String::from_utf8_lossy(&challenge).replacen(
             &format!(
                 "To: {}",
@@ -3385,11 +3071,8 @@ pub(crate) mod tests {
         (handle, drain(handle))
     }
 
-    /// A PBX that takes SIP over UDP alone, and a stack told so with
-    /// `datagram_without_stream_bytes`: once the application says the stream
-    /// cannot be opened, the whole retry goes over the datagram, the call
-    /// goes on, and the stack's diagnostic record says the rule was set
-    /// aside and by how much.
+    /// A UDP-only PBX with `datagram_without_stream_bytes`: once the stream is refused, the
+    /// retry goes over the datagram and the diagnostic record notes the overrun.
     #[test]
     fn a_retry_goes_over_udp_once_no_stream_is_coming_when_the_stack_allows_it() {
         let mut seen = Outgrown::default();
@@ -3447,8 +3130,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A path whose MTU the deployment knows to be larger moves RFC 3261
-    /// §18.1.1's line with it: the same retry fits, and goes at once.
+    /// A known larger path MTU moves RFC 3261 §18.1.1's limit: the retry fits at once.
     #[test]
     fn a_known_path_mtu_keeps_a_retry_that_fits_it_on_udp() {
         let mut seen = Outgrown::default();
@@ -3463,8 +3145,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A message split across reads, and two in one, are each traced whole
-    /// once framed, with the far end they came from.
+    /// Split and coalesced reads are each traced whole, with their far end.
     #[test]
     fn a_stream_is_traced_a_whole_message_at_a_time() {
         let mut observed = Observed::default();
@@ -3532,10 +3213,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// RFC 3261 §18.1.1 on the answer to a challenge, as a C application sees
-    /// it: `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` with both sizes, and once the
-    /// application binds the stream, the retry on it with a `Via` that says so,
-    /// without the call being placed again.
+    /// RFC 3261 §18.1.1 on a challenge answer from C: `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` with
+    /// both sizes, then the retry on the bound stream without placing the call again.
     #[test]
     fn a_challenged_call_whose_answer_outgrew_the_datagram_goes_on_the_stream_bound_for_it() {
         let mut seen = Outgrown::default();
@@ -3589,9 +3268,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// And when the application cannot open that stream, it says so on the
-    /// number it would have bound, and the call ends on that poll with the
-    /// limit named rather than hanging.
+    /// If the stream cannot be opened, the call ends on that poll with the limit named.
     #[test]
     fn a_stream_that_could_not_be_opened_ends_the_call_waiting_for_it_with_the_limit_named() {
         let mut seen = Outgrown::default();
@@ -3627,7 +3304,6 @@ pub(crate) mod tests {
         assert!(text.contains(&format!("{request_bytes} bytes")), "{text}");
         assert!(text.contains("1300-byte"), "{text}");
         assert!(drain(handle).is_empty(), "nothing went");
-        // nothing waits any more, so a number never bound is refused again
         assert_eq!(
             unsafe { sipral_stack_transport_failed(handle, 2, 0, 1_070) },
             SipralStatus::InvalidArgument
@@ -3635,8 +3311,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Polls to `to_ms`, takes everything the stack wants written, and says
-    /// whether a keep-alive ping was among it on `transport`.
+    /// Polls to `to_ms`, drains, and says whether a keep-alive ping went on `transport`.
     fn pinged_on(handle: SipralHandle, transport: u32, to_ms: u64) -> bool {
         poll(handle, to_ms);
         let mut pinged = false;
@@ -3653,11 +3328,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// RFC 5626 §4.4.1 on a stream a C application opened: once the far end
-    /// has answered a ping and then leaves one unanswered for ten seconds, the
-    /// stack retires the transport, and the application that holds the
-    /// socket hears it as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` rather than
-    /// not at all.
+    /// RFC 5626 §4.4.1 on an application-opened stream: a ping unanswered for ten seconds
+    /// retires the transport with `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
     #[test]
     fn a_stream_the_stack_calls_dead_is_told_as_a_transport_failed() {
         let mut seen = Outgrown::default();
@@ -3679,7 +3351,6 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         drain(handle);
 
-        // the first ping is due twenty to twenty-five seconds in, and answered
         assert!(pinged_on(handle, 2, 1_050 + 25_000), "the first ping");
         let pong = b"\r\n";
         assert_eq!(
@@ -3691,7 +3362,6 @@ pub(crate) mod tests {
             last_error_text()
         );
         assert!(seen.lost.is_empty(), "{:?}", seen.lost);
-        // the second is not, and ten seconds after it the flow is dead
         assert!(pinged_on(handle, 2, 1_050 + 50_000), "the second ping");
         poll(handle, 1_050 + 60_000);
         assert_eq!(
@@ -3702,8 +3372,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A C application that never answers the event is not left with a call
-    /// that hangs: the wait runs out on the stack's own clock.
+    /// An application that never answers the event gets a timeout, not a hung call.
     #[test]
     fn a_stream_nobody_opens_ends_the_call_when_the_wait_runs_out() {
         let mut seen = Outgrown::default();
@@ -3717,8 +3386,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The challenges an account's password did not answer, copied out while
-    /// the callback ran: the account, why, who asked and for which realms.
+    /// Declined challenges copied out during the callback: account, reason, server, realms.
     #[derive(Default)]
     struct Declined {
         seen: Vec<(SipralHandle, u32, String, String)>,
@@ -3748,9 +3416,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// The INVITE of a call placed from `account`, refused 407 under
-    /// `realm` by the account's own server, and what went out after it in
-    /// the same call.
+    /// A call's INVITE refused 407 under `realm` by the account's server, and what followed.
     fn challenged_under(
         handle: SipralHandle,
         account: SipralHandle,
@@ -3784,11 +3450,8 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// `sipral_account_config_t::realms` names the realms an account's
-    /// password answers: an SBC at the registrar's address challenging a
-    /// call under one of them is answered, and one challenging under any
-    /// other is not, which `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` reports
-    /// with the account, the server and the realm.
+    /// `realms` limits which challenges the password answers; another realm raises
+    /// `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` with account, server and realm.
     #[test]
     fn the_realms_an_account_names_are_answered_and_any_other_is_reported_declined() {
         let mut declined = Declined::default();
@@ -3806,7 +3469,6 @@ pub(crate) mod tests {
             unsafe { sipral_account_add(handle, ptr::from_ref(&account_config), &raw mut account) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
 
-        // the first realm met would be the only one taken, with none named
         let out = challenged_under(handle, account, "registrar.example", 500);
         assert!(out.iter().any(|message| message.starts_with(b"INVITE ")
             && !header(message, HeaderName::ProxyAuthorization).is_empty()));
@@ -3838,8 +3500,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A list of realms with none in it is a mistake, not the default, and
-    /// a control byte other than the line feed between two is refused.
+    /// An empty realm list is an error, and so is a control byte other than line feed.
     #[test]
     fn realms_that_name_no_realm_are_refused() {
         let mut observed = Observed::default();
@@ -3871,9 +3532,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// What `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` carried, copied out while the
-    /// callback ran: the account, the error, whether a proxy asked, the
-    /// server, the realm, the scope and the authorization server.
+    /// `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` copied out during the callback.
     #[derive(Default)]
     struct TokenWanted {
         seen: Vec<(SipralHandle, u32, u32, String, String, String, String)>,
@@ -3924,10 +3583,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// RFC 8898 through the C ABI: a `Bearer` challenge raises
-    /// `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` with where a token comes from, the
-    /// token handed to `sipral_account_set_access_token` answers it, and a
-    /// token the server calls `invalid_token` is reported and not sent again.
+    /// RFC 8898 via C: a `Bearer` challenge raises `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, the token
+    /// from `sipral_account_set_access_token` answers it, and an `invalid_token` one is not
+    /// resent.
     #[test]
     fn a_bearer_challenge_asks_for_a_token_and_the_token_answers_it() {
         let mut wanted = TokenWanted::default();

@@ -4,24 +4,15 @@
 //! Conferences across the boundary: the picture a `conference` subscription
 //! keeps (RFC 4575), and the conference focus of RFC 4579.
 //!
-//! **A `conference` subscription is kept by the stack.** One made with
-//! `sipral_account_subscribe` naming the `conference` package, or with
-//! [`sipral_call_subscribe_conference`], merges every notification into a
-//! picture of its own by RFC 4575 §4.6: a merged document is
-//! `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`, a gap asks for full state by
-//! itself, and a deleted conference ends the subscription.
-//! [`sipral_subscription_conference`] reads the conference as a whole,
-//! [`sipral_subscription_conference_user_at`] one user, and
-//! [`sipral_subscription_conference_text`] the text the focus wrote about
-//! either, copied into the caller's buffer.
+//! The stack merges every `conference` notification by RFC 4575 §4.6: a gap
+//! asks for full state, a deleted conference ends the subscription. Read it
+//! with [`sipral_subscription_conference`],
+//! [`sipral_subscription_conference_user_at`] and
+//! [`sipral_subscription_conference_text`].
 //!
-//! **A focus says so in its `Contact`.** A call whose far end is a focus
-//! belongs to a conference whose URI is that `Contact`
-//! ([`sipral_call_conference_uri`], RFC 4579 §4.2), and
-//! [`sipral_call_subscribe_conference`] watches it outside the call's
-//! dialog, as §3.4 asks. The other way round, [`sipral_call_set_focus`] puts
-//! `isfocus` on this end's `Contact` for a call it hosts a conference on, and
-//! `sipral_call_config_t::focus` places one that way.
+//! A focus marks its `Contact` with `isfocus` (RFC 4579 §4.2):
+//! [`sipral_call_conference_uri`] reads it, [`sipral_call_subscribe_conference`]
+//! watches it outside the dialog (§3.4), [`sipral_call_set_focus`] marks ours.
 
 use std::ffi::c_char;
 
@@ -47,8 +38,7 @@ codes! {
         Unknown = 0,
         /// It was merged into the picture.
         Applied = 1,
-        /// The focus deleted the conference: the picture is empty, and the
-        /// subscription is being given up (RFC 4575 §4.6).
+        /// Deleted by the focus; the subscription ends (RFC 4575 §4.6).
         Ended = 2,
     }
 }
@@ -58,8 +48,7 @@ codes! {
     /// `sipral_conference_user_t::status`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralEndpointStatus: u32 {
-        /// The focus did not say, or said something the schema does not
-        /// list.
+        /// Absent or not in the schema.
         Unknown = 0,
         /// `pending`: waiting for policy or for the focus.
         Pending = 1,
@@ -83,11 +72,8 @@ codes! {
 }
 
 codes! {
-    /// Which piece of text [`sipral_subscription_conference_text`] is being
-    /// asked for. The first three are about the conference and ignore
-    /// `index`; the rest are about the user at `index`.
-    ///
-    /// Every one of them is what the focus wrote.
+    /// Which text [`sipral_subscription_conference_text`] reads, as the focus
+    /// wrote it. The first three ignore `index`; the rest are about that user.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralConferenceText: u32 {
         /// Never asked for.
@@ -115,8 +101,7 @@ record! {
         pub subscription: SipralHandle,
         /// A [`SipralConferenceUpdate`].
         pub update: Number<SipralConferenceUpdate>,
-        /// The version of the document the picture is at now; zero once the
-        /// conference ended.
+        /// The current document version; zero once ended.
         pub version: u32,
         /// How many users the picture holds.
         pub users: u32,
@@ -132,25 +117,20 @@ record! {
         pub size: usize,
         /// The version of the last document merged.
         pub version: u32,
-        /// How many users the picture holds, which is what
-        /// [`sipral_subscription_conference_user_at`] reads by index.
+        /// Users held, indexed by [`sipral_subscription_conference_user_at`].
         pub users: u32,
-        /// Whether the focus said how many users it counts
-        /// (`conference-state`'s `user-count`), which may differ from
-        /// `users`: a focus need not list every one.
+        /// Whether `user-count` was sent; it may differ from `users`.
         pub has_user_count: u32,
         /// That count, when it said.
         pub user_count: u32,
-        /// `conference-state`'s `active`: one when the focus said it is, two
-        /// when it said it is not, zero when it said nothing.
+        /// `active`: 1 true, 2 false, 0 not said.
         pub active: u32,
         /// Its `locked`, the same way.
         pub locked: u32,
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and the library is the only one that fills it in.
+// Safety: plain data, filled only by the library.
 unsafe impl Versioned for SipralConference {
     const NAME: &'static str = "sipral_conference";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralConference, locked);
@@ -168,18 +148,13 @@ record! {
     pub struct SipralConferenceUser {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
-        /// How many endpoints — devices — the user is in the conference
-        /// from.
+        /// How many endpoints (devices) the user joined from.
         pub endpoints: u32,
-        /// A [`SipralEndpointStatus`]: where the first of them is.
+        /// A [`SipralEndpointStatus`] of the first endpoint.
         pub status: Number<SipralEndpointStatus>,
-        /// How many media streams the first of them has.
+        /// Media streams of the first endpoint.
         pub media: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads to alignment so later members never land in padding.
         pub reserved: u32,
     }
 }
@@ -194,7 +169,6 @@ unsafe impl Versioned for SipralConferenceUser {
     }
 }
 
-/// The payload of a conference event, as C reads it.
 pub(crate) fn changed(
     agent: &UserAgent,
     named: SipralHandle,
@@ -218,7 +192,6 @@ fn count(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
 }
 
-/// The picture one subscription holds, or why there is none.
 fn picture_of(state: &StackState, subscription: SipralHandle) -> Result<&Conference, Fail> {
     let named = subscription_of(state, subscription)?;
     state.agent.conference(named).ok_or_else(|| {
@@ -269,11 +242,8 @@ const fn tristate(flag: Option<bool>) -> u32 {
 
 entry! {
     /// What a `conference` subscription holds about the conference as a
-    /// whole (RFC 4575 §5.5).
-    ///
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that holds no
-    /// conference: one to another package, one no document has reached yet,
-    /// or one that is not live.
+    /// whole (RFC 4575 §5.5). `SIPRAL_STATUS_NOT_SUPPORTED` when it holds
+    /// none: another package, no document yet, or not live.
     ///
     /// # Safety
     ///
@@ -334,14 +304,11 @@ entry! {
 }
 
 entry! {
-    /// A piece of text about the conference or one of its users, copied into
-    /// the caller's buffer the way `sipral_subscription_dialog_text` copies
-    /// one: `out_needed` receives the bytes it needs including the NUL, a
-    /// buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing
-    /// written, and a piece the focus did not send is one byte, the NUL.
-    ///
-    /// `which` is a [`SipralConferenceText`]; `index` names the user for the
-    /// pieces about one, and is ignored for the others.
+    /// Text about the conference or a user, as `which` (a
+    /// [`SipralConferenceText`]) and `index` say. `out_needed` gets the bytes
+    /// needed including the NUL; a small buffer is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written; absent text is
+    /// just the NUL.
     ///
     /// # Safety
     ///
@@ -399,13 +366,9 @@ entry! {
 }
 
 entry! {
-    /// Say, or stop saying, that this end is the focus of a conference the
-    /// call belongs to (RFC 4579 §4.2): `isfocus` on the `Contact` of every
-    /// request and response the call sends from here on — the answer, for a
-    /// call not answered yet, and the next re-INVITE or UPDATE for one that
-    /// is up, which is how the far end learns it.
-    ///
-    /// `focus` is one to say it and zero to stop.
+    /// Put (`focus` 1) or remove (0) `isfocus` on this call's `Contact` from
+    /// the next message on (RFC 4579 §4.2): the answer, or the next re-INVITE
+    /// or UPDATE on an established call.
     ///
     /// # Safety
     ///
@@ -428,12 +391,9 @@ entry! {
 }
 
 entry! {
-    /// The URI of the conference a call belongs to, when its far end said it
-    /// is a focus (`isfocus` in its `Contact`, RFC 4579 §4.2), copied into
-    /// the caller's buffer as `sipral_subscription_conference_text` copies.
-    ///
-    /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end said nothing of
-    /// the kind.
+    /// The conference URI when the far end's `Contact` has `isfocus` (RFC 4579
+    /// §4.2), copied as `sipral_subscription_conference_text` copies.
+    /// `SIPRAL_STATUS_NOT_A_FOCUS` otherwise.
     ///
     /// # Safety
     ///
@@ -460,13 +420,9 @@ entry! {
 
 entry! {
     /// Subscribe to the conference package of the call's focus (RFC 4579
-    /// §3.4), outside the call's dialog, from the call's own account, and
-    /// write the subscription's handle. It is kept like any subscription and
-    /// outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` says what it
-    /// learns.
-    ///
-    /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end did not say it is
-    /// a focus.
+    /// §3.4), outside the call's dialog, from the call's account. The
+    /// subscription outlives the call. `SIPRAL_STATUS_NOT_A_FOCUS` when the
+    /// far end is not a focus.
     ///
     /// # Safety
     ///
@@ -526,9 +482,7 @@ pub(crate) mod tests {
     use std::ffi::c_char;
     use std::ptr;
 
-    /// A notification in the dialog `subscribe` opened, for `package`,
-    /// carrying `body` as `content_type`; `cseq` keeps each one a
-    /// transaction of its own.
+    /// A NOTIFY in the dialog `subscribe` opened; `cseq` keeps each distinct.
     pub(crate) fn notified(
         subscribe: &[u8],
         package: &str,
@@ -572,8 +526,7 @@ Content-Length: {}\r\n\r\n",
         out
     }
 
-    /// Subscribe to `package` at `target`, and have the notifier grant it.
-    /// Hands back the stack, the subscription and the SUBSCRIBE.
+    /// A granted subscription: the stack, the subscription and the SUBSCRIBE.
     pub(crate) fn subscribed(
         observed: &mut Observed,
         package: &str,
@@ -835,7 +788,6 @@ Content-Length: {}\r\n\r\n",
         (status, text)
     }
 
-    /// An incoming call from `invite`, rung and waiting.
     fn incoming(observed: &mut Observed, invite: &[u8]) -> (SipralHandle, SipralHandle) {
         let handle = stack(observed);
         let _ = account_on(handle);

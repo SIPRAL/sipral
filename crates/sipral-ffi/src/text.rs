@@ -1,20 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Text coming in, and why none of it is trusted.
-//!
-//! Every string that crosses into the library is a pointer and a length. Not a
-//! NUL-terminated one: a caller whose display name came from a text field can
-//! hand over bytes with a NUL in the middle, and a library that stopped there
-//! would send half of what it was given without saying so. The length is what
-//! it is.
-//!
-//! Everything that ends up in a header field is checked for the two bytes that
-//! would end the field early. A display name carrying CR or LF is not a name
-//! with a formatting problem, it is a header the caller did not write appearing
-//! in a message the caller thinks it wrote, and §7.3.1 gives a receiver no way
-//! to tell the difference. So they are refused at the boundary, where the
-//! caller still knows which string it passed.
+//! Incoming text: a pointer and a length, never NUL-terminated, so an
+//! embedded NUL cannot silently truncate. Header text with CR or LF would
+//! inject a header (RFC 3261 §7.3.1), so it is refused at the boundary.
 
 use std::ffi::c_char;
 use std::ptr;
@@ -24,15 +13,11 @@ use std::str;
 use crate::error::{Fail, fail};
 use crate::status::SipralStatus;
 
-/// More than any field this ABI accepts, and small enough that a length a
-/// caller never set is refused rather than walked.
+/// Bounds an uninitialised length before it is walked.
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 
-/// Bytes a caller supplied, as they are.
-///
-/// `None` for a null pointer with a length of zero, which is how a caller says
-/// it has nothing to give. A null pointer with a length is a caller that got
-/// its arguments the wrong way round, and is refused.
+/// Bytes a caller supplied. `None` for null or zero length; null with a
+/// length is refused.
 ///
 /// # Safety
 ///
@@ -114,29 +99,15 @@ pub(crate) unsafe fn required_text<'a>(
     }
 }
 
-/// Whether a byte would end a header field, or is one no field may carry.
-///
-/// §7.3.1 folds a field across lines on CRLF followed by whitespace, so both
-/// halves of a line ending are how a field ends and neither belongs inside a
-/// value the caller supplied. The rest of the C0 range and DEL are refused
-/// with them: none of them is `TEXT-UTF8char`, and a value that carries one is
-/// a value some receiver on the path will read differently.
+/// CR and LF end a field (§7.3.1); the rest of C0 and DEL are not
+/// `TEXT-UTF8char`. All are refused in caller text.
 pub(crate) const fn is_field_ending(byte: u8) -> bool {
     byte < 0x20 || byte == 0x7f
 }
 
-/// Bytes going the other way: copied into a buffer the caller owns, with the
-/// length written whether or not the buffer was long enough.
-///
-/// `out_len` receives what it takes before the capacity is looked at, so a
-/// caller that passes a null buffer and a capacity of zero learns how much
-/// room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL` — which is the
-/// question being asked, not a failure.
-///
-/// Not [`crate::diagnostics::copy_out`], which is for text: that one appends a
-/// NUL and counts it in the length. These bytes are opaque and can contain a
-/// NUL, so a terminator would be both a byte too many and a place for a
-/// reader to stop early.
+/// Copy opaque bytes to the caller's buffer, always writing the needed
+/// length; a null buffer of capacity zero is how to ask for it. Unlike
+/// [`crate::diagnostics::copy_out`], no NUL is appended.
 ///
 /// # Safety
 ///
@@ -169,8 +140,7 @@ pub(crate) unsafe fn copy_bytes_out(
     if taken.is_empty() {
         return Ok(());
     }
-    // the capacity reaches a length that is not zero, so the buffer is not
-    // null
+    // capacity is nonzero here, so the buffer is not null
     unsafe { ptr::copy_nonoverlapping(taken.as_ptr(), buffer, taken.len()) };
     Ok(())
 }
@@ -254,8 +224,6 @@ mod tests {
 
     #[test]
     fn text_that_stops_at_a_nul_is_not_what_arrives() {
-        // the length is what counts, so a caller cannot shorten what it sends
-        // by putting a NUL in the middle of it; it is refused instead
         let supplied = "one\0two";
         assert_eq!(as_text(supplied), Err(SipralStatus::InvalidArgument));
     }

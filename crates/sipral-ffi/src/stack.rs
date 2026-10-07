@@ -1,106 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A stack: made, polled, destroyed — and the rules a binding author will
-//! otherwise have to guess.
+//! A stack: made, polled, destroyed.
 //!
-//! Everything the library has to tell the application arrives on one callback,
-//! and the callback runs inside [`sipral_stack_poll`] and nowhere else. That
-//! is the whole reason poll exists. A stack that called back from a thread of
-//! its own would make every binding reason about which thread it is on, and
-//! Swift, .NET, Kotlin and Python each answer that question differently; a stack that
-//! calls back only where it was polled has nothing to answer.
-//!
-//! The clock arrives the same way. Nothing here reads one — except once, at
-//! creation, to have an origin for the milliseconds the caller counts from —
-//! because the layers below own no time either: the caller says what time it
-//! is on every call that can put something on the wire, and a clock that goes
-//! backwards by more than `CLOCK_SLACK_MS` is a caller bug reported as one
-//! rather than a timer that never fires. Not further back than that, because
-//! signalling may run on any thread and `now_ms` is read from whichever one
-//! called last: two threads reading one clock do not agree to the
-//! millisecond, and a reading a little behind the one before it is that and
-//! not a caller mistake. Refusing anything moves nothing — the check runs
-//! before the work the caller asked for, and the clock only ever advances
-//! once that work has actually succeeded, so a call refused for an unrelated
-//! reason (a bad handle, a bad argument) leaves it exactly where it was.
+//! Everything the library tells the application arrives on one callback, which
+//! runs inside [`sipral_stack_poll`] and nowhere else. The caller passes the time
+//! on every call that can put something on the wire; a clock more than
+//! `CLOCK_SLACK_MS` behind is refused, and it advances only when a call succeeds.
 //!
 //! # May one stack be used from two threads at once?
 //!
-//! For signalling, one thread at a time. A stack may be used from *any*
-//! thread, and from a different thread on every call, but a call that arrives
-//! while another thread is inside gets `SIPRAL_STATUS_BUSY` and does nothing.
-//! It does not block, and it does not queue.
-//!
-//! That is the conservative answer, and it is chosen because it is the one
-//! that stays true. A library that promised safe concurrent signalling would
-//! owe that promise to every future member of every future state; one that
-//! blocked would owe the caller a guarantee about how long. Busy costs a
-//! binding one lock it was going to take anyway, and what keeps it rare is how
-//! little the stack's lock is held for: the work of the call that took it, and
-//! never the callback or a frame of audio. A binding that meets Busy has met a
-//! second thread that really was inside at that moment.
-//!
-//! A call's media is outside this answer on purpose. It is reached through a
-//! handle of its own ([`crate::media`]), each call's session has a lock of its
-//! own, and no media entry point takes this one — so the thread that carries a
-//! call's audio never waits on signalling, on the callback or on another call.
-//!
-//! The other way round is refused. Code run inside a frame of a call — a
-//! processor — that calls into that call's stack gets `SIPRAL_STATUS_BUSY`,
-//! even with nobody else inside: the stack's work can need the session the
-//! frame is holding, and a thread that waited for it would be waiting for
-//! itself, with this lock held.
+//! For signalling, one thread at a time, from any thread. A call that arrives
+//! while another is inside gets `SIPRAL_STATUS_BUSY`: it neither blocks nor
+//! queues. Media has its own handle and lock ([`crate::media`]). A processor
+//! inside a frame that calls into its call's stack also gets Busy, since the
+//! stack can need the session the frame holds.
 //!
 //! # May the library be re-entered from inside the event callback?
 //!
-//! Yes. A poll does the stack's work under the lock, takes what the stack has
-//! to say out into a queue that owns everything the events point at, and lets
-//! the lock go before it delivers the first one. Nothing is held while the
-//! callback runs, so answering an event with a request, minting a call's media
-//! handle or polling again from inside it is an ordinary call.
+//! Yes. A poll queues its events and lets the lock go before delivering. One
+//! poll at a time delivers; a nested or concurrent poll leaves its events to the
+//! delivery under way, so order holds and events never arrive on two threads.
+//! A pass delivers only what was queued when it began, and if it leaves some it
+//! sets `has_deadline` with `next_poll_in_ms` zero. The queue holds at most
+//! `OUTBOX_CEILING` events; beyond that a poll drops its own and counts them in
+//! `sipral_counters_t::events_dropped`. [`sipral_stack_destroy`] works from
+//! inside the callback; the current pass still completes.
 //!
-//! The queue is the stack's rather than one poll's, and one poll at a time
-//! delivers from it. A poll made from inside the callback, or from another
-//! thread while one is delivering, does the stack's work and leaves what it
-//! raised to the delivery already under way, so events arrive in the order
-//! they were raised and never on two threads at once. Such a poll returns
-//! before its own events are heard. And because the whole poll runs before the
-//! first event is read, an event can describe something the stack has since
-//! moved past: a call that ended inside the same poll has a stale handle by
-//! the time its first event arrives.
-//!
-//! One delivery pass hands over only what was already queued when it began.
-//! Anything posted while it runs — from another thread, or from the callback
-//! itself — waits in the queue rather than being pulled into the same pass,
-//! and the pass returns once it has delivered what it started with: nothing
-//! here keeps a thread inside `sipral_stack_poll` for longer than that one
-//! batch, however long other threads go on posting behind it. The next poll
-//! on this stack, even one that raises nothing of its own, is what picks up
-//! whatever was left, and the poll whose pass left it says that poll is due
-//! now: `has_deadline` set and `next_poll_in_ms` zero, so a caller that waits
-//! for input or for the deadline polls again at once instead of leaving the
-//! events until a datagram or a timer wakes it.
-//!
-//! The queue itself holds at most `OUTBOX_CEILING` events at once. A poll
-//! that finds it already full drops the events it would have added instead
-//! of growing the queue further or waiting for room — signalling must answer
-//! every call it is asked whatever the application's callback is doing — and
-//! counts what it dropped in `sipral_counters_t::events_dropped`, appended at
-//! that struct's tail so a caller who has never heard of it still reads
-//! every counter that existed before it did.
-//!
-//! [`sipral_stack_destroy`] works from inside the callback as it always has.
-//! It takes nothing but the handle table, and the poll that is delivering
-//! holds its share of the stack until it returns, so the rest of its pass is
-//! still delivered and a binding whose event handler is where its object gets
-//! disposed does not need a queue of deferred frees to be correct. What was
-//! posted while that pass ran is freed with the stack rather than delivered:
-//! no poll can follow a destroy to take it.
-//!
-//! Everything that names no stack — the last error, the status and event-kind
-//! names, the ABI version — is callable from anywhere at any time, including
-//! from inside the callback and from any number of threads.
+//! Everything that names no stack is callable from anywhere, any time.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void};
@@ -144,27 +71,15 @@ static TAGS: StackTags = StackTags::new();
 const SEED_BYTES: usize = 32;
 
 /// The one transport a stack is bound to. Nothing here opens it.
-///
-/// Published to C as `SIPRAL_TRANSPORT_MAIN`, in [`crate::transport`], which is
-/// also where the reason a stack has exactly one is written down.
+/// Published to C as `SIPRAL_TRANSPORT_MAIN`, in [`crate::transport`].
 pub(crate) const TRANSPORT: TransportId = TransportId(0);
 
-/// How far behind this stack's last reading of the caller's clock a
-/// signalling call may be and still be honoured.
-///
-/// Signalling may run on any thread, and each carries its own reading of the
-/// same clock rather than sharing one: two of them a few milliseconds apart
-/// is ordinary drift, not a caller that lost track of time. A media entry
-/// point does not check against this at all — see `crate::media` — because
-/// it never touches `polled_at_ms` in the first place; this is the tolerance
-/// for the calls that do.
+/// How far behind the last clock reading a signalling call may be: threads
+/// reading one clock drift by a few milliseconds.
 const CLOCK_SLACK_MS: u64 = 50;
 
-/// How soon a poll that found the audio engine held by another thread asks
-/// to be called again, so that the engine's news waits one short beat
-/// rather than until whatever the stack's own next deadline is. The same
-/// while the engine is opening devices in the background, so that they are
-/// put under the call as soon as they answer.
+/// How soon a poll that found the audio engine held by another thread, or
+/// still opening devices, asks to be called again.
 const AUDIO_BUSY_RETRY: Duration = Duration::from_millis(20);
 
 /// A call the audio engine is to take up, with its session, or let go of.
@@ -174,11 +89,8 @@ enum AudioOp {
 }
 
 codes! {
-    /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
-    ///
-    /// Zero is not one of them: a stack is told what it is speaking, because
-    /// guessing wrong in the direction of the plainest transport is how a caller
-    /// that meant TLS ends up on the wire in the clear.
+    /// What a stack speaks. Names for `sipral_stack_config_t::transport`. Zero is
+    /// not one, so a caller who meant TLS is never put on the wire in the clear.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralTransport: u32 {
         /// UDP.
@@ -206,8 +118,7 @@ impl SipralTransport {
         }
     }
 
-    /// The number this ABI gives a protocol, or zero for one it has no number
-    /// for — which is the same zero a caller who filled nothing in leaves.
+    /// The number this ABI gives a protocol, or zero for one it has none for.
     pub(crate) const fn named(protocol: TransportProtocol) -> u32 {
         match protocol {
             TransportProtocol::Udp => Self::Udp as u32,
@@ -215,33 +126,18 @@ impl SipralTransport {
             TransportProtocol::Tls => Self::Tls as u32,
             TransportProtocol::Ws => Self::Ws as u32,
             TransportProtocol::Wss => Self::Wss as u32,
-            // the layer below has grown a transport this ABI has no number for,
-            // and saying nothing beats picking one that is wrong
+            // a transport this ABI has no number for yet
             _ => 0,
         }
     }
 }
 
-/// Every transport a stack has bound: [`SIPRAL_TRANSPORT_MAIN`], from the
-/// moment the stack is created, and whatever
-/// [`crate::transport::sipral_stack_transport_bind`] has added since.
-///
-/// Grows only, for the stack's whole life. `TransportId` documents itself, one
-/// crate down, as "a transport the caller opened, named by the caller" — the
-/// endpoint never interprets the number — so the numbers beyond
-/// [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN) are the
-/// caller's own to choose, the same way `sipral_account_config_t::transport`
-/// and `sipral_call_config_t::transport` are read straight through to here
-/// with no translation. A transport that failed or whose stream closed is
-/// retired one layer down — nothing can be sent on it until it is bound again
-/// — which is a fact about whether it may be written to, not about whether
-/// its number still names something: the whole point of remembering it here
-/// is that `sipral_stack_transport_bind` can bring the very same one back.
+/// Every transport a stack has bound, from [`SIPRAL_TRANSPORT_MAIN`] on. Grows
+/// only, so `sipral_stack_transport_bind` can bring a failed one back.
 pub(crate) struct Transports(HashMap<u32, TransportProtocol>);
 
 impl Transports {
-    /// A table with only the main transport in it, speaking what the stack
-    /// was created to speak.
+    /// A table with only the main transport in it.
     fn new(main: TransportProtocol) -> Self {
         let mut entries = HashMap::new();
         entries.insert(TRANSPORT.0, main);
@@ -274,472 +170,202 @@ impl Transports {
         listed
     }
 
-    /// Record a transport as bound: the first time under a number, this is
-    /// what mints the entry; every time after, the number already named this
-    /// same protocol, so nothing here moves.
+    /// Record a transport as bound; a known number keeps its protocol.
     pub(crate) fn record(&mut self, id: u32, protocol: TransportProtocol) {
         self.0.entry(id).or_insert(protocol);
     }
 }
 
 record! {
-    /// What a stack is created with.
-    ///
-    /// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
-    /// filling anything in. Five members have to be filled: the callback, the
-    /// transport, the address this end is reachable at, the entropy, and the
-    /// media seed, which must differ from the entropy. Nothing here can be
-    /// guessed on the caller's behalf.
+    /// What a stack is created with. Set `size` to `sizeof(sipral_stack_config_t)`
+    /// and zero the rest first. Required: the callback, the transport, the reachable
+    /// address, the entropy, and a media seed different from the entropy.
     #[derive(Clone, Copy)]
     pub struct SipralStackConfig {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// Where events go. Required: a stack with nowhere to report to is a
-        /// stack whose failures are invisible.
+        /// Where events go. Required.
         pub event_callback: SipralEventCallback,
         /// Handed back to the callback untouched. The library never reads it.
         pub event_user_data: *mut c_void,
         /// A [`SipralTransport`].
         pub transport: Number<SipralTransport>,
         /// The address the far end reaches this one at, as `host:port`, UTF-8 and
-        /// not NUL-terminated.
-        ///
-        /// It goes in every `Via`, so it is the address a response has to come
-        /// back to rather than whatever a wildcard socket was bound to. Nothing
-        /// here opens a socket or resolves a name.
+        /// not NUL-terminated. It goes in every `Via`.
         pub bind_address: *const c_char,
         /// How many bytes of it.
         pub bind_address_len: usize,
-        /// What to put in `User-Agent` on every request this stack originates —
-        /// REGISTER and INVITE — or null for none.
-        ///
-        /// Not on responses, and not on a request sent inside a dialog: those are
-        /// written a layer below this one, which has no opinion about product
-        /// names. The field is optional on every method — §20 Table 3 marks it `o`
-        /// throughout — so a message that goes out without it is still well formed.
+        /// `User-Agent` for every REGISTER and INVITE this stack originates, or null
+        /// for none (optional per §20 Table 3).
         pub user_agent: *const c_char,
         /// How many bytes of it.
         pub user_agent_len: usize,
-        /// Thirty-two bytes of entropy, from the platform's own generator.
-        ///
-        /// Every branch parameter, tag and `Call-ID` is derived from it, and
-        /// §19.3 wants a tag unguessable — cryptographically random, not a
-        /// counter or a clock. Two stacks must never be given the same bytes.
-        ///
-        /// Not the media keys: those come from `media_seed`, a separate draw,
-        /// because what is drawn from this one goes on the wire in clear. A
-        /// replay recording carries neither: it carries a seed drawn for it
-        /// from a stream derived one way from this one, which says nothing
-        /// about these bytes (`sipral_stack_recording_start`).
+        /// Thirty-two bytes from the platform's generator. Every branch, tag and
+        /// `Call-ID` derives from it, and §19.3 wants a tag unguessable. Never
+        /// shared between stacks. Media keys come from `media_seed`.
         pub entropy: *const u8,
         /// How many bytes of it. Thirty-two.
         pub entropy_len: usize,
         /// T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
-        ///
-        /// In force on every transport: 64·T1 is how long a transaction has to
-        /// finish, whether or not anything retransmits.
         pub timer_t1_ms: u64,
-        /// T2 in milliseconds, or zero for four seconds.
-        ///
-        /// The cap on the doubling that starts at T1, and therefore only a figure
-        /// on a transport that retransmits. Setting it on anything but UDP is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+        /// T2 in milliseconds, or zero for four seconds. UDP only; set on another
+        /// transport it is `SIPRAL_STATUS_INVALID_ARGUMENT`.
         pub timer_t2_ms: u64,
-        /// T4 in milliseconds, or zero for five seconds.
-        ///
-        /// How long a message lingers in the network, which is what timers I and K
-        /// wait out. Zero on a transport that delivers for us, so it is refused
-        /// there the same way T2 is.
+        /// T4 in milliseconds, or zero for five seconds. UDP only, like T2.
         pub timer_t4_ms: u64,
-        /// The codecs to offer, in the order to offer them: their names, separated
-        /// by commas, as UTF-8 and not NUL-terminated. Null for everything this
-        /// build contains, quality first.
-        ///
-        /// A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
-        /// has the peer's preference decide among what both ends list — and it is
-        /// configured per site rather than fixed, because a carrier that bills by
-        /// the minute wants the narrowband codec first and a company on its own
-        /// network wants the wideband one.
-        ///
-        /// A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
-        /// here, with the names it does have in the last error. It is never taken
-        /// and ignored: a setting that is accepted and then quietly dropped is the
-        /// failure neither end can see.
+        /// The codecs to offer, in order (A4, RFC 3264 §6.1): comma-separated names,
+        /// UTF-8, not NUL-terminated; null for every codec built in. An unknown name is
+        /// `SIPRAL_STATUS_NOT_SUPPORTED`, with the known names in the last error.
         pub codecs: *const c_char,
         /// How many bytes of it.
         pub codecs_len: usize,
-        /// How long a frame is, in milliseconds, or zero for twenty.
-        ///
-        /// Twenty is what every peer expects and what every codec here cuts
-        /// cleanly. Opus has a fixed set of frame durations and encodes nothing
-        /// else, so an interval it has no size for is refused while Opus is one of
-        /// the codecs offered.
+        /// Frame length in milliseconds, or zero for twenty. Must suit Opus if offered.
         pub frame_ms: u32,
-        /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
-        /// default: a phone that cannot send a digit cannot navigate a menu.
+        /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by default.
         pub offer_dtmf: Number<SipralToggle>,
-        /// Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
-        ///
-        /// Off by default. §5.1.1 only permits it where both ends asked, and the
-        /// equipment this stack is deployed against does not; asking unasked costs
-        /// a line in every offer and buys a port on the calls where nobody answers.
+        /// Whether to ask for RFC 5761 multiplexing (§5.1.1), as a `SipralToggle`.
+        /// Off by default.
         pub offer_rtcp_mux: Number<SipralToggle>,
-        /// Whether to stop sending during silence, as a `SipralToggle`.
-        ///
-        /// Off by default. It halves the bandwidth of a call in which one person is
-        /// listening, and it costs the far end's own stall watchdog a reason to
-        /// fire — this stack sends no comfort noise of its own to say the silence
-        /// is deliberate, so a gap looks the same from there as a stream that died.
+        /// Whether to stop sending during silence, as a `SipralToggle`. Off by
+        /// default: with no comfort noise, the gap looks like a dead stream.
         pub silence_suppression: Number<SipralToggle>,
-        /// Whether inbound audio that stops is reported, as a `SipralToggle`. On by
-        /// default; this is B5.
+        /// Whether inbound audio that stops is reported (B5), as a `SipralToggle`.
+        /// On by default.
         pub media_stall_watchdog: Number<SipralToggle>,
-        /// How long inbound audio may stop before that is reported, in
-        /// milliseconds, or zero for this build's own figure.
-        ///
-        /// Setting it with the watchdog switched off is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+        /// How long inbound audio may stop before it is reported, in milliseconds,
+        /// or zero for the default. Refused with the watchdog off.
         pub media_stall_ms: u64,
-        /// What the wall clock read when the stack was created, as seconds since
-        /// 1 January 1970, or zero.
-        ///
-        /// The one number a stack that reads no clock cannot work out: RFC 3550
-        /// §6.4.1 has a sender report carry "the wall clock time when this report
-        /// was sent", and a monotonic instant is not one. Zero means the reports
-        /// take the wall clock `sipral_stack_stir` gives in `unix_seconds`, from
-        /// the moment it is given, and count from the Unix epoch until then:
-        /// the round trip the far end computes is a difference, not an
-        /// absolute, but the correlation of this call's media with anything
-        /// else's is not.
+        /// The wall clock at creation, in seconds since the Unix epoch, for RFC 3550
+        /// §6.4.1 sender reports; zero to wait for `sipral_stack_stir`'s `unix_seconds`.
         pub media_clock_unix_seconds: u64,
-        /// Thirty-two more bytes of entropy, for the media keys, and **not
-        /// the same bytes as `entropy`**.
-        ///
-        /// Every SRTP master key this stack offers or answers with is derived
-        /// from these and from nothing else. They are a second draw rather
-        /// than a slice of the first because a replay recording writes
-        /// `entropy` into the file in clear: one generator for both would put
-        /// every key the stack will ever offer into every recording it makes.
-        ///
-        /// Handing the same bytes twice is refused rather than accepted
-        /// quietly. This is the only place in the library that can see both.
+        /// Thirty-two more bytes for the media keys, **not the same bytes as
+        /// `entropy`**, which recordings write in clear. The same bytes are refused.
         pub media_seed: *const u8,
         /// How many bytes of it. Thirty-two.
         pub media_seed_len: usize,
-        /// What every call on this stack does about SRTP unless
-        /// `sipral_call_config_t::srtp` says otherwise for it: a
-        /// `SipralSrtp`, or zero for this build's own built-in default, which
-        /// is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
-        /// until it is asked to. Any other value is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        /// Default SRTP for every call: a `SipralSrtp`, or zero for
+        /// `SIPRAL_SRTP_NOT_OFFERED`. `sipral_call_config_t::srtp` overrides it.
         pub srtp: Number<SipralSrtp>,
-        /// What every call on this stack does about ICE unless
-        /// `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
-        /// or zero for this build's own built-in default, which is
-        /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
-        /// for the reason `docs/06-nat.md` tabulates. Any other value is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        /// Default ICE for every call: a `SipralIce`, or zero for `SIPRAL_ICE_OFF`
+        /// (`docs/06-nat.md`). `sipral_call_config_t::ice` overrides it.
         pub ice: Number<SipralIce>,
-        /// What this stack does about a NAT in front of it: a `SipralNat`, or
-        /// zero for this build's own built-in default, which is
-        /// `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
-        /// socket appears from and writes the answer where a far end reads
-        /// it — see `docs/06-nat.md`. Any other value is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        /// A `SipralNat`, or zero for `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks
+        /// `stun_server` where each socket appears from (`docs/06-nat.md`).
         pub nat: Number<SipralNat>,
-        /// The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
-        /// address, not a name, since resolving one is the application's.
-        /// Required with `SIPRAL_NAT_STUN` and refused without it, since a
-        /// server nothing asks is a setting nothing reads. Copied; the
-        /// caller's buffer is its own again when this returns.
+        /// The STUN server, as a `host:port` address. Required with and only with
+        /// `SIPRAL_NAT_STUN`. Copied.
         pub stun_server: *const c_char,
         /// How many bytes of it.
         pub stun_server_len: usize,
-        /// Whether G.729's Annex B — silence compression: SID frames and
-        /// nothing in a pause, and the comfort noise both ends make from
-        /// them — is allowed on this stack's calls, as a `SipralToggle`. On
-        /// by default, which is what `G729` means with no parameter (RFC
-        /// 4856 §2.1.9): an offer says `annexb=yes`, and an answer says
-        /// `yes` only where the offer allowed it. Off, both say `annexb=no`,
-        /// which RFC 3551 §4.5.6 makes the far end's cue to send no SID
-        /// frames, and this end sends none either. A per-call codec order
-        /// keeps the stack's setting. Nothing changes for a call that does
-        /// not run G.729, so the setting is taken whatever `codecs` names:
-        /// a call's own order may name G.729 when the stack's does not.
+        /// Whether G.729 Annex B is allowed, as a `SipralToggle`. On by default (RFC
+        /// 4856 §2.1.9); off, SDP says `annexb=no` (RFC 3551 §4.5.6).
         pub g729_annex_b: Number<SipralToggle>,
-        /// A TURN server (RFC 8656) to allocate a relay on for every media
-        /// socket `sipral_stack_nat_map` names, as `host:port`: an address,
-        /// not a name. The relay becomes the relayed ICE candidate of the call
-        /// placed, rung or answered on that socket — the path of last resort,
-        /// used only when no cheaper pair answers — and goes back to the
-        /// server when the call ends. See `docs/06-nat.md`.
-        ///
-        /// Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
-        /// same media-socket calls; it may be the same address as
-        /// `stun_server`. `turn_username` and `turn_password` are then
-        /// required: a TURN server that hands out relays to anyone is one
-        /// somebody else is already using. `SIPRAL_STATUS_NOT_SUPPORTED` in
-        /// a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
-        /// can use a relay. Copied; the caller's buffer is its own again when
-        /// this returns.
+        /// A TURN server (RFC 8656), as `host:port`, to relay every media socket
+        /// `sipral_stack_nat_map` names (`docs/06-nat.md`). Only with `SIPRAL_NAT_STUN`,
+        /// needs `turn_username` and `turn_password`, and `SIPRAL_FEATURE_ICE`. Copied.
         pub turn_server: *const c_char,
         /// How many bytes of it.
         pub turn_server_len: usize,
-        /// The user name of the long-term credential the TURN server knows
-        /// this end by (RFC 8489 §9.2).
+        /// The TURN long-term credential's user name (RFC 8489 §9.2).
         pub turn_username: *const c_char,
         /// How many bytes of it.
         pub turn_username_len: usize,
-        /// Its password. Copied into memory that is overwritten when the
-        /// stack is destroyed, and never written to a log, an event or an
-        /// error text.
+        /// Its password. Copied, wiped at destroy, never logged.
         pub turn_password: *const c_char,
         /// How many bytes of it.
         pub turn_password_len: usize,
-        /// Whether a REFER outside any dialog — somebody asking this end to
-        /// place a call it is not in, which is what click-to-dial from a
-        /// switchboard or a CRM sends (RFC 3515 §4.1) — reaches the
-        /// application, as a `SipralToggle`. **Off by default**, and then
-        /// every one is refused 403 before anything reads it: a peer that can
-        /// make a phone dial is a peer that can make it dial a premium-rate
-        /// number, and this stack authenticates no peer to tell the two
-        /// apart. On, each one is screened as an INVITE is and then raised as
-        /// `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
-        /// `sipral_call_accept_transfer` or refuses it with
-        /// `sipral_call_reject_transfer`, one request at a time.
+        /// Whether an out-of-dialog REFER (RFC 3515 §4.1) reaches the application, as
+        /// a `SipralToggle`. **Off by default**: each is refused 403, since an
+        /// unauthenticated peer could make the phone dial anywhere. On, each is raised
+        /// as `SIPRAL_EVENT_KIND_REFERRAL`.
         pub referrals: Number<SipralToggle>,
-        /// Whether an account behind a NAT keeps its registrar's UDP flow
-        /// open, as a `SipralToggle`. **On by default.** An account is
-        /// behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
-        /// socket named an address that is not the socket's own; each such
-        /// account on a UDP transport then sends a double CRLF, alone in a
-        /// datagram, to its registrar every `registrar_keepalive_ms`, while
-        /// its registration holds a binding or is getting one. A NAT that
-        /// filters by address and port (RFC 4787 §5) lets the registrar's
-        /// INVITE in only while it remembers this end sending to it, and the
-        /// STUN refresh goes to the STUN server; without this, a call that
-        /// arrives minutes after the REGISTER is dropped at the NAT.
-        /// Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
-        /// while the stack is suspended (`sipral_stack_suspending`), for a
-        /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
-        /// own address; `docs/06-nat.md` has the reasons.
+        /// Whether an account behind a NAT sends a double CRLF to its registrar every
+        /// `registrar_keepalive_ms` over UDP, as a `SipralToggle`. **On by default.**
+        /// Without it an address-and-port filtering NAT (RFC 4787 §5) drops a later
+        /// INVITE; registrars ignore it (RFC 3261 §7.5). See `docs/06-nat.md`.
         pub registrar_keepalive: Number<SipralToggle>,
-        /// How often, in milliseconds, or zero for twenty-five seconds (RFC
-        /// 5626 §4.4.2's interval for UDP). Each interval is drawn between
-        /// 80% and 100% of it. From 1 000 to 120 000 — past two minutes a
-        /// NAT that keeps to RFC 4787 REQ-5 may already have let the flow go
-        /// — and anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`, as is a
-        /// figure with `registrar_keepalive` off, a value nothing would read.
+        /// Keep-alive interval in milliseconds, or zero for 25 s (RFC 5626 §4.4.2),
+        /// jittered to 80-100%. From 1 000 to 120 000 (RFC 4787 REQ-5), and only with
+        /// `registrar_keepalive` on.
         pub registrar_keepalive_ms: u64,
-        /// How every media socket reaches `turn_server`, as a
-        /// `SipralTransport`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
-        /// `SIPRAL_TRANSPORT_TCP` for the network that blocks UDP outright;
-        /// `SIPRAL_TRANSPORT_TLS` for the one that lets one port out — 5349
-        /// is TURN's (RFC 8656 §4.1) — or for an application that wants the
-        /// server's certificate checked. The relay speaks UDP to the peer
-        /// whichever it is (§3.1). Over TCP or TLS the application opens a
-        /// connection per media socket when `SIPRAL_EVENT_KIND_TURN_STREAM`
-        /// asks, with the platform's own TLS as it does for SIP. Anything
-        /// else, or a value other than zero with no `turn_server`, is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// How media sockets reach `turn_server`, as a `SipralTransport`: UDP (or
+        /// zero), TCP, or TLS (RFC 8656 §4.1). Over TCP or TLS the application opens a
+        /// connection when `SIPRAL_EVENT_KIND_TURN_STREAM` asks.
         pub turn_transport: Number<SipralTransport>,
-        /// Who pumps this stack's audio: a `SipralAudio`. Zero, and
-        /// `SIPRAL_AUDIO_APPLICATION`, is the application, through
-        /// `sipral_media_capture` and `sipral_media_playback`, as every
-        /// stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
-        /// the library open the platform's devices and pump every managed
-        /// call itself — see the `sipral_audio_*` entry points — and needs
-        /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
-        /// platform this build has no backend for, which
-        /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+        /// Who pumps audio, as a `SipralAudio`: zero or `SIPRAL_AUDIO_APPLICATION`
+        /// for the application; `SIPRAL_AUDIO_DEVICE` for the library, which needs
+        /// `audio_transmit_callback` and `SIPRAL_FEATURE_AUDIO_DEVICE`.
         pub audio: Number<SipralAudio>,
-        /// When the devices are opened, in device mode: a
-        /// `SipralAudioActivation`, or zero for
+        /// When devices open in device mode: a `SipralAudioActivation`, or zero for
         /// `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
         pub audio_activation: Number<SipralAudioActivation>,
-        /// Where the packets the engine encodes go, in device mode: called
-        /// on the engine's thread with one `sipral_audio_transmit_t` per
-        /// packet, to be sent from the call's media socket. Required with
-        /// `SIPRAL_AUDIO_DEVICE`, ignored otherwise.
+        /// Device mode: receives each encoded packet on the engine's thread.
+        /// Required with `SIPRAL_AUDIO_DEVICE`.
         pub audio_transmit_callback: SipralAudioTransmitCallback,
         /// Handed back to `audio_transmit_callback` unread.
         pub audio_transmit_user_data: *mut c_void,
-        /// How long a platform call about the devices may block before the
-        /// engine reports it as stuck, in milliseconds; zero for the
-        /// engine's own default of three seconds. A driver that has stopped
-        /// answering is answered `SIPRAL_STATUS_DEVICE_TIMED_OUT`, on a
-        /// thread the engine walks away from, rather than waited for.
+        /// How long a device call may block before `SIPRAL_STATUS_DEVICE_TIMED_OUT`,
+        /// in milliseconds; zero for three seconds.
         pub audio_probe_ms: u64,
-        /// The rate the devices are asked to run at, in device mode; zero
-        /// for 48000. Every call is resampled between its own rate and
-        /// this one, and a platform that answers with another rate is
-        /// taken at its word.
+        /// The device rate in device mode; zero for 48000.
         pub audio_device_rate_hz: u32,
-        /// The most calls this stack holds at once, in either direction, or
-        /// zero for 128: a softphone's ceiling, well past what one person
-        /// can hold and well short of what a flood would make it keep. A
-        /// call counts from its INVITE on — one that arrives from the
-        /// moment it is let in, one placed here from the moment it is sent
-        /// — until it ends or is refused.
-        ///
-        /// An INVITE that arrives past it is answered `503 Service
-        /// Unavailable` before it rings, with `Retry-After: 2`: RFC 3261
-        /// §21.5.4 has a client that gets no `Retry-After` act as if it got a
-        /// 500, where this stack is full rather than broken, and room comes
-        /// back the moment any call ends, so the delay a proxy then keeps
-        /// away for is short. A call placed past it is
-        /// `SIPRAL_STATUS_LIMIT_REACHED` and nothing goes out. A media server
-        /// built on this library raises it to what its machine can carry,
-        /// with `max_server_transactions` beside it; `docs/19-numbers.md` has
-        /// what a call costs.
+        /// The most calls at once, either direction, or zero for 128. Past it an
+        /// INVITE gets `503` with `Retry-After: 2` (RFC 3261 §21.5.4), and a placed
+        /// call is `SIPRAL_STATUS_LIMIT_REACHED`. See `docs/19-numbers.md`.
         pub max_dialogs: u32,
-        /// The most requests from other ends this stack works on at once —
-        /// its server transactions, RFC 3261 §17.2 — or zero for 256. Past
-        /// it a request that would start another is answered `503` at once,
-        /// statelessly and with no `Retry-After`, and every one already
-        /// under way is still answered. A request inside a call is held to
-        /// that call's own share instead, and a BYE never is.
+        /// The most server transactions (RFC 3261 §17.2) at once, or zero for 256;
+        /// past it a stateless `503`. A BYE is never refused.
         pub max_server_transactions: u32,
-        /// D1: how many decisions each call's diagnostic record keeps, or
-        /// zero for 64. Past it the oldest go and the record counts them.
+        /// D1: how many decisions each diagnostic record keeps, or zero for 64.
         pub diagnostic_decisions: u32,
-        /// D1: how many calls have a diagnostic record at once, or zero for
-        /// 32; the endpoint's own record is kept besides them. Past it the
-        /// record written longest ago goes, and the stack counts it. Neither
-        /// of the two refuses anything: they bound what the records cost, a
-        /// quarter of a megabyte at the defaults. Every decision written
-        /// looks through the records for its call, so this one is best kept
-        /// in the hundreds even on a stack holding thousands of calls: the
-        /// calls a support case is about are the ones written most recently.
+        /// D1: how many calls have a diagnostic record at once, or zero for 32; the
+        /// oldest is dropped and counted.
         pub diagnostic_records: u32,
-        /// When a call listens for keypad digits in the far end's audio, as a
-        /// [`SipralDtmfDetection`]: zero
-        /// on exactly the calls that negotiated no telephone event, which is
-        /// when such a far end has no other way to send one.
-        /// `sipral_call_dtmf_detection` changes it for one call.
-        ///
-        /// Here rather than after `rtp_port_max`, where it was appended: six
-        /// four-byte members in a row keep the struct free of padding at its
-        /// end on a 64-bit target and on 32-bit ARM alike.
+        /// When a call listens for in-band keypad digits, as a
+        /// [`SipralDtmfDetection`]; zero for calls with no telephone event. Placed
+        /// here to avoid tail padding.
         pub dtmf_detection: Number<SipralDtmfDetection>,
-        /// The STUN servers to turn to, in this order, when `stun_server`
-        /// fails: `host:port` addresses separated by commas, not names.
-        /// Optional, and only beside a `stun_server`. A server fails when it
-        /// does not answer in five and a half seconds, or answers without an
-        /// address; every socket asking it moves to the next one at once,
-        /// and the one that failed is passed over for thirty seconds, then
-        /// twice as long each time it fails again, up to ten minutes. Only a
-        /// signalling socket's refresh goes back to a better server once its
-        /// time is up, so a call waiting for its media socket's address is
-        /// never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
-        /// when the server in use moves, and when every one has failed.
-        /// Copied; the caller's buffer is its own again when this returns.
+        /// Fallback STUN servers, comma-separated `host:port`, tried in order when
+        /// `stun_server` fails; a failed one is skipped from 30 s up to ten minutes.
+        /// Only with `stun_server`. Copied.
         pub stun_fallbacks: *const c_char,
         /// How many bytes of it.
         pub stun_fallbacks_len: usize,
-        /// The lowest port of the range this stack hands RTP ports out of
-        /// (`sipral_stack_rtp_port_reserve`), or zero with `rtp_port_max`
-        /// for no range: the application picks every media port itself.
-        ///
-        /// RTP takes an even port and its RTCP the odd one above it (RFC 3550
-        /// §11), so an odd `rtp_port_min` starts at the port above it and an
-        /// even `rtp_port_max` is never handed out. A range that holds no
-        /// such pair, one given upside down, or one bound given without the
-        /// other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// The lowest RTP port handed out (`sipral_stack_rtp_port_reserve`), or zero
+        /// with `rtp_port_max` for none. Even ports only (RFC 3550 §11).
         pub rtp_port_min: u32,
         /// The highest port of that range, or zero with `rtp_port_min`.
         pub rtp_port_max: u32,
-        /// The SRTP suites every call on this stack offers and accepts,
-        /// unless its account names its own
-        /// (`sipral_account_config_t::srtp_suites`): the names RFC 4568
-        /// section 6.2 and RFC 7714 section 14.2 give them, separated by
-        /// commas, most preferred first. Null for this build's own order
-        /// (ABI 0.34).
-        ///
-        /// An SDES offer names these, in this order, and an answer takes
-        /// the offerer's first that is among them; a DTLS-SRTP handshake
-        /// offers the ones with a protection profile. Every `a=crypto` line
-        /// is in the INVITE, so past two or three suites an offer over UDP
-        /// needs a stream (RFC 3261 section 18.1.1). A name this library
-        /// does not run, or one named twice, is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// The SRTP suites calls offer and accept unless the account names its own:
+        /// names from RFC 4568 section 6.2 and RFC 7714 section 14.2, comma-separated,
+        /// preferred first; null for the build's order.
         pub srtp_suites: *const c_char,
         /// How many bytes of it.
         pub srtp_suites_len: usize,
-        /// The MTU of the path toward the server, in bytes, when the
-        /// deployment knows it; zero for unknown (ABI 0.34). RFC 3261
-        /// section 18.1.1 moves a request to a stream when it comes within
-        /// 200 bytes of the MTU, and with the MTU unknown past 1300 bytes: a
-        /// path known to carry more lets a larger request stay on UDP. Under
-        /// 576 is `SIPRAL_STATUS_INVALID_ARGUMENT` — an IPv4 host must take
-        /// that much (RFC 791).
+        /// The path MTU in bytes, or zero for unknown (RFC 3261 section 18.1.1).
+        /// At least 576 (RFC 791).
         pub path_mtu: u32,
-        /// The largest request to send over UDP anyway, once no stream to
-        /// its server can be had, in bytes; zero for never (ABI 0.34).
-        ///
-        /// **A deliberate deviation from RFC 3261 section 18.1.1**, for a
-        /// server that takes SIP over UDP alone: such a PBX answers nothing
-        /// to a request it cannot receive over a stream, and takes a
-        /// 1,444-byte INVITE over UDP from every other phone on its network.
-        /// A request past the section's line asks for a stream as always
-        /// (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`); once the application says
-        /// none is coming (`sipral_stack_transport_failed` on the number it
-        /// was going to bind) or the wait runs out, what was waiting goes
-        /// over UDP up to this size, and each such request is written to the
-        /// call's diagnostic record as `transport.kept.datagram` with its
-        /// size and this limit. A stream bound later is preferred again. A
-        /// request past this size ends as it would without it. At most
-        /// 65 507, what one UDP datagram carries over IPv4; a figure not past
-        /// the section's own line changes nothing.
+        /// Largest request sent over UDP once no stream can be had, in bytes; zero
+        /// for never. **A deliberate deviation from RFC 3261 section 18.1.1**, for
+        /// UDP-only servers. At most 65 507.
         pub datagram_without_stream_bytes: u32,
-        /// A salt the application keeps for the installation, keying the
-        /// pseudonyms this stack's log and state text write for users,
-        /// numbers and addresses, so that the same value has the same
-        /// pseudonym in every run and two runs' traces compare line by line
-        /// (ABI 0.34). At least 16 bytes, drawn once from the platform's
-        /// generator; null for pseudonyms keyed from `media_seed`, which are
-        /// fresh every run. It is a secret like a key: whoever holds it can
-        /// test a guessed address against a pseudonym. Copied.
+        /// A per-installation salt (at least 16 bytes) so pseudonyms match across
+        /// runs; null keys them from `media_seed`. Secret. Copied.
         pub pseudonym_salt: *const u8,
         /// How many bytes of it.
         pub pseudonym_salt_len: usize,
-        /// A `SipralToggle`: whether the log's trace writes SIP messages
-        /// whole, with the peer they went to, instead of pseudonymised; off
-        /// by default (ABI 0.34). For a diagnosis only: every user, display
-        /// name, number and address is then written as it went on the wire.
-        /// What is never written, in either mode, is a credential or a key:
-        /// every `Authorization` and `Proxy-Authorization` value, every
-        /// `a=crypto` `inline:` key, every `k=` key, every `a=key-mgmt`
-        /// payload and every `a=ice-pwd` is taken out first, a field whose
-        /// name a control byte or a bare CR line end disguises included
-        /// (ABI 0.35 for the last two). `sipral_stack_diagnostic_trace`
-        /// turns it on and off while the stack runs.
+        /// A `SipralToggle`: whether the trace writes SIP messages unpseudonymised;
+        /// off by default. Credentials and keys are always removed.
         pub diagnostic_trace: Number<SipralToggle>,
         /// Zero.
         pub reserved: u32,
-        /// A `SipralToggle`: whether a stack in device mode opens the
-        /// devices behind the platform's own echo cancellation, where the
-        /// platform lets it be turned off; on by default (ABI 0.35). Off,
-        /// macOS and iOS run the voice-processing unit with its processing
-        /// bypassed, Windows opens a communications stream raw, past the
-        /// endpoint's processing, and Android opens the microphone with the
-        /// voice-recognition preset rather than the voice-communication one;
-        /// Linux has nothing to turn off. For a headset, which has no echo
-        /// to cancel, or an application that cancels it on each call itself.
-        /// `sipral_audio_info_t::system_echo_cancellation` says what the
-        /// platform did. Read only in device mode.
+        /// A `SipralToggle`: whether device mode uses the platform's echo
+        /// cancellation; on by default.
         pub system_echo_cancellation: Number<SipralToggle>,
         /// Zero.
         pub reserved_35: u32,
-        /// A [`SipralHeldAudio`]: what a party this end holds is sent while
-        /// the hold lasts (ABI 0.36). RFC 3264 §8.4 leaves the held stream
-        /// `sendonly`, so something goes on being sent. Zero is silence in
-        /// either mode: in application mode the frames handed
-        /// `sipral_media_capture` may be a microphone's as well, and the
-        /// room a party was put on hold from is not sent unless asked for.
-        /// `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the application
-        /// hands over as they are, for a voice agent or an application
-        /// playing its own hold music or announcement to the held party.
+        /// A [`SipralHeldAudio`]: what a held party is sent (RFC 3264 §8.4). Zero
+        /// is silence.
         pub held_audio: Number<SipralHeldAudio>,
         /// Zero.
         pub reserved_36: u32,
@@ -747,14 +373,12 @@ record! {
 }
 
 codes! {
-    /// What a party this end holds is sent:
-    /// `sipral_stack_config_t::held_audio`.
+    /// What a held party is sent: `sipral_stack_config_t::held_audio`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralHeldAudio: u32 {
         /// Silence, in either mode.
         Default = 0,
-        /// Silence: the party on hold hears nothing of the room it was put
-        /// on hold from.
+        /// Silence.
         Silence = 1,
         /// The frames the application hands over, as they are.
         Application = 2,
@@ -776,12 +400,7 @@ fn held_audio_of(held_audio: u32) -> Result<HeldAudio, Fail> {
     }
 }
 
-// Safety: the trait's contract. Plain data, no invariant between the members,
-// and all-zero is a valid value of each: a null function pointer is `None`, a
-// null user pointer is a user pointer the library never reads anyway, and a
-// zero length beside a null pointer is how a caller says it has nothing to
-// give. A zeroed struct is refused, but it is refused by reading it, not by
-// being undefined.
+// Safety: plain data, and all-zero is a valid value of every member.
 unsafe impl Versioned for SipralStackConfig {
     const NAME: &'static str = "sipral_stack_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralStackConfig, rtp_port_max);
@@ -792,34 +411,20 @@ unsafe impl Versioned for SipralStackConfig {
 }
 
 record! {
-    /// What one call to [`sipral_stack_poll`] did.
-    ///
-    /// Set `size` to `sizeof(sipral_poll_result_t)` before the call.
+    /// What one call to [`sipral_stack_poll`] did. Set `size` first.
     #[derive(Clone, Copy)]
     pub struct SipralPollResult {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// Events handed to the callback during this poll.
         pub events_delivered: usize,
-        /// Events the stack raised that this ABI has no word for yet.
-        ///
-        /// Counted rather than delivered: an event carrying nothing a binding can
-        /// act on is noise, and a number that is not zero is the honest measure of
-        /// how far this vocabulary is behind the stack's.
+        /// Events this ABI has no word for yet. Counted, not delivered.
         pub events_unclaimed: usize,
-        /// Bytes the stack produced and this build had nowhere to send.
-        ///
-        /// Zero since `sipral_stack_poll_transmit` gave them somewhere to go: what the stack
-        /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
-        /// poll no longer empties the queue on its way past. The member stays
-        /// because a released one always does, and because a build that has to drop
-        /// a message again would have somewhere to say so.
+        /// Bytes this build had nowhere to send; zero, kept for ABI stability.
         pub transmits_discarded: usize,
-        /// Whether there is a deadline at all. Zero means nothing is scheduled and
-        /// the next poll can wait for input.
+        /// Whether there is a deadline. Zero: wait for input.
         pub has_deadline: u32,
-        /// How long from `now_ms` until the stack has something to do, when
-        /// `has_deadline` says there is one. Zero means it is already due.
+        /// Milliseconds from `now_ms` until the stack is due. Zero: due now.
         pub next_poll_in_ms: u64,
     }
 }
@@ -835,26 +440,14 @@ unsafe impl Versioned for SipralPollResult {
 }
 
 record! {
-    /// What a stack is actually running with.
-    ///
-    /// A configuration call that answers `SIPRAL_STATUS_OK` has applied what it was
-    /// given, and this is where the caller reads back what that came to. It matters
-    /// because a zero in the config means "the default": a caller that left the
-    /// timers alone has no other way to learn which figures it is retransmitting
-    /// on, and one that set them has no other way to be sure.
-    ///
-    /// Set `size` to `sizeof(sipral_stack_settings_t)` before the call.
+    /// What a stack is running with, defaults filled in. Set `size` first.
     #[derive(Clone, Copy)]
     pub struct SipralStackSettings {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// The [`SipralTransport`] this stack speaks.
         pub transport: Number<SipralTransport>,
-        /// Whether this stack retransmits anything itself.
-        ///
-        /// Zero on a transport that delivers for us, which is every one but UDP.
-        /// The two timers that only exist to pace a retransmission read as their
-        /// defaults there, and mean nothing.
+        /// Whether this stack retransmits; zero on every transport but UDP.
         pub retransmits: u32,
         /// T1 in milliseconds, with the default filled in.
         pub timer_t1_ms: u64,
@@ -862,44 +455,31 @@ record! {
         pub timer_t2_ms: u64,
         /// T4 in milliseconds, with the default filled in.
         pub timer_t4_ms: u64,
-        /// How many codecs this stack offers. `sipral_stack_codec_order` says
-        /// which, and in what order.
+        /// How many codecs this stack offers (`sipral_stack_codec_order`).
         pub codec_count: usize,
         /// How long a frame is, with the default filled in.
         pub frame_ms: u32,
-        /// Whether named events are offered, as a `SipralToggle`. Never the
-        /// default value: this says what the setting came to, not what was passed.
+        /// Whether named events are offered, as a `SipralToggle`.
         pub offer_dtmf: Number<SipralToggle>,
         /// Whether RTCP multiplexing is asked for, as a `SipralToggle`.
         pub offer_rtcp_mux: Number<SipralToggle>,
         /// Whether sending stops during silence, as a `SipralToggle`.
         pub silence_suppression: Number<SipralToggle>,
-        /// How long inbound audio may stop before it is reported, with the default
-        /// filled in. Zero when the watchdog is off, which is the one case where
-        /// there is no figure to give.
+        /// The media stall interval in milliseconds; zero when the watchdog is off.
         pub media_stall_ms: u64,
-        /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
-        /// default filled in.
+        /// Whether G.729 Annex B is allowed, as a `SipralToggle`.
         pub g729_annex_b: Number<SipralToggle>,
-        /// Whether a REFER outside any dialog reaches the application, as a
-        /// `SipralToggle`, with the default — off — filled in.
+        /// Whether an out-of-dialog REFER reaches the application, as a `SipralToggle`.
         pub referrals: Number<SipralToggle>,
-        /// How often an account behind a NAT sends to its registrar, in
-        /// milliseconds, with the default filled in. Zero when
-        /// `registrar_keepalive` was turned off, which is the one case where
-        /// there is no figure to give.
+        /// The registrar keep-alive in milliseconds; zero when off.
         pub registrar_keepalive_ms: u64,
-        /// The most calls the stack holds at once, with the default filled
-        /// in.
+        /// The most calls the stack holds at once.
         pub max_dialogs: u32,
-        /// The most server transactions it works on at once, with the
-        /// default filled in.
+        /// The most server transactions at once.
         pub max_server_transactions: u32,
-        /// How many decisions a diagnostic record keeps, with the default
-        /// filled in.
+        /// How many decisions a diagnostic record keeps.
         pub diagnostic_decisions: u32,
-        /// How many diagnostic records the stack keeps, with the default
-        /// filled in.
+        /// How many diagnostic records the stack keeps.
         pub diagnostic_records: u32,
         /// The RTP port range, as given; both zero for none.
         pub rtp_port_min: u32,
@@ -907,25 +487,15 @@ record! {
         pub rtp_port_max: u32,
         /// The path MTU as given, zero for unknown (ABI 0.34).
         pub path_mtu: u32,
-        /// The largest request sent over UDP once no stream is coming, as
-        /// given; zero for never (ABI 0.34).
+        /// The largest request sent over UDP once no stream is coming; zero for never.
         pub datagram_without_stream_bytes: u32,
-        /// How many SRTP suites the stack's calls offer and accept unless
-        /// their account names its own: the ones `srtp_suites` named, or
-        /// this build's own. `sipral_stack_srtp_suite_order` says which, in
-        /// order (ABI 0.35).
+        /// How many SRTP suites calls use by default (`sipral_stack_srtp_suite_order`).
         pub srtp_suite_count: u32,
-        /// A `SipralToggle`: whether the stack was given a `pseudonym_salt`,
-        /// so that its pseudonyms are the same from run to run. The salt
-        /// itself is never read back (ABI 0.35).
+        /// A `SipralToggle`: whether a `pseudonym_salt` was given. Never the salt.
         pub pseudonym_salted: Number<SipralToggle>,
-        /// A `SipralToggle`: whether the trace writes whole messages now,
-        /// as `diagnostic_trace` set it at creation or
-        /// `sipral_stack_diagnostic_trace` since (ABI 0.35).
+        /// A `SipralToggle`: whether the trace writes whole messages now.
         pub diagnostic_trace: Number<SipralToggle>,
-        /// A `SipralToggle`: whether the platform's echo cancellation is
-        /// asked for, with the default filled in (ABI 0.35), as
-        /// `sipral_audio_set_system_echo_cancellation` left it (ABI 1.1).
+        /// A `SipralToggle`: whether the platform's echo cancellation is asked for.
         pub system_echo_cancellation: Number<SipralToggle>,
     }
 }
@@ -940,82 +510,39 @@ unsafe impl Versioned for SipralStackSettings {
     }
 }
 
-/// How many deliveries [`Outbox::waiting`] holds before the rest of a poll's
-/// own events are dropped rather than queued behind them.
-///
-/// A callback that is slow, or blocked, does not stop other threads from
-/// posting behind it — signalling on this stack still has to answer every
-/// call it is asked, and posting must never be one that waits — so without a
-/// ceiling the queue is exactly as large as a stuck callback and a determined
-/// poster can make it. Four thousand and ninety-six is a call's worth of
-/// events six hundred times over: nothing in this crate's own test suite ever
-/// raises more than a handful in one poll, a media event or a call event is a
-/// few hundred bytes at most, and a stack pinned open by a callback that
-/// never returns has a worse problem than which of its events gets to keep
-/// growing a queue for it.
+/// How many deliveries [`Outbox::waiting`] holds. Posting never waits, so
+/// without this a stuck callback grows the queue without bound.
 const OUTBOX_CEILING: usize = 4096;
 
-/// How many RTCP goodbyes [`StackState::farewells`] holds before the oldest
-/// is dropped to make room for one that just arrived.
-///
-/// Nothing here reads this queue unless the application calls
-/// [`crate::media::sipral_stack_poll_farewell`], so one that never does — a
-/// binding built against a header from before that entry point existed,
-/// among others — would otherwise keep every ended call's goodbye for as
-/// long as the stack lives. A stale goodbye is worth less than a recent one:
-/// RFC 3550 §6.6 has it tell a far end still holding the dialog open that
-/// this participant is gone, and a far end waiting on one that never
-/// arrives times its own dialog out regardless of how long this queue would
-/// have kept it. Two hundred fifty-six is a call ending every second for
-/// over four minutes before the application has looked once, which is a
-/// caller that has stopped polling rather than one running a few seconds
-/// behind.
+/// How many RTCP goodbyes [`StackState::farewells`] holds; the oldest goes
+/// first. A stale one is worth little (RFC 3550 §6.6).
 pub(crate) const FAREWELL_CEILING: usize = 256;
 
-/// What a stack's configuration asked for that nothing but
-/// `sipral_stack_settings` reads back.
+/// Config only `sipral_stack_settings` reads back.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Asked {
-    /// Whether it was given a pseudonym salt; the salt itself is not kept
-    /// here.
+    /// Whether a pseudonym salt was given.
     pub(crate) salted: bool,
     /// Whether device mode asks for the platform's echo cancellation.
     pub(crate) echo_cancellation: bool,
 }
 
-/// One stack.
-///
-/// Its lock is taken without waiting, which is what makes a call from a second
-/// thread an error code instead of a wait. The outbox beside it is how what a
-/// poll raised reaches the callback once that lock has been let go.
+/// One stack. Its lock is only tried, never waited on.
 struct StackEntry {
     state: Mutex<StackState>,
     outbox: Mutex<Outbox>,
-    /// Where the engine's log lines wait for the thread that lets the stack
-    /// go (`crate::log`). The same log the state and the engine hold.
+    /// Log lines waiting for the thread that releases the stack (`crate::log`).
     log: sipral::Log,
-    /// What [`crate::log::sipral_stack_state_text`] reads when the stack is busy,
-    /// and the last refusals it reports, behind a lock of its own so that
-    /// reading them never waits on signalling.
+    /// What [`crate::log::sipral_stack_state_text`] reads while the stack is busy,
+    /// behind its own lock.
     watch: Mutex<crate::log::Watch>,
-    /// The audio engine, reachable without the state's lock: a level meter
-    /// polled from a window must not answer `SIPRAL_STATUS_BUSY` because
-    /// signalling is busy.
+    /// The audio engine, reachable without the state's lock.
     audio: Option<crate::audio::Shared>,
 }
 
 impl StackEntry {
-    /// Queue what one poll raised behind whatever is still waiting, up to
-    /// [`OUTBOX_CEILING`], and say whether the poll that raised it is the one
-    /// to deliver and how many of its own events had no room.
-    ///
-    /// Called with the stack still held, so two polls queue in the order they
-    /// ran. One poll delivers at a time: a poll that arrives while another is
-    /// delivering — from inside that one's callback, or on a thread of its
-    /// own — leaves its events to it, which is what keeps them in order and
-    /// the callback on one thread. Whatever does not fit is dropped rather
-    /// than waited for room, which is what keeps this from ever blocking the
-    /// thread that is signalling.
+    /// Queue a poll's events, up to [`OUTBOX_CEILING`]; return whether this poll
+    /// delivers and how many were dropped. Called with the stack held.
     fn post(&self, raised: Vec<Delivery>) -> (bool, usize) {
         let mut outbox = self.outbox();
         let room = OUTBOX_CEILING.saturating_sub(outbox.waiting.len());
@@ -1028,18 +555,8 @@ impl StackEntry {
         (true, dropped)
     }
 
-    /// Hand what was waiting to the callback, one event at a time and with
-    /// nothing held while it runs, and say how many that was and whether
-    /// anything is still waiting behind it.
-    ///
-    /// Only what was already there when this pass began. A pass that kept
-    /// pulling in whatever arrived while it ran could be held open for as
-    /// long as other threads kept posting, which is what let one slow
-    /// callback grow the queue without bound; anything posted during this
-    /// pass is still in [`Outbox::waiting`] when it returns, and clearing
-    /// `delivering` here — not part way through, only once — is what lets the
-    /// very next poll on this stack, even one that raised nothing of its own,
-    /// notice it is not being delivered and take it instead.
+    /// Deliver what was queued when the pass began, with nothing held; return how
+    /// many and whether more waits.
     fn deliver(&self, speaker: Speaker) -> (usize, bool) {
         let mut batch = {
             let mut outbox = self.outbox();
@@ -1052,9 +569,7 @@ impl StackEntry {
         }
         let mut outbox = self.outbox();
         outbox.delivering = false;
-        // read under the same lock that stops the delivery: a poll that posts
-        // after this finds nobody delivering and delivers its own, and one that
-        // posted before it is what this pass reports as left behind
+        // same lock as `post`: a later poll finds nobody delivering
         (delivered, !outbox.waiting.is_empty())
     }
 
@@ -1063,10 +578,7 @@ impl StackEntry {
         self.watch.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// What every entry point does once it has let the stack go: remember a
-    /// refusal for the state snapshot and log it, then hand the log's queue
-    /// to its callback — with nothing held, which is the whole point of
-    /// doing it here.
+    /// After release: record a refusal, then flush the log with nothing held.
     fn let_go<R>(&self, done: &Result<R, Fail>, at_ms: u64, now: Instant) {
         if let Err(failure) = done {
             self.watch().refused(at_ms, failure);
@@ -1078,8 +590,7 @@ impl StackEntry {
     }
 
     fn outbox(&self) -> MutexGuard<'_, Outbox> {
-        // a panic was caught while this was held, and what is behind it is a
-        // queue and a flag, whole between statements
+        // a panic was caught while held; the queue is whole between statements
         self.outbox.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -1092,41 +603,30 @@ struct Outbox {
     delivering: bool,
 }
 
-/// Where a stack's events go, copied out while the stack is held so that
-/// they can be delivered once it is not.
+/// Where a stack's events go, copied out for delivery after release.
 #[derive(Clone, Copy)]
 struct Speaker {
     callback: unsafe extern "C" fn(event: *const SipralEvent, user_data: *mut c_void),
     user_data: *mut c_void,
 }
 
-/// One event on its way to the callback, with what its pointers point into.
-///
-/// An event is translated while the stack is held and read after the lock is
-/// gone, so nothing it points at may be borrowed from the stack or from a
-/// local of the poll that raised it. Every pointer in it points into one of
-/// the four owners beside it, and all four reach their bytes through a
-/// reference count or a heap buffer, which stay where they are when a
-/// delivery is moved into the outbox and out of it again.
+/// One event on its way to the callback. Read after the lock is gone, so its
+/// pointers point only into the owners beside it.
 struct Delivery {
     event: SipralEvent,
-    /// Never read: the signalling event the message, the descriptions and the
-    /// transfer target in `event` are borrowed from.
+    /// Never read: what `event` borrows from.
     _raised: Option<Arc<UaEvent>>,
     /// Never read: the sentence a media event points at.
     _reason: Option<String>,
     /// Never read: the record a statistics event points at.
     _record: Option<Arc<SipralStreamStats>>,
-    /// Never read: the From, To and Call-ID a call event points at. Kept here
-    /// rather than trusted to still be in `StackState::identities` by the
-    /// time this is delivered, because a call event reporting the end of a
-    /// call arrives after that map has already forgotten it.
+    /// Never read: the identity a call event points at, which
+    /// `StackState::identities` may already have dropped.
     _identity: Option<Arc<CallIdentity>>,
 }
 
 impl Delivery {
     /// An event that points at nothing.
-    // the event is moved into the delivery that owns it from here on
     #[allow(clippy::large_types_passed_by_value)]
     const fn bare(event: SipralEvent) -> Self {
         Self {
@@ -1139,13 +639,8 @@ impl Delivery {
     }
 }
 
-// Safety: the pointers in `event` point into the four owners beside it and
-// nowhere else, and each of those may move to another thread and be read from
-// one: a `String` and a record of plain numbers can, and `UaEvent` and the
-// `CallIdentity` behind the `Arc` are `Send` and `Sync` — asserted just below,
-// so a member that ever stops being either fails the build here rather than
-// making this a lie. A delivery is read by one thread, the one delivering it,
-// and dropped by that thread.
+// Safety: `event` points only into owners that are `Send` and `Sync`
+// (asserted below), and one thread reads and drops it.
 unsafe impl Send for Delivery {}
 
 const _: () = {
@@ -1159,145 +654,82 @@ pub(crate) struct StackState {
     callback: unsafe extern "C" fn(event: *const SipralEvent, user_data: *mut c_void),
     user_data: *mut c_void,
     pub(crate) agent: UserAgent,
-    /// Signalling joined to media. It drains the user agent, which is why
-    /// nothing here polls that directly: an event taken from underneath the
-    /// engine is an event the engine needed in order to know a call was
-    /// answered, and the failure looks like a call that rings and is silent.
+    /// Signalling joined to media. It drains the user agent; nothing else may.
     pub(crate) engine: MediaEngine,
-    /// The calls whose media this stack writes the descriptions for.
-    ///
-    /// Kept here rather than asked of the engine because it is this ABI's
-    /// question, not the engine's: it decides which re-offers the application
-    /// is asked to answer and which the stack has already answered for it.
+    /// The calls whose media this stack describes.
     managed: Vec<CallHandle>,
-    /// The tag every handle this stack mints carries.
-    ///
-    /// Held here rather than beside the stack's handle so that it is given back
-    /// when the last share of this state goes, not when the stack is destroyed:
-    /// a poll that destroyed its own stack from the callback is still delivering,
-    /// and can still name a call, and a tag handed to a new stack before that
-    /// poll returned would start the new stack below a handle the old one had
-    /// yet to mint. Nothing reads it; holding it is the whole of its job.
+    /// The tag this stack's handles carry, freed with the last share of state.
     pub(crate) tag: StackTag,
     pub(crate) accounts: Names<AccountId>,
     pub(crate) calls: Names<CallHandle>,
-    /// Every subscription this stack has handed a handle out for, including
-    /// the ones that appeared by themselves: RFC 6665 §4.1.4 lets one
-    /// SUBSCRIBE be answered by two notifiers, and the sibling is named here
-    /// when its event is translated rather than when a call asked for it.
+    /// Every subscription handed a handle, forks included (RFC 6665 §4.1.4).
     pub(crate) subscriptions: Names<SubscriptionHandle>,
-    /// Every MESSAGE this stack has sent and not yet reported the final
-    /// answer for. Removed the moment `SIPRAL_EVENT_KIND_MESSAGE_SENT` is
-    /// raised about it, the same as the layer below removes its own record.
+    /// MESSAGEs sent whose final answer is not yet reported.
     pub(crate) messages: Names<sipral_ua::MessageHandle>,
     /// Every call a push announced and no INVITE has answered yet.
     pub(crate) announcements: Names<AnnouncementId>,
-    /// Every dialog this stack has asked the application to resolve a next
-    /// hop for. Named rather than inserted when the event is translated, so
-    /// that a dialog asking again on every target refresh keeps the handle it
-    /// was first given, and forgotten with the call it belonged to. A dialog
-    /// that is not a call's — a subscription's — stays named until the stack
-    /// is destroyed, which is one row and is what the alternative, a lookup
-    /// `sipral-ua` does not publish, would cost a public method to avoid.
+    /// Dialogs the application was asked to resolve a next hop for.
     pub(crate) dialogs: Names<DialogId>,
-    /// Who is on every call this stack still knows: the `From` and `To` of
-    /// the request that opened it, fixed since. Read once, at that moment,
-    /// because by the time a call has ended the layer below has already let
-    /// it go and has nothing left to ask.
+    /// The `From` and `To` of every known call, read when it opened.
     pub(crate) identities: HashMap<CallHandle, Arc<CallIdentity>>,
-    /// Every transport this stack has bound: the table `transport` on
-    /// `sipral_account_config_t` and `sipral_call_config_t` is read against,
-    /// and the one [`crate::transport::sipral_stack_transport_bind`] grows.
+    /// Every transport this stack has bound.
     pub(crate) transports: Transports,
-    /// What that transport speaks, kept so the settings can be read back and so
-    /// that binding it again cannot change it.
+    /// What the main transport speaks.
     pub(crate) speaks: SipralTransport,
-    /// The address it advertises, which is what a datagram fed in without one
-    /// is taken to have arrived on.
+    /// The address it advertises.
     pub(crate) local: SocketAddr,
-    /// A message taken from the agent that did not fit the caller's buffer.
-    ///
-    /// It is offered again, before anything queued behind it. A message the
-    /// stack has committed to is not this ABI's to drop, and the buffer it did
-    /// not fit is a fact about the caller rather than about the message.
+    /// A message that did not fit the caller's buffer, offered again first.
     pub(crate) held: Option<Transmit>,
-    /// The figures the endpoint was built with, kept for the same reason: the
-    /// endpoint holds them and does not hand them out.
+    /// The figures the endpoint was built with.
     timers: TimerConfig,
     /// What the media settings came to, for the same reason again.
     media: MediaConfig,
     /// What goes in `User-Agent`, when the caller wanted one.
     pub(crate) user_agent: Option<Box<[u8]>>,
-    /// The RTCP goodbyes `MediaEngine::poll_farewell` produced, gathered here
-    /// during a poll — one call handle at a time, resolved through
-    /// [`StackState::calls`] — because by the time an application asks for
-    /// one the call it belonged to may already be forgotten there. Drained by
-    /// [`crate::media::sipral_stack_poll_farewell`], and held to at most
-    /// [`FAREWELL_CEILING`].
+    /// RTCP goodbyes, resolved during the poll and drained by
+    /// [`crate::media::sipral_stack_poll_farewell`]; at most [`FAREWELL_CEILING`].
     pub(crate) farewells: VecDeque<(SipralHandle, SocketAddr, Vec<u8>, u32)>,
-    /// How many events a poll raised and then had nowhere to queue, because
-    /// [`OUTBOX_CEILING`] was already reached. Reported at the tail of
-    /// `sipral_counters_t`.
+    /// Events dropped at [`OUTBOX_CEILING`].
     pub(crate) events_dropped: u64,
-    /// How many farewells were dropped, oldest first, to keep
-    /// [`StackState::farewells`] at [`FAREWELL_CEILING`]. Reported beside
-    /// `events_dropped` in `sipral_counters_t`.
+    /// Goodbyes dropped at [`FAREWELL_CEILING`].
     pub(crate) farewells_dropped: u64,
-    /// What `now_ms` of zero means. Read once, from the only clock this
-    /// library ever looks at, and never compared with a later reading.
+    /// What `now_ms` of zero means. Read once.
     origin: Instant,
-    /// The last time the caller said it was, so that a clock going backwards
-    /// is caught where it happens.
+    /// The last time the caller gave.
     polled_at_ms: u64,
     /// Whether the first poll has said the stack is running.
     started: bool,
-    /// What it asks a STUN server, when its configuration said to. A build
-    /// without the feature never asks, and has nothing to keep.
+    /// What it asks a STUN server, when configured.
     #[cfg(feature = "stun")]
     pub(crate) nat: crate::nat::Nat,
-    /// The built-in audio engine, on a stack created in device mode. Shared
-    /// with the stack's entry so that the `sipral_audio_*` entry points
-    /// reach it without this state's lock.
+    /// The built-in audio engine, in device mode.
     pub(crate) audio: Option<crate::audio::Shared>,
-    /// Calls the audio engine is to take up or let go of, in the order their
-    /// media started and ended, waiting for a poll that finds the engine
-    /// free: a poll does not wait for an engine another thread holds.
+    /// Calls the audio engine is to take up or drop, waiting for a free engine.
     audio_backlog: Vec<AudioOp>,
-    /// The caller's clock as the engine's pump reads it: what
-    /// `StackState::advance` writes on every poll.
+    /// The caller's clock as the engine's pump reads it.
     clock: Arc<crate::audio::Clock>,
-    /// Whether `media_clock_unix_seconds` gave the engine a wall clock. A
-    /// stack created without one dates its sender reports by the first that
-    /// `sipral_stack_stir` pairs with a `now_ms`.
+    /// Whether `media_clock_unix_seconds` gave the engine a wall clock.
     #[cfg(feature = "stir")]
     pub(crate) media_clock: bool,
-    /// This stack's log, shared with the engine and the entry: lines are
-    /// queued while the stack is held and delivered once it is not.
+    /// This stack's log, shared with the engine and the entry.
     pub(crate) log: sipral::Log,
     /// What the configuration asked for that only the settings read back.
     pub(crate) asked: Asked,
-    /// What the log's and the state snapshot's pseudonyms are keyed with
-    /// (`crate::log::pseudonym_key`), wiped when the stack goes.
+    /// The pseudonym key (`crate::log::pseudonym_key`), wiped on drop.
     pseudonyms: sipral::PseudonymKey,
-    /// Transports retired since the last poll, each raised by it as
-    /// `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before anything else it has.
+    /// Transports retired since the last poll, reported first.
     pub(crate) lost: Vec<crate::transport::Lost>,
-    /// The local conferences made on this stack, by handle: whose changes
-    /// each poll raises, and whose members no pair and no second conference
-    /// may take.
+    /// The local conferences made on this stack, by handle.
     pub(crate) conferences: Vec<(SipralHandle, crate::local_conference::Shared)>,
     /// The network tests under way (`crate::network_test`).
     pub(crate) tests: crate::network_test::Tests,
 }
 
-// Safety: the user pointer is the caller's and is only ever handed back to
-// the caller's own callback, on whichever thread the caller polls from. What
-// it points at, and where it may be touched, is the caller's arrangement; the
-// library reads none of it. Everything else in here is `Send` on its own.
+// Safety: the user pointer is only handed back to the caller's callback;
+// the rest is `Send`.
 unsafe impl Send for StackState {}
 
-/// The caller's clock, as an instant the layers below can use: `now_ms`
-/// milliseconds after `origin`.
+/// `now_ms` as an instant after `origin`.
 pub(crate) fn instant_at(origin: Instant, now_ms: u64) -> Result<Instant, Fail> {
     origin
         .checked_add(Duration::from_millis(now_ms))
@@ -1315,8 +747,7 @@ impl StackState {
         instant_at(self.origin, now_ms)
     }
 
-    /// The latest time this stack has been told, for work an entry point
-    /// that takes no clock of its own sets off.
+    /// The latest time this stack has been told.
     pub(crate) fn last_instant(&self) -> Instant {
         instant_at(self.origin, self.polled_at_ms).unwrap_or(self.origin)
     }
@@ -1331,20 +762,13 @@ impl StackState {
         &self.pseudonyms
     }
 
-    /// What `now_ms` of zero means on this stack, for a media handle that
-    /// has to read the same clock without reaching the stack again.
+    /// What `now_ms` of zero means on this stack.
     pub(crate) const fn origin(&self) -> Instant {
         self.origin
     }
 
-    /// The instant `now_ms` names, refusing one more than [`CLOCK_SLACK_MS`]
-    /// behind this stack's last reading — without moving that reading.
-    ///
-    /// Moving it is [`Self::commit_clock`]'s job, and it is deliberately a
-    /// second step: this only says whether `now_ms` is one the caller might
-    /// reasonably have read from the stack's clock, and every other reason a
-    /// call can fail is checked after this returns, so the clock must not
-    /// move until the whole call has actually succeeded.
+    /// The instant `now_ms` names, refused past [`CLOCK_SLACK_MS`] behind, without
+    /// moving the clock ([`Self::commit_clock`] does, once the call succeeds).
     fn checked_instant(&self, now_ms: u64) -> Result<Instant, Fail> {
         let floor = self.polled_at_ms.saturating_sub(CLOCK_SLACK_MS);
         if now_ms < floor {
@@ -1361,22 +785,13 @@ impl StackState {
         self.instant(now_ms)
     }
 
-    /// Record that this stack has been used at `now_ms`. Never moves
-    /// backward: a reading accepted because it was within the slack leaves
-    /// the high-water mark exactly where a later thread's reading already put
-    /// it.
+    /// Record that this stack has been used at `now_ms`. Never moves backward.
     fn commit_clock(&mut self, now_ms: u64) {
         self.polled_at_ms = self.polled_at_ms.max(now_ms);
     }
 
-    /// Move the stack's clock to `now_ms` and commit it immediately, refusing
-    /// one more than the slack behind.
-    ///
-    /// Only [`sipral_stack_poll`] calls this directly: everything it still
-    /// does after reading the clock cannot fail, so validating and committing
-    /// in one step costs it nothing. Every other signalling entry point goes
-    /// through [`with_stack_at`], which commits only once the call it wraps
-    /// has actually succeeded.
+    /// Validate and commit at once; only [`sipral_stack_poll`] uses this, other
+    /// entry points go through [`with_stack_at`].
     pub(crate) fn advance(&mut self, now_ms: u64) -> Result<Instant, Fail> {
         let now = self.checked_instant(now_ms)?;
         self.commit_clock(now_ms);
@@ -1384,13 +799,7 @@ impl StackState {
         Ok(now)
     }
 
-    /// What a call on this stack opens its session with, unless
-    /// `sipral_call_place` was asked to override the catalogue for it.
-    ///
-    /// Cloned rather than borrowed, because the one caller of this —
-    /// `sipral_call_place`'s per-call SRTP override — pairs it with a
-    /// catalogue of its own to build the `CallMedia` `MediaEngine::place_with`
-    /// takes, and that bundle owns both halves.
+    /// What a call opens its session with, unless `sipral_call_place` overrides it.
     pub(crate) fn media_config(&self) -> MediaConfig {
         self.media.clone()
     }
@@ -1441,11 +850,7 @@ pub(crate) fn handle_failed(refused: Refused) -> Fail {
     }
 }
 
-/// Do something to a stack, or say why not.
-///
-/// The one way in. Every entry point that names a stack goes through here, so
-/// the two rules at the top of this module hold for all of them at once
-/// rather than one function at a time.
+/// Do something to a stack, or say why not. Every entry point goes through here.
 pub(crate) fn with_stack<R>(
     stack: SipralHandle,
     act: impl FnOnce(&mut StackState) -> Result<R, Fail>,
@@ -1460,8 +865,7 @@ pub(crate) fn with_stack<R>(
     done
 }
 
-/// The text [`crate::log::sipral_stack_state_text`] copies out: taken now when the
-/// stack is free, the last one a poll kept when it is not. Never waits.
+/// The text [`crate::log::sipral_stack_state_text`] copies out. Never waits.
 pub(crate) fn state_text(stack: SipralHandle) -> Result<String, Fail> {
     let entry = STACKS.get(stack).map_err(handle_failed)?;
     let held = match entry.state.try_lock() {
@@ -1473,12 +877,8 @@ pub(crate) fn state_text(stack: SipralHandle) -> Result<String, Fail> {
     Ok(crate::log::snapshot_of(stack, held.as_deref(), &mut watch))
 }
 
-/// The stack a handle names, for an entry point about to take its lock.
-///
-/// Refused to a thread that is inside a frame of a call on this stack: the
-/// stack's work can need that call's session, which the same thread is
-/// holding, and it would wait for itself with the stack's lock held and every
-/// other thread shut out behind it.
+/// The stack a handle names. Refused inside a frame of one of its calls,
+/// which would deadlock on the session.
 fn entry_of(stack: SipralHandle) -> Result<Arc<StackEntry>, Fail> {
     if crate::media::inside_media_of(stack) {
         return Err(inside_media());
@@ -1486,8 +886,7 @@ fn entry_of(stack: SipralHandle) -> Result<Arc<StackEntry>, Fail> {
     STACKS.get(stack).map_err(handle_failed)
 }
 
-/// The audio engine of the stack a handle names, without the stack's lock:
-/// `None` on a stack in application mode.
+/// The audio engine of a stack, without its lock; `None` in application mode.
 pub(crate) fn audio_of(stack: SipralHandle) -> Result<Option<crate::audio::Shared>, Fail> {
     let entry = STACKS.get(stack).map_err(handle_failed)?;
     Ok(entry.audio.clone())
@@ -1501,13 +900,7 @@ fn inside_media() -> Fail {
     )
 }
 
-/// The same, for something that happens at a time the caller names.
-///
-/// The clock is validated before `act` runs and committed only after it
-/// succeeds: a call refused for a reason `act` finds — a stale handle, a bad
-/// argument, the wrong state — leaves `now_ms` unrecorded, exactly as if it
-/// had never been asked. Only a call this stack actually goes through moves
-/// its clock.
+/// The same, at the caller's time; the clock commits only if `act` succeeds.
 pub(crate) fn with_stack_at<R>(
     stack: SipralHandle,
     now_ms: u64,
@@ -1524,8 +917,7 @@ pub(crate) fn with_stack_at<R>(
 fn lock(entry: &Arc<StackEntry>) -> Result<MutexGuard<'_, StackState>, Fail> {
     match entry.state.try_lock() {
         Ok(state) => Ok(state),
-        // a panic was caught while this stack was held; what is behind the
-        // lock is whole between statements
+        // a panic was caught while held; the state is whole between statements
         Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
         Err(TryLockError::WouldBlock) => Err(fail(
             SipralStatus::Busy,
@@ -1561,17 +953,8 @@ fn interval(millis: u64, default: Duration) -> Duration {
     }
 }
 
-/// The figures this stack runs its timers on, or which of them it was given
-/// nothing to do with.
-///
-/// T2 caps the doubling that starts at T1, and T4 is how long the machines wait
-/// out a message that may still be in flight. RFC 3261 §17 arms neither on a
-/// transport that delivers for us: timers E and G are never set, and I and K
-/// are zero. So a caller that sets one of those on a stream is configuring a
-/// subsystem this stack does not have, and the only honest answers are to say
-/// so here or to lie about it later. A T2 below T1 is the same failure one step
-/// in: the cap is already reached at the first attempt, so T1 is the value that
-/// disappears.
+/// The timer figures. RFC 3261 §17 arms neither T2 nor T4 on a reliable
+/// transport, so setting them there is refused, as is a T2 below T1.
 fn timers_for(
     protocol: TransportProtocol,
     config: &SipralStackConfig,
@@ -1614,9 +997,7 @@ fn timers_for(
     Ok(timers)
 }
 
-/// The four ceilings a stack is created with, each zero for the endpoint's
-/// own default. Every figure a `u32` can carry is taken: what one costs is a
-/// question for the machine, not for this check.
+/// The four ceilings, each zero for the endpoint's default.
 fn limits_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) {
     let given = |value: u32, default: usize| {
         if value == 0 {
@@ -1638,17 +1019,13 @@ fn limits_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) {
         given(config.diagnostic_records, endpoint.diagnostics.max_records);
 }
 
-/// The smallest datagram an IPv4 host must take whole (RFC 791), and so the
-/// smallest path MTU a deployment can say it has.
+/// The smallest datagram an IPv4 host must take whole (RFC 791).
 const MIN_PATH_MTU: u32 = 576;
 
-/// The most one UDP datagram carries over IPv4: 65 535 less the IP and UDP
-/// headers.
+/// 65 535 less the IP and UDP headers.
 const MAX_UDP_PAYLOAD: u32 = 65_507;
 
-/// What the stack is told of its path to the server, and of a server that
-/// takes UDP alone: the two figures RFC 3261 section 18.1.1's line is drawn
-/// from, each zero for the endpoint's own default.
+/// The two figures RFC 3261 section 18.1.1 draws its line from.
 fn datagrams_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) -> Result<(), Fail> {
     match config.path_mtu {
         0 => {}
@@ -1679,15 +1056,12 @@ fn datagrams_for(endpoint: &mut EndpointConfig, config: &SipralStackConfig) -> R
     Ok(())
 }
 
-/// A count as the caller reads one: saturating, since a figure past what a
-/// `u32` holds was never one a caller could have given.
+/// A count as the caller reads one, saturating.
 fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// What the user agent is told of the configuration's policies: whether it
-/// takes a REFER from outside any dialog, and how often an account behind a
-/// NAT sends to its registrar, or that it never does.
+/// The user agent's policies: out-of-dialog REFER, registrar keep-alive.
 fn agent_policy(
     agent: &mut UserAgent,
     config: &SipralStackConfig,
@@ -1704,9 +1078,7 @@ fn agent_policy(
         })
 }
 
-/// How often an account behind a NAT sends to its registrar, or `None` for
-/// never. Shaped like the stall watchdog below: a figure given with the
-/// keep-alive switched off is one nothing reads, and is said to be so.
+/// The registrar keep-alive, or `None`. A figure with it off is refused.
 fn registrar_keepalive(config: &SipralStackConfig) -> Result<Option<Duration>, Fail> {
     let keeping = toggled(config.registrar_keepalive, "registrar_keepalive", true)?;
     match (keeping, config.registrar_keepalive_ms) {
@@ -1723,12 +1095,8 @@ fn registrar_keepalive(config: &SipralStackConfig) -> Result<Option<Duration>, F
     }
 }
 
-/// How this stack's media behaves, or which of its settings it was given
-/// nothing to do with.
-///
-/// The watchdog is the same shape as the timers above: an interval set while
-/// the thing that reads it is switched off is a value nothing will ever look
-/// at, and the only honest answers are to say so here or to lie about it later.
+/// How this stack's media behaves. A stall interval with the watchdog off is
+/// refused.
 fn media_for(config: &SipralStackConfig) -> Result<MediaConfig, Fail> {
     let watching = toggled(config.media_stall_watchdog, "media_stall_watchdog", true)?;
     if !watching && config.media_stall_ms != 0 {
@@ -1756,8 +1124,7 @@ fn media_for(config: &SipralStackConfig) -> Result<MediaConfig, Fail> {
     })
 }
 
-/// The media engine a stack runs with: what it offers, how it behaves, and the
-/// one wall-clock reading its reports need.
+/// The media engine a stack runs with.
 ///
 /// # Safety
 ///
@@ -1793,12 +1160,9 @@ unsafe fn engine_for(
 entry! {
     /// Create a stack, and write its handle to `out_stack`.
     ///
-    /// The handle is written only if this returns `SIPRAL_STATUS_OK`. A stack
-    /// that is created must be destroyed with [`sipral_stack_destroy`].
-    ///
-    /// A process holds 256 stacks at once. The next is
-    /// `SIPRAL_STATUS_EXHAUSTED` until one of them is destroyed and no poll is
-    /// still running on it.
+    /// The handle is written only on `SIPRAL_STATUS_OK` and must be freed with
+    /// [`sipral_stack_destroy`]. A process holds 256 stacks; the next is
+    /// `SIPRAL_STATUS_EXHAUSTED` until one is destroyed and no poll still runs on it.
     ///
     /// # Safety
     ///
@@ -1815,13 +1179,8 @@ entry! {
     }
 }
 
-/// Everything [`sipral_stack_create`] does but write the handle, with the tag
-/// drawn from `tags`.
-///
-/// The tags are passed in rather than reached for so that a test can hold a set
-/// of its own. Which tag a stack gets, and whether any is left, are otherwise
-/// decided by every other test creating stacks in the same process at the same
-/// moment.
+/// Everything [`sipral_stack_create`] does but write the handle, with tags
+/// from `tags`.
 ///
 /// # Safety
 ///
@@ -1857,8 +1216,6 @@ pub(crate) unsafe fn create_on(
     let media = media_for(&config)?;
     let rtp_ports = rtp_ports_of(&config)?;
     let stun_server = unsafe { crate::nat::configured(&config) }?;
-    // borrowed from the caller until `Nat::start` below copies it into the
-    // one place it is kept
     let turn_server = unsafe { crate::nat::turn_configured(&config) }?;
     let mut endpoint = EndpointConfig::default();
     endpoint.timers = timers;
@@ -1899,8 +1256,7 @@ pub(crate) unsafe fn create_on(
     let mut agent = UserAgent::new(endpoint, *seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
     agent_policy(&mut agent, &config, origin)?;
-    // the socket is the caller's; what the stack is told is the address
-    // the far end will answer to, which is what goes in every Via
+    // the far end answers to the advertised address, not the socket's
     let bound = agent.receive(
         Input::TransportBound {
             transport: TRANSPORT,
@@ -1971,8 +1327,7 @@ pub(crate) unsafe fn create_on(
         conferences: Vec::new(),
         tests: crate::network_test::Tests::default(),
     };
-    // the main transport is the first signalling socket kept mapped; its
-    // first request is waiting in `sipral_stack_poll_transmit` from here on
+    // the main transport's first request now waits in `sipral_stack_poll_transmit`
     crate::nat::Nat::start(
         &mut state,
         stun_server,
@@ -2020,9 +1375,7 @@ fn rtp_ports_of(config: &SipralStackConfig) -> Result<Option<sipral::RtpPorts>, 
     }
 }
 
-/// Refuse a call's media described at a port the stack's RTP range does not
-/// hand out: odd, or outside it. With no range, every port is the
-/// application's to choose.
+/// Refuse media at a port outside the RTP range or odd. No range: any port.
 pub(crate) fn media_port_allowed(state: &StackState, local: SocketAddr) -> Result<(), Fail> {
     match state.engine.rtp_ports() {
         Some(range) if !range.holds(local.port()) => Err(fail(
@@ -2040,10 +1393,7 @@ pub(crate) fn media_port_allowed(state: &StackState, local: SocketAddr) -> Resul
     }
 }
 
-/// The signalling seed and the media seed a configuration hands over, each
-/// thirty-two bytes and never the same bytes twice, each in a buffer that is
-/// wiped when it is dropped: the engine and the agent keep copies of their
-/// own, and these are gone once the stack is made.
+/// The signalling and media seeds, never equal, wiped on drop.
 ///
 /// # Safety
 ///
@@ -2059,10 +1409,7 @@ unsafe fn seeds_of(config: &SipralStackConfig) -> Result<(Seed, Seed), Fail> {
         "media_seed",
     )?;
     if media_seed == seed {
-        // The one check that has to live here: nowhere else can see both.
-        // Sharing them undoes the separation silently — every message
-        // still looks right, and every SRTP key is a block the Call-IDs and
-        // tags on the wire were cut from.
+        // only here are both visible; equal seeds would expose every SRTP key
         return Err(fail(
             SipralStatus::InvalidArgument,
             "media_seed is the same as entropy; they must be two independent draws, because what \
@@ -2091,21 +1438,14 @@ fn seed_from(entropy: Option<&[u8]>, member: &str) -> Result<Seed, Fail> {
 }
 
 entry! {
-    /// Read back what a stack is running with.
-    ///
-    /// Every value here was either given at creation or defaulted there, and
-    /// none of it changes afterwards but the two a running stack switches,
-    /// `diagnostic_trace` and `system_echo_cancellation`. It is the other
-    /// half of a configuration call that answered `SIPRAL_STATUS_OK`: the
-    /// call says the value was taken, this says what it came to.
+    /// Read back what a stack is running with, defaults filled in.
     ///
     /// # Safety
     ///
     /// `out_settings` must point at a `sipral_stack_settings_t` whose `size`
     /// member says how long it is.
     fn sipral_stack_settings(stack: SipralHandle, out_settings: *mut SipralStackSettings) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the stack
+        // size before handle, so a wrong size is the error reported
         unsafe { declared_size(out_settings.cast_const()) }?;
         let settings = with_stack(stack, |state| {
             let limits = *state.agent.endpoint().config();
@@ -2164,14 +1504,9 @@ entry! {
 }
 
 entry! {
-    /// The SRTP suites this stack's calls offer and accept unless their
-    /// account names its own, in the order they are offered, as
-    /// `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
-    /// creation, or this build's own (ABI 0.35). `out_count` always receives
-    /// how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
-    /// caller that passes a capacity of zero and a null buffer learns how
-    /// much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
-    /// `sipral_stack_codec_order` does.
+    /// The SRTP suites calls use by default, in order, as `sipral_srtp_suite_t`
+    /// numbers. `out_count` always receives the total; too small a capacity is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
     ///
     /// # Safety
     ///
@@ -2207,8 +1542,6 @@ entry! {
                 ),
             ));
         }
-        // the capacity reaches the length, so a non-empty order has a
-        // buffer; an empty one is nothing to copy
         if !order.is_empty() {
             unsafe { std::ptr::copy_nonoverlapping(order.as_ptr(), out_suites, order.len()) };
         }
@@ -2216,33 +1549,17 @@ entry! {
     }
 }
 
-/// A configured interval as the caller counts one. Saturating rather than
-/// wrapping: an interval too long to count in milliseconds is one no timer of
-/// this stack's was built from.
+/// An interval in milliseconds, saturating.
 fn millis(interval: Duration) -> u64 {
     u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
 }
 
 entry! {
-    /// Destroy a stack.
-    ///
-    /// The handle is dead the moment this returns, and a second destroy is
-    /// `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
-    /// inside the callback it is still safe: what the poll is holding stays
-    /// alive until that poll returns. Called from inside a frame of one of its
-    /// calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
-    /// because freeing the stack ends that call's media and the frame is
-    /// holding it. No account is de-registered and no call is hung up; a stack
-    /// that has to leave politely does that first.
-    ///
-    /// Nothing is sent, either: the stack owns no socket. A relay on a TURN
-    /// server is given back only by a Refresh this end sends, so one still
-    /// held at this point stays allocated on the server until its lifetime
-    /// runs out, up to ten minutes later. To leave none behind, hang up every
-    /// call, poll until each has ended and send what
-    /// `sipral_stack_poll_farewell` hands out, call
-    /// `sipral_stack_nat_unmap` for every media socket still named and send
-    /// what `sipral_stack_poll_stun` hands out, and destroy after that.
+    /// Destroy a stack. The handle is dead on return; a second destroy is
+    /// `SIPRAL_STATUS_STALE_HANDLE`. Safe inside the callback. Inside a frame of one
+    /// of its calls it is `SIPRAL_STATUS_BUSY`. Nothing is sent: hang up, unmap and
+    /// send what `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` give
+    /// first, or TURN relays linger up to ten minutes.
     ///
     /// # Safety
     ///
@@ -2259,8 +1576,7 @@ entry! {
                  destroy it from another thread",
             ));
         }
-        // dropping the last share of the entry here is what frees it; a poll
-        // running on another thread holds one of its own until it is done
+        // a running poll holds its own share until it is done
         STACKS.remove(stack).map_err(handle_failed)?;
         Ok(())
     }
@@ -2269,43 +1585,21 @@ entry! {
 entry! {
     /// Let the stack do its work, and deliver what it has to say.
     ///
-    /// `now_ms` is the caller's monotonic clock in milliseconds. It must not
-    /// fall more than fifty milliseconds behind the last one this stack saw —
-    /// signalling may be called from any thread, and two of them reading the
-    /// same clock a moment apart is not a caller mistake — and a jump further
-    /// back than that is `SIPRAL_STATUS_CLOCK_BEHIND` with nothing delivered.
-    ///
-    /// The event callback is called from inside this function, on this
-    /// thread, and with nothing held: the stack's work is done and its lock
-    /// let go before the first event is handed over, so the callback may call
-    /// back into the library, this stack included. A poll that finds another
-    /// poll of the same stack already delivering — which is what a poll from
-    /// inside the callback always finds — does the stack's work and leaves its
-    /// events to that one, so they arrive in the order they were raised and
-    /// never on two threads at once.
-    ///
-    /// `result` may be null for a caller that does not want the counts.
-    ///
-    /// A poll is also where the stack writes: a retransmission falls due, a
-    /// registration is refreshed, a transaction gives up and says so. What it
-    /// wrote is taken with `sipral_stack_poll_transmit`, which is drained after
-    /// every poll and left alone by the next one — see `docs/08-ffi.md`,
-    /// "Signalling across the boundary", for the loop in full.
+    /// `now_ms` is the caller's monotonic clock in milliseconds; more than fifty
+    /// behind is `SIPRAL_STATUS_CLOCK_BEHIND`. The callback runs inside this call,
+    /// on this thread, with nothing held. `result` may be null. Drain
+    /// `sipral_stack_poll_transmit` after every poll (`docs/08-ffi.md`).
     ///
     /// # Safety
     ///
     /// `result` must be null or point at a `sipral_poll_result_t` whose `size`
     /// member says how long it is.
     fn sipral_stack_poll(stack: SipralHandle, now_ms: u64, result: *mut SipralPollResult) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the stack,
-        // and before the clock moves, so a refusal here leaves it untouched
+        // before the handle and the clock, so a refusal moves nothing
         if !result.is_null() {
             unsafe { declared_size(result.cast_const()) }?;
         }
-        // held until this poll returns, delivery included, so a stack
-        // destroyed from inside its own callback is freed afterwards rather
-        // than underneath the queue being read
+        // held through delivery, so a destroy from the callback frees afterwards
         let entry = entry_of(stack)?;
         let (mut counted, speaker) = {
             let mut state = lock(&entry)?;
@@ -2313,12 +1607,9 @@ entry! {
             let mut raised = Vec::new();
             let counted = run(stack, &mut state, now, &mut raised);
             if !raised.is_empty() {
-                // something changed: what `sipral_stack_state_text` hands out
-                // while another thread holds the stack is brought up to date
                 entry.watch().refresh(stack, &state);
             }
-            // posted with the stack still held, so that a poll on another
-            // thread cannot queue what it raised in front of this
+            // posted while held, so polls queue in order
             let (should_deliver, dropped) = entry.post(raised);
             state.events_dropped = state
                 .events_dropped
@@ -2333,9 +1624,7 @@ entry! {
             let (delivered, left_waiting) = entry.deliver(speaker);
             counted.events_delivered = delivered;
             if left_waiting {
-                // what arrived during the pass is the next poll's to deliver,
-                // and that poll is due now, not when a timer or a datagram
-                // next happens to wake the caller
+                // what arrived during the pass is due now
                 counted.has_deadline = 1;
                 counted.next_poll_in_ms = 0;
             }
@@ -2350,10 +1639,7 @@ entry! {
     }
 }
 
-/// One poll: time passes, and what the stack has to say is taken out of it.
-///
-/// `events_delivered` is left at zero for whichever poll delivers to fill in,
-/// which is this one or one already under way.
+/// One poll. `events_delivered` is left for whichever poll delivers.
 fn run(
     stack: SipralHandle,
     state: &mut StackState,
@@ -2369,8 +1655,7 @@ fn run(
         state.started = true;
         raised.push(Delivery::bare(crate::event::started(stack)));
     }
-    // the cause before its effects: a transport lost is said before the
-    // registrations and calls that failed with it
+    // a lost transport before the failures it caused
     for lost in std::mem::take(&mut state.lost) {
         let (event, text) = lost.raised(stack);
         raised.push(Delivery {
@@ -2382,8 +1667,7 @@ fn run(
         });
     }
     drain(stack, state, now, raised, &mut unclaimed);
-    // after the engine's, so that a REGISTER an answer moved the accounts to
-    // follows every event the poll already had about them
+    // after the engine's events, so a REGISTER follows them
     for (event, text) in crate::nat::Nat::drain(state, stack, now) {
         raised.push(Delivery {
             event,
@@ -2393,8 +1677,6 @@ fn run(
             _identity: None,
         });
     }
-    // a test is looked at once its parts' own news is in: a mapping or a
-    // relay learned above, an OPTIONS answered in the drain before it
     for (event, text) in crate::network_test::service(state, stack, now) {
         raised.push(Delivery {
             event,
@@ -2404,19 +1686,8 @@ fn run(
             _identity: None,
         });
     }
-    // the audio engine's own news: a device gone, a default moved, a role
-    // reopened; and the calls whose media started or ended in this poll,
-    // taken up or let go of. Its lock is only tried, after the engine's
-    // events above have been translated: a `sipral_audio_*` call on another
-    // thread holds it for as long as the platform takes to answer about its
-    // devices — up to `audio_probe_ms` — and a poll that waited for it would
-    // hold this stack's lock all that while, turning every signalling call
-    // on every other thread into SIPRAL_STATUS_BUSY. A busy engine is
-    // serviced by the next poll, which is asked for soon. Nothing the engine
-    // does here waits on a device either: it opens them in the background
-    // and lets them go on its pump's thread, so that a BYE this poll queued
-    // leaves with the next transmit drain rather than after the voice unit
-    // is down, which on macOS has been seen to wait for the main thread.
+    // audio engine news. Only tried: a `sipral_audio_*` call may hold it up to
+    // `audio_probe_ms`, and waiting would make every other thread BUSY.
     let mut audio_busy = false;
     if let Some(audio) = state.audio.clone() {
         let held = match audio.try_lock() {
@@ -2449,8 +1720,6 @@ fn run(
             audio_busy = true;
         }
     }
-    // what the local conferences did since the last poll: members that
-    // joined and left, who is talking, a recording that stopped
     for event in crate::local_conference::drain(state, stack) {
         raised.push(Delivery::bare(event));
     }
@@ -2477,15 +1746,8 @@ fn run(
     }
 }
 
-/// Take everything the engine has, translated for the callback.
-///
-/// Calls that ended are forgotten at the end rather than as their news is
-/// translated: the media of a call is reported after the signalling that ended
-/// it, and a handle retired in between would leave the last word about a call
-/// naming nothing. What `MediaEngine::poll_farewell` produced for them is
-/// gathered here too, addressed to the same handle before it is forgotten,
-/// since the goodbye and the handle both outlive the call by exactly the same
-/// margin and neither is reachable again after this function returns.
+/// Take everything the engine has, translated. Ended calls are forgotten
+/// last, since their media is reported after the signalling that ended them.
 fn drain(
     stack: SipralHandle,
     state: &mut StackState,
@@ -2499,12 +1761,8 @@ fn drain(
     while let Some(event) = state.engine.poll_event(&mut state.agent, now) {
         match event {
             Event::Signalling(said) => {
-                // read out of the INVITE this event carries, before the event
-                // itself is translated, since it is the first to report who is
-                // on the line. Not asked of the layer below: a CANCEL that
-                // arrived before this poll has already made it forget the call
-                // The layer below read it behind the account's trust gate
-                // (RFC 3325 §8), which only it can apply
+                // read before translation: a CANCEL may already have made the layer below
+                // forget the call, which applied the trust gate (RFC 3325 §8)
                 if let UaEvent::IncomingCall {
                     call,
                     ref request,
@@ -2518,16 +1776,11 @@ fn drain(
                     state.record_shared_identity(call, identity);
                 }
                 if let UaEvent::CallForked { call, sibling } = said {
-                    // one INVITE opened every early dialog among them, so a
-                    // branch answers to the same From, To and Call-ID as the
-                    // parent it was forked from, read before either had one
+                    // a forked branch shares its parent's From, To and Call-ID
                     if let Some(identity) = state.identities.get(&call).cloned() {
                         state.identities.insert(sibling, identity);
                     }
                     if state.manages(call) {
-                        // the branch was offered exactly what its parent was,
-                        // and the engine has already given it a stream of its
-                        // own
                         state.manage(sibling);
                     }
                 }
@@ -2540,8 +1793,7 @@ fn drain(
                 if let UaEvent::ReferralLapsed { referral, .. } = said {
                     lapsed.push(referral);
                 }
-                // a network test's OPTIONS is the test's to report, inside
-                // its own event, and nothing the application asked about
+                // a network test's OPTIONS is reported in the test's own event
                 if let UaEvent::ServerProbed { probe, outcome, .. } = said {
                     state.tests.server_probed(probe, outcome);
                     continue;
@@ -2549,9 +1801,7 @@ fn drain(
                 signalling(stack, state, said, raised, unclaimed);
             }
             Event::Media { call, event } => {
-                // in device mode a call's session is the engine's to pump
-                // from the moment its media starts to the moment it ends:
-                // handed over once this poll reaches the engine, below
+                // in device mode the engine pumps the session; handed over below
                 if state.audio.is_some() {
                     match event {
                         MediaEvent::Started { .. } => {
@@ -2571,22 +1821,14 @@ fn drain(
                 }
                 media(stack, state, call, &event, raised, unclaimed);
             }
-            // the facade is free to grow a vocabulary faster than this ABI,
-            // and a number counted is more honest than a kind invented
             _ => *unclaimed = unclaimed.saturating_add(1),
         }
     }
-    // one call's own release pushes at most one of these, synchronously,
-    // inside the very `poll_event` call above that returned its `CallEnded`
-    // — so by the time this loop runs every goodbye this poll is ever going
-    // to see is already here, still naming a call `calls` has not forgotten
-    // yet
+    // every goodbye of this poll is here while `calls` still names it
     while let Some((call, destination, payload)) = state.engine.poll_farewell() {
         let protocol = SipralTransport::Udp as u32;
         farewell(state, call, destination, payload, protocol);
     }
-    // what a call gives back on its relay's connection to the TURN server:
-    // the same queue, marked with what to write it on
     #[cfg(feature = "ice")]
     while let Some((call, bytes)) = state.engine.poll_turn_stream() {
         let protocol = crate::nat::protocol_of(bytes.transport);
@@ -2598,14 +1840,9 @@ fn drain(
         }
         state.calls.forget(call);
         state.unmanage(call);
-        // the delivery already queued for this call's own ending keeps its
-        // own share of this alive; forgetting it here only stops a later
-        // event from finding it, which there is not going to be one of
         state.identities.remove(&call);
     }
-    // MessageSent is the last word about a send, so the handle is retired the
-    // same way a call's is: after its own event is already translated and
-    // queued, which is the only place it still needed to be found
+    // retired after its own event is queued
     for message in messages_sent {
         state.messages.forget(message);
     }
@@ -2625,8 +1862,6 @@ fn farewell(
 ) {
     let handle = state.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
     if state.farewells.len() >= FAREWELL_CEILING {
-        // the oldest goodbye is worth less than the one that just
-        // arrived — see FAREWELL_CEILING
         state.farewells.pop_front();
         state.farewells_dropped = state.farewells_dropped.saturating_add(1);
     }
@@ -2642,21 +1877,13 @@ fn signalling(
     raised: &mut Vec<Delivery>,
     unclaimed: &mut usize,
 ) {
-    // a re-offer on a call this stack describes has already been answered by
-    // the engine, inside the poll that produced this. Handing it to the
-    // application would be asking for an answer that is already on the wire,
-    // and the application hears the outcome as a media event instead.
+    // already answered by the engine; reported as a media event
     if let UaEvent::Reoffer { call, .. } = said
         && state.manages(call)
     {
         return;
     }
-    // RFC 5626 §4.4.1: a flow that used to answer its pings stopped, and the
-    // endpoint has retired the transport. That is what
-    // `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` says of a transport, so it is said
-    // that way: the application holds the socket, and until it hears this it
-    // keeps a connection the stack will never write to again, and does not
-    // open another when the stack asks for one to the same place.
+    // RFC 5626 §4.4.1: a flow stopped answering and its transport was retired
     if let UaEvent::Unclaimed(sipral_core::endpoint::Event::FlowFailed { transport }) = said {
         // a WebSocket the stack runs says why it gave up, in its own words
         let (error, detail) = match state.agent.websocket_failure(transport) {
@@ -2688,13 +1915,9 @@ fn signalling(
         });
         return;
     }
-    // built before `said` moves behind the `Arc`, and for the same reason a
-    // media reason is built in `media` below: a `SocketAddr` has no bytes of
-    // its own to point at, so this is what the event's pointer needs kept
-    // alive once the borrow below has gone
+    // a `SocketAddr` has no bytes to point at
     let destination = crate::event::text_to_point_at(&said);
-    // shared rather than owned outright, so that the bytes the translation
-    // points into stay where they are however often the delivery moves
+    // shared so the bytes the translation points into never move
     let said = Arc::new(said);
     let mut known = Vocabulary {
         stack,
@@ -2729,13 +1952,8 @@ fn media(
     raised: &mut Vec<Delivery>,
     unclaimed: &mut usize,
 ) {
-    // neither of these can be borrowed from the event: a sentence has to be
-    // formatted and a record converted before either has a shape C can read,
-    // and both travel with the delivery because they are read after this poll
-    // has let the stack go
+    // formatted here, kept with the delivery
     let reason = crate::event::media_reason(said);
-    // the call's stream as its encryption report has it now, for the kinds
-    // that carry it; read before the vocabulary borrows the stack
     let encryption = state
         .engine
         .encryption(call)
@@ -2797,18 +2015,13 @@ pub(crate) mod tests {
 
     pub(crate) const BIND: &str = "192.0.2.10:5060";
     pub(crate) const SEED: [u8; 32] = [7; 32];
-    /// The media seed a test stack runs with: a different draw, because the
-    /// library refuses the same bytes twice and is right to.
+    /// The media seed of a test stack; it must differ from the entropy.
     pub(crate) const MEDIA_SEED: [u8; 32] = [23; 32];
 
-    /// One member of the config, named as a caller's header names it, and the
-    /// way to put a value in it.
+    /// A config member, named as the header names it, and its setter.
     type Setting = (&'static str, fn(&mut SipralStackConfig));
 
-    /// What a media event said, copied out while the callback is still running.
-    ///
-    /// The pointers in an event are the library's and are valid for exactly
-    /// that long, so this is also what tests that promise.
+    /// What a media event said, copied inside the callback.
     #[derive(Clone, Debug)]
     pub(crate) struct Heard {
         pub(crate) kind: SipralEventKind,
@@ -2826,11 +2039,7 @@ pub(crate) mod tests {
         pub(crate) source: u32,
     }
 
-    /// What one call event said about who is on it, copied out while the
-    /// callback is still running.
-    ///
-    /// The pointers in an event are the library's and are valid for exactly
-    /// that long, so this is also what tests that promise.
+    /// Who a call event said is on the call, copied inside the callback.
     #[derive(Clone, Debug)]
     pub(crate) struct Seen {
         pub(crate) kind: SipralEventKind,
@@ -2869,8 +2078,7 @@ pub(crate) mod tests {
         pub(crate) named: Vec<(SipralHandle, SipralHandle)>,
         /// What every media event carried.
         pub(crate) media: Vec<Heard>,
-        /// Who every call event said was on the call, in the order the events
-        /// arrived.
+        /// Who every call event said was on the call.
         pub(crate) calls: Vec<Seen>,
         /// What every subscription event carried, in the order they arrived.
         pub(crate) subscriptions: Vec<Watched>,
@@ -2878,29 +2086,22 @@ pub(crate) mod tests {
         pub(crate) resolves: Vec<Asked>,
         /// What every referral event carried, in the order they arrived.
         pub(crate) referrals: Vec<Referring>,
-        /// What every audio-devices event carried: change, origin, role and
-        /// device, in the order they arrived.
+        /// Every audio-devices event: change, origin, role, device.
         pub(crate) audio: Vec<(u32, u32, u32, u32)>,
-        /// What every progress event carried: what, tone, verdict, reason and
-        /// when, in the order they arrived.
+        /// Every progress event: what, tone, verdict, reason, when.
         pub(crate) progress: Vec<(u32, u32, u32, u32, u64)>,
-        /// What every conference, text and presence event carried, in the
-        /// order they arrived.
+        /// Every conference, text and presence event.
         pub(crate) protocols: Vec<Told>,
-        /// What every transport-failed event carried: transport, protocol,
-        /// error, TLS reason and detail, in the order they arrived.
+        /// Every transport-failed event: transport, protocol, error, TLS reason, detail.
         pub(crate) transports_lost: Vec<(u32, u32, u32, u32, String)>,
-        /// What every local conference event carried, in the order they
-        /// arrived.
+        /// Every local conference event.
         pub(crate) local_conferences: Vec<crate::local_conference::SipralLocalConferenceEvent>,
-        /// What every lookup, location and failed location carried, in the
-        /// order they arrived.
+        /// Every lookup, location and failed location.
         pub(crate) locating: Vec<crate::locate::tests::Locating>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
-        /// What creating a stack from inside the callback answered, and the
-        /// handle it wrote.
+        /// What creating a stack from inside the callback answered.
         created_inside: Option<(SipralStatus, SipralHandle)>,
     }
 
@@ -2961,8 +2162,7 @@ pub(crate) mod tests {
         )
     }
 
-    /// What one media event said, read the way a binding would: out of the
-    /// union arm the kind names, before the callback returns.
+    /// One media event, read from its union arm inside the callback.
     unsafe fn heard(event: &SipralEvent) -> Heard {
         let payload = unsafe { event.payload.media };
         let reason = if payload.reason.is_null() {
@@ -2994,8 +2194,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A pointer and a length an event carries, copied while both are good
-    /// for reading: empty for the null-and-zero this ABI uses for absent.
+    /// A pointer and length copied; empty for null-and-zero.
     fn owned(pointer: *const u8, len: usize) -> Vec<u8> {
         if pointer.is_null() {
             Vec::new()
@@ -3004,9 +2203,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// What one call event said about who is on it, read the way a binding
-    /// would: out of the union arm the kind names, before the callback
-    /// returns.
+    /// One call event's identity, read from its union arm inside the callback.
     unsafe fn seen(event: &SipralEvent) -> Seen {
         let payload = unsafe { event.payload.call };
         Seen {
@@ -3039,9 +2236,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// What one subscription event said, read inside the callback the way an
-    /// application reads it: the payload belongs to the library and is gone
-    /// the moment this returns.
+    /// One subscription event, read inside the callback.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) struct Watched {
         pub(crate) kind: SipralEventKind,
@@ -3059,9 +2254,7 @@ pub(crate) mod tests {
         pub(crate) message_len: usize,
     }
 
-    /// What one conference, text or presence event said, copied out while
-    /// its pointers are still the library's to read. Each kind fills the
-    /// members its arm has and leaves the rest at their defaults.
+    /// One conference, text or presence event, copied inside the callback.
     #[derive(Clone, Debug, Default)]
     pub(crate) struct Told {
         pub(crate) kind: Option<SipralEventKind>,
@@ -3134,8 +2327,7 @@ pub(crate) mod tests {
         out
     }
 
-    /// What one `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` said, copied out while its
-    /// pointers are still the library's to read.
+    /// One `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, copied inside the callback.
     #[derive(Clone, Debug)]
     pub(crate) struct Asked {
         pub(crate) dialog: SipralHandle,
@@ -3166,8 +2358,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// What one `SIPRAL_EVENT_KIND_REFERRAL` said, copied out while its
-    /// pointers are still the library's to read.
+    /// One `SIPRAL_EVENT_KIND_REFERRAL`, copied inside the callback.
     #[derive(Clone, Debug)]
     pub(crate) struct Referring {
         pub(crate) account: SipralHandle,
@@ -3321,11 +2512,8 @@ pub(crate) mod tests {
             Some(unsafe { sipral_stack_poll(event.stack, 0, ptr::null_mut()) });
     }
 
-    /// Call in from a thread that is not the one holding the stack.
-    ///
-    /// Spawning and joining inside the callback is what makes the race
-    /// deterministic: the other thread runs while this one is provably still
-    /// inside the poll.
+    /// Call in from a thread that is not the one holding the stack. Spawned and
+    /// joined inside the callback, so the race is deterministic.
     unsafe extern "C" fn poll_from_another_thread(
         event: *const SipralEvent,
         user_data: *mut c_void,
@@ -3437,8 +2625,7 @@ pub(crate) mod tests {
         handle
     }
 
-    /// Create a stack with its tag drawn from a set the test holds, answered
-    /// the way C is: a status, and the sentence in the last error.
+    /// Create a stack on the test's own tags; status plus last error.
     pub(crate) fn create_with(
         tags: &'static StackTags,
         config: &SipralStackConfig,
@@ -3511,10 +2698,7 @@ pub(crate) mod tests {
     fn a_config_that_declares_the_wrong_size_is_refused() {
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
-        // below the pinned minimum rather than `size_of::<SipralStackConfig>() -
-        // 1`: once the struct grows past that minimum, a size one short of
-        // the *current* build is a perfectly good caller compiled against an
-        // older header, not the wrong size this test means
+        // below the pinned minimum, not merely an older header's size
         config.size = <SipralStackConfig as crate::versioned::Versioned>::MIN_SIZE - 1;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::UnsupportedVersion);
@@ -3525,11 +2709,7 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::UnsupportedVersion);
     }
 
-    /// A `sipral_stack_config_t` that ends where the first header's did,
-    /// before `srtp`, comes from an ABI before the freeze. `ice`, `audio` and
-    /// `max_dialogs` were each appended in the tail padding of a length a
-    /// caller of that time declared, so they would be read from whatever that
-    /// caller's stack held there; the struct is refused instead.
+    /// A config ending before `srtp` predates the freeze and is refused.
     #[test]
     fn a_config_from_before_the_freeze_is_refused() {
         let mut observed = Observed::default();
@@ -3634,9 +2814,7 @@ pub(crate) mod tests {
         suites
     }
 
-    /// What 0.34 configured and could not be read back: the suites in force
-    /// and their order, whether a pseudonym salt was given (never the salt),
-    /// and whether the trace is whole now; and the echo canceller's switch.
+    /// The 0.34 settings read back: suites, salt given, trace, echo canceller.
     #[test]
     fn the_suites_the_salt_the_trace_and_the_echo_switch_read_back() {
         use crate::media::SipralSrtpSuite;
@@ -3692,10 +2870,7 @@ pub(crate) mod tests {
         assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
     }
 
-    /// A stack given no pseudonym salt keys its pseudonyms with a key derived
-    /// one way from its media seed, never with the seed itself: the key holds
-    /// no run of the seed's bytes, is not the seed with a label after it,
-    /// and is held in a buffer that wipes itself.
+    /// Without a salt, pseudonyms use a one-way key from the media seed.
     #[test]
     fn the_pseudonym_key_is_derived_from_the_media_seed_and_does_not_hold_it() {
         let mut observed = Observed::default();
@@ -3739,8 +2914,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The two figures §18.1.1's line is drawn from read back as given, and
-    /// one no path or datagram could have is refused.
+    /// §18.1.1's two figures read back; impossible ones are refused.
     #[test]
     fn the_datagram_figures_read_back_as_given_and_impossible_ones_are_refused() {
         let mut observed = Observed::default();
@@ -3775,8 +2949,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The suites a stack names are the ones every call of it offers, in
-    /// that order; a suite this library does not run is refused.
+    /// A stack's suites are offered in order; an unknown one is refused.
     #[test]
     fn the_stack_srtp_suites_are_what_its_calls_offer() {
         let suites = "AES_256_CM_HMAC_SHA1_80,AES_CM_128_HMAC_SHA1_80";
@@ -3814,8 +2987,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Best effort offers SDES on the plain profile, which a server that
-    /// does no SRTP takes rather than refuses.
+    /// Best effort offers SDES on the plain profile.
     #[test]
     fn best_effort_offers_its_keys_on_the_plain_profile() {
         let mut observed = Observed::default();
@@ -3831,8 +3003,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A REFER outside any dialog reaches nobody unless the stack was made
-    /// to take them, and the setting reads back as what it came to.
+    /// An out-of-dialog REFER is refused unless enabled.
     #[test]
     fn referrals_are_off_unless_asked_for_and_read_back_as_they_came_to() {
         let mut observed = Observed::default();
@@ -3854,10 +3025,7 @@ pub(crate) mod tests {
         assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
     }
 
-    /// The registrar keep-alive is on at twenty-five seconds unless told
-    /// otherwise, an interval of the caller's own is taken and read back, off
-    /// reads back as zero, and a figure out of range or given with it off is
-    /// refused.
+    /// Registrar keep-alive: default, custom, off, and refused figures.
     #[test]
     fn the_registrar_keepalive_is_on_by_default_and_reads_back_as_it_came_to() {
         let mut observed = Observed::default();
@@ -3899,8 +3067,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The four ceilings read back as the defaults when left at zero, and as
-    /// what was given otherwise.
+    /// The four ceilings read back as defaults or as given.
     #[test]
     fn the_limits_read_back_as_they_came_to() {
         let mut observed = Observed::default();
@@ -3944,10 +3111,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// B2: a setting that a neighbouring value has disabled is refused where it
-    /// is set. T2 caps a retransmission interval and T4 waits one out, and RFC
-    /// 3261 §17 arms neither on a transport that delivers for us — so on
-    /// anything but UDP both would be values nothing ever reads.
+    /// B2: T2 and T4 are refused on a reliable transport (RFC 3261 §17).
     #[test]
     fn a_timer_the_transport_never_arms_is_refused_rather_than_taken_and_ignored() {
         let stream = [
@@ -4007,8 +3171,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The other half of the same requirement: T1 is the interval T2 caps, so a
-    /// T2 below it is a T1 that is discarded at the first retransmission.
+    /// A T2 below T1 is refused.
     #[test]
     fn a_cap_below_the_interval_it_caps_is_refused() {
         let mut observed = Observed::default();
@@ -4030,8 +3193,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A T1 raised past the default T2 is the same mistake made by leaving the
-    /// other value alone, and it is caught for the same reason.
+    /// A T1 above the default T2 is refused too.
     #[test]
     fn a_t1_raised_past_a_default_t2_is_caught_too() {
         let mut observed = Observed::default();
@@ -4040,10 +3202,7 @@ pub(crate) mod tests {
         assert_eq!(create(&config).0, SipralStatus::InvalidArgument);
     }
 
-    /// The media half of the same promise: a call that answered
-    /// `SIPRAL_STATUS_OK` applied what it was given, and this is where the
-    /// caller reads what that came to. The three settings that are booleans
-    /// read back as on or off, never as the zero that means "nothing was said".
+    /// The media settings read back as applied; toggles never read zero.
     #[test]
     fn a_stack_reads_back_the_media_settings_it_is_running_on() {
         let mut observed = Observed::default();
@@ -4097,9 +3256,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A4's rule at the boundary a caller actually crosses: a codec this build
-    /// cannot encode is refused at creation, with the status that means the
-    /// build is missing something rather than the one that means try again.
+    /// A4: an unbuildable codec is refused with `SIPRAL_STATUS_NOT_SUPPORTED`.
     #[test]
     fn a_codec_this_build_cannot_encode_stops_the_stack_from_being_made() {
         let mut observed = Observed::default();
@@ -4143,8 +3300,7 @@ pub(crate) mod tests {
             assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
         }
 
-        // a build without the handshake refuses every value that names it,
-        // rather than build a stack that places the calls in the clear
+        // without the handshake, refuse rather than place calls in the clear
         for value in handshake.into_iter().filter(|_| !cfg!(feature = "dtls")) {
             let mut observed = Observed::default();
             let mut config = config(record, &mut observed);
@@ -4194,8 +3350,7 @@ pub(crate) mod tests {
             unsafe { sipral_stack_settings(handle, ptr::null_mut()) },
             SipralStatus::InvalidArgument
         );
-        // shorter than the first published length: no header ever declared
-        // one this short, so it is no version of the struct at all
+        // shorter than any published length
         let mut out = settings();
         out.size = <crate::stack::SipralStackSettings as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
@@ -4206,9 +3361,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The size is checked before the handle is even looked up: a stack that
-    /// was never created and a settings struct too short to be any version of
-    /// this one both fail, and the size is the one this answers with.
+    /// A settings struct too short is refused before the handle is looked up.
     #[test]
     fn a_settings_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
@@ -4299,15 +3452,11 @@ pub(crate) mod tests {
         assert_eq!(create(&config).0, SipralStatus::InvalidArgument);
     }
 
-    /// RFC 3261 §8.1.1.7 (Via) only requires the branch parameter to be
-    /// unique across space and time; the "cryptographically random"
-    /// requirement the entropy field's doc leans on is §19.3, Tags. The
-    /// needle is assembled at runtime so this test does not just match its
-    /// own assertion.
+    /// RFC 3261 §8.1.1.7 asks a unique branch; §19.3 asks random tags. The needle
+    /// is built at runtime so the test does not match itself.
     #[test]
     fn the_entropy_doc_cites_tags_not_via_for_unguessability() {
-        // the needle spans a line break, and a Windows checkout puts a CR in
-        // front of it
+        // a Windows checkout has CRLF
         let source = include_str!("stack.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
@@ -4387,9 +3536,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The size is checked before the handle is even looked up: a stack that
-    /// was never created and a result struct too short to be any version of
-    /// this one both fail, and the size is the one this answers with.
+    /// A result struct too short is refused before the handle is looked up.
     #[test]
     fn a_result_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
     {
@@ -4432,25 +3579,20 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The failure this guards against: `sipral_stack_poll` used to advance
-    /// the clock before checking `result`'s declared size, so a caller with a
-    /// too-short struct lost the clock along with the call.
+    /// A refused poll does not advance the clock.
     #[test]
     fn a_call_refused_for_a_bad_argument_leaves_the_clock_where_it_was() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
         assert_eq!(poll(handle, 1_000).events_delivered, 1);
 
-        // no call was ever minted with this handle: refused for a reason that
-        // has nothing to do with the clock, at a now_ms far ahead of the last
-        // one this stack saw
+        // refused for a stale handle, far ahead of the clock
         assert_eq!(
             unsafe { crate::call::sipral_call_hangup(handle, SIPRAL_HANDLE_NONE, 9_000) },
             SipralStatus::InvalidHandle
         );
 
-        // had the refused call moved the clock to 9_000 anyway, this would
-        // now be more than the slack behind it and refused for that instead
+        // would be behind the slack if the refused call had moved the clock
         assert_eq!(
             poll(handle, 1_010).events_delivered,
             0,
@@ -4464,9 +3606,7 @@ pub(crate) mod tests {
     fn a_clock_as_far_ahead_as_it_counts_is_answered_rather_than_overflowing() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
-        // adding half a billion years to an instant is a panic on a platform
-        // whose clock is narrow enough, and a panic here would be a status
-        // code the caller cannot recover from
+        // must not panic on a platform with a narrow clock
         let status = unsafe { sipral_stack_poll(handle, u64::MAX, ptr::null_mut()) };
         assert!(
             status == SipralStatus::Ok || status == SipralStatus::InvalidArgument,
@@ -4510,9 +3650,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Nothing is held while the callback runs, so calling back into the
-    /// stack from inside it is an ordinary call: neither refused nor a
-    /// deadlock.
+    /// Calling back into the stack from the callback is an ordinary call.
     #[test]
     fn calling_back_into_a_stack_from_its_own_callback_is_an_ordinary_call() {
         let mut observed = Observed::default();
@@ -4535,17 +3673,14 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The half of the promise a binding author will actually hit: any thread
-    /// may call, one at a time, and the one that arrives while another is
-    /// inside gets a status rather than a wait, a deadlock or a fault.
+    /// A second thread inside gets a status, not a wait or a fault.
     #[test]
     fn a_second_thread_calling_in_while_the_stack_is_held_is_told_so() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
         let refused =
             super::with_stack(handle, |_| {
-                // the stack is held for as long as this runs, which is the whole
-                // of the window its lock is still held for
+                // the stack is held for as long as this runs
                 Ok(std::thread::spawn(move || unsafe {
                     sipral_stack_poll(handle, 0, ptr::null_mut())
                 })
@@ -4562,8 +3697,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// While the callback runs the stack is not held, so a second thread that
-    /// polls at that moment is not refused either.
+    /// While the callback runs the stack is free for another thread.
     #[test]
     fn a_second_thread_polling_while_the_callback_runs_is_not_refused() {
         let mut observed = Observed::default();
@@ -4577,10 +3711,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// What a callback that polls from inside itself saw. Cells, because the
-    /// callback may be entered again while an earlier call of it is still
-    /// running, and two mutable borrows of one value would be a test that is
-    /// unsound in exactly the case it exists to catch.
+    /// What a re-entering callback saw. Cells, since it may be re-entered.
     #[derive(Default)]
     struct Nested {
         depth: Cell<usize>,
@@ -4591,8 +3722,7 @@ pub(crate) mod tests {
         inner: Cell<Option<(SipralStatus, usize)>>,
     }
 
-    /// On the first event, register an account — which raises an event of its
-    /// own on the next poll — and poll again from inside the callback.
+    /// On the first event, register an account and poll from inside.
     unsafe extern "C" fn register_and_poll_from_inside(
         event: *const SipralEvent,
         user_data: *mut c_void,
@@ -4615,12 +3745,7 @@ pub(crate) mod tests {
         nested.depth.set(nested.depth.get().saturating_sub(1));
     }
 
-    /// A poll from inside the callback does the stack's work and leaves what
-    /// it raised to the delivery already under way, which now means the
-    /// *next* pass rather than the rest of this one (task 8.4.21): delivered
-    /// into this one instead, the new event would reach the callback before
-    /// the one it is still handling had returned, and there is no bound left
-    /// on how long this pass could keep finding one more thing to deliver.
+    /// A nested poll's events go to the next pass, not this one.
     #[test]
     fn what_a_poll_from_inside_the_callback_raises_waits_for_the_next_pass() {
         let mut observed = Observed::default();
@@ -4653,8 +3778,7 @@ pub(crate) mod tests {
             "what the inner poll raised was left queued, not folded into this pass"
         );
 
-        // the next poll on this stack raises nothing of its own and is still
-        // the one that notices the registration change left waiting
+        // a poll with nothing of its own still delivers what was left
         let result = poll(handle, 1);
         assert_eq!(
             *nested.kinds.borrow(),
@@ -4667,10 +3791,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A pass that returns with events still queued behind it says the next
-    /// poll is already due. Otherwise a caller that waits for input or for the
-    /// deadline, which is the loop `crate::transport` spells out, leaves those
-    /// events where they are until a datagram or a timer happens to arrive.
+    /// A pass that leaves events says the next poll is due now.
     #[test]
     fn a_pass_that_leaves_events_waiting_says_the_next_poll_is_already_due() {
         let mut observed = Observed::default();
@@ -4719,9 +3840,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// `held_audio`'s default is silence, whatever the mode: an
-    /// application-mode stack fed by a microphone does not send the room to
-    /// a party it holds unless the application asks for its own frames.
+    /// `held_audio` defaults to silence in every mode.
     #[test]
     fn a_held_party_is_sent_silence_unless_the_application_is_named() {
         use super::SipralHeldAudio;
@@ -4807,9 +3926,7 @@ pub(crate) mod tests {
     fn what_the_stack_holds_can_move_between_threads() {
         const fn moves<T: Send>() {}
         moves::<sipral_ua::UserAgent>();
-        // every call's session is inside the engine, and `StackState` asserts
-        // `Send` for all of it; this is what keeps that assertion honest now
-        // that a session is also reached from the threads carrying its audio
+        // keeps `StackState`'s `Send` assertion honest
         moves::<sipral::MediaEngine>();
     }
 
@@ -4857,8 +3974,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The tags the test below creates its stacks on, reachable from its
-    /// callback.
+    /// The tags the test below uses, reachable from its callback.
     static INSIDE: StackTags = StackTags::new();
 
     unsafe extern "C" fn destroy_then_create_from_inside(
@@ -4873,10 +3989,7 @@ pub(crate) mod tests {
         observed.created_inside = Some(create_with(&INSIDE, &config));
     }
 
-    /// A stack destroyed from inside its own callback is still being polled,
-    /// and that poll can still mint. Its tag stays with it until the poll
-    /// returns, so no stack created in the meantime starts below a handle it
-    /// has yet to hand out.
+    /// A stack destroyed from its callback keeps its tag until the poll returns.
     #[test]
     fn a_stack_destroyed_from_inside_its_callback_keeps_its_tag_until_the_poll_returns() {
         let mut observed = Observed::default();
@@ -4909,19 +4022,14 @@ pub(crate) mod tests {
 
     // -- the outbox ceiling, and one bounded delivery pass (task 8.4.21) -----
 
-    /// A poll that finds the outbox already at its ceiling — standing in for
-    /// one behind a callback that has not returned — drops what it raised
-    /// instead of growing the queue, and says so where `sipral_stack_counters`
-    /// reads it.
+    /// A full outbox drops a poll's events and counts them.
     #[test]
     fn a_poll_that_finds_the_outbox_at_the_ceiling_drops_its_own_event_and_counts_it() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
         let entry = entry_of(handle).expect("the stack exists");
 
-        // filled directly, bypassing signalling: nothing here has to raise
-        // four thousand and ninety-six real events to prove the queue turns
-        // the excess away once it is full
+        // filled directly instead of raising 4096 real events
         let filler: Vec<Delivery> = (0..OUTBOX_CEILING)
             .map(|_| Delivery::bare(crate::event::started(handle)))
             .collect();
@@ -4929,8 +4037,7 @@ pub(crate) mod tests {
         assert!(delivering, "nobody else was delivering yet");
         assert_eq!(dropped, 0, "exactly the ceiling fits");
 
-        // the first poll a fresh stack ever gets always raises its own
-        // "started" event by itself, and that is what has nowhere to go now
+        // a fresh stack's first poll raises "started", which has nowhere to go
         let result = poll(handle, 0);
         assert_eq!(
             result.events_delivered, 0,
@@ -4943,17 +4050,12 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A callback whose body floods the same stack from a second, real
-    /// thread — joined before the callback returns, the same shape
-    /// `poll_from_another_thread` above uses to make the race deterministic
-    /// — and records what that thread's own post reported.
+    /// A callback that floods the stack from a joined second thread.
     struct Flooded {
         entry: Arc<StackEntry>,
         stack: SipralHandle,
         dropped: AtomicUsize,
-        /// `1` if the flood found nobody delivering and became the deliverer
-        /// itself, which would mean it was folded into the pass already under
-        /// way rather than left for the next one.
+        /// `1` if the flood became the deliverer, i.e. joined this pass.
         joined_this_pass: AtomicUsize,
     }
 
@@ -4975,11 +4077,7 @@ pub(crate) mod tests {
             .store(usize::from(should_deliver), Ordering::SeqCst);
     }
 
-    /// The fix for the thread that used to be held for as long as other
-    /// threads kept posting: a pass hands over only what was there when it
-    /// began, and whatever a second thread posts while it runs — even from
-    /// inside the very callback this pass is calling — waits for the next
-    /// one instead of being folded into this one.
+    /// A pass delivers only what was queued when it began.
     #[test]
     fn a_delivery_pass_leaves_what_arrives_during_it_for_the_next_pass() {
         let mut observed = Observed::default();

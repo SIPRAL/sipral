@@ -1,21 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! D3's health counters, across the boundary: one struct, one call, one copy.
-//!
-//! `sipral::Counters` is already cheap to read — a struct copy, nothing
-//! walked — and this module does nothing to that but carry it across in the
-//! shape every other reading in this ABI takes: a caller-supplied buffer,
-//! filled in place, versioned by its own `size` so a build that adds a
-//! counter later is still read correctly by a binding compiled against a
-//! shorter one.
-//!
-//! What crosses is flat integers rather than the nested
-//! [`sipral::RegistrationFailureCounts`] and [`sipral::CallDispositionCounts`]
-//! the Rust API groups them under: C has no tuple structs to nest a `struct`
-//! inside a `struct` for free, and a name like `registrations_failed_rejected`
-//! costs nothing a binding was not already going to spend turning it back
-//! into whatever shape its own language prefers.
+//! D3's health counters across the boundary: one versioned struct, one copy.
+//! The nested [`sipral::RegistrationFailureCounts`] and
+//! [`sipral::CallDispositionCounts`] are flattened into prefixed names for C.
 
 use sipral::Counters;
 use sipral_core::endpoint::Endpoint;
@@ -28,10 +16,8 @@ use crate::versioned::{Versioned, declared_size, write_versioned};
 
 record! {
     /// D3's flat set of health counters for one stack, since it was created.
-    ///
-    /// Every member here is monotonic except `active_calls`, which is a gauge:
-    /// it can be read as smaller than an earlier reading, and none of the others
-    /// ever will be. Set `size` to `sizeof(sipral_counters_t)` before the call.
+    /// All monotonic except the gauge `active_calls`. Set `size` to
+    /// `sizeof(sipral_counters_t)` before the call.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralCounters {
         /// How many bytes of this struct the library filled in.
@@ -64,57 +50,38 @@ record! {
         pub calls_ended_abandoned: u64,
         /// The session timer ran out and no refresh arrived.
         pub calls_ended_expired: u64,
-        /// How many times inbound audio stopped for longer than the configured
-        /// threshold while signalling stayed healthy (B5).
+        /// Inbound audio stopped past the threshold while signalling was fine (B5).
         pub media_gaps: u64,
-        /// How many times a call's jitter buffer had to shrink or stretch the
-        /// stream to keep its delay where it was aiming.
+        /// Jitter buffer shrink or stretch adjustments.
         pub jitter_buffer_events: u64,
-        /// How many times a request would not fit a datagram and there was no
-        /// stream to the destination to put it on, so the stack asked for one
-        /// (RFC 3261 §18.1.1, B1).
-        ///
-        /// A request promoted onto a connection that already existed does not
-        /// raise it; those are in the diagnostic record instead.
+        /// A request too big for a datagram with no stream to its destination,
+        /// so one was requested (RFC 3261 §18.1.1, B1). Reuse of an existing
+        /// connection does not count.
         pub stream_transport_wanted: u64,
-        /// Calls with media running right now. The one gauge in this struct: it
-        /// moves both ways, and it is what every other member here is not.
+        /// Calls with media running now; the only gauge.
         pub active_calls: u64,
-        /// Events a poll raised and had nowhere to queue, because the
-        /// callback had not kept up and the outbox was already at its ceiling
-        /// (task 8.4.21).
+        /// Events dropped because the outbox was at its ceiling (task 8.4.21).
         pub events_dropped: u64,
-        /// RTCP goodbyes dropped, oldest first, because the application had
-        /// not called `sipral_stack_poll_farewell` and the queue behind it
-        /// was already at its ceiling.
+        /// RTCP goodbyes dropped, oldest first, because
+        /// `sipral_stack_poll_farewell` was not keeping up.
         pub farewells_dropped: u64,
         /// INVITEs a `sipral_stack_screen` policy refused (A8, D7).
         pub screened_refused_by_policy: u64,
-        /// INVITEs refused because their source was offering them faster
-        /// than `sipral_stack_invite_limit` allows.
+        /// INVITEs refused for exceeding `sipral_stack_invite_limit`.
         pub screened_refused_by_rate: u64,
-        /// INVITEs refused because every seat this stack keeps for a source
-        /// it is watching belonged to one still spending, and this source
-        /// could not be limited either — a flood from many addresses at
-        /// once rather than one calling too fast.
+        /// INVITEs refused because every tracked-source seat was taken: a
+        /// flood from many addresses.
         pub screened_refused_by_crowding: u64,
-        /// INVITEs refused 403 for naming a call they had no standing to
-        /// replace (RFC 3891 §3).
+        /// INVITEs refused 403 for an unauthorised Replaces (RFC 3891 §3).
         pub screened_refused_by_replaces: u64,
-        /// Requests this stack sent again because nothing answered in time
-        /// (RFC 3261 timers A and E), and ACKs sent again because the 2xx
-        /// they acknowledge arrived again. Only ever over UDP: nothing
-        /// retransmits over a stream. A figure that climbs while calls still
-        /// connect is a path losing packets before it loses calls.
+        /// Requests resent by RFC 3261 timers A and E, plus ACKs resent for a
+        /// repeated 2xx. UDP only; a rising value means packet loss.
         pub requests_retransmitted: u64,
-        /// Responses sent again: timer G, a reliable provisional response's
-        /// own timer, and the last answer repeated because the far end sent
-        /// its request again, which is what it does when that answer did not
-        /// reach it.
+        /// Responses resent: timer G, reliable provisional timer, and repeats
+        /// for a retransmitted request.
         pub responses_retransmitted: u64,
-        /// Transactions that ended because the far end never answered or
-        /// never acknowledged: timers B, F, H and L, and a reliable
-        /// provisional response never PRACKed.
+        /// Transactions ended by timers B, F, H and L, or an unPRACKed
+        /// reliable provisional response.
         pub transactions_timed_out: u64,
         /// Requests answered `503` because the stack was at
         /// `max_server_transactions`, or an INVITE was at `max_dialogs`.
@@ -122,8 +89,7 @@ record! {
     }
 }
 
-// Safety: integers, no invariant between them, and zero is a valid value of
-// each — a stack that has done nothing reads all zero.
+// Safety: integers only; all-zero is valid.
 unsafe impl Versioned for SipralCounters {
     const NAME: &'static str = "sipral_counters";
     const PIN: crate::versioned::Pin =
@@ -177,19 +143,14 @@ fn counters_of(
 
 entry! {
     /// D3's health counters for one stack, since it was created.
-    ///
-    /// Cheap enough to sample on a timer and ship as telemetry: reading this
-    /// is one struct copy on top of the call itself, the same as
-    /// `sipral_media_statistics` and for the same reason — nothing here walks
-    /// the call table or a session to answer.
+    /// One struct copy, cheap enough to sample on a timer.
     ///
     /// # Safety
     ///
     /// `out_counters` must point at a `sipral_counters_t` whose `size` member
     /// says how long it is.
     fn sipral_stack_counters(stack: SipralHandle, out_counters: *mut SipralCounters) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the stack
+        // size first, so a wrong size is reported before a bad handle
         unsafe { declared_size(out_counters.cast_const()) }?;
         let counters = with_stack(stack, |state| {
             Ok(counters_of(
@@ -276,9 +237,6 @@ mod tests {
         assert_eq!(read.screened_refused_by_replaces, 0);
     }
 
-    /// The wiring this file owns: whatever a poll counted as dropped for want
-    /// of room in the outbox is what this reads back. `crates/sipral-ffi/src/stack.rs`
-    /// owns making that count correct in the first place.
     #[test]
     fn a_stack_reports_events_it_had_no_room_to_queue() {
         let mut observed = Observed::default();
@@ -291,10 +249,6 @@ mod tests {
         assert_eq!(counters(stack).events_dropped, 3);
     }
 
-    /// The same wiring for the farewell queue: whatever a poll counted as
-    /// dropped to keep that queue at its ceiling is what this reads back, and
-    /// not the outbox's count beside it. `crates/sipral-ffi/src/stack.rs` owns
-    /// making the count correct.
     #[test]
     fn a_stack_reports_farewells_it_dropped_at_the_ceiling() {
         let mut observed = Observed::default();
@@ -335,10 +289,7 @@ mod tests {
         );
     }
 
-    /// `max_dialogs` holds both ways: a call placed past it is
-    /// `SIPRAL_STATUS_LIMIT_REACHED` with nothing sent, and one that arrives
-    /// past it is answered 503 and counted. The INVITE that did go, left
-    /// unanswered, goes again T1 later and is counted as that.
+    /// `max_dialogs` refuses outgoing (nothing sent) and incoming (503).
     #[test]
     fn a_stack_at_its_call_ceiling_refuses_both_ways_and_counts_what_went_again() {
         let mut observed = Observed::default();
@@ -387,20 +338,14 @@ mod tests {
         let mut observed = Observed::default();
         let stack = crate::stack::tests::stack(&mut observed);
         let mut out = zeroed();
-        // below the pinned minimum rather than `size_of::<SipralCounters>() -
-        // 1`: the struct has grown past that minimum since it was first
-        // published (`events_dropped`, task 8.4.21), and a size one short of
-        // the *current* build is a perfectly good caller compiled against an
-        // older header, not the wrong size this test means
+        // below the pinned minimum: one short of the current size is a valid
+        // older header
         out.size = <crate::counters::SipralCounters as crate::versioned::Versioned>::MIN_SIZE - 1;
         let status = unsafe { sipral_stack_counters(stack, &raw mut out) };
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(out.registrations_attempted, u64::MAX, "nothing was written");
     }
 
-    /// The size is checked before the handle is even looked up: a stack that
-    /// was never created and a counters struct too short to be any version of
-    /// this one both fail, and the size is the one this answers with.
     #[test]
     fn a_counters_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {

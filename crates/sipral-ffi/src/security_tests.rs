@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! STIR/SHAKEN, the SRTP policy per account and the encryption report,
-//! through the C ABI: two stacks in one process, one signing the call it
-//! places and the other verifying it, driven the way C drives them.
+//! STIR/SHAKEN, per-account SRTP policy and the encryption report through the
+//! C ABI: one stack signs, another verifies.
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -34,8 +33,7 @@ const CALLER: &str = "12155551212";
 const CALLED: &str = "sip:12125551213@example.com";
 const X5U: &str = "https://cert.example.org/passport.pem";
 
-/// A second stack's entropy, so that its tags and branches are not the
-/// first one's.
+/// Distinct entropy so the second stack's tags differ.
 static OTHER_SEED: [u8; 32] = [91; 32];
 
 fn text(value: &str) -> (*const c_char, usize) {
@@ -120,8 +118,7 @@ unsafe extern "C" fn listen(event: *const SipralEvent, user_data: *mut c_void) {
     }
 }
 
-/// A stack reporting to `heard`, whose wall clock reads inside every test
-/// certificate's validity.
+/// Its wall clock falls inside every test certificate's validity.
 fn stack_hearing(heard: &mut Heard, credentials: &Credentials, second: bool) -> SipralHandle {
     let mut unused = Observed::default();
     let mut config = config(record, &mut unused);
@@ -136,16 +133,13 @@ fn stack_hearing(heard: &mut Heard, credentials: &Credentials, second: bool) -> 
     handle
 }
 
-/// `sipral_stack_stir` with these anchors and this wall clock at `now_ms`
-/// zero.
+/// `sipral_stack_stir` with these anchors and this wall clock.
 fn stir(handle: SipralHandle, anchors: &[u8], unix_seconds: u64) {
     let config = stir_config(anchors, unix_seconds);
     let status = unsafe { sipral_stack_stir(handle, ptr::from_ref(&config), 0) };
     assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
 }
 
-/// A `sipral_stir_config_t` with these anchors and this wall clock, the rest
-/// zero.
 fn stir_config(anchors: &[u8], unix_seconds: u64) -> SipralStirConfig {
     SipralStirConfig {
         reserved: 0,
@@ -163,8 +157,7 @@ fn stir_config(anchors: &[u8], unix_seconds: u64) -> SipralStirConfig {
     }
 }
 
-/// The verdict a stack trusting `credentials`' root reaches on `invite`,
-/// with `accept_service_provider_codes` set to `providers`.
+/// The verdict on `invite` for a stack trusting `credentials`' root.
 fn verdict_on(credentials: &Credentials, invite: &[u8], providers: u32) -> Verified {
     let mut heard = Heard::default();
     let callee = stack_hearing(&mut heard, credentials, true);
@@ -192,9 +185,7 @@ fn verdict_on(credentials: &Credentials, invite: &[u8], providers: u32) -> Verif
     verdict
 }
 
-/// ABI 0.32: a certificate that names a service provider code and no number
-/// covers the caller only when the stack's STIR configuration says codes
-/// count, and a value the toggle has no word for is refused.
+/// A provider-code certificate covers the caller only when codes are accepted.
 #[test]
 fn a_service_provider_code_covers_the_caller_only_when_the_stack_says_so() {
     let credentials = sipral_stir::testing::provider_credentials("709J");
@@ -225,9 +216,7 @@ fn a_service_provider_code_covers_the_caller_only_when_the_stack_says_so() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// ABI 0.32: an account says whether its encrypted calls may be recorded to
-/// a recording server in the clear, off unless it does, and a value the
-/// toggle has no word for is refused before the account is added.
+/// Recording encrypted calls in the clear is off by default.
 #[test]
 fn an_account_says_whether_its_encrypted_calls_may_be_recorded_in_the_clear() {
     let credentials = credentials(&[CALLER]);
@@ -263,12 +252,8 @@ fn an_account_says_whether_its_encrypted_calls_may_be_recorded_in_the_clear() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// A caller built against ABI 0.31 declares the 384 bytes that header gave
-/// `sipral_account_config_t`, whose last four were padding then and may be
-/// left unwritten. `recording_in_clear` starts at 384 today, so nothing of
-/// what it sent is read as the toggle; but the frozen ABI serves no length
-/// from before minor 33, so the struct is refused outright rather than read
-/// with its padding as a member.
+/// A 384-byte `sipral_account_config_t` predates minor 33 and is refused,
+/// not read with its padding as a member.
 #[test]
 fn a_0_31_account_config_is_refused_rather_than_read() {
     // 384 bytes on a 64-bit target: everything before the member 0.32 added
@@ -284,9 +269,7 @@ fn a_0_31_account_config_is_refused_rather_than_read() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// A stack created with no media clock dates its sender reports by the wall
-/// clock `sipral_stack_stir` pairs with `now_ms`, and one created with a
-/// media clock keeps it.
+/// Without a media clock, sender reports use the STIR wall clock.
 #[test]
 fn a_stack_with_no_media_clock_takes_the_one_stir_is_given() {
     let credentials = credentials(&[CALLER]);
@@ -505,8 +488,7 @@ fn what_an_account_says_about_stir_is_checked_before_it_is_added() {
     assert_eq!(account(handle, &bad_key).0, SipralStatus::InvalidArgument);
     assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
 
-    // a stack that was never told the time cannot sign; the media clock's
-    // seconds go with no `now_ms`, and are not taken for the time
+    // without a wall clock it cannot sign; the media clock is not one
     let mut unused = Observed::default();
     let mut created = config(record, &mut unused);
     created.media_clock_unix_seconds = credentials.not_before + 1_000;
@@ -672,10 +654,8 @@ fn the_encryption_report_says_how_an_sdes_call_is_protected() {
     assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
 }
 
-/// The four layers prove a service provider code's coverage with the files
-/// in `bindings/fixtures/stir-provider-709J`, having no certificate
-/// authority of their own: those files are the credentials
-/// `sipral_stir::testing` issues for the code `709J`, and stay so.
+/// The bindings' `stir-provider-709J` fixtures must stay what
+/// `sipral_stir::testing` issues for `709J`.
 #[test]
 fn the_layers_provider_fixture_is_the_testing_provider_credentials() {
     let issued = sipral_stir::testing::provider_credentials("709J");

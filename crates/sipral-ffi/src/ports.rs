@@ -3,23 +3,14 @@
 
 //! Media ports out of a range the deployment set.
 //!
-//! The application opens every socket, so a stack cannot bind a port for
-//! it; what it can do is say which one to bind, out of the range a firewall
-//! in front of the deployment was opened for. `sipral_stack_config_t`'s
-//! `rtp_port_min` and `rtp_port_max` set the range; [`sipral_stack_rtp_port_reserve`]
-//! hands out an even port from it, with the odd one above kept for RTCP
-//! (RFC 3550 §11, and what the stack itself sends RTCP to unless the far end
-//! says otherwise); the application binds it and describes the call there
-//! with `media_address`. With a range set, a call described at a port the
-//! range does not hand out is refused, so a firewall rule and the ports in
-//! use cannot drift apart.
+//! The application binds sockets; the stack picks the port from
+//! `rtp_port_min`..`rtp_port_max`. [`sipral_stack_rtp_port_reserve`] hands out
+//! an even port, the odd one above kept for RTCP (RFC 3550 §11). With a range
+//! set, media described outside it is refused, so firewall and ports agree.
 //!
-//! A reserved port stays reserved while a call describes its media there and
-//! comes back once the call has ended or moved off it. One no call took — the
-//! bind failed because another process holds the port, the call was refused
-//! — goes back with [`sipral_stack_rtp_port_release`]. Ports are handed out
-//! round the range rather than lowest first, so a port a call has just let
-//! go is the last to be reused while its stragglers may still arrive.
+//! A port comes back when its call ends or moves; one no call took goes back
+//! with [`sipral_stack_rtp_port_release`]. Ports rotate round the range so a
+//! freed port is reused last, after its stray packets.
 
 use crate::error::{entry, fail};
 use crate::handle::SipralHandle;
@@ -30,11 +21,8 @@ entry! {
     /// Reserve a free even port from this stack's RTP range, with the odd
     /// port above it kept for RTCP, and write it to `out_port`.
     ///
-    /// `SIPRAL_STATUS_EXHAUSTED` when every pair in the range is taken —
-    /// reserved, or described by a call this stack still holds — and the
-    /// last error says how many pairs the range has. Nothing is reserved
-    /// then. `SIPRAL_STATUS_WRONG_STATE` on a stack created without a range:
-    /// its ports are the application's to choose.
+    /// `SIPRAL_STATUS_EXHAUSTED` when every pair is taken (the last error
+    /// gives the range size). `SIPRAL_STATUS_WRONG_STATE` without a range.
     ///
     /// # Safety
     ///
@@ -58,13 +46,9 @@ entry! {
 }
 
 entry! {
-    /// Give back a port [`sipral_stack_rtp_port_reserve`] handed out that no
-    /// call is using: the socket could not be bound there, or the call was
-    /// refused. A port a call took comes back by itself when the call ends,
-    /// and needs no release.
-    ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a port that is not reserved,
-    /// which is also what a second release of the same port is.
+    /// Give back a reserved port no call used. A port a call took comes back
+    /// by itself. `SIPRAL_STATUS_INVALID_ARGUMENT` for one not reserved,
+    /// including a second release.
     ///
     /// # Safety
     ///
@@ -170,8 +154,6 @@ mod tests {
         }
     }
 
-    /// With a range, a call described at a port the range does not hand out
-    /// is refused, so the firewall rule and the ports in use cannot drift.
     #[test]
     fn a_call_described_outside_the_range_is_refused_and_one_inside_is_placed() {
         let mut observed = Observed::default();

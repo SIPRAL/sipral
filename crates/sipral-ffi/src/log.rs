@@ -3,37 +3,26 @@
 
 //! The engine's log, through a callback, and its state, on demand.
 //!
-//! Two questions an application asks when something has gone wrong in the
-//! field, and neither the event stream nor the diagnostic record answers.
-//! "What was the stack doing" is a log: [`sipral_stack_log`] installs a
-//! callback that receives the engine's lines at the levels asked for. "What
-//! was the stack holding when it crashed" is a snapshot: [`sipral_stack_state_text`]
-//! copies out one bounded text of accounts, calls, transports, media
-//! sessions, the last errors and the counters, from any thread.
+//! [`sipral_stack_log`] installs a callback for the engine's lines at the
+//! chosen levels. [`sipral_stack_state_text`] copies out a bounded snapshot of
+//! accounts, calls, transports, media, last errors and counters, from any
+//! thread.
 //!
-//! **The log callback is never called with the stack held.** Everything the
-//! engine has to say is queued while an entry point holds the stack, and
-//! handed to the callback only once that entry point has let it go — at the
-//! end of the same call, on the same thread — so calling back into the
-//! library from inside it, this stack included, is an ordinary call, as it is
-//! from the event callback. One delivery runs at a time: a thread that
-//! finishes an entry point while another is delivering leaves its lines
-//! queued, and the next entry point or poll to finish delivers them, so they
-//! arrive in order and never on two threads at once.
+//! **The log callback never runs with the stack held.** Lines are queued while
+//! an entry point holds the stack and delivered after it lets go, at the end
+//! of the same call on the same thread, so re-entering the library is an
+//! ordinary call. One delivery runs at a time; lines queued meanwhile go out
+//! with the next entry point to finish, in order.
 //!
-//! **A flood cannot stall the stack.** Lines pass a token bucket —
-//! `sipral::BURST` at once, `sipral::PER_SECOND` a second after that, on the
-//! stack's own clock — and wait in a queue of at most `sipral::QUEUE_CEILING`.
-//! What either turns away is counted, never waited for, and the next line
-//! delivered carries the count in [`SipralLogRecord::suppressed`].
+//! **A flood cannot stall the stack.** A token bucket (`sipral::BURST`, then
+//! `sipral::PER_SECOND`, on the stack's clock) and a queue of at most
+//! `sipral::QUEUE_CEILING`. Dropped lines are counted in the next line's
+//! [`SipralLogRecord::suppressed`].
 //!
-//! **Nothing either one writes carries a secret or a person.** Both go
-//! through the redaction `docs/14-diagnostics.md` describes: user parts,
-//! numbers and IP literals become pseudonyms keyed with a secret derived from
-//! this stack's `media_seed` — never from `entropy`, which a replay recording
-//! carries in clear — and credentials and SDES keys are dropped outright. The
-//! log and the snapshot share the key, so an address reads as the same
-//! pseudonym in both.
+//! **Both are redacted** (`docs/14-diagnostics.md`): user parts, numbers and
+//! IP literals become pseudonyms keyed from `media_seed` (never `entropy`,
+//! which a replay recording carries in clear); credentials and SDES keys are
+//! dropped. Log and snapshot share the key, so pseudonyms match.
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
@@ -51,23 +40,21 @@ use crate::stack::{StackState, with_stack};
 use crate::status::SipralStatus;
 
 codes! {
-    /// How loud a log line is, for [`sipral_stack_log`] and
-    /// [`SipralLogRecord::level`]. Higher is more detailed: a stack logging
-    /// at `SIPRAL_LOG_LEVEL_INFO` delivers errors, warnings and information.
+    /// Log verbosity, for [`sipral_stack_log`] and [`SipralLogRecord::level`].
+    /// Each level includes the ones below it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralLogLevel: u32 {
-        /// Nothing: the log is off. What a stack starts with.
+        /// The log is off; the initial state.
         Off = 0,
-        /// Something failed and the application is likely to see the effect.
+        /// A failure the application is likely to notice.
         Error = 1,
-        /// Something went wrong that the stack worked around, or is about to
-        /// matter: a registration refused, audio that stopped arriving.
+        /// Something worked around or about to matter: a registration
+        /// refused, audio that stopped arriving.
         Warn = 2,
-        /// What an operator wants in a log file: a registration granted, a
-        /// call arriving, confirmed or ending, media starting.
+        /// Operator-level: registrations, calls arriving, confirmed or ending,
+        /// media starting.
         Info = 3,
-        /// Every event the stack raises, every decision its diagnostic record
-        /// writes down, and every call into this ABI it refused.
+        /// Every event raised, every diagnostic decision, every refused ABI call.
         Debug = 4,
         /// Every SIP message in and out, whole and redacted.
         Trace = 5,
@@ -75,8 +62,8 @@ codes! {
 }
 
 constants! {
-    /// The longest text [`sipral_stack_state_text`] writes, its NUL included: a
-    /// buffer of this many bytes always has room.
+    /// The longest text [`sipral_stack_state_text`] writes, NUL included; a
+    /// buffer this size always fits.
     pub const SIPRAL_STATE_TEXT_MAX: usize = 16384;
 }
 
@@ -86,17 +73,14 @@ const STATE_TEXT_LIMIT: usize = SIPRAL_STATE_TEXT_MAX - 1;
 /// How many refused calls a stack remembers for its state.
 const LAST_ERRORS: usize = 8;
 
-/// How often, at most, a poll that raised something refreshes the snapshot
-/// kept for [`sipral_stack_state_text`] to hand out while the stack is busy.
+/// Minimum interval between snapshots refreshed by polls, for a busy stack.
 const SNAPSHOT_EVERY_MS: u64 = 1000;
 
 record! {
     /// One log line, as [`SipralLogCallback`] reads it.
     ///
-    /// Filled by the library and handed over as a `const` pointer: read
-    /// `size` before anything past it, and nothing once the callback has
-    /// returned — the two strings are the library's and live for the call
-    /// alone.
+    /// Read `size` first, and nothing after the callback returns: the strings
+    /// live for the call only.
     #[derive(Clone, Copy)]
     pub struct SipralLogRecord {
         /// How many bytes of this struct the library filled in.
@@ -116,8 +100,7 @@ record! {
         pub message: *const c_char,
         /// How many bytes of it.
         pub message_len: usize,
-        /// How many lines the rate limit or the queue ceiling turned away
-        /// since the line before this one. Zero almost always.
+        /// Lines dropped by the rate limit or queue since the previous line.
         pub suppressed: u64,
     }
 }
@@ -126,14 +109,11 @@ alias! {
     /// Where a stack's log lines go. Installed with
     /// [`crate::log::sipral_stack_log`].
     ///
-    /// Called on whichever thread has just finished a call into this stack,
-    /// after the stack has been let go and with nothing of the library held,
-    /// so it may call back into the library — this stack included — as an
-    /// ordinary call. One line at a time, and never on two threads at once.
-    /// It must not unwind, for the reason nothing in this ABI may.
+    /// Called on the thread that just finished a call into this stack, with
+    /// nothing held, so it may call back into the library. One line at a
+    /// time, never on two threads at once. It must not unwind.
     ///
-    /// `record` and everything it points at belong to the library and are
-    /// valid for the duration of this one call and no longer.
+    /// `record` and what it points at are valid for this call only.
     pub type SipralLogCallback = fn(record: *const SipralLogRecord, user_data: *mut c_void);
 }
 
@@ -144,12 +124,10 @@ struct CSink {
     user_data: *mut c_void,
 }
 
-// Safety: `user_data` is the caller's own pointer, never read here, and only
-// handed back to the callback it arrived with; `sipral_stack_log`'s safety
-// section says the callback may be called from any thread that calls into
-// the stack, which is the caller's arrangement to make safe.
+// Safety: `user_data` is never read here, only handed back to its callback;
+// the caller makes it safe on any thread that calls into the stack.
 unsafe impl Send for CSink {}
-// Safety: as above; nothing here is ever mutated after construction.
+// Safety: as above; nothing is mutated after construction.
 unsafe impl Sync for CSink {}
 
 impl CSink {
@@ -164,34 +142,27 @@ impl CSink {
             message_len: line.message.len(),
             suppressed: line.suppressed,
         };
-        // Safety: the caller's own function, under the contract
-        // `SipralLogCallback` states; `record` borrows from `line`, alive
-        // for the whole call.
+        // Safety: the caller's function, under the `SipralLogCallback`
+        // contract; `record` borrows from `line` for the call.
         unsafe { (self.callback)(&raw const record, self.user_data) };
     }
 }
 
 entry! {
-    /// Send this stack's log to `callback`, at `level` and louder — or turn
-    /// it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
+    /// Send this stack's log to `callback`, at `level` and louder, or turn it
+    /// off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
     ///
-    /// A stack is created with its log off, and a log that is off costs
-    /// nothing: no line is formatted for it. Calling this again replaces the
-    /// callback and the level, on this stack alone; lines already waiting go
-    /// to the new callback. Turning the log off drops what was waiting.
-    ///
-    /// What each level carries, how lines are rate-limited and how they are
-    /// redacted is in this module's documentation and in
-    /// `docs/17-observability.md`. A level above `SIPRAL_LOG_LEVEL_TRACE` is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing.
+    /// Off by default and free when off. A second call replaces callback and
+    /// level on this stack; queued lines go to the new callback. Turning off
+    /// drops the queue. Details: `docs/17-observability.md`. A level above
+    /// `SIPRAL_LOG_LEVEL_TRACE` is `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
     /// # Safety
     ///
-    /// `callback`, when not null, is called from inside later calls into this
-    /// stack on whichever thread made them, once the stack has been let go
-    /// (see [`SipralLogCallback`]). `user_data` is handed back to it untouched
-    /// and must stay valid until the log is turned off or replaced and no
-    /// thread is inside this stack any more.
+    /// `callback`, when not null, is called inside later calls into this stack,
+    /// after the stack is released (see [`SipralLogCallback`]). `user_data`
+    /// must stay valid until the log is replaced or off and no thread is
+    /// inside this stack.
     fn sipral_stack_log(
         stack: SipralHandle,
         level: Number<SipralLogLevel>,
@@ -224,15 +195,13 @@ entry! {
     }
 }
 
-/// What a stack remembers beside itself for [`sipral_stack_state_text`], reachable
-/// without the stack's own lock.
+/// What a stack keeps for [`sipral_stack_state_text`], reachable without the
+/// stack's lock.
 #[derive(Default)]
 pub(crate) struct Watch {
-    /// The last calls into this stack that were refused, newest last: when,
-    /// with what, and the sentence.
+    /// The last refused calls, newest last: time, status, message.
     errors: VecDeque<(u64, SipralStatus, String)>,
-    /// The last snapshot taken with the stack held, and when: what a caller
-    /// is handed while another thread is inside.
+    /// The last snapshot taken under the lock, and when; served while busy.
     snapshot: Option<(u64, String)>,
 }
 
@@ -246,8 +215,7 @@ impl Watch {
             .push_back((at_ms, failure.status, failure.message().to_owned()));
     }
 
-    /// Keep a fresh snapshot, unless one was kept less than
-    /// [`SNAPSHOT_EVERY_MS`] ago.
+    /// Keep a fresh snapshot, at most every [`SNAPSHOT_EVERY_MS`].
     pub(crate) fn refresh(&mut self, stack: SipralHandle, state: &StackState) {
         let at = state.polled_at_ms();
         if let Some((then, _)) = &self.snapshot
@@ -321,8 +289,7 @@ impl Watch {
         head + &body
     }
 
-    /// What to hand out while the stack is held — by another thread, or by
-    /// the very call this one was made from inside.
+    /// The answer while the stack is held, by another thread or by this call.
     fn stale(&self, stack: SipralHandle) -> String {
         match &self.snapshot {
             Some((at, text)) => format!(
@@ -339,21 +306,15 @@ impl Watch {
 }
 
 entry! {
-    /// Copy a snapshot of everything this stack is holding into `buffer`, as
-    /// text for a crash report: its accounts and their registrations, its
-    /// calls and their states, its transports, its media sessions, the last
-    /// calls into it that were refused, its queues, its RTP port range and
-    /// its counters — redacted, and never longer than
-    /// `SIPRAL_STATE_TEXT_MAX` bytes with the NUL, so a buffer that size
-    /// always has room.
+    /// Copy a redacted snapshot of this stack into `buffer` for a crash
+    /// report: accounts and registrations, calls and states, transports, media
+    /// sessions, last refused calls, queues, RTP port range and counters. At
+    /// most `SIPRAL_STATE_TEXT_MAX` bytes with the NUL.
     ///
-    /// Safe from any thread, including one the stack is busy on, and never
-    /// waits. When no other thread is inside the stack the snapshot is taken
-    /// there and then; when one is, what comes back is the last snapshot a
-    /// poll kept — polls keep one at most once a second, and only when
-    /// something happened — and its first line says so and when it was
-    /// taken. A call's media session that a thread is in the middle of a
-    /// frame on is reported as busy rather than waited for.
+    /// Safe from any thread and never waits. If another thread holds the
+    /// stack, the last snapshot kept by a poll (at most once a second) is
+    /// returned, and its first line says so. A media session busy on a frame
+    /// is reported as busy.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_needed`,
     /// when it does not fit; `out_needed` may be null.
@@ -374,16 +335,13 @@ entry! {
 }
 
 entry! {
-    /// Turn the diagnostic trace on or off while the stack runs: `on` is a
-    /// `SipralToggle`, and zero leaves it as it is (ABI 0.34).
+    /// Turn the diagnostic trace on or off: `on` is a `SipralToggle`, zero
+    /// leaves it (ABI 0.34).
     ///
-    /// On, the trace level of `sipral_stack_log` writes every SIP message
-    /// whole, with the peer it went to or came from, and prose lines
-    /// without pseudonyms: for a diagnosis, where pseudonyms would hide the
-    /// difference between two runs. What is never written, on or off, is a
-    /// credential or a key — `sipral_stack_config_t::diagnostic_trace` has
-    /// the list. Off, the trace is pseudonymised as it always was. Nothing
-    /// is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+    /// On, the trace level writes whole SIP messages with the peer and no
+    /// pseudonyms, to compare runs. Credentials and keys are never written
+    /// (list in `sipral_stack_config_t::diagnostic_trace`). Off, the trace is
+    /// pseudonymised. Only applies at `SIPRAL_LOG_LEVEL_TRACE`.
     ///
     /// # Safety
     ///
@@ -407,8 +365,7 @@ entry! {
     }
 }
 
-/// The snapshot text for a stack whose entry is in hand: fresh when its lock
-/// is free, the kept one otherwise.
+/// The snapshot: fresh if the lock is free, the kept one otherwise.
 pub(crate) fn snapshot_of(
     stack: SipralHandle,
     state: Option<&StackState>,
@@ -424,13 +381,10 @@ pub(crate) fn snapshot_of(
     }
 }
 
-/// The key a stack's pseudonyms are made with when it was given no salt:
-/// derived one way from its `media_seed`, which is secret and never written
-/// anywhere, under a label of its own (`sipral::derived_pseudonym_key`).
-///
-/// Derived, never the seed itself: every SRTP master key the stack offers is
-/// drawn from that seed, and the log holds its key for as long as the stack
-/// lives and feeds it values a far end chooses.
+/// The pseudonym key when no salt was given: derived one way from the secret
+/// `media_seed` (`sipral::derived_pseudonym_key`). Never the seed itself:
+/// SRTP master keys come from it, and the log keeps its key for the stack's
+/// life while hashing values a far end chooses.
 pub(crate) fn pseudonym_key(media_seed: &[u8; 32]) -> sipral::PseudonymKey {
     sipral::derived_pseudonym_key(media_seed)
 }
@@ -460,8 +414,7 @@ pub(crate) mod tests {
     use std::ptr;
     use std::sync::Mutex;
 
-    /// Every line a stack's log delivered, and what calling back into that
-    /// stack from inside the callback answered.
+    /// Every line delivered, and what re-entering the stack answered.
     #[derive(Default)]
     pub(crate) struct Heard {
         pub(crate) lines: Mutex<Vec<(u32, String, String, u64)>>,
@@ -564,8 +517,8 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::InvalidArgument);
     }
 
-    /// The line about a refused call arrives at the end of that same call,
-    /// with the stack let go: the callback's own call into it is answered.
+    /// The line arrives at the end of the refused call, with the stack
+    /// released: the callback's re-entry is answered.
     #[test]
     fn the_callback_runs_with_the_stack_let_go_and_may_call_back_into_it() {
         let mut observed = Observed::default();
@@ -633,9 +586,8 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
     }
 
-    /// Turned on, the trace carries the message as it came, with the peer;
-    /// turned off again, it is pseudonymised as before. The credential it
-    /// carried is never written either way.
+    /// Diagnostic trace on: whole messages with the peer. Off: pseudonymised.
+    /// The credential is never written.
     #[test]
     fn a_diagnostic_trace_writes_whole_messages_until_it_is_turned_off() {
         let mut observed = Observed::default();
@@ -705,8 +657,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Two stacks given one installation's salt write the same pseudonyms
-    /// for the same message; two left to their media seeds do not.
+    /// One salt gives the same pseudonyms across stacks; media seeds do not.
     #[test]
     fn a_pseudonym_salt_gives_the_same_pseudonyms_in_every_run() {
         fn traced(salt: Option<&[u8]>, seed: u8) -> Vec<String> {
@@ -748,8 +699,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Ten thousand refusals at one instant reach the callback as one burst,
-    /// and the next line after the bucket refills says how many went.
+    /// A flood is cut to one burst, and the next line counts the rest.
     #[test]
     fn a_flood_of_lines_is_cut_to_the_rate_and_counted() {
         let mut observed = Observed::default();
@@ -825,8 +775,7 @@ pub(crate) mod tests {
         assert!(len > 1 && len <= SIPRAL_STATE_TEXT_MAX);
     }
 
-    /// What `sipral_stack_state_text` answered from inside a screening policy,
-    /// which runs with the stack held.
+    /// What `sipral_stack_state_text` answered inside a screening policy.
     static FROM_INSIDE: Mutex<Option<String>> = Mutex::new(None);
 
     unsafe extern "C" fn snapshot_from_inside(
@@ -838,8 +787,7 @@ pub(crate) mod tests {
         SIPRAL_SCREEN_ACCEPT
     }
 
-    /// A stack that is held answers at once with the snapshot its last poll
-    /// kept, and says so, rather than waiting or refusing.
+    /// A held stack answers at once with the last kept snapshot, and says so.
     #[test]
     fn the_state_of_a_busy_stack_is_the_last_snapshot_kept_and_says_so() {
         let mut observed = Observed::default();

@@ -3,23 +3,17 @@
 
 //! One event, one callback, one tagged union.
 //!
-//! Everything the stack has to say arrives as a [`SipralEvent`]: a size, the
-//! handles it is about, a kind, and a union whose arm the kind names. One
-//! struct rather than one callback per kind, because a binding that registers
-//! fourteen function pointers has fourteen chances to leave one null, and
-//! because a kind added later then costs a caller nothing — it reads the
-//! kind it does not know and ignores it.
+//! Everything the stack reports arrives as a [`SipralEvent`]: a size, handles, a
+//! kind, and a union whose arm the kind names. A binding registers one function
+//! pointer, and a kind added later is simply ignored by a caller that does not
+//! know it.
 //!
-//! Nothing inside the union is an enumerated type. A union arm the library did
-//! not write holds whatever the arm it did write put there, and reading a Rust
-//! enum out of bits that were never one of its values is undefined behaviour,
-//! so every enumerated member in there is a plain integer whose names are
-//! declared next to it. The head of the struct, which is written every time,
-//! keeps its types.
+//! Nothing inside the union is an enumerated type: reading a Rust enum out of an
+//! arm the library did not write is undefined behaviour, so enumerated members
+//! there are plain integers with names declared next to them.
 //!
-//! Pointers in an event belong to the library and are valid for the duration of
-//! the callback and no longer. A binding copies what it wants out before it
-//! returns; there is nothing to free.
+//! Pointers in an event belong to the library and are valid only for the
+//! duration of the callback. Copy what you need; there is nothing to free.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
@@ -62,30 +56,14 @@ use crate::stack::SipralTransport;
 use crate::subscription::{SipralSubscriptionEnd, SipralSubscriptionState, named_end, named_state};
 use crate::transport::SipralTransportFailedEvent;
 
-/// Declare the event number space, once.
+/// Declare the event number space, once: the enum, the log name and the
+/// number are generated from one list, so none can be missed.
 ///
-/// Everything that has to agree about an event's number is written here and
-/// generated from here: the enum, the name a log line prints, and the number
-/// the two are indexed by. A kind cannot be added to one of those and missed in
-/// the other, because there is only one place to add it.
-///
-/// A number is spent by appearing in this list, live or reserved, and the
-/// generated assertion is that the list runs `1, 2, 3, …` with nothing repeated
-/// and no hole. A hole is what two features fall into: each takes the number
-/// after the last live kind, each builds, and the one that lands second has
-/// silently renamed an event that a shipped binding already knows. A reserved
-/// line is that hole filled in advance — the number belongs to a named feature
-/// before the feature is written, so taking it is reading rather than choosing.
-///
-/// Live and reserved lines interleave, in one run, in number order. That is
-/// what makes "taking a reserved number in place" the literal truth: the line
-/// stays where its number is and turns into a kind, and the features on either
-/// side of it keep the numbers they were promised. A list that made every live
-/// kind come first would force a feature to take five numbers it has nothing to
-/// put behind in order to reach the sixth.
-///
-/// Removing or reordering a line is what `docs/08-ffi.md` forbids outright, and
-/// what the assertion turns from a released mistake into a build failure.
+/// The generated assertion checks the list runs `1, 2, 3, …` with no repeat and
+/// no hole, live and reserved lines interleaved in number order. Without it, two
+/// features could each take the next free number and silently rename an event a
+/// shipped binding knows. A reserved line turns into a kind in place. Removing
+/// or reordering a line is forbidden by `docs/08-ffi.md`.
 macro_rules! event_kinds {
     (
         $(#[doc = $doc:literal])*
@@ -101,8 +79,7 @@ macro_rules! event_kinds {
     ) => {
         $(#[doc = $doc])*
         ///
-        /// Numbers already spent on features this build does not have, so that
-        /// two of them cannot arrive holding the same one:
+        /// Numbers already spent on features this build does not have:
         ///
         $($(#[doc = concat!(" - `", stringify!($held), "` — ", $feature)])*)*
         #[repr(u32)]
@@ -115,14 +92,11 @@ macro_rules! event_kinds {
         }
 
         impl SipralEventKind {
-            /// Every kind this build has, in the order their numbers were
-            /// spent.
+            /// Every kind this build has, in number order.
             pub const ALL: &'static [Self] = &[$(Self::$variant),*];
 
-            /// What this enumeration is, for the header and the bindings. The
-            /// reserved numbers travel with it, so that the header says what
-            /// this list says: the number is spent whether or not a kind has
-            /// been written behind it.
+            /// What this enumeration is, for the header and the bindings,
+            /// reserved numbers included.
             pub(crate) const ABI: $crate::abi::Enumeration = $crate::abi::Enumeration {
                 name: "SipralEventKind",
                 doc: &[$($doc,)*],
@@ -145,18 +119,15 @@ macro_rules! event_kinds {
 
         entry! {
             /// The short name of an event kind, as a static NUL-terminated
-            /// string, or null for a number this build has no kind for.
+            /// string, or null for a number this build has no kind for
+            /// (reserved numbers included).
             ///
             /// The string belongs to the library and lives as long as it is
-            /// loaded. A number that is reserved for a feature this build does
-            /// not have answers null, the same as one that was never spent: a
-            /// name for something that cannot arrive would be a name for
-            /// nothing.
+            /// loaded.
             ///
             /// # Safety
             ///
-            /// Reads no memory the caller owns, and is safe to call from any
-            /// thread.
+            /// Reads no caller memory; safe from any thread.
             fn sipral_event_kind_name(
                 kind: Number<SipralEventKind>,
             ) -> *const c_char, on_panic = std::ptr::null(), {
@@ -167,9 +138,7 @@ macro_rules! event_kinds {
             }
         }
 
-        // every number in the list, live and reserved, against the one it has
-        // to be: this is the build failure that a collision, a hole or a
-        // reordering becomes
+        // a collision, a hole or a reordering fails the build here
         const _: () = {
             let mut next = 1_u32;
             $(
@@ -194,21 +163,13 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
-    /// What an event is about.
-    ///
-    /// The numbers are part of the ABI and are only ever added to. A binding
-    /// that meets a kind it does not know must ignore that event rather than
-    /// refuse it, which is what makes adding one safe.
+    /// What an event is about. Numbers are only ever added; a binding must
+    /// ignore a kind it does not know.
     kinds {
-        /// The stack is running on this thread.
-        ///
-        /// The first event on every stack, delivered by the first poll and never
-        /// again. A binding that has a callback to hand out, a queue to open or a
-        /// thread to name has somewhere definite to do it, before anything that
-        /// matters can arrive.
+        /// The stack is running on this thread: the first event, delivered
+        /// once by the first poll.
         1 = Started, c"started";
-        /// A registration moved: it went out, it took, it is being refreshed, it
-        /// was given up, or it failed. `payload.registration` says which, and
+        /// A registration moved. `payload.registration` says how, and
         /// `account` says whose.
         2 = RegistrationChanged, c"registration changed";
         /// Somebody is calling. Answer, ring, or reject it.
@@ -232,85 +193,45 @@ event_kinds! {
         10 = TransferRequested, c"transfer requested";
         /// A transfer this end asked for is under way.
         11 = TransferProgress, c"transfer progress";
-        /// And how it ended: the final status the far end reported, a 2xx
-        /// hanging this call up. A REFER the far end refused outright
-        /// (4xx–6xx, RFC 3515 §2.4.2) ends here too, with the refusal's
-        /// status, and so does one that went unanswered, as a 408, or whose
-        /// transport failed, as a 503 (ABI 1.2); either way the call stays
-        /// as it was.
+        /// And how it ended: the far end's final status, a 2xx hanging this
+        /// call up. A refused REFER (RFC 3515 §2.4.2) ends here with its status,
+        /// a timeout as 408, a transport failure as 503; the call stays up.
         12 = TransferDone, c"transfer done";
         /// A call arrived carrying a `Replaces` and took over one already up.
         /// `payload.call.other` is the one being replaced.
         13 = CallReplaced, c"call replaced";
-        /// The call is over, and its handle is stale from here on.
-        ///
-        /// `message` is the refusal when a response ended it, and the BYE
-        /// or the CANCEL when the far end did (ABI 1.2), so that a header
-        /// field of the far end's own on it can be read with
-        /// `sipral_message_header`; null otherwise.
+        /// The call is over; its handle is stale from here on. `message` is
+        /// the refusal, or the far end's BYE or CANCEL, or null.
         14 = CallEnded, c"call ended";
 
-        /// A subscription moved: it was asked for, granted, put on probation,
-        /// scheduled for another attempt, or ended.
-        ///
-        /// A1. `payload.subscription` says which one and where it is now, and
-        /// `reason` why it is not live when it is not. Not sent on every
-        /// refresh — a lamp does not move because a refresh was scheduled —
-        /// and not sent for a notification arriving, which is
-        /// [`SipralEventKind::Notified`] instead.
+        /// A1. A subscription moved: asked for, granted, on probation,
+        /// retrying, or ended. `payload.subscription` says which and where it
+        /// is, `reason` why it is not live. Not sent per refresh or per NOTIFY.
         15 = SubscriptionChanged, c"subscription changed";
 
-        // Held for what `docs/13-client-requirements.md` already commits to, so
-        // that features written in separate branches cannot arrive holding the same
-        // number. Taking one means turning its line into a kind, in place.
+        // held for `docs/13-client-requirements.md` features; taken in place
         reserved 16 = "held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same";
 
-        /// What one call's media cost, delivered once, after
-        /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
-        ///
-        /// A6's second consumer. `payload.media.statistics` points at the
-        /// completed record; it is the library's and lives as long as the callback
-        /// does. The stream is gone by the time this arrives, which is why the
-        /// numbers travel in the event rather than behind a lookup that would now
-        /// fail.
+        /// A6. What one call's media cost, once, after
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED`. `payload.media.statistics` points
+        /// at the record, library-owned and valid for the callback.
         17 = MediaStatistics, c"media statistics";
-        /// A request grew too large for a datagram (RFC 3261 §18.1.1) and this
-        /// stack has no stream transport open to the destination it names.
-        /// `payload.transport_wanted` says where it was going, over what
-        /// protocol, and how it measured against the datagram it did not fit.
-        ///
-        /// B1. The call that asked for the request — placing a call,
-        /// registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
-        /// nothing went on the wire. Answered with
-        /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind):
-        /// once the application has bound a transport to that destination,
-        /// asking again sends the request on it, and this ABI raises nothing
-        /// further about it — there is no "it went" event, the same way there
-        /// is none for an ordinary request that fit the first time.
+        /// B1. A request grew too large for a datagram (RFC 3261 §18.1.1) and
+        /// no stream transport is open to its destination; it was refused with
+        /// `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
+        /// Bind with
+        /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
+        /// and ask again.
         18 = TransportWanted, c"transport wanted";
-        /// Nothing has arrived on the media path for longer than the configured
-        /// threshold, while signalling is perfectly happy.
-        ///
-        /// B5. `payload.media.silent_for_ms` says how long. The call is untouched:
-        /// whether to hang up over silence is a decision with a person on the other
-        /// end of it.
+        /// B5. No media has arrived for longer than the configured threshold.
+        /// `payload.media.silent_for_ms` says how long. The call is left up.
         19 = MediaStalled, c"media stalled";
-        /// A call a push announced never arrived.
-        ///
-        /// C2, and not an error. A wake-up chain has a notification service,
-        /// a proxy, a bucket timer and a radio in it, and when a call does not
-        /// come through it this is the only place that says which end gave up:
-        /// the push was delivered, this device woke, refreshed its binding,
-        /// and no INVITE followed. `payload.announce` says which announcement
-        /// and how long it was waited for; the screen the application raised
-        /// can come down.
+        /// C2. A call a push announced never arrived: the device woke and
+        /// refreshed, and no INVITE followed. `payload.announce` says which
+        /// announcement and how long it was waited for.
         20 = AnnouncedCallMissing, c"announced call missing";
-        /// Audio is running: the negotiation settled and an RTP session is open.
-        ///
-        /// A4's reporting half and the first half of D5: `payload.media.codec` is
-        /// what the two ends agreed on. This is the moment to mint the call's
-        /// media handle with `sipral_call_media`, and `sipral_media_info` on it
-        /// says the rest.
+        /// A4, D5. Audio is running; `payload.media.codec` is the agreed codec.
+        /// Mint the media handle now with `sipral_call_media`.
         21 = MediaStarted, c"media started";
         /// The session changed under a live call: a hold, a resume, a peer that
         /// moved its media address, or a re-negotiation onto another codec.
@@ -321,478 +242,175 @@ event_kinds! {
         /// Media could not be started or could not be kept. The call itself is
         /// untouched; `payload.media.fault` and `payload.media.reason` say why.
         24 = MediaFailed, c"media failed";
-        /// A recording stopped on its own, part-way through: the disk filled, the
-        /// file went away, the volume was unmounted.
-        ///
-        /// Never an abort. `payload.media.recorded_ms` says how much audio reached
-        /// the file before it stopped, and the call carries on without it.
+        /// A recording stopped on its own (disk full, file gone).
+        /// `payload.media.recorded_ms` says how much was written.
         25 = RecordingStopped, c"recording stopped";
-        /// The far end pressed a key: an RFC 4733 named telephone event, or an
-        /// INFO carrying `application/dtmf-relay` or `application/dtmf`.
-        ///
-        /// One per keypress, not one per packet: an RFC 4733 digit goes out as
-        /// a run of updates and then its closing packet three times, and the
-        /// layer below collapses them on the timestamp that identifies the
-        /// event; an INFO is one request. `payload.media.digit` is the
-        /// character, `event_code` the number behind it for the events no
-        /// keypad has a key for, `held_ms` how long it lasted, and `source`
-        /// a `SIPRAL_DIGIT_SOURCE` naming which of the two reported it.
-        /// `held_ms` zero means either of two different facts: an
-        /// `application/dtmf` INFO never carries a duration at all, and a
-        /// peer using the other form may have said `Duration=0` and held the
-        /// key for no time at all — this C ABI does not tell the two apart.
+        /// The far end pressed a key (RFC 4733 event, or INFO with
+        /// `application/dtmf-relay` or `application/dtmf`), one per press.
+        /// `payload.media` gives `digit`, `event_code`, `held_ms` and `source`.
+        /// `held_ms` zero means no duration or `Duration=0`, not told apart.
         26 = DigitReceived, c"digit received";
-        /// An INFO this end sent for `sipral_call_send_dtmf` reached a final
-        /// answer. `payload.call.digit` is the character and
-        /// `payload.call.status_code` what the far end answered — a 415 from
-        /// a switch that does not take this `Content-Type` included, so the
-        /// application learns which of the two INFO forms to try without
-        /// guessing from silence. A digit that waited behind another and whose
-        /// own INFO could then not be sent at all is reported the same way,
-        /// with 503: nothing reached the far end for that one, and no digit
-        /// after it is sent.
+        /// An INFO from `sipral_call_send_dtmf` got a final answer:
+        /// `payload.call.digit` and `payload.call.status_code` (415: try the
+        /// other INFO form). An unsendable queued digit reports 503 and stops
+        /// the rest.
         27 = DtmfSent, c"dtmf sent";
-        /// The lifecycle machine settled: a registrar answered again and
-        /// proved a path this stack had stopped believing in, or every rung
-        /// of a recovery ladder was climbed and none of them worked.
-        /// `payload.recovery` says which, and carries what the ladder that
-        /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
-        /// and `docs/16-lifecycle.md` are the ladder this reports on.
+        /// The lifecycle ladder settled: a path proved again, or every rung
+        /// failed. `payload.recovery` says which (`docs/16-lifecycle.md`).
         28 = Recovery, c"recovery";
 
-        /// A dialog's next hop is a name, and this library does not look
-        /// names up.
-        ///
-        /// RFC 3263 §4's TARGET, before any NAPTR, SRV or A lookup: the
-        /// route set and the remote target say where this dialog's requests
-        /// should go, and what they say is not where they are going. Nothing
-        /// here owns a resolver — nothing here owns a socket either — so the
-        /// answer is the application's, through
-        /// [`sipral_stack_resolved`](crate::resolve::sipral_stack_resolved),
-        /// with `payload.resolve.dialog` as the handle it takes.
-        ///
-        /// **Ignoring it is legitimate and is the common case.** The dialog
-        /// keeps the flow its first message travelled on, which §8.1.2 allows
-        /// as an alternate address and which is the only thing that survives
-        /// a NAT. Nothing times out, nothing retries, and no second event
-        /// says the first went unanswered.
+        /// A dialog's next hop is a name to resolve (RFC 3263 §4 TARGET).
+        /// Answer with
+        /// [`sipral_stack_resolved`](crate::resolve::sipral_stack_resolved)
+        /// and `payload.resolve.dialog`. **Ignoring it is fine**: the dialog
+        /// keeps its first flow (§8.1.2), which survives a NAT.
         29 = ResolveNeeded, c"resolve needed";
 
-        /// A notification arrived on a subscription, and has been answered.
-        ///
-        /// A1's other half. The NOTIFY is in `message`, whole and unparsed,
-        /// which is where every package this ABI has no reader for is read
-        /// from. `payload.subscription.has_dialog_info` says the body was
-        /// `application/dialog-info+xml` and could be read, and the picture it
-        /// updated is behind
+        /// A1. A notification arrived and was answered; the NOTIFY is in
+        /// `message`. `payload.subscription.has_dialog_info` says the body was
+        /// readable dialog-info, read via
         /// [`sipral_subscription_dialog_count`](crate::subscription::sipral_subscription_dialog_count).
-        /// A body that could not be read arrives here all the same, with that
-        /// member zero and the request whole: a lamp showing what was last
-        /// known beats one showing what a malformed document happened to
-        /// contain.
+        /// An unreadable body arrives with it zero; the old picture is kept.
         30 = Notified, c"notified";
-        /// The INVITE for a call a push had already announced has arrived
-        /// (RFC 8599).
-        ///
-        /// C2's other half. Queued immediately before the
-        /// [`SipralEventKind::IncomingCall`] naming the same call, and never
-        /// without one, so that an application reading its events in order
-        /// knows which screen the call belongs to before it is told there is a
-        /// call at all. That is the whole point: on a phone the ringing screen
-        /// exists first, and a stack that reports the INVITE without saying
-        /// which announcement it answers has made the application guess.
-        ///
-        /// `call` is the call, and `payload.announce.announcement` what
-        /// announced it. That announcement is spent: it is not waited for any
-        /// more, and `sipral_announcement_forget` on it answers
-        /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
+        /// C2. The INVITE for a call a push announced arrived (RFC 8599),
+        /// queued just before its [`SipralEventKind::IncomingCall`].
+        /// `payload.announce.announcement` is now spent:
+        /// `sipral_announcement_forget` answers `SIPRAL_STATUS_WRONG_STATE`.
         31 = CallAnnounced, c"call announced";
-        /// The handshake that keys a call finished, and audio can move
-        /// (RFC 5764).
-        ///
-        /// Only DTLS-SRTP produces it, and it is the moment the call becomes
-        /// what it agreed to be: between `SIPRAL_EVENT_KIND_MEDIA_STARTED`
-        /// and this one the stream exists, has an address and a codec, and
-        /// carries nothing in either direction. An application that draws a
-        /// padlock draws it here.
-        ///
-        /// `call` is the call and `payload.media.suite` is the transform the
-        /// handshake chose — the signalling does not, which is why there is
-        /// an event for it at all. A call keyed by SDES never produces one,
-        /// because such a call is keyed before its session is opened.
-        ///
-        /// A handshake that does not finish produces
-        /// `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead, and the call is left up:
-        /// whether to hang it up is a decision with a person on the other end
-        /// of it.
+        /// The DTLS-SRTP handshake finished and audio can move (RFC 5764).
+        /// `payload.media.suite` is the chosen transform. SDES calls never
+        /// raise it; a failed handshake raises `SIPRAL_EVENT_KIND_MEDIA_FAILED`
+        /// and leaves the call up.
         32 = MediaSecured, c"media secured";
-        /// `sipral_media_event_t`: ICE chose the path this call's media takes
-        /// (RFC 8445 §8.1.1), and audio can move.
-        ///
-        /// The moment the connectivity checks stop, and the answer to "why is
-        /// this call sending to an address the signalling never named" —
-        /// which, behind a NAT, is the ordinary outcome rather than a fault.
-        /// It arrives again if a nomination of higher priority replaces the
-        /// pair part-way through the call.
-        ///
-        /// The two addresses of the pair are deliberately not carried here,
-        /// for the reason `SIPRAL_EVENT_KIND_MEDIA_SECURED` gives about its
-        /// own: every packet `sipral_media_capture` and
-        /// `sipral_media_poll_transmit` hand back already names the
-        /// destination to send it to, so an application that puts this
-        /// stack's media on a socket at all has the address the moment it
-        /// matters. `sipral_media_statistics` does not repeat it either.
-        ///
-        /// A call not using ICE never emits it, and that is most calls: the
-        /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
+        /// ICE chose this call's media path (RFC 8445 §8.1.1), and audio can
+        /// move; again if a higher-priority pair replaces it. Addresses are not
+        /// carried: each outgoing packet names its destination. Never raised
+        /// without ICE (default `SIPRAL_ICE_OFF`).
         33 = MediaPathChosen, c"media path chosen";
-        /// A MESSAGE arrived (RFC 3428 §7) and has already been answered:
-        /// 200, because this stack delivers rather than relays.
-        /// `payload.message` carries the body, and `account`/`call` on
-        /// `sipral_event_t` say where it was addressed and whether it rode
-        /// inside a call's dialog.
+        /// A MESSAGE arrived (RFC 3428 §7) and was answered 200.
+        /// `payload.message` carries the body; `call` is set if it was in-dialog.
         34 = MessageReceived, c"message received";
-        /// A MESSAGE `sipral_account_message` sent reached its final answer,
-        /// or never will. `payload.message.status_code` is 200, a 202 from a
-        /// relay, a refusal, or the 408/503 this stack reports for one that
-        /// timed out or lost its transport.
+        /// A MESSAGE from `sipral_account_message` got its final answer:
+        /// `payload.message.status_code` (408/503 for timeout or transport).
         35 = MessageSent, c"message sent";
-        /// A `message-summary` `NOTIFY` reported the state of a mailbox
-        /// (RFC 3842 §3.9). `payload.message` carries the counts of the
-        /// `voice-message` class, the one a phone's message-waiting light is
-        /// about.
+        /// A `message-summary` NOTIFY reported a mailbox (RFC 3842 §3.9);
+        /// `payload.message` has the `voice-message` counts.
         36 = MessagesWaiting, c"messages waiting";
-        /// The account this call belongs to asked for an RFC 6035 voice
-        /// quality report and the attempt to publish it has now been made,
-        /// once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
-        ///
-        /// `payload.media.quality_report_sent` says whether the PUBLISH
-        /// left this end — not whether a collector accepted it, which this
-        /// stack never waits to learn. Raised only when the account named
-        /// a collector to publish to at all
-        /// (`sipral_account_config_t::quality_report_uri`); a call whose
-        /// account named none raises nothing here, since nothing was ever
-        /// attempted.
+        /// The RFC 6035 quality report PUBLISH was attempted once, after
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED`, if `quality_report_uri` was set.
+        /// `payload.media.quality_report_sent` says it left, not that it landed.
         37 = QualityReportSent, c"quality report sent";
-        /// The call this one was joined to has ended, taking the local
-        /// conference of two down with it.
-        ///
-        /// `sipral_call_join` paired the two calls and neither one ever
-        /// called `sipral_call_leave` — the partner's own call simply ended
-        /// first, the same way any call does, and this is the half of that
-        /// this call has to be told: the pairing does not outlive either
-        /// side of it. `call` is the survivor; its own session is untouched
-        /// and carries on exactly as an unjoined call always has, on
-        /// whatever `sipral_media_playback`/`sipral_media_capture` it is
-        /// next given directly rather than through `sipral_media_mix`.
+        /// The call this one was joined to ended. `call` is the survivor and
+        /// carries on unjoined, fed directly rather than by `sipral_media_mix`.
         38 = MediaUnjoined, c"media unjoined";
-        /// A STUN server said where one of this end's sockets appears from,
-        /// said it has moved, or never answered (RFC 8489). Only on a stack
-        /// created with `SIPRAL_NAT_STUN`.
-        ///
-        /// `payload.nat` says which socket and what it came to. For a
-        /// signalling socket the work is already done by the time this
-        /// arrives: every account whose `Contact` named the socket names the
-        /// public address now, and each one holding a binding has sent the
-        /// REGISTER that says so. For a media socket
-        /// `sipral_stack_nat_map` named, this is the moment a call can be
-        /// placed, rung or answered on it — before it, that is
-        /// `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
-        /// for is described by its own address, as it would have been with
-        /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
-        /// a socket is neither.
+        /// A STUN server reported, moved or never answered for a socket
+        /// (RFC 8489). Only with `SIPRAL_NAT_STUN`. `payload.nat` says which.
+        /// Signalling sockets are already re-registered; a media socket from
+        /// `sipral_stack_nat_map` is now usable for calls (before, that is
+        /// `SIPRAL_STATUS_WRONG_STATE`). `account`, `call`: none.
         39 = NatMapping, c"nat mapping";
-        /// A TURN server allocated a relay for a media socket
-        /// `sipral_stack_nat_map` named, or gave none (RFC 8656). Only on a
-        /// stack created with a `turn_server`.
-        ///
-        /// `payload.relay` says which socket and what it came to. Allocated,
-        /// it is the moment a call can be placed, rung or answered on the
-        /// socket with the relay as its relayed ICE candidate — before it,
-        /// that is `SIPRAL_STATUS_WRONG_STATE`, as it is while the STUN
-        /// answer is awaited. Failed, the call goes without one. `account`
-        /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
+        /// A TURN server allocated a relay for a `sipral_stack_nat_map` socket,
+        /// or gave none (RFC 8656). Only with a `turn_server`. `payload.relay`
+        /// says which; once allocated, calls may use it (before, that is
+        /// `SIPRAL_STATUS_WRONG_STATE`). `account`, `call`: none.
         40 = NatRelay, c"nat relay";
-        /// A REFER outside any dialog asked this end to place a call (RFC
-        /// 3515): click-to-dial from a switchboard, a CRM or an operator
-        /// console. Only on a stack created with
-        /// `sipral_stack_config_t::referrals` on, and only for one the same
-        /// screening an INVITE meets let through.
-        ///
-        /// `call` is the referral's handle: a handle of the call kind that
-        /// names this request rather than a call — `sipral_call_state`
-        /// answers `SIPRAL_STATUS_WRONG_STATE` about it, and nothing but the
-        /// two calls below takes it. `account` is the line it arrived for,
-        /// which the call it asks for is placed from; `message` is the REFER.
-        /// `payload.referral` says who to call, whether that is an attended
-        /// transfer's target, and who the sender says is asking.
-        ///
-        /// Take it with `sipral_call_accept_transfer`, which answers 202,
-        /// places the call exactly as it does for a transfer inside a call and
-        /// writes the placed call's handle; refuse it with
-        /// `sipral_call_reject_transfer`. Either spends the handle. **Taking
-        /// it is the application's decision each time**: a peer that can make
-        /// a phone dial can make it dial anything, and `referred_by` is what
-        /// the sender wrote, never proof of who it is.
-        ///
-        /// Raised a second time, with `payload.referral.status_code` set and
-        /// nothing else, when the application answered neither before the
-        /// REFER's transaction ran out: the stack answered it with that status
-        /// and the handle is stale from here on.
+        /// An out-of-dialog REFER asks this end to place a call (RFC 3515),
+        /// with `sipral_stack_config_t::referrals` on. `call` is the referral's
+        /// handle, taken only by `sipral_call_accept_transfer` (202, places the
+        /// call) or `sipral_call_reject_transfer`; either spends it. `account`
+        /// is the line, `message` the REFER, `payload.referral` the target.
+        /// **The application decides each time**: `referred_by` is unverified.
+        /// If left unanswered, raised again with only `status_code` set, and
+        /// the handle is stale.
         41 = Referral, c"referral";
-        /// A media socket's connection to a TURN server reached over TCP or
-        /// TLS (`turn_transport`, RFC 8656 §3.1) is to be opened, or closed.
-        /// Only on a stack created with one.
-        ///
-        /// `payload.turn_stream` says which socket, which server, over what,
-        /// and which of the two. `SIPRAL_TURN_STREAM_OPEN` follows
-        /// `sipral_stack_nat_map`: open the connection from the socket to the
-        /// server — TLS with the platform's own stack, the certificate
-        /// checked against the server's name — and say so with
-        /// `sipral_stack_turn_connected`, then hand everything it carries to
-        /// `sipral_stack_turn_receive` for as long as it is open, and its
-        /// closing to `sipral_stack_turn_closed`. What is written on it comes
-        /// out of `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
-        /// `sipral_media_capture`, `sipral_media_poll_rtcp` and
-        /// `sipral_stack_poll_farewell`, each marked with its `protocol`.
-        /// `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be: write what
-        /// is still queued for it, and close it. `account` and `call` are
-        /// `SIPRAL_HANDLE_NONE`: a socket is neither.
+        /// A media socket's TCP/TLS connection to a TURN server
+        /// (`turn_transport`, RFC 8656 §3.1) is to be opened or closed.
+        /// `payload.turn_stream` says which. On `SIPRAL_TURN_STREAM_OPEN`, open
+        /// it (TLS checked against the server name), then call
+        /// `sipral_stack_turn_connected`, `sipral_stack_turn_receive` and
+        /// `sipral_stack_turn_closed`. On `SIPRAL_TURN_STREAM_CLOSE`, flush and
+        /// close. `account`, `call`: none.
         42 = TurnStream, c"turn stream";
-        /// The audio engine's devices moved: a device arrived or left, the
-        /// system's default changed, a role was put on a device, lost the
-        /// one it was on, or was reopened on another. Only on a stack
-        /// created with `sipral_stack_config_t::audio` set to
-        /// `SIPRAL_AUDIO_DEVICE`.
-        ///
-        /// `payload.audio` says what changed and who changed it —
-        /// `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
-        /// `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
-        /// application asked or what a loss made it do — so that an
-        /// application can note the first and need not re-apply its own
-        /// choice on hearing the second. `account` and `call` are
-        /// `SIPRAL_HANDLE_NONE`: a device is neither.
+        /// The audio engine's devices moved (with `SIPRAL_AUDIO_DEVICE`).
+        /// `payload.audio` says what and whether the system or the engine did
+        /// it. `account`, `call`: none.
         43 = AudioDevicesChanged, c"audio devices changed";
         reserved 44 = "held for a second audio device event, which the audio engine did not need; spent all the same";
 
-        /// The network changed under this call and the address its media
-        /// was described at is gone: the far end is still sending its audio
-        /// there.
-        ///
-        /// One for every call that can still be offered a new description,
-        /// raised by `sipral_stack_network_changed` when it answers
-        /// `SIPRAL_RECOVERY_REBUILD`. Answer it by binding a media socket on
-        /// the new network and handing its address to
-        /// `sipral_call_media_readdress`, after `sipral_account_rebind`, so
-        /// that the re-INVITE carries the new `Contact` as well as the new
-        /// `c=` and port. `call` is the call; the payload is
-        /// `payload.call`, as for every other call event.
+        /// The network changed and this call's media address is gone. Raised
+        /// per call by `sipral_stack_network_changed` on
+        /// `SIPRAL_RECOVERY_REBUILD`: after `sipral_account_rebind`, pass a new
+        /// socket address to `sipral_call_media_readdress`.
         45 = CallAddressWanted, c"call address wanted";
-        /// The STUN server a stack asks changed, or every one of them failed.
-        /// Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
-        /// `sipral_stack_stun_servers`.
-        ///
-        /// `payload.stun_server` says which:
-        /// `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
-        /// the one before it failed, one earlier in the list answered again,
-        /// or the list was replaced -- and
-        /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
-        /// `stun_server` and `stun_fallbacks` has failed and none is left to
-        /// turn to. A server fails when it does not answer in five and a half
-        /// seconds, or answers without an address, and is then passed over
-        /// for thirty seconds, twice as long each time it fails again, up to
-        /// ten minutes. Nothing is asked of the application: the sockets move
-        /// to the next server by themselves, and
-        /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
-        /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
-        /// neither.
+        /// The STUN server in use changed, or all failed
+        /// (`payload.stun_server`). A server fails after 5.5 s and is skipped
+        /// for 30 s, doubling up to ten minutes. Sockets move on by themselves.
+        /// `account`, `call`: none.
         46 = StunServer, c"stun server";
-        /// Who is calling, as a signature says (RFC 8224, RFC 8588): the
-        /// stack's verification service at work on an INVITE for an account
-        /// that verifies its callers. ABI 0.31.
-        ///
-        /// `payload.verification.stage` says which half.
-        /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: the certificate at
-        /// `certificate_url` is needed; fetch it and hand it to
-        /// `sipral_call_stir_certificate`, or hand over nothing if it cannot
-        /// be had. The call waits, and the application has not been told of
-        /// it yet — `call` names it all the same, for the answer.
-        /// `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict, queued just
-        /// before the `SIPRAL_EVENT_KIND_INCOMING_CALL` naming the same call,
-        /// whose call events carry it too; or, with `refused` set, before the
-        /// `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
-        /// refused with `response_code`. `message` is the INVITE.
+        /// Caller verification (RFC 8224, RFC 8588); `payload.verification`.
+        /// `CERTIFICATE_WANTED`: fetch `certificate_url` and pass it (or
+        /// nothing) to `sipral_call_stir_certificate`; the call waits.
+        /// `VERIFIED`: the verdict, just before the call's
+        /// `SIPRAL_EVENT_KIND_INCOMING_CALL`, or with `refused` set before its
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED`. `message` is the INVITE.
         47 = CallerVerification, c"caller verification";
-        /// A keypad digit heard in the far end's audio, as the two tones
-        /// themselves, on a call listening for them:
-        /// `sipral_stack_config_t::dtmf_detection` and
-        /// `sipral_call_dtmf_detection` say when. One per press, reported as
-        /// it ends; on a call that also negotiated named events, a press the
-        /// far end sent both ways is reported once, as
-        /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
-        /// waits a quarter of a second before it is reported here.
-        ///
-        /// `payload.media` carries it the way it carries every digit:
-        /// `digit` is the key's character, `event_code` its RFC 4733 code,
-        /// `held_ms` how long it sounded and `source`
-        /// `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+        /// A keypad digit heard as tones (with DTMF detection enabled), once
+        /// per press. A press also sent as a named event is reported once as
+        /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`; tones alone wait 250 ms.
         48 = InBandDigit, c"in-band digit";
-        /// What was heard on a call told to listen with
-        /// `sipral_call_detect_progress`: a call-progress tone of its network
-        /// on early media, the special information tone, who answered, or
-        /// the beep an answering machine plays before it records.
-        /// `payload.progress` says which, and what was measured.
+        /// What `sipral_call_detect_progress` heard: a progress tone, the
+        /// special information tone, who answered, or a machine's beep
+        /// (`payload.progress`).
         49 = ProgressDetected, c"progress detected";
-        /// A `conference` subscription's picture of the conference changed,
-        /// or the conference ended (RFC 4575 §4.6).
-        ///
-        /// `payload.conference` says which subscription and what happened:
-        /// `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
-        /// picture, with the version it is at and how many users it holds,
-        /// and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
-        /// deleted, after which the subscription is being given up. The
-        /// picture itself is read with `sipral_subscription_conference` and
-        /// `sipral_subscription_conference_user_at`. A document that was late
-        /// or repeated raises nothing, and one that followed a lost one is
-        /// answered by the stack asking for full state again. `account` and
-        /// `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
-        /// before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+        /// A `conference` subscription's picture changed or the conference
+        /// ended (RFC 4575 §4.6); `payload.conference`. Read the picture with
+        /// `sipral_subscription_conference`. Out-of-order documents raise
+        /// nothing; after a loss the stack asks for full state.
         50 = ConferenceChanged, c"conference changed";
-        /// The far end typed something on the call's real-time text stream
-        /// (RFC 4103), in the order it typed it.
-        ///
-        /// `call` is the call; `payload.text` holds the text, UTF-8: an
-        /// erasure of the last character as BACKSPACE (U+0008), a new line
-        /// as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
-        /// REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
-        /// lost and no redundant copy recovered (RFC 4103 §5.3), counted in
-        /// `payload.text.missing`.
+        /// Real-time text from the far end (RFC 4103), in order, UTF-8 in
+        /// `payload.text`: BACKSPACE erases, U+2028 is a new line, BELL alerts,
+        /// U+FFFD marks each unrecovered lost block (§5.3), counted in `missing`.
         51 = TextReceived, c"text received";
-        /// Presence moved: a `presence` subscription was told about the
-        /// presentity (RFC 3856), or the state this account publishes (RFC
-        /// 3903) was published, refreshed, removed, lapsed or refused.
-        ///
-        /// `payload.presence.kind` says which. For a subscription,
-        /// `payload.presence.subscription` names it and the rest is what the
-        /// PIDF document said: open or closed, the first RPID activity, the
-        /// first note and the entity; the NOTIFY itself arrived just before,
-        /// as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
-        /// names the account and
-        /// `payload.presence.publication_state` says what became of it, with
-        /// the SIP status, the lifetime the compositor granted and when the
-        /// stack refreshes it.
+        /// Presence moved: a `presence` subscription's PIDF (RFC 3856), or this
+        /// account's publication (RFC 3903). `payload.presence.kind` says
+        /// which.
         52 = PresenceChanged, c"presence changed";
-        /// A transport this stack signals on stopped carrying traffic: the
-        /// application said it failed (`sipral_stack_transport_failed`,
-        /// `sipral_stack_transport_failed_with`) or closed
-        /// (`sipral_stack_stream_closed`), or a stream carried bytes no
-        /// message starts with (`sipral_stack_receive_stream`), or a stream
-        /// that had answered a keep-alive ping left the next one unanswered
-        /// for ten seconds (RFC 5626 §4.4.1, `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`:
-        /// the stack has let the connection go, and the socket is the
-        /// application's to close).
-        ///
-        /// Raised by the next poll, before what the loss did to the
-        /// registrations and calls on it. `payload.transport_failed` says
-        /// which transport, what it spoke, what went wrong and — when TLS
-        /// refused the connection — why, as the application's TLS library
-        /// said it: untrusted, a name that does not match, expired, or a
-        /// handshake refused, with the library's own sentence beside it.
-        /// Nothing is sent on the transport until
-        /// `sipral_stack_transport_bind` brings it back; a request asked for
-        /// meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
-        /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
+        /// A signalling transport stopped: reported failed or closed, bad
+        /// stream bytes, or a keep-alive unanswered for ten seconds (RFC 5626
+        /// §4.4.1). `payload.transport_failed` says why. Until
+        /// `sipral_stack_transport_bind` restores it, requests get
+        /// `SIPRAL_STATUS_TRANSPORT_DOWN`. `account`, `call`: none.
         53 = TransportFailed, c"transport failed";
-        /// A local conference changed (ABI 0.32): a member joined or left, who
-        /// is talking changed, or its recording stopped by itself.
-        ///
-        /// `payload.local_conference` says which conference and what
-        /// happened: `member` is the call that joined or left — or the
-        /// conference's own handle for this end — `departure` why it left,
-        /// and `members`, `talkers` and `loudest` how the conference stands
-        /// now. The talkers themselves are read with
-        /// `sipral_local_conference_talker_at`. `account` and `call` are
-        /// `SIPRAL_HANDLE_NONE`: a conference is neither.
+        /// A local conference changed: membership, talkers, or recording
+        /// (`payload.local_conference`). `account`, `call`: none.
         54 = LocalConferenceChanged, c"local conference changed";
-        /// A DNS lookup is wanted to locate an account's server by RFC 3263
-        /// (ABI 0.34): the account named its registrar or its outbound proxy
-        /// with `server_uri` rather than an address.
-        ///
-        /// `payload.locate` names the query: `name`, and `record`, what to
-        /// ask it for. Ask the platform's resolver and hand the answer to
-        /// `sipral_account_looked_up` — every one, a failure included, since
-        /// the procedure waits for each. Several may be outstanding at once,
-        /// one per host an SRV answer named. `account` is the account.
+        /// A DNS lookup is wanted to locate an account's server (RFC 3263).
+        /// Pass every answer, failures included, to `sipral_account_looked_up`.
         55 = LookupWanted, c"lookup wanted";
-        /// An account's server was located, or located again once the last
-        /// answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
-        /// is every address the answer named, first the one the account's
-        /// requests go to now. `account` is the account.
+        /// An account's server was located: `payload.locate.targets`, the
+        /// address in use first.
         56 = Located, c"located";
-        /// A lookup of an account's server named no address (ABI 0.34):
-        /// `payload.locate.failure` says why, and `retry_in_ms` when the name
-        /// is looked up again. A REGISTER that was waiting for it is reported
-        /// failed as well, and backs off; an address an earlier answer named
-        /// stays in use meanwhile. `account` is the account.
+        /// Locating an account's server failed; `retry_in_ms` says when it
+        /// retries. An earlier address stays in use.
         57 = LocateFailed, c"locate failed";
-        /// A request of an account's was challenged by somebody its
-        /// password is not for, and the challenge was not answered (ABI
-        /// 0.36): RFC 3261 §22.1 gives each protection domain its own
-        /// password, and every answer is material for an offline search of
-        /// it by whoever chose the nonce.
-        ///
-        /// `payload.challenge` says why — `refusal` — and who asked:
-        /// `server`, where the challenged request went, and `realms`, what
-        /// it was challenged for. Raised before the refusal settles the way
-        /// any unanswered challenge does — a call ending with the 401 or
-        /// 407, a registration failing with `BAD_CREDENTIALS`, a request
-        /// inside a call refused — so the application knows why first. A
-        /// server that answers under a realm the account was never told of
-        /// is what `sipral_account_config_t::realms` is for. `account` is
-        /// the account.
+        /// A challenge was not answered because it came from outside the
+        /// account's protection domain (RFC 3261 §22.1): an answer would feed
+        /// an offline password guess. `payload.challenge` says who and why.
         58 = ChallengeDeclined, c"challenge declined";
-        /// An account's own server takes an OAuth 2.0 access token (RFC
-        /// 8898) and the account has none it would accept: none was
-        /// supplied, or the one supplied was refused — expired or revoked,
-        /// which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
-        ///
-        /// `payload.token` says where a token comes from: `authz_server`, an
-        /// `https` URI RFC 8898 §2.1.1 says to check against the
-        /// authorization servers the application trusts before going near
-        /// it, and `scope`, what the token has to cover. Fetching it is the
-        /// application's; hand it over with `sipral_account_set_access_token`.
-        /// The refusal settles meanwhile the way an unanswered challenge does
-        /// — a registration failing with `BAD_CREDENTIALS`, a call ending
-        /// with the 401 or 407 — and `sipral_account_register` registers
-        /// again at once with the new token. `account` is the account.
+        /// The account's server wants an OAuth 2.0 token (RFC 8898) and has
+        /// none acceptable. Check `payload.token.authz_server` against trusted
+        /// servers (§2.1.1), then pass a token to
+        /// `sipral_account_set_access_token`.
         59 = TokenRequired, c"token required";
-        /// A network test `sipral_stack_network_test` started has every
-        /// answer it is going to get (ABI 1.2). `payload.network_test` holds
-        /// each part and the verdict; `account` is the account whose server
-        /// was probed and `call` the echo call, when the test had them.
+        /// A `sipral_stack_network_test` finished; `payload.network_test`.
         60 = NetworkTest, c"network test";
     }
 }
 
-/// Which arm of [`SipralEventPayload`] each live kind writes, once.
+/// Which arm of [`SipralEventPayload`] each live kind writes.
 ///
-/// Not part of the C ABI -- nothing across the boundary reads this, and
-/// `sipral_event_kind_name` above is what a C, Swift or C# caller has
-/// instead, because they read the one arm `kind` names and no other, the
-/// same discipline every application on top of this ABI is written to. The
-/// generated Kotlin/JNI shim cannot be: it reads every arm of every event,
-/// since nothing in these declarations otherwise says which value of `kind`
-/// writes which arm (`tools/abi-gen/src/kotlin.rs`), and the bytes of an
-/// arm nothing wrote are not merely meaningless once another arm has
-/// written real data into the same union -- a buffer's own pointer,
-/// reinterpreted as some other arm's length, is a number with no relation
-/// to any allocation, and dereferencing it is what put
-/// `sipral-lab-agent-kotlin` on the floor with a `SIGSEGV` inside
-/// `NewByteArray`. So the generator reads this, once, to gate every buffer
-/// and every whole-record pointer it prints behind the kind that is the one
-/// arm this crate ever actually writes it under; `translate` above and the
-/// `MediaEvent` match below are what it transcribes, and the assertion
-/// after it is what refuses a kind that arrived here having forgotten to.
+/// For the Kotlin/JNI generator (`tools/abi-gen/src/kotlin.rs`), which reads
+/// every arm and must not dereference one nothing wrote (a `SIGSEGV` once).
 pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::Started, "call"),
     (SipralEventKind::RegistrationChanged, "registration"),
@@ -854,11 +472,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::NetworkTest, "network_test"),
 ];
 
-// every live kind is here exactly once, in `SipralEventKind::ALL`'s own
-// order: the build failure a hole, a duplicate or a reordering becomes, the
-// same discipline `event_kinds!`'s own assertion holds the numbers to. Slice
-// patterns rather than indexing, which this workspace's lints refuse even
-// where a `while` beside it already proved every index in bounds.
+// every live kind once, in order; slice patterns since indexing is linted
 const fn arms_match(arms: &[(SipralEventKind, &str)], kinds: &[SipralEventKind]) -> bool {
     match (arms, kinds) {
         ([], []) => true,
@@ -897,23 +511,18 @@ codes! {
         Unregistered = 6,
         /// The registrar refused in a way that trying again cannot fix.
         Failed = 7,
-        /// A binding a registrar really granted, over a transport that has since
-        /// been suspended or lost, which nothing has proved since.
+        /// A binding a registrar granted, over a transport since suspended or
+        /// lost, which nothing has proved since.
         ///
-        /// Not registered, because it is no longer evidence; not failed, because
-        /// nothing refused it. A monotonic clock does not advance while a machine
-        /// sleeps, so a stack that slept eight hours comes back believing eight
-        /// milliseconds passed and every binding still valid — this is the state
-        /// that says otherwise, and an application that shows a line as ready on
-        /// the strength of it will show it ready when it is not.
+        /// A monotonic clock does not advance while a machine sleeps, so after
+        /// sleep every binding would otherwise look valid. Do not show the line
+        /// as ready in this state.
         Unverified = 8,
         /// A binding read back from a snapshot rather than granted in this
         /// process. It has not been proved either.
         Restored = 9,
-        /// The account was configured with no registrar and never registers:
-        /// a trunk that knows this end by its address. It starts here and
-        /// stays here, and `sipral_account_register` refuses it. Not idle,
-        /// which is one `sipral_account_register` away from a binding.
+        /// The account has no registrar and never registers (a trunk that
+        /// knows this end by address). `sipral_account_register` refuses it.
         NotRegistering = 10,
     }
 }
@@ -934,12 +543,8 @@ codes! {
         /// The registrar moved. Following it needs an address, which is the
         /// caller's to resolve.
         Redirected = 4,
-        /// The account's `Contact` names an address the registrar cannot
-        /// reach this end at — loopback, to a registrar that is not, or the
-        /// unspecified address — and nothing was sent (ABI 0.34). Trying
-        /// again cannot help until the account is given one it can:
-        /// `sipral_account_rebind`, with an address `sipral_advertised_address`
-        /// found.
+        /// The account's `Contact` is unreachable for the registrar (loopback
+        /// or unspecified); nothing was sent. Fix with `sipral_account_rebind`.
         UnreachableContact = 5,
     }
 }
@@ -996,9 +601,7 @@ codes! {
 }
 
 codes! {
-    /// Which of the ways this stack accepts a digit reported the one
-    /// [`SipralEventKind::DigitReceived`] or [`SipralEventKind::InBandDigit`]
-    /// carries. Names for `sipral_media_event_t::source`.
+    /// Which way a digit arrived. Names for `sipral_media_event_t::source`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDigitSource: u32 {
         /// RFC 4733: a named telephone event in the RTP stream.
@@ -1019,21 +622,16 @@ codes! {
     pub enum SipralProgressKind: u32 {
         /// Never written by this build.
         Unknown = 0,
-        /// A call-progress tone of the configured network: `tone` says which
-        /// and `at_ms` when its first burst began, from the first frame
-        /// listened to.
+        /// A call-progress tone: `tone`, and `at_ms` when its first burst began.
         Tone = 1,
-        /// The special information tone: the call failed, and an
-        /// announcement usually follows. `sit_hz_1` to `sit_hz_3` and
-        /// `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
-        /// first of the three began.
+        /// The special information tone (the call failed): `sit_hz_*` and
+        /// `sit_ms_*` as measured, `at_ms` when the first began.
         SpecialInformation = 2,
         /// Who answered: `verdict`, `reason`, `at_ms` after answer,
         /// `initial_silence_ms`, `greeting_ms` and `words`.
         AnsweredBy = 3,
-        /// The beep a machine plays before it records: `frequency_hz`,
-        /// `at_ms` when it ended after answer — when the machine starts
-        /// recording — and `length_ms`.
+        /// A machine's record beep: `frequency_hz`, `length_ms`, and `at_ms`
+        /// when it ended, after answer.
         Beep = 4,
     }
 }
@@ -1095,9 +693,8 @@ codes! {
 }
 
 codes! {
-    /// What a [`SipralEventKind::Recovery`] reports happened, for
-    /// `payload.recovery.state`: the two ways a recovery settles — a
-    /// registrar answered again, or the ladder ran out of rungs.
+    /// What a [`SipralEventKind::Recovery`] reports, for
+    /// `payload.recovery.state`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralRecoveryOutcome: u32 {
         /// Never written by this build.
@@ -1110,12 +707,7 @@ codes! {
 }
 
 codes! {
-    /// The last rung a recovery ladder tried before it gave up, for
-    /// [`SipralEventKind::Recovery`]'s `payload.recovery.rung`. Meaningful
-    /// only when `payload.recovery.state` is
-    /// [`SipralRecoveryOutcome::GaveUp`]. The ladder's own last step, giving
-    /// up, has no name here: what is reported is the rung before it that
-    /// asked for something and went unanswered.
+    /// The last rung tried before giving up, for `payload.recovery.rung`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralRecoveryRung: u32 {
         /// The ladder did not give up.
@@ -1163,17 +755,14 @@ record! {
         pub expires_ms: u64,
         /// How long until the refresh, zero unless one is scheduled.
         pub refresh_in_ms: u64,
-        /// How long until the next attempt. Only meaningful while the state is
-        /// retrying, which is exactly when the stack is going to try again.
+        /// How long until the next attempt; meaningful only while retrying.
         pub retry_in_ms: u64,
     }
 }
 
 record! {
-    /// What every call event carries.
-    ///
-    /// Not every member means something in every kind, and the ones that do not
-    /// are zero. A zero here always reads as absent rather than as a value.
+    /// What every call event carries. Members that do not apply are zero,
+    /// and zero always means absent.
     #[derive(Clone, Copy)]
     pub struct SipralCallEvent {
         /// A [`SipralCallState`].
@@ -1200,10 +789,8 @@ record! {
         /// When a refused session change goes out again by itself, zero when it is
         /// not going to.
         pub retry_in_ms: u64,
-        /// The `From` URI of the request that created this call: as written in
-        /// the header, without the angle brackets and without header
-        /// parameters such as `tag`. The same on every event of this call.
-        /// Null and zero when this build has none to report.
+        /// The creating request's `From` URI, as written, without brackets or
+        /// header parameters. Null and zero when unavailable.
         pub from_uri: *const u8,
         /// How many bytes of it.
         pub from_uri_len: usize,
@@ -1224,30 +811,21 @@ record! {
         /// The digit an INFO this end sent named, for
         /// [`SipralEventKind::DtmfSent`]. Zero for every other kind.
         pub digit: u32,
-        /// For [`SipralEventKind::CallEnded`]: the SIP status the far end's
-        /// `Reason` (RFC 3326) named — on the BYE or the CANCEL that ended
-        /// the call, or on the refusal. 200 on a CANCEL is a forking proxy
-        /// saying another phone answered: not a missed call. Zero when no
-        /// SIP reason was given. ABI 0.29.
+        /// For [`SipralEventKind::CallEnded`]: the SIP cause in the far end's
+        /// `Reason` (RFC 3326). 200 on a CANCEL means answered elsewhere.
         pub cause_sip: u32,
-        /// The same for a Q.850 cause, which a gateway to the telephone
-        /// network writes: 16 a normal clearing, 17 a busy line. Zero when
-        /// none was given.
+        /// The Q.850 cause from `Reason` (16 normal, 17 busy), or zero.
         pub cause_q850: u32,
         /// The `text` of the first `Reason` value, unquoted. Null and zero
         /// when there was none.
         pub cause_text: *const u8,
         /// How many bytes of it.
         pub cause_text_len: usize,
-        /// Whether the INVITE of a call that came in arrived from a peer its
-        /// account trusts (`trusted_peers` on `sipral_account_config_t`).
-        /// When it did not, `asserted_uri`, `asserted_display` and
-        /// `verstat` say nothing, whatever it carried (RFC 3325 §8). The same
-        /// on every event of the call; zero for a call this end placed.
+        /// Whether an incoming INVITE came from a `trusted_peers` peer. If not,
+        /// the asserted identity and `verstat` are empty (RFC 3325 §8).
         pub identity_trusted: u32,
-        /// Who the network says is calling: the first `P-Asserted-Identity`,
-        /// or a calling `Remote-Party-ID` when there is none, as written.
-        /// Null and zero when a trusted peer said nothing.
+        /// The first `P-Asserted-Identity`, else a `Remote-Party-ID`, as
+        /// written. Null and zero when none.
         pub asserted_uri: *const u8,
         /// How many bytes of it.
         pub asserted_uri_len: usize,
@@ -1260,9 +838,8 @@ record! {
         pub verstat: Number<SipralVerstat>,
         /// The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
         pub privacy: u32,
-        /// Who the call was last diverted from: the top-most `Diversion`
-        /// (RFC 5806), as written. Null and zero when none.
-        /// `sipral_call_identity_text` reads the rest.
+        /// The top-most `Diversion` (RFC 5806), as written. Null and zero
+        /// when none.
         pub diverted_from: *const u8,
         /// How many bytes of it.
         pub diverted_from_len: usize,
@@ -1285,10 +862,8 @@ record! {
         pub priv_answer_mode: u32,
         /// Whether that field said `;require`.
         pub priv_answer_mode_required: u32,
-        /// Whether the call asked to be answered without the user —
-        /// `Answer-Mode: Auto`, `answer-after` on `Call-Info` or
-        /// `Alert-Info`, or `info=alert-autoanswer` — after
-        /// `answer_after_ms`. Whether to is the application's policy.
+        /// Whether the call asked to be auto-answered after `answer_after_ms`
+        /// (`Answer-Mode: Auto`, `answer-after`, `info=alert-autoanswer`).
         pub has_answer_after: u32,
         /// After how long, when `has_answer_after` is set.
         pub answer_after_ms: u64,
@@ -1300,18 +875,13 @@ record! {
         pub alert_info: *const u8,
         /// How many bytes of it.
         pub alert_info_len: usize,
-        /// A [`SipralVerificationOutcome`]:
-        /// this stack's own verdict on the caller (RFC 8224 §6.2), for an
-        /// account that verifies; zero when nothing was verified. Unlike
-        /// `verstat`, which is what a network before this end concluded,
-        /// this is what this end checked itself. ABI 0.31.
+        /// A [`SipralVerificationOutcome`]: this stack's own verdict (RFC 8224
+        /// §6.2), unlike the network's `verstat`. Zero when not verified.
         pub verification: Number<SipralVerificationOutcome>,
         /// A [`SipralAttestation`]: the
         /// level a valid SHAKEN PASSporT claimed.
         pub attestation: Number<SipralAttestation>,
-        /// A [`SipralVerificationFailure`]:
-        /// why the verdict did not hold. `sipral_call_identity_text` reads
-        /// the number it was signed for, its `origid` and its certificate URL.
+        /// A [`SipralVerificationFailure`]: why the verdict did not hold.
         pub verification_failure: Number<SipralVerificationFailure>,
     }
 }
@@ -1337,23 +907,18 @@ record! {
     /// dialog, or the word that one lapsed.
     #[derive(Clone, Copy)]
     pub struct SipralReferralEvent {
-        /// Zero while the referral waits for the application. Set on the
-        /// event that says it lapsed, to what the stack answered it with —
-        /// 408, once its transaction ran out unanswered — and then every
-        /// other member is zero or null.
+        /// Zero while the referral waits. On the lapse event, the status the
+        /// stack answered (408), and every other member is zero or null.
         pub status_code: u32,
-        /// Whether its `Refer-To` named a dialog to replace (RFC 3891), which
-        /// makes it an attended transfer's second half rather than a plain
-        /// request to dial.
+        /// Whether `Refer-To` named a dialog to replace (RFC 3891): an
+        /// attended transfer.
         pub attended: u32,
         /// Who to call, as UTF-8. Not NUL-terminated.
         pub target: *const c_char,
         /// How many bytes of it.
         pub target_len: usize,
-        /// Its `Referred-By` (RFC 3892), as UTF-8 and as the sender wrote it:
-        /// who it says is asking. Context for the decision, never proof of
-        /// anything. Null when the REFER carried none, or more than the one
-        /// §2.1 allows. Not NUL-terminated.
+        /// Its `Referred-By` (RFC 3892), UTF-8, unverified. Null when absent or
+        /// repeated (§2.1). Not NUL-terminated.
         pub referred_by: *const c_char,
         /// How many bytes of it.
         pub referred_by_len: usize,
@@ -1361,10 +926,7 @@ record! {
 }
 
 record! {
-    /// What a media event carries.
-    ///
-    /// As with a call event, not every member means something in every kind, and
-    /// the ones that do not are zero or null.
+    /// What a media event carries. Members that do not apply are zero or null.
     #[derive(Clone, Copy)]
     pub struct SipralMediaEvent {
         /// A [`SipralCodec`]: what the negotiation
@@ -1395,35 +957,23 @@ record! {
         /// The RFC 4733 event code behind `digit`. Codes at and above sixteen are
         /// real events that are not keys.
         pub event_code: u32,
-        /// How long the far end held it. Zero either for an `application/dtmf`
-        /// INFO, which carries no duration at all, or for the other form's
-        /// own `Duration=0` — a peer that held the key for no time at all.
-        /// The Rust facade keeps the two apart; this ABI does not.
+        /// How long the key was held. Zero for no duration or `Duration=0`.
         pub held_ms: u64,
-        /// A [`SipralSrtpSuite`]: the transform
-        /// this call's media is protected with, for
-        /// [`SipralEventKind::MediaSecured`] and zero on every other kind.
+        /// A [`SipralSrtpSuite`], for [`SipralEventKind::MediaSecured`] and the
+        /// encryption report.
         pub suite: Number<SipralSrtpSuite>,
         /// A [`SipralDigitSource`]: which of the two ways this stack accepts a
         /// digit reported this one, for [`SipralEventKind::DigitReceived`].
         pub source: Number<SipralDigitSource>,
         /// Whether the RFC 6035 PUBLISH left this end, for
-        /// [`SipralEventKind::QualityReportSent`] and zero on every other
-        /// kind. Not whether a collector accepted it.
+        /// [`SipralEventKind::QualityReportSent`].
         pub quality_report_sent: u32,
-        /// A [`SipralKeyExchange`]: how
-        /// the call's keys were exchanged, for
-        /// [`SipralEventKind::MediaStarted`], [`SipralEventKind::MediaChanged`]
-        /// and [`SipralEventKind::MediaSecured`], which carry the encryption
-        /// report of the call's stream: this, `encrypted`, `authenticated`,
-        /// and `suite` from then on. ABI 0.31.
+        /// A [`SipralKeyExchange`], on the start, change and secure kinds.
         pub key_exchange: Number<SipralKeyExchange>,
-        /// Whether the stream is encrypted, now. Zero at the start of a
-        /// DTLS-SRTP call, whose keys arrive with
-        /// [`SipralEventKind::MediaSecured`].
+        /// Whether the stream is encrypted now; zero until a DTLS-SRTP
+        /// handshake ends.
         pub encrypted: u32,
-        /// Whether the key exchange authenticated the far end: a DTLS-SRTP
-        /// handshake that checked its certificate against the signalled
+        /// Whether DTLS-SRTP checked the far end's certificate against the
         /// fingerprint. Never for SDES.
         pub authenticated: u32,
     }
@@ -1442,9 +992,7 @@ record! {
         pub verdict: Number<SipralAmdVerdict>,
         /// A [`SipralAmdReason`], for who answered.
         pub reason: Number<SipralAmdReason>,
-        /// When, in milliseconds: a tone's first burst from the first frame
-        /// listened to; the decision after answer; the beep's end after
-        /// answer.
+        /// When, in milliseconds: the tone's first burst, or after answer.
         pub at_ms: u64,
         /// How long after answer the first word began, or the silence if
         /// nobody spoke.
@@ -1473,8 +1021,7 @@ record! {
 }
 
 record! {
-    /// What a [`SipralEventKind::Recovery`] carries: the lifecycle machine
-    /// settling, either by proving the path again or by giving the ladder up.
+    /// What a [`SipralEventKind::Recovery`] carries.
     #[derive(Clone, Copy)]
     pub struct SipralRecoveryEvent {
         /// A [`SipralRecoveryOutcome`].
@@ -1496,9 +1043,8 @@ record! {
     /// [`SipralEventKind::AnnouncedCallMissing`] carry.
     #[derive(Clone, Copy)]
     pub struct SipralAnnounceEvent {
-        /// Which announcement. Minted by `sipral_account_announce`, and it
-        /// names nothing once either of these two events has been raised
-        /// about it.
+        /// Which announcement, minted by `sipral_account_announce`. Stale once
+        /// either of these two events has been raised about it.
         pub announcement: SipralHandle,
         /// How long the call was waited for, in milliseconds. Meaningful only
         /// on [`SipralEventKind::AnnouncedCallMissing`].
@@ -1509,16 +1055,10 @@ record! {
 record! {
     /// What a [`SipralEventKind::SubscriptionChanged`] and a
     /// [`SipralEventKind::Notified`] carry.
-    ///
-    /// The subscription names itself here rather than in `sipral_event_t`,
-    /// which has room for an account and a call and not for every kind of
-    /// handle this ABI mints. The account is not carried at all: a caller
-    /// asked for the subscription on one, and a sibling from a fork belongs
-    /// to the same one as the subscription it forked from.
     #[derive(Clone, Copy)]
     pub struct SipralSubscriptionEvent {
-        /// Which subscription. Minted by `sipral_account_subscribe`, or by
-        /// this ABI when a fork made one nobody asked for.
+        /// Which subscription, minted by `sipral_account_subscribe` or by this
+        /// ABI for a fork sibling.
         pub subscription: SipralHandle,
         /// A [`SipralSubscriptionState`].
         pub state: Number<SipralSubscriptionState>,
@@ -1528,54 +1068,38 @@ record! {
         /// The SIP status a response gave for it, when one did. Zero
         /// otherwise.
         pub status_code: u32,
-        /// Whether the notification carried dialog state this build could
-        /// read. Zero on every kind but [`SipralEventKind::Notified`], and
-        /// zero there for a body in any other form or none at all.
+        /// Whether the notification carried readable dialog state. Zero on
+        /// every kind but [`SipralEventKind::Notified`].
         pub has_dialog_info: u32,
         /// What the notifier granted, in milliseconds. Zero until one has.
         pub expires_ms: u64,
         /// How long until this stack refreshes it, in milliseconds.
         pub refresh_in_ms: u64,
         /// How long until the next attempt, in milliseconds, when the state
-        /// is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise, which
-        /// includes every subscription that has ended for good.
+        /// is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise.
         pub retry_in_ms: u64,
-        /// The subscription this one forked from
-        /// ([RFC 6665 §4.1.4]), or `SIPRAL_HANDLE_NONE`. A sibling is a
-        /// subscription of its own from here on, with its own dialog, its own
-        /// refresh and its own state; RFC 4235 §3.9 makes this the normal case
-        /// for dialog state, one per device the watched address is registered
-        /// on.
-        ///
-        /// [RFC 6665 §4.1.4]: https://www.rfc-editor.org/rfc/rfc6665#section-4.1.4
+        /// The subscription this one forked from (RFC 6665 §4.1.4), or
+        /// `SIPRAL_HANDLE_NONE`. A sibling is a full subscription (RFC 4235
+        /// §3.9: one per device).
         pub forked_from: SipralHandle,
     }
 }
 
 record! {
     /// What a [`SipralEventKind::TransportWanted`] carries: a request RFC
-    /// 3261 §18.1.1 would not let out over a datagram, and nowhere open to
-    /// send it instead.
+    /// 3261 §18.1.1 kept off a datagram, with no stream open for it.
     #[derive(Clone, Copy)]
     pub struct SipralTransportWantedEvent {
-        /// What to open, as a
-        /// [`SipralTransport`]. Zero for a
-        /// protocol this build has no number for, which
-        /// `sipral_stack_transport_bind` then cannot be asked to open
-        /// either — nothing this build originates ever measures against a
-        /// protocol like that, so this is the layer below having grown one
-        /// rather than a caller mistake.
+        /// What to open, as a [`SipralTransport`]; zero for an unknown one.
         pub protocol: Number<SipralTransport>,
         /// Where to, as `host:port`. Not NUL-terminated.
         pub destination: *const c_char,
         /// How many bytes of it.
         pub destination_len: usize,
-        /// How large the request came out, in bytes as they would have gone
-        /// on the wire.
+        /// The request's size in bytes, as it would go on the wire.
         pub request_bytes: usize,
-        /// The largest it could have been and still fitted a datagram: the
-        /// path MTU less the §18.1.1 headroom where the MTU is known, 1300
-        /// where it is not.
+        /// The largest size that fits a datagram: path MTU less the §18.1.1
+        /// headroom, or 1300 when the MTU is unknown.
         pub limit_bytes: u32,
     }
 }
@@ -1585,58 +1109,39 @@ record! {
     /// next hop is written as, and the handle an answer takes.
     #[derive(Clone, Copy)]
     pub struct SipralResolveEvent {
-        /// The dialog this is about, and what
+        /// The handle
         /// [`sipral_stack_resolved`](crate::resolve::sipral_stack_resolved)
-        /// is answered with. Minted by the library and valid while the dialog
-        /// is; answering for one that has ended is
-        /// `SIPRAL_STATUS_STALE_HANDLE` and changes nothing.
+        /// takes; stale once the dialog ends.
         pub dialog: SipralHandle,
-        /// The host to resolve, as the URI spells it — a name, or a literal
-        /// address, which is still reported because the flow the dialog is on
-        /// may legitimately differ from it. An IPv6 literal carries its
-        /// brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+        /// The host as the URI spells it; IPv6 literals keep brackets (RFC
+        /// 3261 §19.1.1). Not NUL-terminated.
         pub host: *const c_char,
         /// How many bytes of it.
         pub host_len: usize,
-        /// The port the URI gave, or zero for none. Zero is not 5060: RFC
-        /// 3263 §4.2 leaves the choice to whoever does the lookup, because
-        /// an SRV answer carries a port of its own.
+        /// The URI's port, or zero for none. Zero is not 5060: an SRV answer
+        /// carries its own port (RFC 3263 §4.2).
         pub port: u32,
-        /// The transport the URI or the scheme named, as a
-        /// [`SipralTransport`], or zero for
-        /// neither — which leaves §4.1's NAPTR step to the caller, and is
-        /// also what a protocol this build has no number for reads as.
+        /// The transport named, as a [`SipralTransport`], or zero, leaving
+        /// §4.1's NAPTR step to the caller.
         pub protocol: Number<SipralTransport>,
     }
 }
 
 record! {
-    /// What a [`SipralEventKind::MessageReceived`], a
-    /// [`SipralEventKind::MessageSent`] and a
-    /// [`SipralEventKind::MessagesWaiting`] carry.
-    ///
-    /// One struct for all three, the way [`SipralSubscriptionEvent`] answers
-    /// for two kinds: a member meaningless on one kind is zero or null there.
-    /// The whole request or response, when there is one, rides in
-    /// `sipral_event_t::message` instead — `attach` points it at the same
-    /// bytes `content_type` and `body` are read out of, so both are valid for
-    /// exactly as long as the callback is.
+    /// What the three message kinds carry; inapplicable members are zero.
+    /// `content_type` and `body` point into `sipral_event_t::message`.
     #[derive(Clone, Copy)]
     pub struct SipralMessageEvent {
-        /// [`SipralEventKind::MessageSent`]: which send, minted by
-        /// `sipral_account_message`. [`SIPRAL_HANDLE_NONE`] on the other two
-        /// kinds, and names nothing once this event has been raised about it.
+        /// [`SipralEventKind::MessageSent`]: which send; stale after this.
         pub message: SipralHandle,
         /// [`SipralEventKind::MessagesWaiting`]: which subscription reported
-        /// it. [`SIPRAL_HANDLE_NONE`] on the other two kinds, which are not
-        /// subscriptions.
+        /// it. [`SIPRAL_HANDLE_NONE`] on the other kinds.
         pub subscription: SipralHandle,
         /// [`SipralEventKind::MessageSent`]: the final status. Zero on the
         /// other two kinds.
         pub status_code: u32,
-        /// [`SipralEventKind::MessageReceived`]: the `Content-Type` of the
-        /// body, as written. Null on the other two kinds, and on a MESSAGE
-        /// with no body at all.
+        /// [`SipralEventKind::MessageReceived`]: the body's `Content-Type`, as
+        /// written. Null on the other kinds and for an empty MESSAGE.
         pub content_type: *const c_char,
         /// How many bytes of it.
         pub content_type_len: usize,
@@ -1646,13 +1151,10 @@ record! {
         /// How many bytes of it.
         pub body_len: usize,
         /// [`SipralEventKind::MessagesWaiting`]: RFC 3842 §3.5's status
-        /// line, 1 for `yes` and 0 for `no`. Meaningless on the other two
-        /// kinds.
+        /// line, 1 for `yes` and 0 for `no`.
         pub waiting: u32,
-        /// [`SipralEventKind::MessagesWaiting`]: new messages of the
-        /// `voice-message` class (RFC 3458 §6.2), the one a phone's
-        /// message-waiting light is about. Zero when the body named no
-        /// `voice-message` line, which a boolean-only notification does.
+        /// [`SipralEventKind::MessagesWaiting`]: new `voice-message` messages
+        /// (RFC 3458 §6.2). Zero when the body had no such line.
         pub new_messages: u32,
         /// The same, old.
         pub old_messages: u32,
@@ -1660,10 +1162,8 @@ record! {
         pub urgent_new_messages: u32,
         /// Old messages flagged urgent.
         pub urgent_old_messages: u32,
-        /// [`SipralEventKind::MessagesWaiting`]: `Message-Account`, when the
-        /// notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
-        /// subscription to a group or collection of accounts). Null on the
-        /// other two kinds, and on a body that named none.
+        /// [`SipralEventKind::MessagesWaiting`]: `Message-Account`, when sent
+        /// (RFC 3842 §3.5). Null otherwise.
         pub message_account: *const c_char,
         /// How many bytes of it.
         pub message_account_len: usize,
@@ -1696,9 +1196,8 @@ record! {
         /// Whether the call was refused with it, which only a strict account
         /// does.
         pub refused: u32,
-        /// The URL of the certificate: the one to fetch, or the one that was
-        /// verified. UTF-8, not NUL-terminated; null and zero when there is
-        /// none.
+        /// The certificate URL: to fetch, or that was verified. UTF-8, not
+        /// NUL-terminated; null and zero when none.
         pub certificate_url: *const c_char,
         /// How many bytes of it.
         pub certificate_url_len: usize,
@@ -1725,25 +1224,16 @@ codes! {
     pub enum SipralChallengeRefusal: u32 {
         /// Never written by this build.
         Unknown = 0,
-        /// The challenged request went somewhere other than the account's
-        /// own server — its registrar, or the outbound proxy of an account
-        /// that does not register — so whoever asked is the far end of a
-        /// call, or a peer reached directly.
+        /// The challenge came from beyond the account's own server.
         NotTheAccountsServer = 1,
-        /// The account's server asked for a realm that is not the
-        /// account's: not one of `sipral_account_config_t::realms`, or, with
-        /// none named, neither the one its server first challenged with nor
-        /// one its REGISTERs were challenged with. A proxy passing on a far
-        /// end's own challenge looks like this, and so does an SBC that
-        /// challenges calls under a realm of its own.
+        /// The account's server asked for a realm not the account's (e.g. a
+        /// proxy relaying a far end's challenge).
         NotTheAccountsRealm = 2,
     }
 }
 
 codes! {
-    /// What an account's server said was wrong with the access token it
-    /// was given (RFC 6750 §3.1, RFC 8898 §4). Names for
-    /// `sipral_token_event_t::error`.
+    /// What the server said was wrong with the token (RFC 6750 §3.1).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralTokenError: u32 {
         /// The server named no error: no token was offered yet.
@@ -1764,20 +1254,15 @@ codes! {
 }
 
 record! {
-    /// What a [`SipralEventKind::TokenRequired`] carries: the `Bearer`
-    /// challenge of an account's server (RFC 8898 §4), and where it came
-    /// from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
-    /// server left out is empty.
+    /// What a [`SipralEventKind::TokenRequired`] carries (RFC 8898 §4).
+    /// Texts are UTF-8, not NUL-terminated, empty when absent.
     #[derive(Clone, Copy)]
     pub struct SipralTokenEvent {
         /// A [`SipralTokenError`].
         pub error: Number<SipralTokenError>,
-        /// A `SipralToggle`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
-        /// answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
-        /// registrar or the far end did (401).
+        /// A `SipralToggle`: on for a proxy's 407, off for a 401.
         pub proxy: Number<SipralToggle>,
-        /// Where the challenged request went, and the challenge came from,
-        /// as `host:port`.
+        /// Where the challenged request went, as `host:port`.
         pub server: *const c_char,
         /// How many bytes of it.
         pub server_len: usize,
@@ -1790,8 +1275,7 @@ record! {
         pub scope: *const c_char,
         /// How many bytes of it.
         pub scope_len: usize,
-        /// The authorization server: an `https` URI. A value that was not
-        /// one is left out.
+        /// The authorization server: an `https` URI, or empty if it was not one.
         pub authz_server: *const c_char,
         /// How many bytes of it.
         pub authz_server_len: usize,
@@ -1804,19 +1288,18 @@ record! {
 
 record! {
     /// What a [`SipralEventKind::ChallengeDeclined`] carries: who asked for
-    /// the account's password, and why it was not given (ABI 0.36).
+    /// the account's password, and why it was not given.
     #[derive(Clone, Copy)]
     pub struct SipralChallengeEvent {
         /// A [`SipralChallengeRefusal`].
         pub refusal: Number<SipralChallengeRefusal>,
-        /// Where the challenged request went, and the refusal came from, as
-        /// `host:port`. Not NUL-terminated.
+        /// Where the challenged request went, as `host:port`. Not
+        /// NUL-terminated.
         pub server: *const c_char,
         /// How many bytes of it.
         pub server_len: usize,
-        /// The realms it was challenged for, each on a line of its own,
-        /// separated by line feeds: a realm may hold a comma, and never a
-        /// line break. UTF-8, not NUL-terminated.
+        /// The challenged realms, separated by line feeds (a realm may hold a
+        /// comma, never a line break). UTF-8, not NUL-terminated.
         pub realms: *const c_char,
         /// How many bytes of it.
         pub realms_len: usize,
@@ -1824,25 +1307,17 @@ record! {
 }
 
 record! {
-    /// The arm of an event that its kind names.
-    ///
-    /// The whole union is zeroed before that one arm is written, so every
-    /// byte past the arm, and every byte of another arm, reads as zero —
-    /// which is what a member appended to an arm later reads as from a
-    /// library built before it. Another arm still means nothing for this
-    /// kind.
+    /// The arm of an event that its kind names. The rest of the union is
+    /// zeroed, so members appended later read as zero.
     #[derive(Clone, Copy)]
     pub union SipralEventPayload {
         /// For [`SipralEventKind::RegistrationChanged`].
         pub registration: SipralRegistrationEvent,
         /// For every call kind.
         pub call: SipralCallEvent,
-        /// For [`SipralEventKind::TransferRequested`],
-        /// [`SipralEventKind::TransferProgress`] and
-        /// [`SipralEventKind::TransferDone`].
+        /// For the three transfer kinds.
         pub transfer: SipralTransferEvent,
-        /// For every media kind: started, changed, stalled, resumed, failed, the
-        /// end-of-call statistics, and a recording that stopped by itself.
+        /// For every media kind.
         pub media: SipralMediaEvent,
         /// For [`SipralEventKind::Recovery`].
         pub recovery: SipralRecoveryEvent,
@@ -1856,9 +1331,7 @@ record! {
         pub announce: SipralAnnounceEvent,
         /// For [`SipralEventKind::ResolveNeeded`].
         pub resolve: SipralResolveEvent,
-        /// For [`SipralEventKind::MessageReceived`],
-        /// [`SipralEventKind::MessageSent`] and
-        /// [`SipralEventKind::MessagesWaiting`].
+        /// For the three message kinds.
         pub message: SipralMessageEvent,
         /// For [`SipralEventKind::NatMapping`].
         pub nat: SipralNatEvent,
@@ -1901,11 +1374,8 @@ record! {
 record! {
     /// Something the library has to tell the application.
     ///
-    /// The pointer handed to the callback is the library's, and it is valid for
-    /// the duration of that call and no longer. `size` says how much of the
-    /// struct this build filled in, and a binding reads no further than that. The
-    /// union stays the last member for the same reason: an arm that grows grows
-    /// the tail, which is the one place a released struct may change.
+    /// Library-owned, valid for the callback only. Read no further than
+    /// `size`; the union stays last so growth only extends the tail.
     #[derive(Clone, Copy)]
     pub struct SipralEvent {
         /// How many bytes of this struct are meaningful.
@@ -1918,11 +1388,7 @@ record! {
         pub account: SipralHandle,
         /// The call it is about, or [`SIPRAL_HANDLE_NONE`].
         pub call: SipralHandle,
-        /// The SIP message behind it, whole and unparsed, when there is one.
-        ///
-        /// A reason phrase, a `Retry-After`, the `Contact` of a redirect and the
-        /// caller's display name all live here and none of them is worth a member
-        /// of its own. Null when the event came from no single message.
+        /// The SIP message behind it, whole and unparsed, or null.
         pub message: *const u8,
         /// How many bytes of it.
         pub message_len: usize,
@@ -1934,37 +1400,18 @@ record! {
 alias! {
     /// The one callback a stack has.
     ///
-    /// It is called from inside `sipral_stack_poll`, on the thread that called
-    /// it, with the `user_data` the stack was created with, and never on two
-    /// threads at once for one stack. It must not unwind. Nothing is held
-    /// while it runs, so it may call back into the library, the stack it was
-    /// given included (`docs/08-ffi.md`, "The shape").
+    /// Called inside `sipral_stack_poll` on its thread, never concurrently
+    /// for one stack. Must not unwind. May call back into the library
+    /// (`docs/08-ffi.md`, "The shape").
     pub type SipralEventCallback = fn(event: *const SipralEvent, user_data: *mut c_void);
 }
 
-/// A [`SipralEventPayload`] with the one arm named written, and every other
-/// byte of the union zero.
-///
-/// `SipralEventPayload { call: value }`'s own construction only ever writes
-/// `value`'s own bytes; nothing sets the rest of the union, up to its own
-/// size (the size of its largest arm), and a fresh value's unwritten bytes
-/// are whatever the compiler put on the stack there before -- not
-/// necessarily zero, and not the same twice. Every binding but Kotlin's
-/// reads the one arm `kind` names and nothing past it, so that was never
-/// reached; the generated Kotlin/JNI shim reads every arm of every event,
-/// because nothing in these declarations says which value of `kind` writes
-/// which arm (`tools/abi-gen/src/kotlin.rs`), and a buffer pointer read out
-/// of bytes nothing wrote is not a value with no meaning, the way an
-/// unwritten integer is -- it is an address nothing owns, and JNI dies on
-/// it exactly as it found here (`SIGSEGV` inside `NewByteArray`, from a
-/// `Kotlin lab agent`'s length reading a genuinely negative array size).
+/// A [`SipralEventPayload`] with the named arm written and every other byte
+/// zero, since the Kotlin/JNI shim reads every arm.
 macro_rules! payload {
     ($arm:ident: $value:expr) => {{
-        // Safety: every member of every arm is a plain integer or a
-        // pointer with its own length beside it, and the all-zero bit
-        // pattern is already the value each of those reads as "nothing" on
-        // its own -- a null pointer, a zero length, a zero code -- so it is
-        // a valid value of every arm this union has, whichever is read.
+        // Safety: every arm member is an integer or a pointer with a length,
+        // and all-zero is a valid value for each.
         let mut zeroed: SipralEventPayload = unsafe { std::mem::zeroed() };
         zeroed.$arm = $value;
         zeroed
@@ -1973,12 +1420,7 @@ macro_rules! payload {
 
 impl SipralEvent {
     /// An event with nothing in it but its kind, for a kind to fill in.
-    ///
-    /// The payload is written whole, never a member at a time: a union member
-    /// is a place the library has to know it owns before it writes through it,
-    /// and one assignment of the arm the kind names is the way to be sure.
-    // moved in whole, for the reason above: the union is built at the call
-    // site and assigned here once, and a reference would only add a copy
+    // the union is built at the call site and moved in once
     #[allow(clippy::large_types_passed_by_value)]
     fn of(stack: SipralHandle, kind: SipralEventKind, payload: SipralEventPayload) -> Self {
         Self {
@@ -2085,15 +1527,15 @@ pub(crate) fn started(stack: SipralHandle) -> SipralEvent {
     )
 }
 
-/// What a STUN server said about one socket, as C reads it. The pointers in
-/// `payload` point into text the caller keeps beside the event.
+/// What a STUN server said about one socket, as C reads it. `payload`
+/// points into text the caller keeps beside the event.
 #[cfg(feature = "stun")]
 pub(crate) fn nat_mapping(stack: SipralHandle, payload: SipralNatEvent) -> SipralEvent {
     SipralEvent::of(stack, SipralEventKind::NatMapping, payload!(nat: payload))
 }
 
-/// What happened to the STUN servers a stack asks, as C reads it. The
-/// pointers in `payload` point into text the caller keeps beside the event.
+/// What happened to a stack's STUN servers, as C reads it. `payload`
+/// points into text the caller keeps beside the event.
 #[cfg(feature = "stun")]
 pub(crate) fn stun_server(stack: SipralHandle, payload: SipralStunServerEvent) -> SipralEvent {
     SipralEvent::of(
@@ -2103,8 +1545,8 @@ pub(crate) fn stun_server(stack: SipralHandle, payload: SipralStunServerEvent) -
     )
 }
 
-/// A transport lost, as C reads it. The pointer in `payload` points into
-/// text the caller keeps beside the event.
+/// A transport lost, as C reads it. `payload` points into text the caller
+/// keeps beside the event.
 pub(crate) fn transport_failed(
     stack: SipralHandle,
     payload: SipralTransportFailedEvent,
@@ -2116,8 +1558,8 @@ pub(crate) fn transport_failed(
     )
 }
 
-/// A network test finished, as C reads it. The pointers in `payload` point
-/// into text the caller keeps beside the event.
+/// A network test finished, as C reads it. `payload` points into text the
+/// caller keeps beside the event.
 pub(crate) fn network_tested(stack: SipralHandle, payload: SipralNetworkTestEvent) -> SipralEvent {
     SipralEvent::of(
         stack,
@@ -2126,17 +1568,15 @@ pub(crate) fn network_tested(stack: SipralHandle, payload: SipralNetworkTestEven
     )
 }
 
-/// What a TURN server said about one media socket's relay, as C reads it.
-/// The pointers in `payload` point into text the caller keeps beside the
-/// event.
+/// A TURN relay result for one media socket, as C reads it. `payload`
+/// points into text the caller keeps beside the event.
 #[cfg(all(feature = "stun", feature = "ice"))]
 pub(crate) fn nat_relay(stack: SipralHandle, payload: SipralNatRelayEvent) -> SipralEvent {
     SipralEvent::of(stack, SipralEventKind::NatRelay, payload!(relay: payload))
 }
 
-/// What a media socket's connection to its TURN server is to do, as C
-/// reads it. The pointers in `payload` point into text the caller keeps
-/// beside the event.
+/// What a media socket's TURN connection is to do, as C reads it.
+/// `payload` points into text the caller keeps beside the event.
 #[cfg(all(feature = "stun", feature = "ice"))]
 pub(crate) fn turn_stream(stack: SipralHandle, payload: SipralTurnStreamEvent) -> SipralEvent {
     SipralEvent::of(
@@ -2177,29 +1617,16 @@ pub(crate) struct Vocabulary<'a> {
     pub(crate) messages: &'a mut Names<sipral_ua::MessageHandle>,
     pub(crate) announcements: &'a mut Names<sipral_ua::AnnouncementId>,
     pub(crate) dialogs: &'a mut Names<sipral_core::transaction::DialogId>,
-    /// Who is on every call this stack still knows, fixed when each was
-    /// created.
+    /// Who is on every call this stack still knows, fixed at creation.
     pub(crate) identities: &'a HashMap<CallHandle, Arc<CallIdentity>>,
-    /// The identity `call_payload` last attached, if any, so that whoever
-    /// queues the event this translation produces can keep its bytes alive
-    /// for as long as the delivery takes.
+    /// The identity `call_payload` last attached, kept alive by whoever
+    /// queues the event for the duration of delivery.
     pub(crate) raised_identity: Option<Arc<CallIdentity>>,
 }
 
-/// Say a user agent event the way C says it.
-///
-/// `None` for one this ABI has no word for. Nothing is invented: an event that
-/// would arrive carrying only its own existence tells a binding nothing it can
-/// act on, and the poll result counts them instead so that the gap is a number
-/// rather than a silence.
-///
-/// The pointers in what comes back borrow from `event`, and `transport`
-/// carries one more this ABI has to point at that `event` holds no bytes for:
-/// [`SipralEventKind::TransportWanted`]'s destination or
-/// [`SipralEventKind::ResolveNeeded`]'s host, formatted by
-/// [`text_to_point_at`] before this is called, since neither has bytes of its
-/// own in the shape C reads. Both have to outlive the callback this is handed
-/// to.
+/// Say a user agent event the way C says it, or `None` (counted by the
+/// poll). The result borrows from `event` and `transport`, the text from
+/// [`text_to_point_at`]; both must outlive the callback.
 pub(crate) fn translate(
     known: &mut Vocabulary<'_>,
     event: &UaEvent,
@@ -2253,10 +1680,8 @@ pub(crate) fn translate(
     about_lifecycle(known, event)
 }
 
-/// A challenge an account's password did not answer. Who asked and the
-/// realms are `text`, the text [`text_to_point_at`] built for this event —
-/// the address, a line feed, and the realms one to a line — since neither
-/// has bytes of its own in the shape C reads.
+/// A challenge an account's password did not answer. `text` is from
+/// [`text_to_point_at`]: the address, a line feed, then one realm per line.
 fn about_a_challenge(
     known: &mut Vocabulary<'_>,
     event: &UaEvent,
@@ -2295,9 +1720,8 @@ fn about_a_challenge(
     Some(out)
 }
 
-/// An account's server asking for an OAuth 2.0 access token. The address is
-/// `text`, the text [`text_to_point_at`] built for this event, since it has
-/// no bytes of its own; the rest borrows from the event.
+/// An account's server asking for an OAuth 2.0 access token. `text` is the
+/// address from [`text_to_point_at`]; the rest borrows from the event.
 fn about_a_token(
     known: &mut Vocabulary<'_>,
     event: &UaEvent,
@@ -2358,10 +1782,8 @@ fn about_a_token(
     Some(out)
 }
 
-/// An account's server being located by RFC 3263: a lookup wanted, the
-/// addresses found, or none found. The query's name borrows from `event`;
-/// the addresses are `targets`, the text [`text_to_point_at`] built for this
-/// event, since a list of `SocketAddr`s has no bytes of its own.
+/// An account's server being located (RFC 3263). `targets` is from
+/// [`text_to_point_at`].
 fn about_a_location(
     known: &mut Vocabulary<'_>,
     event: &UaEvent,
@@ -2623,10 +2045,8 @@ fn subscription_payload(
     }
 }
 
-/// The handle one subscription of the layer below is known by here, minting
-/// one for a subscription nobody asked for: a sibling a fork produced arrives
-/// in an event rather than as the result of a call, the way an incoming call
-/// does.
+/// The handle for a subscription of the layer below, minting one for a fork
+/// sibling nobody asked for.
 fn subscription_named(
     known: &mut Vocabulary<'_>,
     subscription: sipral_ua::SubscriptionHandle,
@@ -2637,9 +2057,8 @@ fn subscription_named(
         .unwrap_or(SIPRAL_HANDLE_NONE)
 }
 
-/// Where a subscription is now, asked of the layer below rather than inferred:
-/// the event that says a state changed is raised from the same drain that
-/// changed it.
+/// A subscription's current state, asked of the layer below: the event is
+/// raised from the same drain that changed it.
 fn subscription_state_now(
     known: &Vocabulary<'_>,
     subscription: sipral_ua::SubscriptionHandle,
@@ -2681,8 +2100,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             subscription,
             sibling,
         } => {
-            // the sibling is what this event is about: it is new, and the one
-            // it forked from carries on unchanged
+            // the event is about the new sibling; its origin is unchanged
             let from = subscription_named(known, subscription);
             let named = subscription_named(known, sibling);
             let mut payload = subscription_payload(named, subscription_state_now(known, sibling));
@@ -2718,9 +2136,8 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             ref response,
         } => {
             let named = subscription_named(known, subscription);
-            // said here rather than asked for: a subscription that has ended
-            // for good is one the layer below has already let go of, and a
-            // state read now would be no state at all
+            // stated, not asked: an ended subscription is already released
+            // below
             let state = if retry_in.is_some() {
                 SipralSubscriptionState::Retrying
             } else {
@@ -2771,10 +2188,7 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
         } => {
             let raw = request.as_raw();
             let mut payload = empty_message_payload();
-            // both point straight into `request`, which `attach` below also
-            // borrows from and which lives as long as the event this
-            // translation produced: no copy, and nothing to keep alive that
-            // is not already kept
+            // both point into `request`, which the event keeps alive
             if let Some(field) = raw.header(HeaderName::ContentType) {
                 payload.content_type = field.as_ptr().cast::<c_char>();
                 payload.content_type_len = field.len();
@@ -2850,12 +2264,8 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
     }
 }
 
-/// A request RFC 3261 §18.1.1 would not let out over a datagram, with
-/// nowhere open to send it instead. `destination` is the text
-/// [`text_to_point_at`] built for the event this is about; `None`
-/// here from a caller that has none is the same as the event carrying no
-/// destination at all, which never actually happens for this kind but is not
-/// this function's to assume.
+/// A request RFC 3261 §18.1.1 kept off a datagram, with no stream open for
+/// it. `destination` is the text [`text_to_point_at`] built for the event.
 fn about_a_transport(
     known: &Vocabulary<'_>,
     event: &UaEvent,
@@ -2889,12 +2299,8 @@ fn about_a_transport(
     }
 }
 
-/// A dialog whose next hop is a name this library will not look up. `host` is
-/// the text [`text_to_point_at`] built for this event, for the same reason
-/// `about_a_transport` needs one: a [`Host`](sipral_core::endpoint::Host) that
-/// is a literal address has no bytes of its own to point at, and one that is a
-/// name has bytes that belong to the event rather than to the shape C reads.
-/// Formatting both the same way is one rule instead of two.
+/// A dialog whose next hop is a name to resolve. `host` is from
+/// [`text_to_point_at`].
 fn about_a_resolve(
     known: &mut Vocabulary<'_>,
     event: &UaEvent,
@@ -2907,9 +2313,8 @@ fn about_a_resolve(
             protocol,
             ..
         }) => {
-            // named rather than inserted, so that a dialog asking again --
-            // which it does on every target refresh -- is the same handle it
-            // was the first time and not another row
+            // looked up, not inserted: every target refresh asks again and
+            // must get the same handle
             let named = known
                 .dialogs
                 .name_of(dialog)
@@ -2935,17 +2340,8 @@ fn about_a_resolve(
     }
 }
 
-/// The one piece of text an event has no bytes of its own for, formatted once
-/// so the shape this ABI raises has something to point at that outlives the
-/// callback.
-///
-/// Two kinds need it and neither can borrow: a
-/// [`SipralEventKind::TransportWanted`]'s destination is a `SocketAddr`, which
-/// carries no text at all, and a [`SipralEventKind::ResolveNeeded`]'s host is
-/// a `Host`, whose name half borrows from the event and whose address half is
-/// again a value with no text. One rule for both beats two. `None` for every
-/// other kind of event, which is also what a caller who does not care to check
-/// the kind first gets.
+/// Text an event has no bytes of its own for, formatted once so the event
+/// can point at it. `None` for kinds that need none.
 pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
     match *event {
         UaEvent::Unclaimed(Event::TransportWanted { destination, .. }) => {
@@ -2995,9 +2391,8 @@ fn about_registration(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sip
             let mut payload = registration_payload(known, account, None);
             payload.expires_ms = millis(expires);
             payload.refresh_in_ms = millis(refresh_in);
-            // the 2xx, whole, as a refusal always was: the Service-Route, the
-            // GRUUs and the P-Associated-URI a registrar sent are read out of
-            // it rather than out of members of their own
+            // the whole 2xx, so Service-Route, GRUUs and P-Associated-URI
+            // can be read from it
             let mut out = registration_event(known, account, payload);
             attach(&mut out, Some(response));
             Some(out)
@@ -3159,16 +2554,14 @@ fn about_a_call_ending(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Si
             ref causes,
         } => {
             let mut payload = call_payload(known, call);
-            // the layer below has already let the call go, so the state is
-            // said here rather than asked for
+            // already released below, so the state is stated, not asked
             payload.state = SipralCallState::Terminated as u32;
             payload.end_reason = end_reason(reason) as u32;
             payload.status_code = status_of(status);
             said_why(&mut payload, causes);
             let mut out = call_event(known, SipralEventKind::CallEnded, call, payload);
-            // the refusal when there was one, or the BYE or the CANCEL the
-            // far end ended the call with: never both, since a call that was
-            // refused had no dialog to send a BYE in
+            // the refusal, or the far end's BYE/CANCEL; never both, since a
+            // refused call had no dialog for a BYE
             attach(&mut out, response.as_ref().or(request.as_ref()));
             Some(out)
         }
@@ -3176,9 +2569,7 @@ fn about_a_call_ending(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Si
     }
 }
 
-/// The `Reason` values a call's end carried, onto its event: the SIP and
-/// the Q.850 cause, and the first value's text. The text borrows from
-/// `causes`, which the queued delivery keeps alive with the event.
+/// The call end's `Reason` causes onto its event; text borrows `causes`.
 fn said_why(payload: &mut SipralCallEvent, causes: &[sipral_ua::Reason]) {
     for cause in causes {
         let number = cause.cause.map_or(0, u32::from);
@@ -3252,8 +2643,8 @@ fn about_a_transfer(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipra
                 SipralEventKind::Referral,
                 payload!(referral: payload),
             );
-            // minted here, the way an incoming call's handle is: the
-            // referral's is what the two calls that answer it take
+            // minted here like an incoming call's handle; the two answering
+            // calls take it
             out.call = known.calls.name_of(referral).unwrap_or(SIPRAL_HANDLE_NONE);
             out.account = known
                 .accounts
@@ -3279,25 +2670,13 @@ fn about_a_transfer(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipra
             out.call = known.calls.name_of(referral).unwrap_or(SIPRAL_HANDLE_NONE);
             Some(out)
         }
-        // a protocol event this stack has no policy for and this ABI has no
-        // word for; the poll result counts it, and the layer below is free to
-        // grow a vocabulary faster than this one.
-        //
-        // This arm cannot be deleted to make the compiler demand a translation
-        // for every new one: `UaEvent` is `#[non_exhaustive]`, so a match on it
-        // outside its own crate is required to have a wildcard. What that
-        // buys is a layer below that can add an event without breaking this
-        // one, and what it costs is that the compiler cannot notice a kind
-        // this ABI has not caught up with. The number space above is where the
-        // guarantee lives instead, because that is where a mistake would be
-        // permanent.
+        // no word for it here; counted by the poll. `UaEvent` is
+        // `#[non_exhaustive]`, so the number space is the guarantee.
         _ => None,
     }
 }
 
-/// The two ways `crates/sipral-ffi/src/lifecycle.rs`'s ladder settles: a
-/// registrar proved the path again, or every rung was climbed and none of
-/// them worked.
+/// The two ways `crates/sipral-ffi/src/lifecycle.rs`'s ladder settles.
 fn about_lifecycle(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
     match *event {
         UaEvent::Lifecycle {
@@ -3326,10 +2705,8 @@ fn about_lifecycle(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
                 unverified: u32::try_from(unverified).unwrap_or(u32::MAX),
             },
         )),
-        // every other `Lifecycle` variant is a rung mid-ladder — `Suspending`,
-        // or `Recovering`/`ResolutionLost`/`InterfaceLost` with a rung that is
-        // not the last one — and this ABI has no word for a step, only for
-        // where a ladder ends. `SIPRAL_EVENT_KIND_RECOVERY` is that word.
+        // other `Lifecycle` variants are mid-ladder steps, which this ABI
+        // does not report; only where the ladder ends
         _ => None,
     }
 }
@@ -3348,9 +2725,8 @@ fn recovery_rung(rung: Rung) -> SipralRecoveryRung {
         Rung::Reregister => SipralRecoveryRung::Reregister,
         Rung::WantTransport => SipralRecoveryRung::WantTransport,
         Rung::WantAddress => SipralRecoveryRung::WantAddress,
-        // `Rung` is `#[non_exhaustive]`, and `give_up_recovering` never
-        // reports `Rung::GiveUp` as the rung it gave up on in the first
-        // place.
+        // `Rung` is `#[non_exhaustive]`; `GiveUp` is never reported as the
+        // rung given up on
         _ => SipralRecoveryRung::None,
     }
 }
@@ -3364,9 +2740,8 @@ fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
     }
 }
 
-/// The transform a call is running, on this side of the boundary: every
-/// suite the stack implements has a word of its own (ABI 0.29), and `Unknown`
-/// is left for an event that is not about one.
+/// The C name of the transform a call is running; `Unknown` is kept for
+/// events not about one.
 pub(crate) const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
     use crate::media::SipralSrtpSuite;
     match suite {
@@ -3380,8 +2755,8 @@ pub(crate) const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite 
     }
 }
 
-/// Real-time text the far end typed on `call`, `missing` blocks of it lost:
-/// `text` borrows from the caller for the one delivery.
+/// Real-time text typed on `call`, `missing` blocks lost. `text` borrows
+/// from the caller for one delivery.
 fn text_received(
     known: &mut Vocabulary<'_>,
     call: CallHandle,
@@ -3406,20 +2781,9 @@ fn text_received(
     out
 }
 
-/// Say a media event the way C says it.
-///
-/// `None` for one this ABI has no word for, as with a signalling event: the
-/// layer below is free to grow a vocabulary faster than this one, and a number
-/// is counted rather than invented.
-///
-/// `reason` and `statistics` are the caller's, because both are built for the
-/// duration of one delivery and neither can be borrowed from the event itself:
-/// a `MediaError` is a Rust value with no C shape, and the statistics have to
-/// be converted before they have one.
-///
-/// `encryption` is the call's stream as its encryption report has it at the
-/// moment of the event, which the kinds that start, change or secure a call's
-/// media carry.
+/// Say a media event the way C says it, or `None` (counted). `reason` and
+/// `statistics` are the caller's, built for one delivery; `encryption` is
+/// the stream's report for the start, change and secure kinds.
 pub(crate) fn media(
     known: &mut Vocabulary<'_>,
     call: CallHandle,
@@ -3428,8 +2792,7 @@ pub(crate) fn media(
     statistics: Option<&SipralStreamStats>,
     encryption: Option<&sipral::StreamEncryption>,
 ) -> Option<SipralEvent> {
-    // text has an arm of its own: `reason` is the text itself, which is what
-    // `media_reason` built it to be
+    // text has its own arm; `reason` is the text (see `media_reason`)
     if let MediaEvent::TextReceived { missing, .. } = *event {
         return Some(text_received(known, call, missing, reason));
     }
@@ -3473,10 +2836,8 @@ pub(crate) fn media(
         MediaEvent::PathChosen { .. } => SipralEventKind::MediaPathChosen,
         #[cfg(feature = "dtls")]
         MediaEvent::Secured { suite, .. } => {
-            // the address the handshake came from is deliberately not carried
-            // here: it is the address `sipral_media_poll_transmit` already
-            // hands every record back with, so an application that drove the
-            // handshake at all has it
+            // the handshake's address is not carried:
+            // `sipral_media_poll_transmit` already returns it with each record
             payload.suite = suite_of(suite) as u32;
             SipralEventKind::MediaSecured
         }
@@ -3488,9 +2849,7 @@ pub(crate) fn media(
         } => {
             payload.digit = digit.map_or(0, u32::from);
             payload.event_code = u32::from(event);
-            // no ABI change here: a duration the peer never gave and a
-            // `Duration=0` it did give both read as zero on this side of the
-            // boundary, and `sipral_media_event_t::held_ms`'s own doc says so
+            // a missing duration and `Duration=0` both read as zero here
             payload.held_ms = held.map_or(0, millis);
             payload.source = digit_source(source) as u32;
             if source == DigitSource::InBand {
@@ -3536,8 +2895,7 @@ pub(crate) fn media(
     Some(out)
 }
 
-/// Whether a media event is one of the kinds that carry the encryption
-/// report: the call's media started, changed, or was secured.
+/// Whether a media event carries the encryption report.
 const fn reports_encryption(event: &MediaEvent) -> bool {
     match event {
         MediaEvent::Started { .. } | MediaEvent::Changed { .. } => true,
@@ -3547,17 +2905,12 @@ const fn reports_encryption(event: &MediaEvent) -> bool {
     }
 }
 
-/// The sentence a media event carries, for the kinds that have one to say.
-///
-/// Built here rather than in the translation because it has to outlive the
-/// borrow the event holds, and a `String` handed to C has to belong to
-/// something that is still alive when the callback reads it.
+/// The text a media event carries, owned so it outlives the event borrow.
 pub(crate) fn media_reason(event: &MediaEvent) -> Option<String> {
     match *event {
         MediaEvent::Failed(ref error) => Some(error.to_string()),
         MediaEvent::RecordingStopped { ref reason, .. } => Some(reason.to_string()),
-        // not a sentence, but the same need: bytes C reads after the borrow
-        // of the event has gone
+        // not a sentence, but it must outlive the event borrow too
         MediaEvent::TextReceived { ref text, .. } => Some(text.clone()),
         _ => None,
     }
@@ -3600,10 +2953,8 @@ fn call_payload(known: &mut Vocabulary<'_>, call: CallHandle) -> SipralCallEvent
         state: call_state(known.agent.call_state(call)) as u32,
         ..SipralCallEvent::empty()
     };
-    // read from this stack's own record, never from the layer below: by the
-    // time a call has ended, `known.agent` has already let it go (the state
-    // above just asked for is `None` for exactly that call), and an event
-    // reporting the end is the one place this matters
+    // read from this stack's own record: after a call ends the layer below
+    // has already released it
     if let Some(identity) = known.identities.get(&call) {
         let identity = Arc::clone(identity);
         payload.from_uri = identity.from_uri.as_ptr();
@@ -3617,18 +2968,15 @@ fn call_payload(known: &mut Vocabulary<'_>, call: CallHandle) -> SipralCallEvent
         payload.call_id = identity.call_id.as_ptr();
         payload.call_id_len = identity.call_id.len();
         who_and_how(&mut payload, &identity);
-        // kept on the vocabulary rather than dropped here, so that whoever
-        // queues this event can keep these bytes alive for as long as the
-        // delivery takes: the map this came from may be missing the entry by
-        // then, forgotten alongside a call that has ended in the meantime
+        // kept on the vocabulary so the queued delivery can keep these bytes
+        // alive; the map entry may be gone by then
         known.raised_identity = Some(identity);
     }
     payload
 }
 
-/// What the INVITE of a call said about who is calling and how to answer
-/// it, onto a call event. Every pointer borrows from `identity`, which the
-/// queued delivery keeps alive with the event.
+/// The INVITE's caller identity and answer hints, onto a call event. Pointers
+/// borrow from `identity`, kept alive with the queued event.
 fn who_and_how(payload: &mut SipralCallEvent, identity: &CallIdentity) {
     let caller = &identity.caller;
     payload.identity_trusted = u32::from(caller.trusted);
@@ -3676,7 +3024,7 @@ fn who_and_how(payload: &mut SipralCallEvent, identity: &CallIdentity) {
         crate::security::failure_code(verified.and_then(|verdict| verdict.failure)) as u32;
 }
 
-// moved into the event whole, the way `SipralEvent::of` takes its union
+// moved in whole, like `SipralEvent::of`'s union
 #[allow(clippy::large_types_passed_by_value)]
 fn call_event(
     known: &mut Vocabulary<'_>,
@@ -3714,8 +3062,8 @@ fn status_of(status: Option<sipral_core::msg::StatusCode>) -> u32 {
     status.map_or(0, |code| u32::from(code.get()))
 }
 
-/// Point the event at the message it came from, which the caller of the
-/// callback still owns.
+/// Point the event at its source message, still owned by the callback's
+/// caller.
 fn attach(event: &mut SipralEvent, message: Option<&sipral_core::msg::OwnedMessage>) {
     if let Some(message) = message {
         let raw = message.as_raw().as_bytes();
@@ -3724,8 +3072,7 @@ fn attach(event: &mut SipralEvent, message: Option<&sipral_core::msg::OwnedMessa
     }
 }
 
-/// Milliseconds, saturating rather than wrapping: a duration too long to
-/// count is one no caller is waiting for anyway.
+/// Milliseconds, saturating rather than wrapping.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -3742,8 +3089,7 @@ pub(crate) fn registration_state(state: Option<RegistrationState>) -> SipralRegi
         Some(RegistrationState::Unverified) => SipralRegistrationState::Unverified,
         Some(RegistrationState::Restored) => SipralRegistrationState::Restored,
         Some(RegistrationState::NotRegistering) => SipralRegistrationState::NotRegistering,
-        // nothing to ask about, or a state the layer below has grown and this
-        // ABI has no number for; saying so beats picking one that is wrong
+        // nothing to ask about, or a state this ABI has no number for
         None | Some(_) => SipralRegistrationState::Unknown,
     }
 }
@@ -3871,7 +3217,7 @@ fn progress_of(heard: CallProgress) -> SipralProgressEvent {
             out.at_ms = millis(ended);
             out.length_ms = millis(length);
         }
-        // a report the facade has grown and this ABI has no word for yet
+        // a report this ABI has no word for yet
         _ => {}
     }
     out
@@ -3961,22 +3307,8 @@ mod tests {
 
     #[test]
     fn bytes_past_the_arm_actually_written_are_zero() {
-        // `announce` is one of the union's smallest arms -- a handle and a
-        // `u64`, sixteen bytes -- and `message`'s own tail, well past that,
-        // is where a byte only `payload!`'s own zeroing could have reached:
-        // nothing this call wrote goes anywhere near it. Before `payload!`
-        // zeroed the whole union first, that tail was whatever the stack
-        // held from before this call, and reading a pointer out of it is
-        // what put `sipral-lab-agent-kotlin` on the floor with a `SIGSEGV`
-        // inside `NewByteArray` -- the generated Kotlin/JNI shim reads
-        // every arm of every event, not only the one `kind` names the way
-        // every other binding's own application code already does
-        // (`tools/abi-gen/src/kotlin.rs`), and `EVENT_KIND_ARMS` above is
-        // what keeps it from dereferencing a pointer out of the bytes this
-        // proves are zero rather than out of the ones that are not: the
-        // ones another, larger arm's own write left behind, reinterpreted,
-        // which are not tested here because they are not zero and are not
-        // supposed to be -- see `EVENT_KIND_ARMS`'s own documentation.
+        // `message`'s tail lies past the small `announce` arm: only
+        // `payload!`'s zeroing reaches it
         let event = SipralEvent::of(
             1,
             SipralEventKind::CallAnnounced,
@@ -4111,9 +3443,8 @@ mod tests {
         assert_eq!(SipralCallEndReason::None as u32, 0);
     }
 
-    /// The numbers are written out rather than walked. A test that derived
-    /// them from the declaration would agree with a declaration that had moved
-    /// them, which is the one thing `docs/08-ffi.md` says can never happen.
+    /// Written out rather than walked: a derived test would agree with a
+    /// declaration that had moved them (`docs/08-ffi.md`).
     #[test]
     fn the_event_numbers_are_where_they_were_published() {
         assert_eq!(SipralEventKind::Started as u32, 1);
@@ -4177,10 +3508,7 @@ mod tests {
         assert_eq!(SipralEventKind::ALL.len(), 58, "and there are no others");
     }
 
-    /// The numbers this DTMF surface and the media one before it took were
-    /// spoken for before either was written, and each took them where they
-    /// were rather than appending. A feature that had chosen the next free
-    /// number instead would have renamed the one still reserved.
+    /// Reserved numbers were taken in place, not by appending.
     #[test]
     fn the_numbers_that_were_reserved_for_this_are_the_ones_it_took() {
         assert_eq!(
@@ -4227,14 +3555,10 @@ mod tests {
         }
     }
 
-    /// The reserved numbers are the mechanism, so this is the test of it: a
-    /// number that is spoken for but not built answers exactly like one that
-    /// was never spent, and a feature that takes it has to say so in the one
-    /// declaration before this build will name it.
+    /// A reserved number answers exactly like one never spent.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        // two numbers are held: 16 and 44, both for audio devices; 34 to 37, held while
-        // MESSAGE and RTCP-XR were written apart, are live now
+        // 16 and 44 are reserved (audio devices); 34 to 37 are live now
         assert_eq!(name(16), None, "16 is reserved, not live");
         assert_eq!(
             name(37).as_deref(),
@@ -4300,9 +3624,8 @@ mod tests {
         assert_eq!(millis(Duration::MAX), u64::MAX);
     }
 
-    /// A call secured under any suite the stack runs says which one: none of
-    /// them falls back to `Unknown`, which is kept for an event that is not
-    /// about a transform, and no two share a number.
+    /// Every suite has its own number, none falls back to `Unknown`, and no
+    /// two share one.
     #[cfg(feature = "dtls")]
     #[test]
     fn every_suite_the_stack_runs_has_a_word_of_its_own() {

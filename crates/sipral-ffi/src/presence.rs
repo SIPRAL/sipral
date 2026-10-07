@@ -4,21 +4,9 @@
 //! Presence across the boundary: this account's own, published (RFC 3903),
 //! and other people's, watched (RFC 3856).
 //!
-//! **Publishing is one call per change.** [`sipral_account_publish_presence`]
-//! writes the PIDF document (RFC 3863) with the RPID activity phones show
-//! (RFC 4480) and publishes it for the account's address of record; a second
-//! call modifies the same publication. The stack refreshes it, answers the
-//! compositor's challenges with the account's credentials, publishes afresh
-//! when the compositor forgot it (412) and asks for a longer lifetime when
-//! it wants one (423). [`sipral_account_unpublish_presence`] takes it away.
-//! What becomes of it is `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
-//! `SIPRAL_PRESENCE_KIND_PUBLICATION`.
-//!
-//! **Watching is a subscription.** One made with `sipral_account_subscribe`
-//! naming the `presence` package reads every `application/pidf+xml`
-//! notification, and says what it read as
-//! `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with `SIPRAL_PRESENCE_KIND_WATCHED`:
-//! open or closed, the first activity, the first note.
+//! Publishing: one call per change writes PIDF (RFC 3863) with an RPID
+//! activity (RFC 4480); the stack refreshes it and handles 401/412/423.
+//! Watching: a `presence` subscription reports each PIDF notification.
 
 use std::ffi::c_char;
 
@@ -49,9 +37,8 @@ codes! {
 }
 
 codes! {
-    /// Whether a presentity can be reached: PIDF's `basic` (RFC 3863
-    /// §4.1.4). Names for `sipral_presence_t::basic` and
-    /// `sipral_presence_event_t::basic`.
+    /// PIDF's `basic` (RFC 3863 §4.1.4). Names for `sipral_presence_t::basic`
+    /// and `sipral_presence_event_t::basic`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralBasic: u32 {
         /// Not said. A document published with this is refused, since
@@ -128,11 +115,8 @@ codes! {
 }
 
 record! {
-    /// This account's presence, as [`sipral_account_publish_presence`] takes
-    /// it.
-    ///
-    /// Set `size` to `sizeof(sipral_presence_t)` and zero the rest before
-    /// filling anything in.
+    /// This account's presence for [`sipral_account_publish_presence`]. Set
+    /// `size` to `sizeof(sipral_presence_t)` and zero the rest first.
     #[derive(Clone, Copy)]
     pub struct SipralPresence {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -151,9 +135,7 @@ record! {
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and all-zero is valid: the pointer is null beside a length of
-// zero, and a zero `basic` is refused by name.
+// Safety: plain data; all-zero is valid (null text, zero `basic` refused).
 unsafe impl Versioned for SipralPresence {
     const NAME: &'static str = "sipral_presence";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPresence, note_len);
@@ -164,17 +146,14 @@ unsafe impl Versioned for SipralPresence {
 }
 
 record! {
-    /// What a [`crate::event::SipralEventKind::PresenceChanged`] carries.
-    ///
-    /// The text points into the event and is valid for as long as the
-    /// callback is.
+    /// What a [`crate::event::SipralEventKind::PresenceChanged`] carries. The
+    /// text is valid only during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralPresenceEvent {
         /// A [`SipralPresenceKind`].
         pub kind: Number<SipralPresenceKind>,
-        /// [`SipralPresenceKind::Watched`]: which subscription.
-        /// `SIPRAL_HANDLE_NONE` for a publication, whose account is the
-        /// event's `account`.
+        /// [`SipralPresenceKind::Watched`]: which subscription;
+        /// `SIPRAL_HANDLE_NONE` for a publication.
         pub subscription: SipralHandle,
         /// [`SipralPresenceKind::Watched`]: a [`SipralBasic`], open when any
         /// of the presentity's tuples is open.
@@ -350,16 +329,12 @@ unsafe fn document(entity: &str, presence: &SipralPresence) -> Result<Presence, 
 }
 
 entry! {
-    /// Publish this account's presence (RFC 3903, RFC 3856 §6.2): a PIDF
-    /// document for its address of record, open or closed, with the activity
-    /// and the note `presence` gives. The first call publishes it and every
-    /// later one modifies the same publication; the stack keeps it refreshed
-    /// until [`sipral_account_unpublish_presence`].
+    /// Publish this account's presence (RFC 3903, RFC 3856 §6.2). Later calls
+    /// modify the same publication; the stack refreshes it until
+    /// [`sipral_account_unpublish_presence`].
     ///
-    /// Nothing has happened when this returns: the PUBLISH is in the
-    /// transmit queue, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
-    /// `SIPRAL_PRESENCE_KIND_PUBLICATION` says what the compositor did with
-    /// it.
+    /// The PUBLISH is only queued on return; the outcome arrives as
+    /// `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with `SIPRAL_PRESENCE_KIND_PUBLICATION`.
     ///
     /// # Safety
     ///

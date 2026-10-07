@@ -3,16 +3,10 @@
 
 //! Which address this end advertises to a peer (ABI 0.34).
 //!
-//! An application that leaves its sockets on `127.0.0.1`, or advertises the
-//! address it bound to without asking where that is reachable from, registers
-//! a loopback `Contact` and offers loopback media: the PBX takes the binding
-//! and answers the calls, and every request and every packet for this end
-//! goes to the PBX's own loopback interface. The stack now refuses to
-//! advertise a loopback address to a peer that is not one
-//! (`SIPRAL_STATUS_UNREACHABLE_ADDRESS`, and
-//! `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT` for a REGISTER it sends on
-//! its own), and [`sipral_advertised_address`] is how the application finds
-//! the address to use instead.
+//! A loopback `Contact` sent to a remote PBX is accepted, then every packet
+//! goes to the PBX's own loopback. The stack refuses to advertise loopback to
+//! a non-loopback peer (`SIPRAL_STATUS_UNREACHABLE_ADDRESS`); use
+//! [`sipral_advertised_address`] to find the right address.
 
 use std::ffi::c_char;
 
@@ -24,25 +18,16 @@ use crate::media::address;
 use crate::status::SipralStatus;
 
 entry! {
-    /// The address to advertise — in a `Contact`, a `bind_address`, a
-    /// `media_address` — for a socket bound at `bound` whose traffic goes to
-    /// `peer`, as `host:port`, written into `buffer` with a NUL after it.
+    /// The `host:port` to advertise for a socket bound at `bound` whose
+    /// traffic goes to `peer` (both `host:port` addresses, not names),
+    /// NUL-terminated into `buffer`.
     ///
-    /// A socket bound to a specific address advertises it, unless it is a
-    /// loopback address and `peer` is not: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`,
-    /// with nothing written. A socket bound to the wildcard address
-    /// (`0.0.0.0:5060`, `[::]:5060`) advertises the address of the
-    /// operating system's route toward `peer`, with its own port; the route
-    /// is found by connecting a datagram socket and closing it, and nothing
-    /// is sent. No route to `peer` at all is `SIPRAL_STATUS_TRANSPORT_DOWN`.
-    /// `peer` is the registrar for the signalling socket, and the far end —
-    /// or the registrar, while the far end is not known yet — for a media
-    /// socket. Both are `host:port` addresses, not names.
-    ///
-    /// Callable from any thread at any time: it names no stack. Text out as
-    /// every such call writes it: `out_needed` receives the length with the
-    /// NUL counted, `buffer` may be null with a `capacity` of zero to ask for
-    /// it, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
+    /// A specific address is used as is; loopback toward a non-loopback
+    /// `peer` is `SIPRAL_STATUS_UNREACHABLE_ADDRESS`. A wildcard bind uses
+    /// the OS route toward `peer` (found without sending);
+    /// `SIPRAL_STATUS_TRANSPORT_DOWN` when there is none. Any thread.
+    /// `out_needed` gets the length with the NUL; `buffer` may be null with
+    /// `capacity` zero; `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
     ///
     /// # Safety
     ///
@@ -144,8 +129,7 @@ mod tests {
 
     #[test]
     fn a_wildcard_bind_advertises_the_route_toward_the_peer_with_its_own_port() {
-        // the loopback peer is the one route every machine the tests run on
-        // has, and the answer is then the loopback address
+        // loopback is the one route every test machine has
         assert_eq!(
             advertised("0.0.0.0:5070", "127.0.0.1:5060"),
             Ok("127.0.0.1:5070".to_owned())

@@ -4,14 +4,10 @@
 //! A TLS server certificate an account trusts by its SHA-256 fingerprint
 //! (ABI 0.34).
 //!
-//! TLS is the application's (`docs/22-tls.md`): the platform's library runs
-//! the handshake, and this library never sees it. So a pin is a value the
-//! account carries — `sipral_account_config_t::tls_pin_sha256` — and a check
-//! the application's certificate verifier makes, with the DER bytes of the
-//! leaf certificate the server presented: [`sipral_account_check_certificate`].
-//! With a pin, the fingerprint is the whole verdict. No chain, trust anchor or
-//! host name is consulted, and an expired certificate that matches is accepted
-//! and said to be expired, for the reasons `docs/22-tls.md` gives.
+//! The application runs TLS (`docs/22-tls.md`); its verifier calls
+//! [`sipral_account_check_certificate`] with the leaf's DER. With a pin the
+//! fingerprint is the whole verdict: no chain, anchor or host name, and an
+//! expired match is accepted but flagged.
 
 use crate::abi::record;
 use crate::error::{entry, fail};
@@ -35,18 +31,12 @@ record! {
         pub not_before: u64,
         /// Its `notAfter`, the same way.
         pub not_after: u64,
-        /// One when the account pins a certificate and this is it: accept
-        /// the handshake, whoever signed it. Zero when the account pins
-        /// none: the platform's own checks apply, as they would without
-        /// this call.
+        /// One: pinned and matching, accept. Zero: no pin, platform checks apply.
         pub pinned: u32,
-        /// One when `unix_seconds` is past `not_after`. Accepted all the
-        /// same: its dates were written by the holder of the pinned key, and
-        /// a PBX whose self-signed certificate lapsed would otherwise go
-        /// silent. Worth a warning.
+        /// One when past `not_after`. Still accepted (a lapsed self-signed PBX
+        /// would go silent); worth a warning.
         pub expired: u32,
-        /// One when `unix_seconds` is before `not_before`: a clock set wrong,
-        /// or a certificate minted with a future date. Accepted too.
+        /// One when before `not_before`. Still accepted.
         pub not_yet_valid: u32,
         /// Zero.
         pub reserved: u32,
@@ -64,20 +54,13 @@ unsafe impl Versioned for SipralPinnedCertificate {
 }
 
 entry! {
-    /// Check the certificate a TLS server presented against the one the
-    /// account pins, from inside the application's certificate verifier.
+    /// Check the server's leaf certificate (DER) against the account's pin:
+    /// SHA-256 over the bytes, constant-time. `unix_seconds` is used only for
+    /// the reported dates.
     ///
-    /// `certificate` is the DER encoding of the leaf, the first certificate
-    /// the server sent, and `unix_seconds` the wall clock, which only the
-    /// dates reported in `out_pinned` are read against. The fingerprint
-    /// is SHA-256 over those exact bytes, compared in constant time.
-    ///
-    /// `SIPRAL_STATUS_OK` with `pinned` set: the certificate is the pinned
-    /// one, and the handshake is to be accepted whatever its chain, its name
-    /// or its dates. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: the account pins a
-    /// certificate and this is another; refuse the handshake, and nothing is
-    /// written. `SIPRAL_STATUS_OK` with `pinned` zero: the account pins
-    /// nothing, and the platform's own checks decide.
+    /// `SIPRAL_STATUS_OK` with `pinned` 1: accept. With `pinned` 0: no pin,
+    /// platform checks decide. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse;
+    /// nothing written.
     ///
     /// # Safety
     ///
@@ -143,9 +126,7 @@ mod tests {
     use std::mem::size_of;
     use std::ptr;
 
-    /// Not a certificate a TLS library would take, and it does not need to
-    /// be: the pin is over the bytes, whatever they are. Its dates are not
-    /// readable, so they come back zero.
+    /// Not a real certificate: the pin is over bytes. Dates read as zero.
     const LEAF: &[u8] = b"\x30\x03\x02\x01\x07 a certificate the PBX signed itself";
     const OTHER: &[u8] = b"\x30\x03\x02\x01\x07 another certificate for the same name";
 
@@ -222,9 +203,7 @@ mod tests {
         assert_eq!(refused.pinned, u32::MAX, "nothing is written on a refusal");
     }
 
-    /// What `openssl x509 -fingerprint -sha256` prints, 3.x and 1.1, and
-    /// the rest of the forms every layer reads alike, each pinning the same
-    /// certificate across the boundary.
+    /// `openssl x509 -fingerprint -sha256` output (3.x and 1.1) and variants.
     #[test]
     fn every_printed_form_of_the_fingerprint_pins_the_certificate() {
         let mut observed = Observed::default();

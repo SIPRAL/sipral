@@ -1,39 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A local conference across the boundary: any number of this stack's
-//! calls, each on its own codec and rate, mixed so that every member hears
-//! everybody but itself — this end too, when it takes part (ABI 0.32).
+//! A local conference: any number of this stack's calls, each on its own
+//! codec and rate, mixed so every member hears everybody but itself, this
+//! end included when it takes part (ABI 0.32). `sipral_call_join` is the
+//! two-call, same-rate case.
 //!
-//! `sipral_call_join` pairs two calls that agree on a rate. This is the
-//! general case, and the one a softphone's "merge calls" button wants.
+//! **Device mode:** the audio engine carries the conference like one more
+//! call (microphone in, loudspeaker out), and member packets reach
+//! `audio_transmit_callback` under each member's call handle. **Application
+//! mode:** every 20 ms the application calls [`sipral_local_conference_tick`]
+//! and drains [`sipral_local_conference_poll_transmit`].
 //!
-//! **Who drives it depends on the stack's mode.** In device mode the audio
-//! engine does: the conference is carried like one more call, the
-//! microphone is this end's voice in it and the loudspeaker plays this
-//! end's share, and every packet the members owe their far ends reaches
-//! `audio_transmit_callback` with the member's own call handle. In
-//! application mode the application does, once every twenty milliseconds:
-//! [`sipral_local_conference_tick`] takes this end's microphone frame and
-//! gives back its loudspeaker frame, and
-//! [`sipral_local_conference_poll_transmit`] hands out the packets, each
-//! with the call whose socket sends it.
+//! **Members are driven only by the conference.** Their
+//! `sipral_media_playback` and `sipral_media_capture` belong to it while
+//! inside. A call joined with `sipral_call_join` or in another conference, a
+//! full conference, or an unmixable codec is
+//! `SIPRAL_STATUS_CONFERENCE_REFUSED`.
 //!
-//! **A member is driven by the conference and by nothing else.** Its
-//! `sipral_media_playback` and `sipral_media_capture` belong to the
-//! conference while it is in it; in device mode the audio engine lets go of
-//! it on the way in and takes it up again on the way out. A call joined with
-//! `sipral_call_join`, or already in another conference, is refused with
-//! `SIPRAL_STATUS_CONFERENCE_REFUSED`, as is any call when the conference is
-//! full and a call whose codec it cannot mix.
-//!
-//! **This end is a member too.** Where a member is named — a mute, a gain,
-//! the talkers, an event — this end is named by the conference's own
-//! handle, and every call by its call handle.
-//!
-//! What changes — who joined, who left and why, who is talking, a recording
-//! that stopped by itself — arrives as
-//! `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` from the stack's poll.
+//! This end is named by the conference's own handle wherever a member is
+//! named. Changes arrive as `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
 
 use std::ffi::c_char;
 use std::fs::File;
@@ -59,30 +45,27 @@ use crate::text::required_text;
 use crate::versioned::{Versioned, declared_size, read_versioned, write_versioned};
 
 codes! {
-    /// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened.
-    /// Names for `sipral_local_conference_event_t::change`.
+    /// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` reports
+    /// (`sipral_local_conference_event_t::change`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralLocalConferenceChange: u32 {
         /// Never written by this build.
         Unknown = 0,
-        /// `member` joined: a call added, or this end when the conference was
-        /// made with it.
+        /// `member` joined (a call, or this end at creation).
         Joined = 1,
         /// `member` left, for the reason `departure` gives.
         Left = 2,
-        /// Who is talking changed: `talkers` and `loudest` say who now, and
-        /// `sipral_local_conference_talker_at` lists them, loudest first.
+        /// The talkers changed: see `talkers`, `loudest` and
+        /// `sipral_local_conference_talker_at`.
         Talkers = 3,
-        /// The conference's recording stopped by itself: the file would not
-        /// take what was written. It holds the audio up to its last
-        /// checkpoint.
+        /// The recording stopped because the file refused a write; it holds
+        /// audio up to its last checkpoint.
         RecordingStopped = 4,
     }
 }
 
 codes! {
-    /// Why a member left. Names for
-    /// `sipral_local_conference_event_t::departure`.
+    /// Why a member left (`sipral_local_conference_event_t::departure`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDeparture: u32 {
         /// Nobody left.
@@ -91,46 +74,36 @@ codes! {
         Removed = 1,
         /// Its call's media ended.
         Ended = 2,
-        /// Its call moved to a codec whose rate or frame the conference
-        /// cannot mix.
+        /// Its call moved to a codec the conference cannot mix.
         Incompatible = 3,
     }
 }
 
 record! {
-    /// How `sipral_local_conference_create` makes a conference. Zero in
-    /// every member but `size` is a conference of sixteen with this end in
-    /// it at 16 kHz.
+    /// How `sipral_local_conference_create` makes a conference. All zero but
+    /// `size`: sixteen members, this end in, 16 kHz.
     ///
-    /// Set `size` to `sizeof(sipral_local_conference_config_t)` before the
-    /// call.
+    /// Set `size` to `sizeof(sipral_local_conference_config_t)` first.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralLocalConferenceConfig {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// The most members it holds at once, this end included, or zero
-        /// for sixteen. At most 1024.
+        /// Most members at once, this end included; zero for 16, at most 1024.
         pub max_members: u32,
-        /// A `SipralToggle`: whether this end takes part. On unless it is
-        /// `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
-        /// its calls.
+        /// A `SipralToggle`: whether this end takes part. On unless
+        /// `SIPRAL_TOGGLE_OFF`; without it the conference only bridges calls.
         pub local: Number<SipralToggle>,
-        /// The rate of this end's frames in application mode, in hertz —
-        /// 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
-        /// twenty milliseconds of it. In device mode the audio engine
-        /// converts the devices to it.
+        /// This end's frame rate in application mode, in Hz: 8000, 16000,
+        /// 32000 or 48000, zero for 16000. A tick is 20 ms of it. In device
+        /// mode the engine converts the devices to it.
         pub sample_rate: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. Set it to zero; the library reads nothing from
-        /// it.
+        /// Zero. Pads the struct to its alignment so an appended member starts
+        /// past the declared length. Never read.
         pub reserved: u32,
     }
 }
 
-// Safety: the trait's contract. Integers only, and all-zero is a valid value
-// of each: it is the ordinary conference.
+// Safety: integers only; all-zero is the ordinary conference.
 unsafe impl Versioned for SipralLocalConferenceConfig {
     const NAME: &'static str = "sipral_local_conference_config";
     const PIN: crate::versioned::Pin =
@@ -144,8 +117,7 @@ unsafe impl Versioned for SipralLocalConferenceConfig {
 record! {
     /// A conference as it stands: `sipral_local_conference_info`.
     ///
-    /// Set `size` to `sizeof(sipral_local_conference_info_t)` before the
-    /// call.
+    /// Set `size` to `sizeof(sipral_local_conference_info_t)` first.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralLocalConferenceInfo {
         /// How many bytes of this struct the library filled in.
@@ -164,7 +136,7 @@ record! {
         pub frame_samples: u32,
         /// 1 while the conference is being recorded.
         pub recording: u32,
-        /// How much has been recorded, while it is.
+        /// Recorded so far, while recording.
         pub recorded_ms: u64,
         /// Packets dropped because nobody polled for them in time.
         pub packets_dropped: u64,
@@ -185,8 +157,7 @@ unsafe impl Versioned for SipralLocalConferenceInfo {
 record! {
     /// One member of a conference: `sipral_local_conference_member_at`.
     ///
-    /// Set `size` to `sizeof(sipral_local_conference_member_t)` before the
-    /// call.
+    /// Set `size` to `sizeof(sipral_local_conference_member_t)` first.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralLocalConferenceMember {
         /// How many bytes of this struct the library filled in.
@@ -199,21 +170,17 @@ record! {
         pub muted_input: u32,
         /// 1 when it hears nothing.
         pub muted_output: u32,
-        /// The level of what it says, in the steps `sipral_audio_set_gain`
-        /// takes: 256 is unity.
+        /// Level of what it says, in `sipral_audio_set_gain` steps (256 = unity).
         pub gain_input: u32,
         /// The level of what it hears, in the same steps.
         pub gain_output: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads the struct to its alignment so an appended member starts
+        /// past the declared length. Written as zero, never read.
         pub reserved: u32,
     }
 }
 
-// Safety: integers and a handle, and zero is a valid value of each.
+// Safety: integers and a handle; zero is valid for each.
 unsafe impl Versioned for SipralLocalConferenceMember {
     const NAME: &'static str = "sipral_local_conference_member";
     const PIN: crate::versioned::Pin =
@@ -234,8 +201,8 @@ record! {
         pub change: Number<SipralLocalConferenceChange>,
         /// A [`SipralDeparture`], for `SIPRAL_LOCAL_CONFERENCE_CHANGE_LEFT`.
         pub departure: Number<SipralDeparture>,
-        /// Who joined or left: a call, or the conference's own handle for
-        /// this end. `SIPRAL_HANDLE_NONE` for the other changes.
+        /// Who joined or left (a call, or the conference handle for this end);
+        /// `SIPRAL_HANDLE_NONE` otherwise.
         pub member: SipralHandle,
         /// Members now, this end included.
         pub members: u32,
@@ -246,10 +213,10 @@ record! {
     }
 }
 
-/// The steps a gain crosses in: 256 is unity, as for the audio engine.
+/// Gain steps: 256 is unity, as in the audio engine.
 const GAIN_UNITY: u32 = 256;
 
-/// The most a step count means: four times.
+/// Largest gain in steps: four times.
 const GAIN_MOST: u32 = 4 * GAIN_UNITY;
 
 /// One conference, and the names its members go by across the boundary.
@@ -257,9 +224,8 @@ pub(crate) struct Conference {
     pub(crate) inner: LocalConference,
     /// This conference's own handle, which is this end's name as a member.
     handle: SipralHandle,
-    /// Every call ever added, with its handle, so that a packet or a
-    /// departure is named after the call even once the stack has forgotten
-    /// it.
+    /// Every call ever added, so packets and departures can still be named
+    /// after the stack forgets the call.
     names: Vec<(CallHandle, SipralHandle)>,
 }
 
@@ -295,8 +261,8 @@ impl Conference {
 /// A conference, shared between its handle, its stack and the audio engine.
 pub(crate) type Shared = Arc<Mutex<Conference>>;
 
-/// Lock one; poisoning means a panic was caught while it was held, and a
-/// conference is whole between statements.
+/// Lock one; poisoning is ignored since a conference is whole between
+/// statements.
 pub(crate) fn lock(shared: &Shared) -> MutexGuard<'_, Conference> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -313,9 +279,8 @@ struct Entry {
 
 static CONFERENCES: HandleTable<Entry> = HandleTable::new(Kind::Conference);
 
-/// Do something with a conference, refused to a thread that is inside one
-/// of its ticks — a processor on one of its calls — which would wait for
-/// itself.
+/// Act on a conference, refused to a thread inside one of its ticks (a
+/// processor on a member call), which would wait for itself.
 fn with_conference<R>(
     conference: SipralHandle,
     act: impl FnOnce(&mut Conference, &Entry) -> Result<R, Fail>,
@@ -353,12 +318,11 @@ pub(crate) fn in_a_conference(state: &StackState, call: CallHandle) -> bool {
         .any(|(_, shared)| lock(shared).inner.contains(call))
 }
 
-/// The audio engine's view of a conference: one more call, whose frame is
-/// this end's twenty milliseconds and whose packets are its members'.
+/// The engine's view of a conference: one more call, whose frame is this
+/// end's 20 ms and whose packets are its members'.
 struct Carried {
     shared: Shared,
-    /// The conference's handle, which the pump's thread is marked with for
-    /// the length of a tick, as an application's is.
+    /// The conference's handle, marking the pump's thread during a tick.
     handle: SipralHandle,
     rate: u32,
     frame: usize,
@@ -374,8 +338,8 @@ impl CallAudio for Carried {
     }
 
     fn capture(&mut self, frame: &[i16], now: Instant) -> Result<Option<Outgoing>, CallGone> {
-        // the pump hands over a frame of this end's own length; the packets
-        // wait in the conference for `capture_each`
+        // the pump gives a frame of this end's length; packets wait for
+        // `capture_each`
         let _inside = crate::media::Inside::enter(self.handle);
         let _ = lock(&self.shared).inner.tick(frame, now);
         Ok(None)
@@ -459,21 +423,19 @@ fn count(value: usize) -> u32 {
 }
 
 entry! {
-    /// Make a local conference on this stack, empty but for this end when
-    /// `config` says it takes part, and write its handle to
-    /// `out_conference`.
+    /// Make a local conference on this stack, holding only this end if it
+    /// takes part, and write its handle to `out_conference`.
     ///
-    /// In device mode the audio engine starts carrying it at once, opening
-    /// the devices under automatic activation as a call's media does.
+    /// In device mode the engine carries it at once, opening the devices
+    /// under automatic activation.
     ///
-    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate that is not 8, 16, 32
-    /// or 48 kHz and for more than 1024 members.
+    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate other than 8, 16, 32 or
+    /// 48 kHz, or more than 1024 members.
     ///
     /// # Safety
     ///
     /// `config` must point at a `sipral_local_conference_config_t` whose
-    /// `size` member says how long it is, and `out_conference` at one
-    /// `sipral_handle_t`.
+    /// `size` says how long it is, and `out_conference` at one `sipral_handle_t`.
     fn sipral_local_conference_create(
         stack: SipralHandle,
         config: *const SipralLocalConferenceConfig,
@@ -551,9 +513,9 @@ entry! {
 }
 
 entry! {
-    /// End a conference. Every call still in it goes back to carrying its
-    /// own audio — in device mode, the audio engine takes each up again —
-    /// a recording running is finished, and the handle is stale.
+    /// End a conference. Its calls carry their own audio again (in device
+    /// mode the engine takes them back), a running recording is finished, and
+    /// the handle is stale.
     ///
     /// # Safety
     ///
@@ -571,7 +533,7 @@ entry! {
             if let Some(audio) = state.audio.clone() {
                 let mut engine = audio.lock().unwrap_or_else(PoisonError::into_inner);
                 engine.detach(conference);
-                // the controls its first attach made go with it
+                // controls made by the first attach go with it
                 engine.forget_call(conference);
                 let held = lock(&entry.shared);
                 for (call, handle) in &held.names {
@@ -584,8 +546,7 @@ entry! {
             }
             Ok(())
         });
-        // a stack destroyed first has nothing left to hand the calls back
-        // to, and the conference still goes
+                // the conference goes even if the stack is already destroyed
         if let Err(refused) = back
             && refused.status != SipralStatus::InvalidHandle
             && refused.status != SipralStatus::StaleHandle
@@ -602,14 +563,13 @@ entry! {
 }
 
 entry! {
-    /// Add a call. It takes part from the next tick, at its own codec's rate,
-    /// and its far end hears everybody in the conference but itself.
+    /// Add a call, from the next tick, at its codec's rate; its far end hears
+    /// everybody but itself.
     ///
-    /// The call needs media running, as for `sipral_call_media`.
-    /// `SIPRAL_STATUS_CONFERENCE_REFUSED` when the conference is full, for a
-    /// call already in this one or another or joined with
-    /// `sipral_call_join`, and for a codec the conference cannot mix — a
-    /// rate other than 8, 16, 32 or 48 kHz, or frames past 60 ms.
+    /// The call needs running media. `SIPRAL_STATUS_CONFERENCE_REFUSED` when
+    /// full, for a call already in a conference or joined with
+    /// `sipral_call_join`, or for an unmixable codec (rate not 8, 16, 32 or
+    /// 48 kHz, or frames over 60 ms).
     ///
     /// # Safety
     ///
@@ -634,8 +594,7 @@ entry! {
             if let Some(audio) = state.audio.clone() {
                 let mut engine = audio.lock().unwrap_or_else(PoisonError::into_inner);
                 engine.detach(call);
-                // the call's own gain, mute and meter go into the conference
-                // with it, and act on its path there
+                // the call's gain, mute and meter move with it into the conference
                 if let Some(controls) = engine.call_controls(call) {
                     let _ = lock(&entry.shared).inner.filter(named, Box::new(controls));
                 }
@@ -646,9 +605,8 @@ entry! {
 }
 
 entry! {
-    /// Take a call out. From the next tick nobody in the conference hears it
-    /// and it hears nobody; its media is the application's again — in device
-    /// mode, the audio engine carries it as it carries any call.
+    /// Take a call out, from the next tick. Its media is the application's
+    /// again (in device mode, the engine's).
     ///
     /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not in it.
     ///
@@ -675,11 +633,10 @@ entry! {
 }
 
 entry! {
-    /// Mute or unmute one way of a member, from the next tick: its input,
-    /// which everybody else stops hearing, or its output, which it stops
-    /// hearing. `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or
-    /// `SIPRAL_AUDIO_DIRECTION_OUTPUT`; `member` is a call in the conference,
-    /// or the conference's own handle for this end.
+    /// Mute or unmute one direction of a member from the next tick: input
+    /// (others stop hearing it) or output (it stops hearing).
+    /// `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or `_OUTPUT`; `member` is a
+    /// call in the conference, or the conference handle for this end.
     ///
     /// `SIPRAL_STATUS_WRONG_STATE` for a member that is not in it.
     ///
@@ -703,10 +660,9 @@ entry! {
 }
 
 entry! {
-    /// Set the level of one way of a member, from the next tick, in the
-    /// steps `sipral_audio_set_gain` takes: 256 is unity and 1024, four
-    /// times, the most. Its input's level is what everybody else hears of
-    /// it; its output's is what it hears.
+    /// Set one direction's level for a member, from the next tick, in
+    /// `sipral_audio_set_gain` steps: 256 unity, 1024 at most. Input is what
+    /// others hear of it; output is what it hears.
     ///
     /// # Safety
     ///
@@ -735,7 +691,7 @@ entry! {
     /// # Safety
     ///
     /// `out_info` must point at a `sipral_local_conference_info_t` whose
-    /// `size` member says how long it is.
+    /// `size` says how long it is.
     fn sipral_local_conference_info(
         conference: SipralHandle,
         out_info: *mut SipralLocalConferenceInfo,
@@ -763,16 +719,15 @@ entry! {
 }
 
 entry! {
-    /// One member, by index: this end first when it takes part, then the
-    /// calls in the order they joined. The index is stable until the next
-    /// member joins or leaves.
+    /// One member by index: this end first if it takes part, then calls in
+    /// join order. Stable until the next join or leave.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last member.
     ///
     /// # Safety
     ///
     /// `out_member` must point at a `sipral_local_conference_member_t` whose
-    /// `size` member says how long it is.
+    /// `size` says how long it is.
     fn sipral_local_conference_member_at(
         conference: SipralHandle,
         index: usize,
@@ -810,11 +765,11 @@ entry! {
 }
 
 entry! {
-    /// Who was talking in the last tick, by rank: index zero is the
-    /// loudest. A muted member is never listed.
+    /// Who talked in the last tick, loudest at index zero. Muted members are
+    /// never listed.
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last talker,
-    /// which `sipral_local_conference_info_t::talkers` counts.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` past the last talker (count in
+    /// `sipral_local_conference_info_t::talkers`).
     ///
     /// # Safety
     ///
@@ -845,25 +800,23 @@ entry! {
 }
 
 entry! {
-    /// Twenty milliseconds of conference, in application mode: `mic` is this
-    /// end's frame, `sipral_local_conference_info_t::frame_samples` long,
-    /// and `speaker` is filled with what this end hears, the same length,
-    /// written to `out_written`. A conference without this end reads no
-    /// microphone — `mic` may be null — and fills `speaker` with silence.
+    /// 20 ms of conference in application mode. `mic` is this end's frame,
+    /// `sipral_local_conference_info_t::frame_samples` long; `speaker` gets
+    /// what this end hears, same length, written to `out_written`. Without
+    /// this end, `mic` may be null and `speaker` gets silence.
     ///
-    /// Call it once every twenty milliseconds, from the thread that carries
-    /// the audio, and then drain `sipral_local_conference_poll_transmit`.
+    /// Call every 20 ms from the audio thread, then drain
+    /// `sipral_local_conference_poll_transmit`.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` in device mode, where the audio engine
-    /// ticks it; `SIPRAL_STATUS_INVALID_ARGUMENT` for a frame of any other
-    /// length, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a speaker buffer
-    /// shorter than a frame, with the length needed in `out_written`.
+    /// `SIPRAL_STATUS_WRONG_STATE` in device mode;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a wrong frame length;
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a short speaker buffer, with the
+    /// length needed in `out_written`.
     ///
     /// # Safety
     ///
-    /// `mic` must be readable for `mic_count` `int16_t`, `speaker` writable
-    /// for `capacity` `int16_t`, and `out_written` must point at one
-    /// `size_t` or be null.
+    /// `mic` readable for `mic_count` `int16_t`, `speaker` writable for
+    /// `capacity` `int16_t`, `out_written` one `size_t` or null.
     fn sipral_local_conference_tick(
         conference: SipralHandle,
         now_ms: u64,
@@ -918,10 +871,9 @@ entry! {
 
 entry! {
     /// The oldest packet a member's call owes its far end, in application
-    /// mode: `out_call` names the call, whose media socket sends it, and
-    /// `packet` is filled as `sipral_media_capture` fills one. A `len`
-    /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
-    /// waiting. Drain it after every tick.
+    /// mode. `out_call` names the call whose socket sends it; `packet` is
+    /// filled as by `sipral_media_capture`. `len` zero with
+    /// `SIPRAL_HANDLE_NONE` means nothing waits. Drain after every tick.
     ///
     /// # Safety
     ///
@@ -952,21 +904,17 @@ entry! {
 }
 
 entry! {
-    /// Record the whole conference to `path`: everybody it hears, each at
-    /// its own level, in one channel, written as `options` say — WAV or Ogg
-    /// Opus, at the conference's rate unless another is named.
+    /// Record the whole conference mix to `path`, one channel, as `options`
+    /// say (WAV or Ogg Opus, at the conference rate unless another is named).
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` when it is already being recorded,
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a stereo layout, for options no
-    /// file can be written with and for a path the file system refuses, and
-    /// `SIPRAL_STATUS_RECORDING_FAILED` when the file would not take its
-    /// header.
+    /// `SIPRAL_STATUS_WRONG_STATE` if already recording;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for stereo, unusable options or a
+    /// refused path; `SIPRAL_STATUS_RECORDING_FAILED` if the header write fails.
     ///
     /// # Safety
     ///
-    /// `path` must be readable for `path_len` bytes, and `options` must point
-    /// at a `sipral_recording_options_t` whose `size` member says how long
-    /// it is.
+    /// `path` readable for `path_len` bytes; `options` a
+    /// `sipral_recording_options_t` whose `size` says how long it is.
     fn sipral_local_conference_record_start(
         conference: SipralHandle,
         path: *const c_char,
@@ -1169,8 +1117,7 @@ mod tests {
         out
     }
 
-    /// One mu-law RTP packet of a 500 Hz square wave: eight samples at the
-    /// top of the scale and eight at the bottom.
+    /// One mu-law RTP packet of a 500 Hz square wave (8 high, 8 low samples).
     fn loud(sequence: u16) -> Vec<u8> {
         let mut out = vec![0x80, 0x00];
         out.extend_from_slice(&sequence.to_be_bytes());
@@ -1180,8 +1127,7 @@ mod tests {
         out
     }
 
-    /// The share of a mu-law payload that is loud: its segment in the top
-    /// three of eight.
+    /// The share of a mu-law payload in the top three of eight segments.
     fn loud_share(payload: &[u8]) -> f64 {
         let audio = payload.get(12..).unwrap_or_default();
         let loud = audio
@@ -1242,9 +1188,8 @@ mod tests {
         total / i64::try_from(samples.len().max(1)).unwrap_or(1)
     }
 
-    /// What the second half of a run gave: this end's loudness, how loud
-    /// the packets to call a's and call b's far ends were, and how many
-    /// went to each.
+    /// The second half of a run: this end's loudness, the loudness of packets
+    /// to a's and b's far ends, and how many went to each.
     struct Heard {
         speaker: i64,
         to_a: f64,
@@ -1253,8 +1198,7 @@ mod tests {
         packets_b: usize,
     }
 
-    /// Ticks with call a's far end sending its square wave. Every packet
-    /// has to name call a or call b.
+    /// Ticks with a's far end sending its square wave; every packet names a or b.
     fn run(
         conference: SipralHandle,
         (call_a, media_a, call_b): (SipralHandle, SipralHandle, SipralHandle),
@@ -1309,9 +1253,8 @@ mod tests {
             .collect()
     }
 
-    /// Two calls on one stack, both in a conference of three at 8 kHz with
-    /// this end: the stack, the two calls, call a's media handle and the
-    /// conference.
+    /// Two calls in an 8 kHz conference of three with this end: stack, calls,
+    /// a's media handle, conference.
     fn two_calls_in_one(
         observed: &mut Observed,
     ) -> (
@@ -1339,8 +1282,8 @@ mod tests {
         (stack, call_a, call_b, media_a, conference)
     }
 
-    /// Application mode: two calls and this end, each hearing the others and
-    /// not itself, and who is talking reported.
+    /// Application mode: everyone hears the others and not itself; talkers
+    /// are reported.
     #[test]
     fn two_calls_and_this_end_hear_each_other_over_the_abi() {
         let mut observed = Observed::default();
@@ -1430,8 +1373,7 @@ mod tests {
         );
     }
 
-    /// A mute and a gain taken, a member removed and a member whose call
-    /// ended, each reported, and the conference destroyed.
+    /// Mute, gain, removal and an ended call are reported; then destroy.
     #[test]
     fn members_are_muted_levelled_removed_and_let_go_over_the_abi() {
         let mut observed = Observed::default();
@@ -1474,8 +1416,7 @@ mod tests {
             "a member that is not in it"
         );
 
-        // call a taken out: a Left event, and a pair is refused until call b
-        // is out too
+        // call a out: a Left event; a pair is refused until b is out too
         assert_eq!(
             unsafe { sipral_local_conference_remove(conference, call_a) },
             SipralStatus::Ok
@@ -1543,10 +1484,8 @@ mod tests {
         );
     }
 
-    /// A conference with no place left refuses the next call with status 23,
-    /// as does a call already in another conference and a rate the
-    /// conference cannot mix; a conference without this end reads no
-    /// microphone and plays silence.
+    /// Refused with status 23 when full, for a call in another conference, or
+    /// for an unmixable rate. Without this end: no microphone, silent speaker.
     #[test]
     fn a_full_conference_refuses_the_next_call() {
         let mut observed = Observed::default();
@@ -1691,8 +1630,7 @@ mod tests {
         );
     }
 
-    /// What a processor on a member's call saw when it called back into the
-    /// conference and into the stack from inside a tick.
+    /// What a member's processor saw re-entering conference and stack in a tick.
     struct Reentered {
         conference: SipralHandle,
         stack: SipralHandle,
@@ -1708,9 +1646,8 @@ mod tests {
         reentered.said.lock().unwrap().push((conference, stack));
     }
 
-    /// A processor on a member's call runs inside the conference's tick,
-    /// with the conference held: calling back into the conference, or into
-    /// the stack, from there is told BUSY rather than waiting for itself.
+    /// A processor inside a tick re-entering the conference or the stack is
+    /// told BUSY rather than deadlocking.
     #[test]
     fn a_processor_inside_a_tick_is_told_busy_rather_than_waiting_for_itself() {
         let mut observed = Observed::default();
@@ -1761,8 +1698,7 @@ mod tests {
         );
     }
 
-    /// Two calls on a stack in device mode over a fake platform, and the
-    /// platform.
+    /// Two calls in device mode over a fake platform, and the platform.
     fn device_pair(
         observed: &mut Observed,
     ) -> (
@@ -1800,8 +1736,8 @@ mod tests {
         FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
         let (_, call_a) = up(observed, stack, account, ANSWER);
         let call_b = second_media_call(observed, stack, account);
-        // the devices open in the background, and only a poll puts them
-        // under the calls: nothing below polls, so they have to be there now
+        // devices open in the background and only a poll attaches them;
+        // nothing below polls, so they must be attached now
         landed(stack, 2_500);
         (stack, call_a, call_b, fake)
     }
@@ -1829,10 +1765,9 @@ mod tests {
         peak
     }
 
-    /// In device mode a call's own controls go into a local conference with
-    /// it and act on its path there: with call a's input muted — what the
-    /// microphone sends it — its far end hears silence while call b's hears
-    /// this end, and call b's meter reads what its far end is sent.
+    /// Device mode: a call's controls move into the conference. With a's
+    /// input muted its far end hears silence, b's hears this end, and b's
+    /// meter reads what its far end is sent.
     #[test]
     fn in_device_mode_a_calls_own_controls_act_inside_a_conference() {
         let mut observed = Observed::default();
@@ -1854,8 +1789,7 @@ mod tests {
         assert_eq!(add(conference, call_a), SipralStatus::Ok);
         assert_eq!(add(conference, call_b), SipralStatus::Ok);
 
-        // a 500 Hz square wave near the top of the scale, at the fake
-        // microphone's 48 kHz
+        // 500 Hz square wave near full scale, at the fake mic's 48 kHz
         let square: Vec<i16> = (0..960)
             .map(|n| if (n / 48) % 2 == 0 { 12_000 } else { -12_000 })
             .collect();
@@ -1935,10 +1869,9 @@ mod tests {
         .expect("the stack")
     }
 
-    /// In device mode the audio engine carries the conference in place of
-    /// its members, every packet reaches the transmit callback under its
-    /// own call's handle, and a member taken out — or the conference
-    /// destroyed — is carried by the engine again.
+    /// Device mode: the engine carries the conference instead of its members,
+    /// packets reach the callback under each call's handle, and removed
+    /// members (or all, on destroy) are carried by the engine again.
     #[test]
     fn in_device_mode_the_engine_carries_the_conference_in_place_of_its_members() {
         let mut observed = Observed::default();

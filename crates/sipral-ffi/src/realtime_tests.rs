@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What carrying a call's microphone to the far end costs the audio
-//! engine's pump in allocations: none, once the packet it keeps has grown to
-//! a packet's size. The pump runs as audio, and a thread the scheduler runs
-//! ahead of everything else is not one to wait inside the allocator.
+//! The audio pump must not allocate once warm: it runs at real-time priority.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -16,8 +13,7 @@ use crate::call::tests::media_call_tuned;
 use crate::stack::tests::Observed;
 
 thread_local! {
-    /// Allocations made by this thread since it started. Per thread, because
-    /// the other tests run beside this one and allocate as they please.
+    /// Per thread, since other tests allocate concurrently.
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -63,8 +59,6 @@ fn allocations() -> u64 {
     ALLOCATIONS.with(Cell::get)
 }
 
-/// A call's session, as the engine's pump carries it, encodes a frame and
-/// hands its packet over without allocating once it is running.
 #[test]
 fn carrying_a_calls_microphone_allocates_nothing() {
     let mut observed = Observed::default();

@@ -3,24 +3,19 @@
 
 //! Accounts: configured, registered, given up.
 //!
-//! An account is one identity, usually with one registrar behind it, and
-//! several of them live in one stack without sharing anything. Adding one sends
-//! nothing; [`sipral_account_register`] is what puts a REGISTER on the wire, and
-//! from then on the binding is refreshed, retried and backed off without another
-//! call. What the application hears about is the state, not the transactions.
+//! An account is one identity, usually with one registrar; accounts in one
+//! stack share nothing. Adding one sends nothing; [`sipral_account_register`]
+//! starts the REGISTER, and the binding is then refreshed, retried and backed
+//! off on its own. The application hears the state, not the transactions.
 //!
-//! An account configured with no registrar never registers at all. It is a
-//! trunk that knows this end by the address its requests come from: its state
-//! reads `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` from the moment it is
-//! added, registering it is refused, and what it places goes to
-//! `registrar_address`, which for it is the outbound proxy.
+//! An account with no registrar never registers: a trunk known by its source
+//! address. Its state is `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`,
+//! registering is refused, and its requests go to `registrar_address`, the
+//! outbound proxy.
 //!
-//! Three things here are the caller's and cannot be defaulted. The address
-//! requests are sent to, because resolving a server's name is I/O; the
-//! `Contact` this end is reachable at, because a library that never opened a
-//! socket does not know what the world sees; and the instance identifier,
-//! because RFC 5626 §4.1 wants one that survives a power cycle and nothing
-//! here has storage.
+//! The caller must supply the destination address (resolving is I/O), the
+//! `Contact` (only the caller knows what the world sees), and the instance id
+//! (RFC 5626 §4.1 wants one that survives a power cycle; nothing here stores).
 
 use std::ffi::c_char;
 use std::net::{IpAddr, SocketAddr};
@@ -46,10 +41,8 @@ use crate::text::{required_text, text};
 use crate::versioned::{Versioned, read_versioned};
 
 record! {
-    /// What an account is configured with.
-    ///
-    /// Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
-    /// filling anything in.
+    /// What an account is configured with. Set `size` to
+    /// `sizeof(sipral_account_config_t)` and zero the rest first.
     #[derive(Clone, Copy)]
     pub struct SipralAccountConfig {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -60,11 +53,9 @@ record! {
         /// How many bytes of it.
         pub aor_len: usize,
         /// Where the REGISTER is addressed, `sip:example.com`, no user part.
-        ///
-        /// A `registrar_len` of zero makes an account that never registers: a
-        /// trunk that knows this end by the address its requests come from.
-        /// Its state is `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` for as long
-        /// as it exists, and `sipral_account_register` refuses it.
+        /// A `registrar_len` of zero makes a trunk that never registers: its
+        /// state stays `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, and
+        /// `sipral_account_register` refuses it.
         pub registrar: *const c_char,
         /// How many bytes of it.
         pub registrar_len: usize,
@@ -72,12 +63,10 @@ record! {
         pub contact: *const c_char,
         /// How many bytes of it.
         pub contact_len: usize,
-        /// Where this account's requests go, as `host:port`: the registrar's
-        /// address for an account that registers, and the outbound proxy for
-        /// one configured with no registrar. A call that names no destination
-        /// of its own goes here either way, so it is required unless
-        /// `server_uri` names the server instead. An address, not a name: a
-        /// server known by name is `server_uri`'s.
+        /// Where this account's requests go, as `host:port`: the registrar, or
+        /// the outbound proxy for an account with no registrar. Calls without
+        /// a destination go here too. Required unless `server_uri` is given;
+        /// an address, not a name.
         pub registrar_address: *const c_char,
         /// How many bytes of it.
         pub registrar_address_len: usize,
@@ -85,13 +74,11 @@ record! {
         pub display_name: *const c_char,
         /// How many bytes of it.
         pub display_name_len: usize,
-        /// The user name to answer a challenge with, or null for an account that
-        /// answers none.
+        /// The user name to answer a challenge with, or null for none.
         pub auth_user: *const c_char,
         /// How many bytes of it.
         pub auth_user_len: usize,
-        /// The password that goes with it. Copied out of the caller's memory; what
-        /// happens to the caller's copy is the caller's.
+        /// The password that goes with it, copied.
         pub auth_password: *const c_char,
         /// How many bytes of it.
         pub auth_password_len: usize,
@@ -101,278 +88,202 @@ record! {
         pub instance_id_len: usize,
         /// How long a binding to ask for, or zero for an hour.
         ///
-        /// A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
-        /// is refused rather than sent as a number no registrar will read. What the
-        /// registrar grants wins over the request either way, and the granted
-        /// figure is what `sipral_registration_event_t::expires_ms` carries — that
-        /// is where the effective value is read back, not here.
+        /// Above 2³²−1 is refused (§20.19 `delta-seconds`). The registrar's
+        /// grant wins, and is read back in
+        /// `sipral_registration_event_t::expires_ms`.
         pub expires_seconds: u64,
-        /// Header fields to put on every REGISTER this account sends, in the
-        /// order given, or null for none.
+        /// Header fields for every REGISTER of this account, in order, or null.
         ///
-        /// Checked when the account is added, as `sipral_call_config_t::headers`
-        /// is, against what the stack writes on a REGISTER: `Expires` is the
-        /// stack's there, because it is `expires_seconds`, and `Supported` is the
-        /// application's, because a registration asking for a GRUU has to say
-        /// so. Refused for an account with no registrar, which sends no REGISTER
-        /// to put them on.
+        /// Checked on add as `sipral_call_config_t::headers` is: `Expires` is
+        /// the stack's (`expires_seconds`), `Supported` the application's (for
+        /// GRUU). Refused for an account with no registrar.
         pub headers: *const SipralHeader,
         /// How many elements `headers` has.
         pub headers_len: usize,
-        /// Which transport this account's REGISTER and every request it
-        /// places go out on: [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN)
-        /// for zero, which is what a caller that leaves this at zero already
-        /// gets, or a further number
+        /// The transport for this account's REGISTER and requests:
+        /// [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN)
+        /// for zero, or a number
         /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
-        /// has bound. A number this stack has never bound is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
+        /// has bound. An unbound number is `SIPRAL_STATUS_INVALID_ARGUMENT`.
         pub transport: u32,
-        /// The push notification service to be woken through, as its
-        /// registered name: `apns`, `fcm`, `webpush` (RFC 8599 §4.1.1). Null
-        /// for an account that is not woken by push, which is every account on
-        /// a machine that does not suspend.
+        /// The push service to be woken through, by registered name: `apns`,
+        /// `fcm`, `webpush` (RFC 8599 §4.1.1). Null for no push.
         ///
-        /// These four go on the `Contact` of this account's REGISTER and on no
-        /// other request, ever: §4.1 says so because a `pn-prid` in the
-        /// `Contact` of an INVITE hands the far end a token that wakes this
-        /// device whenever it likes. The de-registration that gives the binding
-        /// up leaves the identifier out, which §4.1.2 also requires.
+        /// The push parameters go only on this account's REGISTER `Contact`
+        /// (§4.1): on an INVITE `pn-prid` would let the far end wake this
+        /// device at will. De-registration leaves the identifier out (§4.1.2).
         pub push_provider: *const c_char,
         /// How many bytes of it.
         pub push_provider_len: usize,
-        /// The resource identifier the service issued for this installation —
-        /// the device token. Required when `push_provider` is given, and
-        /// refused without one.
-        ///
-        /// Whatever it holds is percent-escaped where the SIP grammar needs it
-        /// (§8.7), because an APNs token carries `=` and a Web Push identifier
-        /// is a whole URL.
+        /// The device token the service issued. Required with
+        /// `push_provider`, and refused without it. Percent-escaped where SIP
+        /// needs it (§8.7): APNs tokens carry `=`, Web Push ids are URLs.
         pub push_prid: *const c_char,
         /// How many bytes of it.
         pub push_prid_len: usize,
-        /// The extra value a service needs beside the identifier: the
-        /// application bundle for Apple, the sender for Firebase. §4.1.1 makes
-        /// it mandatory "if required for the specific PNS", so it is optional
-        /// here and the service decides.
+        /// The extra value a service needs: the bundle for Apple, the sender
+        /// for Firebase. Optional; §4.1.1 lets the service decide.
         pub push_param: *const c_char,
         /// How many bytes of it.
         pub push_param_len: usize,
-        /// Nonzero to say this device can send a binding refresh without being
-        /// woken by a push, which §4.1.4 makes it declare with a
-        /// `+sip.pnsreg` media feature tag.
-        ///
-        /// It is the application's fact and not this library's to guess: a
-        /// process the operating system has suspended has no timer that runs,
-        /// and one that claims otherwise gets a registrar that stops sending
-        /// the wake-ups the device is relying on.
+        /// Nonzero when this device can refresh its binding without a push,
+        /// declared with `+sip.pnsreg` (§4.1.4). Only the application knows:
+        /// a suspended process runs no timer, and a false claim stops the
+        /// registrar's wake-ups.
         pub push_wakes_itself: u32,
-        /// Where this account's end-of-call voice quality reports go (RFC
-        /// 6035, carried by a PUBLISH, RFC 3903), or null to send none.
+        /// Where end-of-call quality reports go (RFC 6035 over PUBLISH, RFC
+        /// 3903), or null for none.
         pub quality_report_uri: *const c_char,
         /// How many bytes of it.
         pub quality_report_uri_len: usize,
-        /// A [`SipralSessionTimer`]: how
-        /// this account's calls ask for a session timer (RFC 4028). Zero is
-        /// the stack's default, thirty minutes.
+        /// A [`SipralSessionTimer`]: how this account's calls ask for a
+        /// session timer (RFC 4028). Zero is the default, thirty minutes.
         pub session_timer: Number<SipralSessionTimer>,
         /// The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
         /// seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
         pub session_interval_seconds: u64,
-        /// `SIPRAL_PRIVACY_*` bits: place every call from this account
-        /// anonymously (RFC 3323), asking for these. `SIPRAL_PRIVACY_ID` is
-        /// "withhold my number". `From` becomes `"Anonymous"
-        /// <sip:anonymous@anonymous.invalid>`, `Privacy` carries the bits,
-        /// and the account's own identity goes in `P-Asserted-Identity` only
-        /// toward a peer in `trusted_peers`. Zero asks for none.
+        /// `SIPRAL_PRIVACY_*` bits: place every call anonymously (RFC 3323).
+        /// `From` becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`,
+        /// `Privacy` carries the bits, and `P-Asserted-Identity` goes only to
+        /// a peer in `trusted_peers`. Zero asks for none.
         pub privacy: u32,
-        /// The peers this account trusts (RFC 3325's trust domain), as IP
-        /// addresses separated by commas: usually the registrar or the trunk.
-        /// A call arriving from one of them has its asserted identity read
-        /// (`sipral_call_event_t::asserted_uri`); from anywhere else it is
-        /// left out. And once any are named, a call placed toward any other
-        /// peer carries no `P-Asserted-Identity` or `P-Preferred-Identity`,
-        /// whoever wrote it. Null and zero trusts nobody.
+        /// Trusted peers (RFC 3325's trust domain), comma-separated IP
+        /// addresses. Only their asserted identity is read
+        /// (`sipral_call_event_t::asserted_uri`). Once any are named, calls to
+        /// other peers carry no `P-Asserted-Identity` or `P-Preferred-Identity`.
+        /// Null trusts nobody.
         pub trusted_peers: *const c_char,
         /// How many bytes of it.
         pub trusted_peers_len: usize,
-        /// A `SipralSrtp`: what this account's calls do about SRTP, over the
-        /// stack's own `srtp` — offered, required, DTLS-SRTP, or DTLS-SRTP
-        /// falling back to SDES — or zero for the stack's. A call placed from
-        /// it may name a stricter policy of its own and never a looser one
-        /// (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
-        /// under it is refused with 488. ABI 0.31, like every member below.
+        /// A `SipralSrtp` over the stack's `srtp`, or zero for the stack's.
+        /// A call may be stricter, never looser
+        /// (`SIPRAL_STATUS_SECURITY_POLICY`); an INVITE it cannot meet gets
+        /// 488.
         pub srtp: Number<SipralSrtp>,
-        /// The SRTP suites this account's calls run, most preferred first,
-        /// as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
-        /// commas: `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. The `a=crypto`
-        /// lines an SDES offer carries, the lines an SDES answer takes, and
-        /// the DTLS-SRTP profiles a handshake offers and accepts — GCM among
-        /// them only if named. Null for this build's own. Every line is in
-        /// the INVITE: past two or three over UDP it needs a stream.
+        /// The SRTP suites, most preferred first, comma-separated, as RFC 4568
+        /// §6.2 and RFC 7714 §14.2 name them:
+        /// `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. Used for SDES and the
+        /// DTLS-SRTP profiles; GCM only if named. Null for this build's own.
+        /// Each line goes in the INVITE: more than two or three need a stream
+        /// transport.
         pub srtp_suites: *const c_char,
         /// How many bytes of it.
         pub srtp_suites_len: usize,
-        /// A `SipralStirVerification`: what this account does with the
-        /// `Identity` header fields of the calls it receives (RFC 8224 §6.2).
-        /// Zero reports, once `sipral_stack_stir` has given the stack trust
-        /// anchors.
+        /// A `SipralStirVerification`: what to do with received `Identity`
+        /// fields (RFC 8224 §6.2). Zero reports, once `sipral_stack_stir` gave
+        /// trust anchors.
         pub stir_verification: Number<SipralStirVerification>,
-        /// The P-256 private key this account signs its calls with (RFC 8224
-        /// §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
-        /// `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
-        /// wall clock `sipral_stack_stir` gives the stack in `unix_seconds`;
-        /// `SIPRAL_STATUS_WRONG_STATE` without it.
+        /// The P-256 key this account signs calls with (RFC 8224 §6.1): the
+        /// bare 32-octet scalar, or `EC PRIVATE KEY` / `PRIVATE KEY` in DER or
+        /// PEM. Null signs nothing. Needs the wall clock from
+        /// `sipral_stack_stir`, else `SIPRAL_STATUS_WRONG_STATE`.
         pub stir_key: *const u8,
         /// How many bytes of it.
         pub stir_key_len: usize,
-        /// Where the certificate chain for `stir_key` is published: the
-        /// `x5u` and `info` of every PASSporT this account signs. Required
-        /// with `stir_key`, and only with it.
+        /// Where the chain for `stir_key` is published (`x5u` and `info`).
+        /// Required with `stir_key`, and only with it.
         pub stir_certificate_url: *const c_char,
         /// How many bytes of it.
         pub stir_certificate_url_len: usize,
-        /// The telephone number this account signs as, canonicalised by
-        /// RFC 8224 §8.3's first step, or null for the number in `aor`'s user
-        /// part.
+        /// The number this account signs as, canonicalised by RFC 8224 §8.3's
+        /// first step, or null for `aor`'s user part.
         pub stir_orig: *const c_char,
         /// How many bytes of it.
         pub stir_orig_len: usize,
-        /// The origination identifier every call it signs claims (RFC 8588
-        /// §5), a UUID, or null for one the stack draws for the account.
+        /// The origination id every signed call claims (RFC 8588 §5), a UUID,
+        /// or null for one the stack draws.
         pub stir_origid: *const c_char,
         /// How many bytes of it.
         pub stir_origid_len: usize,
-        /// A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
-        /// full attestation, `A`.
+        /// A `SipralAttestation` (RFC 8588 §4); zero is full, `A`.
         pub stir_attestation: Number<SipralAttestation>,
-        /// A `SipralToggle`: whether an encrypted call of this account may be
-        /// recorded to a recording server (`sipral_call_record_to`) in the
-        /// clear. Off by default: the copies of an encrypted call are offered
-        /// to the server as SRTP, with SDES keys in the recording session's
-        /// offer (RFC 4568), and a stream the server will not take that way
-        /// gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
-        /// unencrypted call's always do. ABI 0.32.
+        /// A `SipralToggle`: whether an encrypted call may be recorded
+        /// (`sipral_call_record_to`) in the clear. Off by default: copies go as
+        /// SRTP with SDES keys (RFC 4568), and a stream the server refuses
+        /// that way gets nothing (RFC 7866 §12.2).
         ///
-        /// Sixty-four bits wide, where every other toggle takes thirty-two,
-        /// so that it starts past the 384 bytes of ABI 0.31: the last four
-        /// of those were padding, which a caller built against that header
-        /// may have left unwritten, and are never read.
+        /// Sixty-four bits wide so it starts past an older layout's trailing
+        /// padding, which old callers may leave unwritten.
         pub recording_in_clear: u64,
-        /// How often, in milliseconds, this account keeps its flow to its
-        /// registrar — to its outbound proxy, for one that never registers —
-        /// open, whatever STUN found; zero for never, which leaves it to
-        /// `sipral_stack_config_t::registrar_keepalive` (ABI 0.34).
+        /// How often, in milliseconds, to keep the flow to the registrar (or
+        /// outbound proxy) open regardless of STUN; zero defers to
+        /// `sipral_stack_config_t::registrar_keepalive`.
         ///
-        /// For a network whose NAT forgets a UDP flow sooner than the
-        /// REGISTER refresh comes round, with STUN off. On UDP a double CRLF
-        /// goes out alone in a datagram, which a registrar ignores (RFC 3261
-        /// §7.5); on TCP or TLS the connection is pinged at this interval
-        /// instead of the stack's own (RFC 5626 §4.4.1). Each interval is
-        /// drawn between 80% and 100% of it. From 1 000 to 120 000, and
-        /// anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// For a NAT that forgets UDP flows before the REGISTER refresh. UDP
+        /// sends a lone double CRLF (RFC 3261 §7.5); TCP and TLS ping at this
+        /// interval (RFC 5626 §4.4.1). Jittered to 80-100%. From 1 000 to
+        /// 120 000, else `SIPRAL_STATUS_INVALID_ARGUMENT`.
         pub keepalive_ms: u64,
-        /// The server this account's requests go to, as a URI whose host RFC
-        /// 3263 locates — `sip:pbx.example.com`, `sips:example.com:5061` —
-        /// in place of `registrar_address`: exactly one of the two is given
-        /// (ABI 0.34). The registrar for an account that registers (usually
-        /// the same URI as `registrar`), the outbound proxy for one that
-        /// does not.
+        /// The server as a URI whose host RFC 3263 locates
+        /// (`sip:pbx.example.com`, `sips:example.com:5061`), in place of
+        /// `registrar_address`: exactly one is given. The registrar, or the
+        /// outbound proxy for an account that does not register.
         ///
-        /// The lookups are the application's resolver's, asked for with
-        /// `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with
-        /// `sipral_account_looked_up`; the order they go in, the SRV ranking
-        /// and the fallback to the host's own addresses are the stack's.
-        /// The first REGISTER waits for the first answer, and a call placed
-        /// before it with no `destination` of its own is
-        /// `SIPRAL_STATUS_WRONG_STATE`. A request outside a dialog — REGISTER,
-        /// INVITE, MESSAGE, SUBSCRIBE, PUBLISH — that times out, whose
-        /// transport fails or that is answered 503 moves to the next address
-        /// found at once (§4.3; every request but REGISTER from ABI 0.35);
-        /// the name is looked up again when the
-        /// answer's time-to-live runs out, and when the stack's recovery
-        /// asks for an address. A host with a port skips SRV, and a numeric
-        /// host asks nothing.
+        /// Lookups go to the application's resolver via
+        /// `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and `sipral_account_looked_up`;
+        /// ordering, SRV ranking and fallback are the stack's. The first
+        /// REGISTER waits for the first answer; a call before it with no
+        /// destination is `SIPRAL_STATUS_WRONG_STATE`. An out-of-dialog
+        /// request that times out, fails its transport or gets 503 moves to
+        /// the next address (§4.3). The name is looked up again when the TTL
+        /// runs out or recovery asks. A port skips SRV; a numeric host asks
+        /// nothing.
         pub server_uri: *const c_char,
         /// How many bytes of it.
         pub server_uri_len: usize,
-        /// The SHA-256 fingerprint of the one TLS server certificate this
-        /// account trusts, in place of a trust anchor, for a PBX that serves
-        /// a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
-        /// either case, colons and spaces among them ignored, bare or after
-        /// `sha256 Fingerprint=` (what `openssl x509 -fingerprint -sha256`
-        /// prints, 3.x and 1.1), `sha-256 ` (RFC 8122) or `SHA256=`, each
-        /// prefix in any case (ABI 0.35 for the first and the spaces).
-        /// Anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
+        /// The SHA-256 fingerprint of the one TLS certificate this account
+        /// trusts, for a self-signed PBX: 64 hex digits, any case, colons and
+        /// spaces ignored, bare or after `sha256 Fingerprint=` (openssl),
+        /// `sha-256 ` (RFC 8122) or `SHA256=`, any case. Anything else is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
         ///
-        /// TLS is the application's, so this is what its certificate
-        /// verifier asks, with `sipral_account_check_certificate`: with a
-        /// pin, the fingerprint is the whole verdict, and no chain, trust
-        /// anchor or host name is consulted (`docs/22-tls.md`).
+        /// The application's verifier asks `sipral_account_check_certificate`;
+        /// with a pin the fingerprint is the whole verdict (`docs/22-tls.md`).
         pub tls_pin_sha256: *const c_char,
         /// How many bytes of it.
         pub tls_pin_sha256_len: usize,
-        /// A `SipralToggle`: whether `server_uri`'s domain is asked for NAPTR
-        /// records before SRV (RFC 3263 §4.1). Off by default: most domains
-        /// publish none, and the account's transport is already chosen.
-        /// Refused without a `server_uri` (ABI 0.34).
+        /// A `SipralToggle`: ask NAPTR before SRV for `server_uri`'s domain
+        /// (RFC 3263 §4.1). Off by default; refused without `server_uri`.
         pub server_naptr: Number<SipralToggle>,
         /// Zero.
         pub reserved: u32,
-        /// A [`SipralTransport`]: the protocol
-        /// of a connection of this account's own to its server, which the
-        /// stack asks the application to open, or zero for none (ABI 0.35).
+        /// A [`SipralTransport`]: the protocol of a connection of this
+        /// account's own to its server, which the application opens, or zero.
         ///
-        /// For an account on TCP or TLS to one server beside an account on
-        /// the stack's UDP transport to another, in one stack with one audio
-        /// engine. With `SIPRAL_TRANSPORT_TCP`, `_TLS`, `_WS` or `_WSS` the
-        /// stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming the
-        /// protocol and the server's address — `request_bytes` and
-        /// `limit_bytes` zero, since no request outgrew anything — and the
-        /// account's requests go over whichever transport of that protocol
-        /// the application binds to that address with
-        /// `sipral_stack_transport_bind`, under any number; one bound before
-        /// the account is added is used as it stands. Until then its
-        /// REGISTER waits; ten seconds after the question it fails as
-        /// unreachable and its retry, after the usual back-off, asks again.
-        /// An account that never registers asks when it is added, and any
-        /// account asks again at once when its connection fails or closes —
-        /// a registered one by registering again. A call placed before the
-        /// connection is bound is `SIPRAL_STATUS_TRANSPORT_DOWN`. Every
-        /// request inside the account's calls keeps the connection their
-        /// INVITE went over, and a request arriving over it is matched to
-        /// this account before any other with the same user. `transport` is
-        /// then where the account starts, and is replaced by the connection
-        /// once there is one. `SIPRAL_TRANSPORT_UDP` only says what
-        /// `transport` speaks.
+        /// For an account on TCP or TLS beside one on the stack's UDP, in one
+        /// stack. With TCP, TLS, WS or WSS the stack raises
+        /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` with the protocol and address
+        /// (`request_bytes` and `limit_bytes` zero); the account then uses
+        /// whatever transport of that protocol the application binds there with
+        /// `sipral_stack_transport_bind`, including one bound before. Until
+        /// then the REGISTER waits; after ten seconds it fails as unreachable
+        /// and the retry asks again. A non-registering account asks on add;
+        /// any account asks again when the connection fails or closes. A call
+        /// before the bind is `SIPRAL_STATUS_TRANSPORT_DOWN`. In-call requests
+        /// keep their INVITE's connection, and requests arriving on it match
+        /// this account first. `SIPRAL_TRANSPORT_UDP` only describes
+        /// `transport`.
         pub stream_protocol: Number<SipralTransport>,
         /// Zero.
         pub reserved_35: u32,
-        /// The realms the password answers, each on a line of its own,
-        /// separated by line feeds (a realm may hold a comma, and never a
-        /// line break), or null for the default (ABI 0.36).
+        /// The realms the password answers, one per line (a realm may hold a
+        /// comma, never a line break), or null for the default.
         ///
-        /// The password answers the account's own server and nobody else
-        /// (RFC 3261 §22.1). With none named the account takes the realms
-        /// its server first challenges it with, and every realm its
-        /// registrar challenges a REGISTER with, and answers those and no
-        /// others: a proxy passing on a far end's own 401 under a realm of
-        /// its choosing gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
-        /// says so. A server whose calls are challenged under a realm its
-        /// REGISTERs never meet — an SBC or an outbound proxy at the
-        /// registrar's address with a realm of its own — needs both named
-        /// here; named, these and no others are answered, REGISTERs
-        /// included. An empty line is skipped; a realm is compared exactly,
-        /// case included, as RFC 3261 §22.1 compares it.
+        /// The password answers only the account's own server (RFC 3261
+        /// §22.1). By default that is the realms of the server's first
+        /// challenge and of every REGISTER challenge; a proxy relaying a far
+        /// end's 401 gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
+        /// says so. When calls are challenged under a realm REGISTERs never
+        /// see (an SBC or proxy with its own realm), name all of them here.
+        /// Empty lines are skipped; realms compare exactly (§22.1).
         pub realms: *const c_char,
         /// How many bytes of it.
         pub realms_len: usize,
     }
 }
 
-/// The realms `config` names, one to a line: `None` for none, which is the
-/// default. A line break is the one byte a realm never holds, so it is the
-/// one byte allowed between them; any other control byte, or a list with no
-/// realm in it, is refused.
+/// The realms `config` names, one per line, or `None` by default. Any control
+/// byte but the line feed, or a list with no realm, is refused.
 ///
 /// # Safety
 ///
@@ -408,9 +319,8 @@ unsafe fn realms_of(config: &SipralAccountConfig) -> Result<Option<Vec<&str>>, F
     Ok(Some(named))
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and all-zero is valid: every pointer is null beside a length of
-// zero, which is how a caller says it has nothing to give.
+// Safety: plain data, and all-zero is valid: every pointer null beside a zero
+// length.
 unsafe impl Versioned for SipralAccountConfig {
     const NAME: &'static str = "sipral_account_config";
     const PIN: crate::versioned::Pin =
@@ -421,8 +331,7 @@ unsafe impl Versioned for SipralAccountConfig {
     }
 }
 
-/// Read a URI a caller supplied, and say which field it was when it will not
-/// parse.
+/// Parse a caller's URI, naming the field when it fails.
 fn uri(supplied: &str, name: &'static str) -> Result<Uri, Fail> {
     Uri::parse_str(supplied).map_err(|error| {
         fail(
@@ -432,13 +341,8 @@ fn uri(supplied: &str, name: &'static str) -> Result<Uri, Fail> {
     })
 }
 
-/// How long a binding to ask for, inside what an `Expires` can say.
-///
-/// §20.19 makes it a number of seconds "between 0 and (2**32)-1". A larger one
-/// still writes a header field, and every registrar that reads the grammar
-/// refuses the request — which reaches the application as a registration that
-/// will not take, four hundred milliseconds and one wire round trip after the
-/// mistake was made rather than at the call that made it.
+/// How long a binding to ask for, inside what an `Expires` can say (§20.19:
+/// up to 2³²−1). Refused here, not later by the registrar.
 fn expiry(seconds: u64) -> Result<Duration, Fail> {
     if u32::try_from(seconds).is_err() {
         return Err(fail(
@@ -452,9 +356,8 @@ fn expiry(seconds: u64) -> Result<Duration, Fail> {
     Ok(Duration::from_secs(seconds))
 }
 
-/// What an account's calls ask for, from what crossed the boundary: the
-/// session timer (RFC 4028), the privacy (RFC 3323), and the peers whose
-/// asserted identities it believes (RFC 3325).
+/// Apply the session timer (RFC 4028), privacy (RFC 3323) and trusted peers
+/// (RFC 3325).
 ///
 /// # Safety
 ///
@@ -520,8 +423,7 @@ fn address(supplied: &str, name: &'static str) -> Result<SocketAddr, Fail> {
     })
 }
 
-/// The push service an account asks to be woken through, or nothing when it
-/// asked for none.
+/// The push service an account asks to be woken through, if any.
 ///
 /// # Safety
 ///
@@ -537,8 +439,7 @@ unsafe fn push_from(config: &SipralAccountConfig) -> Result<Option<Push>, Fail> 
     let prid = unsafe { text(config.push_prid, config.push_prid_len, "push_prid") }?;
     let param = unsafe { text(config.push_param, config.push_param_len, "push_param") }?;
     let (Some(provider), Some(prid)) = (provider, prid) else {
-        // a provider with no identifier is a `Contact` naming a service and no
-        // device, which a registrar takes and nothing ever wakes
+        // a provider without a device is a binding nothing ever wakes
         if provider.is_some() || prid.is_some() || param.is_some() {
             return Err(fail(
                 SipralStatus::InvalidArgument,
@@ -565,8 +466,8 @@ unsafe fn push_from(config: &SipralAccountConfig) -> Result<Option<Push>, Fail> 
     Ok(Some(push))
 }
 
-/// Where an account's requests go: the address `registrar_address` gives, or
-/// the URI `server_uri` names for RFC 3263 to locate, exactly one of the two.
+/// Where requests go: `registrar_address`, or `server_uri` for RFC 3263 to
+/// locate; exactly one.
 ///
 /// # Safety
 ///
@@ -591,14 +492,13 @@ unsafe fn destination_of(
              give the address, or the URI whose server is located, not both",
         )),
         (Some(remote), None) => Ok((address(remote, "registrar_address")?, None)),
-        // located: the address is the first answer's, and nothing is sent
-        // before it comes
+        // located: the first answer gives the address, nothing goes before it
         (None, Some(server)) => Ok((
             SocketAddr::from(([0, 0, 0, 0], 0)),
             Some(uri(server, "server_uri")?),
         )),
-        // said for the trunk in its own words, because a caller who left
-        // the registrar out on purpose reads "required" as a contradiction
+        // a trunk's caller left the registrar out on purpose: explain why the
+        // address is still needed
         (None, None) => Err(fail(
             SipralStatus::InvalidArgument,
             if registering {
@@ -612,9 +512,8 @@ unsafe fn destination_of(
     }
 }
 
-/// How an account reaches its server and keeps reaching it: the server
-/// located by RFC 3263, NAPTR first when asked, its own keep-alive, and the
-/// one TLS certificate it trusts.
+/// How an account reaches its server: RFC 3263 location (NAPTR when asked),
+/// its own keep-alive, and a pinned TLS certificate.
 ///
 /// # Safety
 ///
@@ -669,13 +568,9 @@ unsafe fn with_reach(
     Ok(account)
 }
 
-/// The account's password, held to what [`text`] holds any other member to —
-/// UTF-8, one line — but refused without saying where it went wrong.
-///
-/// [`text`]'s refusal names the offset of the byte it refused, which is right
-/// for a header field and wrong for a secret: the shape of a password is not
-/// something an error text an application may log should describe. The TURN
-/// password is read the same way (`crate::nat`).
+/// The password, held to [`text`]'s rules (UTF-8, one line) but refused
+/// without naming the offending offset: an error that may be logged must not
+/// describe a secret. The TURN password is read the same way (`crate::nat`).
 ///
 /// # Safety
 ///
@@ -708,7 +603,6 @@ unsafe fn password_of(config: &SipralAccountConfig) -> Result<Option<&str>, Fail
 /// Every pointer in `config` must be readable for the length beside it.
 unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Result<Account, Fail> {
     let aor = unsafe { required_text(config.aor, config.aor_len, "aor") }?;
-    // no registrar is an account that never registers, not a mistake
     let registrar = unsafe { text(config.registrar, config.registrar_len, "registrar") }?;
     let contact = unsafe { required_text(config.contact, config.contact_len, "contact") }?;
     let (remote, server) = unsafe { destination_of(config, registrar.is_some()) }?;
@@ -731,8 +625,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
             state.user_agent.is_some(),
         )
     }?;
-    // accepted and never sent would be a field the application believes is
-    // on the wire
+    // refused rather than accepted and never sent
     if registrar.is_none() && !asked.is_empty() {
         return Err(fail(
             SipralStatus::InvalidArgument,
@@ -776,8 +669,8 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
             account = account.credentials(Credentials::new(user, password));
         }
         (None, None) => {}
-        // half a credential answers nothing, and an account that silently
-        // stopped answering challenges looks like a wrong password
+        // half a credential would silently stop answering challenges, which
+        // looks like a wrong password
         _ => {
             return Err(fail(
                 SipralStatus::InvalidArgument,
@@ -809,10 +702,8 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
 }
 
 entry! {
-    /// Configure an account, and write its handle to `out_account`.
-    ///
-    /// Nothing is sent. The account exists until [`sipral_account_remove`] or
-    /// until the stack is destroyed.
+    /// Configure an account and write its handle to `out_account`. Nothing is
+    /// sent. It lives until [`sipral_account_remove`] or the stack's end.
     ///
     /// # Safety
     ///
@@ -828,8 +719,7 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "out_account is null"));
         }
         let config = unsafe { read_versioned(config) }?;
-        // read before the stack is locked, like a call's own, so a value this
-        // ABI names nothing for never reaches the point of building anything
+        // read before locking the stack, so an unknown value builds nothing
         let srtp = AccountSrtp {
             policy: crate::media::srtp_policy(config.srtp, "srtp")?,
             suites: crate::security::srtp_suites(unsafe {
@@ -840,8 +730,7 @@ entry! {
                 "recording_in_clear",
                 false,
             )?,
-            // the C ABI names no switch for it: the stack's own answer, the
-            // default, which takes SDES on any transport and says so
+            // no C switch: the stack's default, SDES on any transport
             sdes_signalling: None,
         };
         let handle = with_stack(stack, |state| {
@@ -856,9 +745,8 @@ entry! {
                 let _ = state.engine.set_account_srtp(id, AccountSrtp::default());
                 fail(status, "no room for another account on this stack")
             })?;
-            // behind a NAT whose answer is already in, the account starts out
-            // on the public address rather than waiting for the next refresh
-            // to say so; it has not registered, so nothing is sent
+            // behind a known NAT the account starts on the public address;
+            // nothing is sent, since it has not registered
             let now = state.last_instant();
             crate::nat::Nat::contacts_changed(state, now);
             Ok(handle)
@@ -869,12 +757,9 @@ entry! {
 }
 
 entry! {
-    /// Forget an account, and everything scheduled for it.
-    ///
-    /// Nothing is sent: an account being removed may be one whose registrar is
-    /// unreachable, and waiting on that is not this call's job. Give the
-    /// binding up politely with [`sipral_account_unregister`] first when it
-    /// matters.
+    /// Forget an account and everything scheduled for it. Nothing is sent: its
+    /// registrar may be unreachable. Call [`sipral_account_unregister`] first
+    /// to give the binding up.
     ///
     /// # Safety
     ///
@@ -883,7 +768,7 @@ entry! {
         with_stack(stack, |state| {
             let id = state.accounts.remove(account).map_err(handle_failed)?;
             state.agent.remove_account(id);
-            // the default is the engine's own, which is what forgets it
+            // the engine's default forgets the account's policy
             let _ = state.engine.set_account_srtp(id, AccountSrtp::default());
             Ok(())
         })
@@ -893,13 +778,10 @@ entry! {
 entry! {
     /// Register, and keep the binding alive until told otherwise.
     ///
-    /// Refreshes, credential retries and the back-off after an outage all
-    /// happen without another call. What stops them is
-    /// [`sipral_account_unregister`], or a refusal that trying again cannot
-    /// fix. Every step of it arrives as a `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`.
-    ///
-    /// An account configured with no registrar never registers, and this
-    /// answers `SIPRAL_STATUS_INVALID_ARGUMENT` for it with nothing sent.
+    /// Refreshes, credential retries and back-off happen on their own until
+    /// [`sipral_account_unregister`] or a refusal retrying cannot fix. Each
+    /// step arrives as `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`. An account
+    /// with no registrar gets `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent.
     ///
     /// # Safety
     ///
@@ -918,12 +800,9 @@ entry! {
 entry! {
     /// Give the binding up: a REGISTER with `Expires: 0` (§10.2.2).
     ///
-    /// Only this device's binding. A `Contact: *` would remove every binding
-    /// the address of record has, including the one belonging to the desk
-    /// phone somebody else is holding.
-    ///
-    /// An account configured with no registrar has no binding to give up, and
-    /// is refused the way `sipral_account_register` refuses it.
+    /// Only this device's binding: `Contact: *` would remove every binding of
+    /// the address of record. An account with no registrar is refused as
+    /// `sipral_account_register` refuses it.
     ///
     /// # Safety
     ///
@@ -940,10 +819,8 @@ entry! {
 }
 
 entry! {
-    /// Where an account's registration is, as a `SipralRegistrationState`.
-    ///
-    /// An account configured with no registrar answers
-    /// `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, always.
+    /// Where an account's registration is, as a `SipralRegistrationState`;
+    /// always `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` with no registrar.
     ///
     /// # Safety
     ///
@@ -967,28 +844,21 @@ entry! {
 
 entry! {
     /// Give an account the OAuth 2.0 access token its server asked for
-    /// (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
-    /// takes the token away. The password, if the account has one, stays.
+    /// (RFC 8898), replacing any it had. A `token_len` of zero removes it; a
+    /// password stays.
     ///
-    /// The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
-    /// renewed ahead of its expiry goes in: from the next request on, a
-    /// `Bearer` challenge from the account's own server is answered with
-    /// `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
-    /// request its cached challenge covers. Offered a `Digest` and a
-    /// `Bearer` challenge for one realm, the token answers. A token the
-    /// server refused is never sent to it again. The token answers the
-    /// account's own server and nobody else, the rule the password is held
-    /// to. Nothing is sent by this call; a registration that failed for
-    /// want of a token starts again with `sipral_account_register`.
+    /// Answers `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, or renews ahead of expiry.
+    /// From the next request, a `Bearer` challenge from the account's own
+    /// server (and every request its cached challenge covers) gets
+    /// `Authorization: Bearer <token>` (RFC 6750 §2.1); with `Digest` and
+    /// `Bearer` offered for one realm, the token answers. A refused token is
+    /// never resent. Nothing is sent now; a registration that failed for want
+    /// of a token restarts with `sipral_account_register`.
     ///
-    /// The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
-    /// names the authorization server and the scope, and the exchange with
-    /// it is the application's. The token is copied, kept out of every log
-    /// and diagnostic, and wiped when replaced.
-    ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
-    /// §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
-    /// nothing changed and the error not describing it.
+    /// The application fetches tokens. The token is copied, kept out of logs
+    /// and diagnostics, and wiped when replaced. A token that is not RFC 6750
+    /// §2.1's `b64token` is `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing changed,
+    /// the error not describing it.
     ///
     /// # Safety
     ///
@@ -1122,8 +992,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The same, for an account that never registers: no registrar, and the
-    /// address is the outbound proxy its requests go to.
+    /// A trunk: no registrar, the address is its outbound proxy.
     fn trunk_config() -> SipralAccountConfig {
         SipralAccountConfig {
             registrar: ptr::null(),
@@ -1132,8 +1001,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Everything the stack wants written, and where each message is going,
-    /// through the C ABI and nothing else.
+    /// Everything queued to write, with destinations, through the C ABI.
     fn written(stack: SipralHandle) -> Vec<(Vec<u8>, String)> {
         let mut message = vec![0_u8; SIPRAL_MESSAGE_BYTES];
         let mut destination: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
@@ -1231,10 +1099,8 @@ pub(crate) mod tests {
 
     #[test]
     fn an_account_handle_from_one_stack_does_not_open_another() {
-        // tags of its own, so both stacks start at the first generation the way
-        // every stack did before a handle carried one; tags from the process's
-        // own set come back carrying whatever other tests minted, and can refuse
-        // the handle for a reason that has nothing to do with its stack
+        // own tags, so both stacks start at the same generation regardless of
+        // other tests
         static TAGS: StackTags = StackTags::new();
         let mut first_observed = Observed::default();
         let mut second_observed = Observed::default();
@@ -1242,8 +1108,7 @@ pub(crate) mod tests {
         let second = stack_on(&TAGS, &mut second_observed);
         let (_, foreign) = add(first, &account_config());
         let (_, own) = add(second, &account_config());
-        // both stacks number their accounts from the same first slot, so the
-        // two handles differ in nothing but the stack they carry
+        // the handles differ only in the stack they carry
         assert_ne!(foreign, own);
         assert_eq!(
             unsafe { sipral_account_register(second, foreign, 0) },
@@ -1399,9 +1264,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// An account's own keep-alive goes out at its interval whatever STUN
-    /// found — here with no STUN at all — to the address its requests go
-    /// to, and not at all without one.
+    /// An account keep-alive goes to its proxy at its interval without STUN,
+    /// and not at all unless asked.
     #[test]
     fn an_account_keepalive_goes_to_its_proxy_at_its_own_interval() {
         let crlf = |out: &[(Vec<u8>, String)]| {
@@ -1454,9 +1318,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A loopback `Contact` handed to a registrar on another machine is
-    /// refused with nothing sent, as its own status, and so is a call a
-    /// trunk would place with one.
+    /// A loopback `Contact` toward another machine is refused with its own
+    /// status, nothing sent, for a REGISTER and a trunk call.
     #[test]
     fn a_loopback_contact_toward_another_machine_is_refused_as_unreachable() {
         let mut observed = Observed::default();
@@ -1519,10 +1382,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A password that is not usable text is refused without the error
-    /// saying where: a control byte at offset 5 leaves neither the 5 nor the
-    /// word "offset" in the last error, and neither does a byte that is not
-    /// UTF-8.
+    /// A bad password is refused without the error saying where or what.
     #[test]
     fn a_password_refused_is_refused_without_describing_it() {
         let mut observed = Observed::default();
@@ -1540,9 +1400,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// §20.19 bounds an `Expires` at 2³²−1 seconds. A larger figure still
-    /// writes a header field, so without this the mistake surfaces as a
-    /// registration the registrar refuses rather than as the call that made it.
+    /// §20.19 bounds an `Expires` at 2³²−1 seconds; above is refused on add.
     #[test]
     fn an_expiry_longer_than_the_header_can_carry_is_refused_where_it_is_set() {
         let mut observed = Observed::default();
@@ -1638,14 +1496,11 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// RFC 3261 §10.2.5 is Setting the Internal Clock; the rule that a UA
-    /// removes a binding by sending `Expires: 0` is §10.2.2, Removing
-    /// Bindings. The needle is assembled at runtime so this test does not
-    /// just match its own assertion.
+    /// Removing a binding with `Expires: 0` is §10.2.2, not §10.2.5. The
+    /// needle is built at runtime so the test does not match itself.
     #[test]
     fn the_unregister_doc_cites_removing_bindings_not_the_clock() {
-        // the needle spans a line break, and a Windows checkout puts a CR in
-        // front of it
+        // a Windows checkout adds CRs
         let source = include_str!("account.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
@@ -1687,8 +1542,7 @@ pub(crate) mod tests {
     fn a_config_that_declares_the_wrong_size_is_refused() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
-        // one byte short of the oldest published length: anything between that
-        // and this build's own is an older caller, and is taken
+        // one byte short of the oldest published length
         let mut config = account_config();
         config.size =
             <crate::account::SipralAccountConfig as crate::versioned::Versioned>::MIN_SIZE - 1;
@@ -1696,9 +1550,7 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The size is checked before the handle is even looked up: a stack that
-    /// was never created and a config too short to be any version of this one
-    /// both fail, and the size is the one this answers with.
+    /// The size is checked before the handle is looked up.
     #[test]
     fn an_account_config_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {

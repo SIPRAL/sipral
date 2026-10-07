@@ -3,42 +3,22 @@
 
 //! Turning an INVITE away before C ever hears of it (A8, D7).
 //!
-//! `crates/sipral-ua/src/screening.rs` already does the work: a policy
-//! consulted before a call exists, and a floor that costs a flood nothing
-//! more than a token bucket. This module is the two ways an application
-//! reaches it — `sipral_stack_screen` for the policy, `sipral_stack_invite_limit`
-//! for the floor — and the counters that say what either one refused.
+//! The work is in `crates/sipral-ua/src/screening.rs`. This module exposes the
+//! policy (`sipral_stack_screen`), the rate floor (`sipral_stack_invite_limit`)
+//! and the counters of what either refused.
 //!
-//! **Where this runs is the whole reason it is not a small wrapper.** Every
-//! other callback in this ABI, [`SipralEventCallback`](crate::event::SipralEventCallback)
-//! included, is answered from outside the stack's own lock: a poll takes what
-//! it has to say into a queue and only then lets the lock go, so calling back
-//! into the library from inside that callback is an ordinary call
-//! (`docs/08-ffi.md`, "Nothing is held while the callback runs"). A screening
-//! decision cannot wait for that moment, because it has to be made before the
-//! INVITE it is about is allowed to do anything at all, and that INVITE is
-//! being read in the middle of the very call — `sipral_stack_receive_datagram`
-//! or `sipral_stack_receive_stream` — that is holding the lock. So
-//! [`SipralScreenCallback`] runs *inside* it, which nothing else this ABI
-//! calls back on does, and its own doc comment says so before it says
-//! anything else.
+//! **The policy runs inside the stack's lock.** Every other callback, including
+//! [`SipralEventCallback`](crate::event::SipralEventCallback), runs after the
+//! lock is released (`docs/08-ffi.md`). A screening decision must come before
+//! the INVITE does anything, and that INVITE is being read inside
+//! `sipral_stack_receive_datagram` or `sipral_stack_receive_stream`, which
+//! hold the lock. So [`SipralScreenCallback`] runs inside it.
 //!
-//! **The rule that follows is enforced, not merely written down.** Every
-//! entry point that takes a stack takes its lock without waiting
-//! (`crates/sipral-ffi/src/stack.rs::lock`); one that finds it already held
-//! answers `SIPRAL_STATUS_BUSY` and touches nothing. A screening callback
-//! that called back into the very stack it was given — `sipral_stack_poll`,
-//! another receive, a hangup — would find that lock held by the call it is
-//! itself running inside of, on the very same thread, and would be answered
-//! `SIPRAL_STATUS_BUSY` rather than left to deadlock. Calling into a
-//! *different* stack is unaffected, since each stack's lock is its own, and
-//! [`crate::stack::sipral_stack_destroy`] on *this* stack is safe even from in
-//! here, for the same reason it is safe from inside the event callback: the
-//! call that is screening holds its own share of the stack until it returns,
-//! so nothing is freed underneath it. None of that makes re-entering the
-//! library from in here a good idea — it is answered with an error rather
-//! than run — which is exactly why the doc comment forbids it outright rather
-//! than describing what happens if it is tried anyway.
+//! Entry points take the lock without waiting (`stack.rs::lock`) and answer
+//! `SIPRAL_STATUS_BUSY` when it is held, so a callback re-entering its own
+//! stack gets an error, not a deadlock. Another stack is unaffected.
+//! [`crate::stack::sipral_stack_destroy`] on this stack is safe from here: the
+//! screening call holds its own share of the stack until it returns.
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -55,30 +35,24 @@ use crate::status::SipralStatus;
 
 record! {
     /// What [`SipralScreenCallback`] reads about one INVITE, before it has
-    /// had any effect at all.
+    /// had any effect.
     ///
-    /// Filled by the library and handed to the callback as a `const`
-    /// pointer, the same shape [`crate::event::SipralEvent`] is: read `size`
-    /// before anything past it, and read nothing once the callback has
-    /// returned, since `message` — and `source`, when it is not null —
-    /// borrow from a request that is still in the middle of being processed
-    /// and are not this ABI's to keep alive a moment longer. The answer does
-    /// not travel in here: the callback returns it.
+    /// Read `size` first, like [`crate::event::SipralEvent`]. `message` and
+    /// `source` borrow from a request still being processed: read nothing after
+    /// the callback returns.
     #[derive(Clone, Copy)]
     pub struct SipralScreenRequest {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// The stack the INVITE arrived on.
         pub stack: SipralHandle,
-        /// The far end of the bytes it arrived in, as `host:port` — the same
-        /// text form every address in this ABI takes. Null and zero for a
-        /// byte stream the application bound without naming its far end.
+        /// The far end of the bytes, as `host:port`. Null and zero for a byte
+        /// stream bound without naming its far end.
         pub source: *const c_char,
         /// How many bytes of it.
         pub source_len: usize,
-        /// The INVITE, whole and unparsed. `sipral_message_header` and its
-        /// three companions read any header out of these bytes the way they
-        /// read any other message this ABI hands over.
+        /// The INVITE, whole and unparsed; `sipral_message_header` and its
+        /// companions read headers out of it.
         pub message: *const u8,
         /// How many bytes of it.
         pub message_len: usize,
@@ -86,92 +60,59 @@ record! {
 }
 
 constants! {
-    /// The answer that lets an INVITE through, and the reason it is a status
-    /// code rather than a flag.
+    /// The answer that lets an INVITE through.
     ///
-    /// A policy answers with what it wants said: 200 to let the call arrive,
-    /// or the status to refuse it with. Making acceptance 200 rather than
-    /// zero is the whole safety property of this mechanism — zero is what a
-    /// binding hands back when the application's listener threw, and what a
-    /// caller who filled nothing in leaves behind, and neither of those may
-    /// mean "let the stranger in".
+    /// Any other answer refuses. Acceptance is 200, not zero, because zero is
+    /// what a binding returns when the listener threw, or what an unfilled
+    /// answer leaves; neither may admit a call.
     pub const SIPRAL_SCREEN_ACCEPT: u32 = 200;
 
-    /// The burst a stack starts with: ten INVITEs from one address at once.
+    /// The default burst: ten INVITEs from one address at once.
     ///
-    /// With [`SIPRAL_INVITE_LIMIT_EVERY_MS`], the floor every stack has from
-    /// `sipral_stack_create` on. An INVITE past it is answered 480 and
-    /// counted in `sipral_counters_t::screened_refused_by_rate`; nothing is
-    /// raised for it.
+    /// With [`SIPRAL_INVITE_LIMIT_EVERY_MS`], the floor every stack starts with.
+    /// An INVITE past it is answered 480 and counted in
+    /// `sipral_counters_t::screened_refused_by_rate`; no event is raised.
     pub const SIPRAL_INVITE_LIMIT_BURST: u32 = 10;
 
-    /// The interval a stack starts with: one more INVITE every two seconds.
+    /// The default interval: one more INVITE every two seconds.
     pub const SIPRAL_INVITE_LIMIT_EVERY_MS: u64 = 2_000;
 
-    /// The voice-agent preset's burst: a hundred and twenty-eight at once.
+    /// The voice-agent preset's burst: 128 at once.
     ///
-    /// For a headless service that takes every call from one trunk or proxy,
-    /// where the default's ten-then-one-every-two-seconds answers a
-    /// campaign's twelfth caller 480. Handed to `sipral_stack_invite_limit`
-    /// with [`SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS`]. The burst is the
-    /// default `max_dialogs`, so that a rush is turned away by the ceiling on
-    /// calls held, with a 503, before it is by the rate.
+    /// For a headless service taking every call from one trunk or proxy. Use
+    /// with [`SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS`]. Equal to the default
+    /// `max_dialogs`, so a rush hits that ceiling (503) before the rate.
     pub const SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST: u32 = 128;
 
-    /// The voice-agent preset's interval: one more INVITE every fifty
-    /// milliseconds, twenty a second.
+    /// The voice-agent preset's interval: one more INVITE every 50 ms.
     pub const SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS: u64 = 50;
 }
 
 alias! {
-    /// The screening policy: consulted once for every INVITE, before it has
-    /// any effect. Installed with [`crate::screening::sipral_stack_screen`].
+    /// The screening policy: called once per INVITE, before it has any
+    /// effect. Installed with [`crate::screening::sipral_stack_screen`].
     ///
-    /// **It runs with the stack's own lock held**, which is the opposite of
-    /// [`SipralEventCallback`](crate::event::SipralEventCallback) and is the
-    /// whole reason this type's module documentation exists — read it there.
-    /// In consequence: **this callback must not call back into the stack it
-    /// was given**, on this thread or on any other. Doing so does not
-    /// deadlock — every entry point that takes a stack takes its lock
-    /// without waiting and answers `SIPRAL_STATUS_BUSY` rather than block —
-    /// but it is refused outright rather than relied on, and a policy that
-    /// tries it gets an error code back instead of the call it wanted made.
-    /// A *different* stack is unaffected. It must not unwind, for the same
-    /// reason nothing in this ABI may: a panic that reached C across this
-    /// boundary would take the host process with it.
+    /// **It runs with the stack's lock held** (see the module docs), unlike
+    /// [`SipralEventCallback`](crate::event::SipralEventCallback). **It must
+    /// not call back into the stack it was given**, from any thread; such a
+    /// call is answered `SIPRAL_STATUS_BUSY`. Another stack is fine. It must
+    /// not unwind across the boundary.
     ///
-    /// `request` and everything it points at belong to the library and are
-    /// valid for the duration of this one call and no longer.
+    /// `request` and what it points at are valid for this call only.
     ///
-    /// **The answer is a SIP status code, and the numbers are chosen so that
-    /// no answer at all is a refusal.** `SIPRAL_SCREEN_ACCEPT` — 200 — lets
-    /// the INVITE through, exactly as it would arrive with no policy
-    /// installed. Anything else is a refusal, answered with that status when
-    /// that status refuses — 400 to 699 — and with 500 when it does not.
-    ///
-    /// Three ranges do not refuse, and each fails the same way. Zero is what
-    /// a binding hands back when the application's own listener threw and
-    /// the exception was caught at the boundary, and it is no status at all.
-    /// A 1xx is a provisional answer: it would leave the caller ringing at a
-    /// call this end has already forgotten, holding a server transaction
-    /// nothing here will ever answer. A 2xx that is not the one acceptance
-    /// is spelled with accepts nothing, and a 3xx redirects nowhere without
-    /// a `Contact` this ABI has no way to give it. So a policy whose answer
-    /// went missing does not let a stranger in on the strength of it, and a
-    /// policy that meant to refuse and named a number that cannot refuse is
-    /// a bug to fix rather than a reason to wave one through.
+    /// **The answer is a SIP status code.** `SIPRAL_SCREEN_ACCEPT` (200) lets
+    /// the INVITE through as if no policy were installed. 400 to 699 refuses
+    /// with that status. Anything else refuses with 500: zero (a listener that
+    /// threw), a 1xx (would leave the transaction open), another 2xx, or a 3xx
+    /// (no `Contact` to redirect to).
     pub type SipralScreenCallback = fn(request: *const SipralScreenRequest, user_data: *mut c_void) -> u32;
 }
 
 /// A [`Screen`] that hands the decision to a C callback.
 ///
-/// # Safety
-///
-/// `user_data` is the caller's own pointer. Nothing here reads through it;
-/// it is only ever handed back to the same `callback` it arrived with, on
-/// whichever thread ends up calling into this stack — which, since screening
-/// runs with the stack's lock held, is always the one thread that is inside
-/// an entry point on it at that moment.
+/// `user_data` is the caller's pointer, never read here, only handed back to
+/// `callback`. Screening runs under the stack's lock, so it is called on the
+/// one thread inside an entry point on this stack.
 struct CScreen {
     stack: SipralHandle,
     callback:
@@ -179,7 +120,7 @@ struct CScreen {
     user_data: *mut c_void,
 }
 
-// Safety: see the struct's own doc comment above.
+// Safety: see the struct's doc comment.
 unsafe impl Send for CScreen {}
 
 impl Screen for CScreen {
@@ -196,25 +137,16 @@ impl Screen for CScreen {
             message: message.as_ptr(),
             message_len: message.len(),
         };
-        // Safety: `callback` is the caller's own function, called under the
-        // contract `SipralScreenCallback`'s doc comment states — it must not
-        // unwind, and it must not call back into `self.stack`, which is
-        // enforced elsewhere by that stack's own lock rather than by anything
-        // here. `request` borrows from `message` and `source`, both alive
-        // for the whole of this call and touched by nothing else while it
-        // runs.
+        // Safety: `callback` is called under the `SipralScreenCallback`
+        // contract (no unwind, no re-entry into `self.stack`, enforced by the
+        // stack's lock). `request` borrows `message` and `source`, both alive
+        // and untouched for this call.
         let answer = unsafe { (self.callback)(&raw const request, self.user_data) };
         if answer == SIPRAL_SCREEN_ACCEPT {
             return Screening::Take;
         }
-        // A refusal is a failure status and nothing else. A status code is
-        // anything from 100 to 699, and three of those ranges do not refuse
-        // an INVITE: a 1xx leaves the transaction open and the caller ringing
-        // at a call this end has already forgotten, a 2xx that is not the one
-        // acceptance is spelled with accepts nothing, and a 3xx without a
-        // `Contact` redirects nowhere. A policy that named one of those has
-        // not made a decision this ABI can carry out, and the rule for that
-        // is the rule for an answer that never arrived.
+        // Only a failure status (>= 400) refuses as itself; 1xx, other 2xx
+        // and 3xx cannot be carried out, so they are treated like no answer.
         let status = u16::try_from(answer)
             .ok()
             .and_then(|code| StatusCode::new(code).ok())
@@ -227,45 +159,29 @@ impl Screen for CScreen {
 entry! {
     /// Install, replace, or remove the screening policy for one stack.
     ///
-    /// Every INVITE that survives [`sipral_stack_invite_limit`] reaches this
-    /// callback before anything else does: before ringing, before
-    /// `SIPRAL_EVENT_KIND_INCOMING_CALL`, before a call handle exists for
-    /// anybody to answer or reject. What the callback refuses is answered
-    /// with the SIP status it named — when that status refuses, and with 500
-    /// when it does not — and forgotten — no event, no handle,
-    /// nothing for the application to clean up — and what it takes, by
-    /// answering `SIPRAL_SCREEN_ACCEPT`, arrives exactly as it would with no
-    /// policy installed at all.
+    /// Every INVITE that passes [`sipral_stack_invite_limit`] reaches this
+    /// callback before ringing, before `SIPRAL_EVENT_KIND_INCOMING_CALL` and
+    /// before a call handle exists. A refused INVITE gets the named status
+    /// (500 if it does not refuse) and is forgotten: no event, no handle. One
+    /// answered `SIPRAL_SCREEN_ACCEPT` arrives as with no policy.
     ///
-    /// `callback` given as `NULL` removes the policy: every INVITE reaches
-    /// the application again, the way it did before this was ever called.
-    /// Calling this a second time with a callback replaces the first outright,
-    /// on this stack alone — a different stack's policy, if it has one, is
-    /// untouched.
+    /// `NULL` removes the policy. A second call replaces the first, on this
+    /// stack only.
     ///
-    /// The rule that the callback must not call back into this stack, and
-    /// must not unwind, is on [`SipralScreenCallback`] and is the reason
-    /// this module's own documentation exists; read it there before wiring
-    /// one up.
+    /// The no re-entry and no unwind rules are on [`SipralScreenCallback`].
     ///
     /// # Safety
     ///
-    /// `callback`, when not null, is called on whichever thread is inside an
-    /// entry point that is feeding this stack bytes, for as long as the
-    /// policy stays installed. `user_data` is handed back to it untouched on
-    /// every call and read by nothing here.
+    /// `callback`, when not null, is called on whichever thread is feeding
+    /// this stack bytes, while the policy is installed. `user_data` is handed
+    /// back untouched and never read here.
     ///
-    /// **Whatever `user_data` points at has to outlive the last call, and the
-    /// last call is not `sipral_stack_destroy` returning.** A destroy takes
-    /// this thread's share of the stack away; a receive already running on
-    /// another thread holds one of its own until it is done, and the policy
-    /// it is in the middle of asking is still asked. So the moment to free
-    /// what the pointer names is once no thread is inside this stack any
-    /// more, which is the application's own knowledge and not something this
-    /// ABI can answer. Replacing the policy, or removing it with `NULL`, has
-    /// the same shape: it takes the stack's lock, so it cannot run while a
-    /// policy is being asked, and once it returns the callback that was
-    /// there is not asked again.
+    /// **`user_data` must outlive the last call, which may come after
+    /// `sipral_stack_destroy` returns:** a receive already running on another
+    /// thread holds its own share of the stack and still asks the policy. Free
+    /// it once no thread is inside this stack. Replacing or removing the
+    /// policy takes the lock, so once it returns the old callback is not asked
+    /// again.
     fn sipral_stack_screen(
         stack: SipralHandle,
         callback: SipralScreenCallback,
@@ -288,33 +204,21 @@ entry! {
 entry! {
     /// How fast one source address may offer this stack an INVITE (A8).
     ///
-    /// `burst` calls from one address are let through at once; one more is
-    /// earned every `every_ms` after that. What either number means is
-    /// exactly what [`Rate`] already means by it — `sipral_stack_create`'s
-    /// default is ten at once and one every two thousand milliseconds,
-    /// loose on purpose, because in most deployments every legitimate call
-    /// arrives from the one address a phone registered with.
+    /// `burst` calls from one address pass at once; one more is earned every
+    /// `every_ms` (see [`Rate`]). The default is ten, then one every 2000 ms;
+    /// loose because most legitimate calls come from the registrar's address.
     ///
-    /// A `burst` of zero, or an `every_ms` of zero, is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
-    /// no call ever, the first or the one after a week of quiet, and the
-    /// second earns a token in no time, which is a limit that never limits.
-    /// There is deliberately no way to ask for that from C, since a
-    /// deployment that wants no floor at all can simply never call this.
+    /// A zero `burst` or zero `every_ms` is `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// and changes nothing: one admits no call, the other never limits.
     ///
-    /// The floor is asked before [`sipral_stack_screen`]'s own policy is: a
-    /// source that has exhausted it never reaches the callback at all, and is
-    /// counted in `sipral_counters_t::screened_refused_by_rate` or
-    /// `screened_refused_by_crowding`, never in `screened_refused_by_policy`.
+    /// The floor is checked before [`sipral_stack_screen`]'s policy: a source
+    /// past it never reaches the callback and is counted in
+    /// `screened_refused_by_rate` or `screened_refused_by_crowding`.
     ///
-    /// **It counts by source address, so it counts nothing it cannot name.**
-    /// An INVITE that arrived on a byte stream the application bound without
-    /// saying where the far end is has no address on it, and this floor lets
-    /// every one of those through to the policy — which is where a caller who
-    /// cannot identify a stream's far end has to decide, the same way
-    /// [`SipralScreenRequest::source`] being null is what it has to decide
-    /// on. Naming the far end in `sipral_stack_transport_bind`'s `remote` is
-    /// what puts a stream under this floor at all.
+    /// **It counts by source address.** An INVITE on a byte stream bound
+    /// without a far end has no address and always passes to the policy (where
+    /// [`SipralScreenRequest::source`] is null). Naming `remote` in
+    /// `sipral_stack_transport_bind` puts a stream under this floor.
     ///
     /// # Safety
     ///
@@ -344,9 +248,7 @@ mod tests {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-    /// An INVITE from somebody else, addressed here, distinguished by
-    /// `Call-ID` and `Via` branch so that two calls to this in one test are
-    /// two different INVITEs rather than a retransmission of the first.
+    /// An INVITE to this end; `tag` makes `Call-ID` and branch distinct.
     fn invitation(tag: &str) -> Vec<u8> {
         format!(
             "INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
@@ -377,8 +279,7 @@ Content-Length: 0\r\n\r\n"
             .any(|message| start_line(message).starts_with(status))
     }
 
-    /// A `sipral_counters_t` with every member at zero, the way a stack that
-    /// has done nothing reads.
+    /// A `sipral_counters_t` with every member at zero.
     fn zero_counters() -> SipralCounters {
         SipralCounters {
             size: size_of::<SipralCounters>(),
@@ -432,11 +333,9 @@ Content-Length: 0\r\n\r\n"
         _user_data: *mut c_void,
     ) -> u32 {
         SIPRAL_SCREEN_ACCEPT
-        // left at zero, which is what the caller finds it at already
     }
 
-    /// Refuses every INVITE with the status held in `user_data`, an
-    /// `AtomicU32` the test owns.
+    /// Refuses with the status in `user_data`, a test-owned `AtomicU32`.
     unsafe extern "C" fn refuse_with_held_status(
         request: *const SipralScreenRequest,
         user_data: *mut c_void,
@@ -447,9 +346,8 @@ Content-Length: 0\r\n\r\n"
         wanted.load(Ordering::SeqCst)
     }
 
-    /// Takes every INVITE, and counts how many it saw in `user_data`, an
-    /// `AtomicU32` the test owns — the request itself is also checked, so
-    /// that a policy that never reads it still fails this one.
+    /// Takes every INVITE and counts it in `user_data`, a test-owned
+    /// `AtomicU32`. Also checks the request.
     unsafe extern "C" fn count_and_take(
         request: *const SipralScreenRequest,
         user_data: *mut c_void,
@@ -463,9 +361,8 @@ Content-Length: 0\r\n\r\n"
         SIPRAL_SCREEN_ACCEPT
     }
 
-    /// Calls back into the stack it was given — which the contract forbids —
-    /// leaves what that answered in `user_data`, an `AtomicI32` the test
-    /// owns, and then takes the INVITE.
+    /// Calls back into its own stack (forbidden), stores the status in
+    /// `user_data` (an `AtomicI32`), then takes the INVITE.
     unsafe extern "C" fn reenter_and_take(
         request: *const SipralScreenRequest,
         user_data: *mut c_void,
@@ -477,14 +374,8 @@ Content-Length: 0\r\n\r\n"
         SIPRAL_SCREEN_ACCEPT
     }
 
-    /// The rule this mechanism's documentation states in three places, and
-    /// the reason it is a rule rather than a deadlock.
-    ///
-    /// A policy runs with the stack's lock held, so it must not call back
-    /// into the stack it was given. What happens when one does is not a hang:
-    /// every entry point takes that lock without waiting and answers
-    /// `SIPRAL_STATUS_BUSY` where it stands. The INVITE it was asked about is
-    /// decided all the same — a policy that broke the rule still answered.
+    /// Re-entry from a policy is answered `SIPRAL_STATUS_BUSY`, not a
+    /// deadlock, and the INVITE is still decided.
     #[test]
     fn a_policy_that_calls_back_into_its_own_stack_is_refused_rather_than_deadlocked() {
         let mut observed = Observed::default();
@@ -518,16 +409,8 @@ Content-Length: 0\r\n\r\n"
         );
     }
 
-    /// The safety property of the whole mechanism: an answer that is not a
-    /// decision refuses, and 500 is what goes out.
-    ///
-    /// Zero is the case that matters, because zero is what arrives when the
-    /// application's own listener threw and the binding caught it at the
-    /// boundary, and it is what a caller who answered nothing at all leaves
-    /// behind. A policy whose answer went missing must not wave a stranger
-    /// in on the strength of it. The other two are the same rule at the
-    /// edges: a number that is no SIP status, and a 2xx that is not the one
-    /// number acceptance is spelled with.
+    /// An answer that is not a decision refuses with 500. Zero matters most:
+    /// it is what a listener that threw returns.
     #[test]
     fn an_answer_that_is_not_a_decision_refuses_rather_than_admits() {
         for (answer, why) in [
@@ -756,8 +639,7 @@ Content-Length: 0\r\n\r\n"
         );
     }
 
-    /// The numbers the header publishes are the ones the stack runs with,
-    /// and the preset is one `sipral_stack_invite_limit` takes.
+    /// The published rates are the stack's own, and the preset is accepted.
     #[test]
     fn the_published_rates_are_the_ones_the_stack_applies() {
         use super::{

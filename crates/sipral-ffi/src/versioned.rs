@@ -1,27 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Structs that cross the boundary carry their own size, and this is what
-//! reads and writes them.
+//! Reading and writing structs that carry their own size.
 //!
-//! A caller compiled against one header and a library built from a later one
-//! disagree about how long a struct is. The `size` member, first and always,
-//! is how they settle it: the caller writes its own `sizeof`, and neither side
-//! touches a byte the other did not account for. That is what makes appending
-//! a member to a released struct safe, and it is the only change a released
-//! struct is allowed.
-//!
-//! Two rules make the arrangement honest in both directions. On the way in,
-//! bytes past what this build knows are accepted only if they are all zero: a
-//! caller who set a field this library has never heard of is answered
-//! `SIPRAL_STATUS_NOT_SUPPORTED`, rather than served by a library that quietly
-//! ignored it. The size is not the complaint — a longer struct is exactly what
-//! a newer header is supposed to hand over — so the answer is not about the
-//! version but about the member, which is the difference an application acts
-//! on. On the way out, the
-//! `size` written back says how far the library actually filled, and anything
-//! past that is zeroed, so a newer caller reading an older library sees
-//! absence rather than whatever was on its stack.
+//! The first member, `size`, is the caller's `sizeof`; neither side touches a
+//! byte past it. Appending a member is the only change a released struct may
+//! get. On the way in, unknown trailing bytes must be zero, else
+//! `SIPRAL_STATUS_NOT_SUPPORTED` (the member is the problem, not the size).
+//! On the way out, `size` says how far the library filled and the rest is
+//! zeroed.
 
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
@@ -46,12 +33,8 @@ pub(crate) unsafe trait Versioned: Copy {
     /// [`pin!`] as the member it ends with.
     const PIN: Pin;
 
-    /// The shortest this build will work with: the end of the pinned member,
-    /// on whatever target this was compiled for.
-    ///
-    /// A pinned length longer than the struct would turn away a caller
-    /// compiled against this very header, so that is refused when the crate
-    /// is compiled, on every target, rather than by a test on one.
+    /// The shortest this build accepts: the end of the pinned member on this
+    /// target. A pin past the struct's end fails at compile time.
     const MIN_SIZE: usize = {
         assert!(
             Self::PIN.end <= size_of::<Self>(),
@@ -60,38 +43,21 @@ pub(crate) unsafe trait Versioned: Copy {
         Self::PIN.end
     };
 
-    /// Set the size member. The size a caller declared is read from its
-    /// pointer instead, since by then there is no value to ask.
+    /// Set the size member.
     fn set_declared_size(&mut self, bytes: usize);
 }
 
 /// The length a versioned struct had in the first version of it the frozen
 /// ABI publishes, held as the member that version ends with.
 ///
-/// This is the whole of what makes appending a member safe. [`declared_size`]
-/// refuses anything below [`Versioned::MIN_SIZE`], so a minimum that tracked
-/// the current build — `size_of::<Self>()`, which is what these once were —
-/// would turn away every caller compiled against yesterday's header, from a
-/// change whose entire point was to be additive. The number has to stand
-/// still while the struct grows.
+/// [`declared_size`] refuses anything below [`Versioned::MIN_SIZE`], so the
+/// minimum must stand still while the struct grows, or old callers are turned
+/// away. It is a member, not a literal, because the length differs per
+/// target (32-bit ARM packs tighter).
 ///
-/// A literal stands still too, and was what this used to be: a number read
-/// off a 64-bit build. It is one number on every target, and the length it
-/// describes is not — on 32-bit ARM `sipral_abi_version_t` is 20 bytes where
-/// the literal said 24, so every caller doing exactly what the header says was
-/// refused. A member does not move when the struct grows, and where it ends
-/// is the compiler's answer on each target, so the pin is the member and the
-/// number is derived from it.
-///
-/// The frozen ABI starts at minor 33: every pin names the member each struct
-/// ended with there. ABI 1.0 is that surface as minor 36 left it, carried
-/// into major 1 unchanged, and the pins with it: a caller compiled against
-/// 1.0 declares at least these lengths, so they turn none of them away, and
-/// the members appended from 0.34 to 0.36 come back zero for the rare caller
-/// that declares a shorter one. Changing one is wrong in every case but a struct whose
-/// first frozen version did not end where it says. `bindings/c/abi-sizes.txt`
-/// prints the member and the length it comes to on each layout, and the gate
-/// diffs it, so the change shows up twice.
+/// Pins name the member each struct ended with at ABI minor 33, carried into
+/// 1.0 unchanged. Change one only if that is wrong. `bindings/c/abi-sizes.txt`
+/// prints each pin per layout and the gate diffs it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Pin {
     /// The member the oldest published version ends with.
@@ -100,8 +66,7 @@ pub(crate) struct Pin {
     pub(crate) end: usize,
 }
 
-/// The size of what a field accessor returns, so that [`pin!`] can say where
-/// a member ends without its type being written out a second time.
+/// The size of a member, for [`pin!`], without naming its type.
 pub(crate) const fn size_of_member<R, M>(_accessor: fn(&R) -> &M) -> usize {
     size_of::<M>()
 }
@@ -119,10 +84,8 @@ macro_rules! pin {
 
 pub(crate) use pin;
 
-/// More than any struct here will ever be, and small enough that a size
-/// member the caller left uninitialised is refused rather than obeyed. The
-/// declared size decides how far the reader walks, so it is the one number a
-/// caller can get catastrophically wrong.
+/// Above any real struct; refuses an uninitialised size member before the
+/// reader walks that far.
 const MAX_DECLARED_SIZE: usize = 64 * 1024;
 
 /// What a caller says its struct is, checked as far as the size member.
@@ -138,8 +101,7 @@ pub(crate) unsafe fn declared_size<T: Versioned>(source: *const T) -> Result<usi
             format!("{} is null", T::NAME),
         ));
     }
-    // read unaligned: the alignment is the C caller's business, and a struct
-    // inside a packed one is still a struct
+    // the struct may sit inside a packed one
     let declared = unsafe { source.cast::<usize>().read_unaligned() };
     if declared < T::MIN_SIZE {
         return Err(fail(
@@ -165,8 +127,7 @@ pub(crate) unsafe fn declared_size<T: Versioned>(source: *const T) -> Result<usi
 
 /// Read a struct the caller supplied, honouring the size it declares.
 ///
-/// Members past what the caller supplied come back zero, which is what every
-/// member added to a released struct has to mean.
+/// Members past what the caller supplied come back zero.
 ///
 /// # Safety
 ///
@@ -177,8 +138,7 @@ pub(crate) unsafe fn read_versioned<T: Versioned>(source: *const T) -> Result<T,
     let known = size_of::<T>();
     let taken = declared.min(known);
 
-    // zero is a valid value of every member by the trait's contract, so the
-    // part the caller did not send reads as absent
+    // all-zero is valid by the trait's contract
     let mut value: T = unsafe { MaybeUninit::zeroed().assume_init() };
     unsafe {
         ptr::copy_nonoverlapping(source.cast::<u8>(), (&raw mut value).cast::<u8>(), taken);
@@ -205,8 +165,7 @@ pub(crate) unsafe fn read_versioned<T: Versioned>(source: *const T) -> Result<T,
 
 /// Fill in a struct the caller supplied, honouring the size it declares.
 ///
-/// The size written back is how far this build filled, so a caller newer than
-/// the library can tell which members mean anything.
+/// The size written back is how far this build filled.
 ///
 /// # Safety
 ///
@@ -410,8 +369,7 @@ mod tests {
         );
     }
 
-    // the misalignment is the point: a caller may hand over a struct inside a
-    // packed one, and the reader copies bytes rather than dereferencing
+    // the misalignment is the point
     #[allow(clippy::cast_ptr_alignment)]
     #[test]
     fn an_unaligned_struct_is_read_as_it_is() {
@@ -518,9 +476,7 @@ mod tests {
         assert_eq!(declared, size_of::<Second>());
     }
 
-    /// Everything here copies bytes on the strength of the size member being
-    /// the first one, so every type that claims the trait is asked to prove
-    /// it.
+    /// The copying relies on `size` being the first member.
     fn size_member_comes_first<T: Versioned>() {
         let mut value: T = unsafe { MaybeUninit::zeroed().assume_init() };
         value.set_declared_size(0x5A5A);
@@ -537,12 +493,7 @@ mod tests {
         size_member_comes_first::<crate::version::SipralAbiVersion>();
     }
 
-    // -- the pinned lengths --------------------------------------------------
-
-    /// A list of thirteen kept by hand beside a list of thirteen kept by the
-    /// declarations is two lists, and they drift. This is the loop that stops
-    /// them: everything in `SURFACE` that starts with a `size` either has a
-    /// pinned length or is named as one the library fills itself.
+    /// Every sized struct in `SURFACE` is pinned or filled by the library.
     #[test]
     fn every_versioned_struct_has_a_pinned_length() {
         let mut missing = Vec::new();
@@ -560,8 +511,7 @@ mod tests {
         );
     }
 
-    /// The other direction, which is the one that catches a rename: a pinned
-    /// length for a struct that is no longer declared pins nothing.
+    /// Catches a rename.
     #[test]
     fn nothing_is_pinned_that_does_not_exist() {
         for (name, member, _) in MIN_SIZES {
@@ -583,10 +533,7 @@ mod tests {
         }
     }
 
-    /// The invariant the pinning exists for. A pinned length above the
-    /// current one would refuse a caller compiled against this very build —
-    /// which is what every literal pin did on a 32-bit target, where this
-    /// test failed for 27 structs.
+    /// A pin above the current length would refuse a caller of this build.
     #[test]
     fn no_pinned_length_is_longer_than_the_struct_is_now() {
         for (name, _, pinned) in MIN_SIZES {

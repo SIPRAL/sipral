@@ -4,13 +4,8 @@
 //! Real-time text in a call (RFC 4103): T.140 over RTP, with the redundancy
 //! of RFC 2198, on a socket of its own.
 //!
-//! A call offers it when its configuration names `text_address`, and takes
-//! one an offer carries on the same condition. Once both descriptions agree,
-//! `sipral_media_info_t::has_text` is set and three entry points carry it:
-//! [`sipral_media_send_text`] queues what the user typed,
-//! [`sipral_media_poll_text`] hands out the datagrams due for the text
-//! socket, and [`sipral_media_receive_text`] takes the ones that arrive on
-//! it. What the far end typed comes back as
+//! Offered and accepted only when the call config names `text_address`; then
+//! `sipral_media_info_t::has_text` is set. Received text arrives as
 //! `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
 
 use std::ffi::c_char;
@@ -27,36 +22,26 @@ use crate::status::SipralStatus;
 use crate::versioned::{read_versioned, write_versioned};
 
 record! {
-    /// What a [`crate::event::SipralEventKind::TextReceived`] carries.
-    ///
-    /// The text points into the event and is valid for as long as the
-    /// callback is.
+    /// What a [`crate::event::SipralEventKind::TextReceived`] carries; the
+    /// text is valid during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralTextEvent {
         /// What the far end typed, UTF-8, not NUL-terminated.
         pub text: *const c_char,
         /// How many bytes of it.
         pub text_len: usize,
-        /// How many blocks of text were lost with no redundant copy to
-        /// recover them, each marked in `text` by a REPLACEMENT CHARACTER
-        /// (U+FFFD) where it fell.
+        /// Unrecoverable lost blocks, each marked in `text` by U+FFFD.
         pub missing: u32,
     }
 }
 
 entry! {
     /// Queue text the user typed for the far end, UTF-8.
+    /// Sent every 300 ms within the far end's rate, with `red` redundancy
+    /// when agreed. CR, LF or CR LF is a new line; U+0008 erases.
     ///
-    /// It goes in the next transmission interval (300 ms), at no more
-    /// characters a second than the far end said it takes, each block sent
-    /// twice more as redundancy where both ends agreed `red`. A CR LF, a
-    /// lone CR or a lone LF goes as a new line, and BACKSPACE (U+0008) erases
-    /// the far end's last character.
-    ///
-    /// `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no text stream,
-    /// and `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent than a
-    /// stream holds; nothing is queued then, and a later call finds room as
-    /// the far end reads.
+    /// `SIPRAL_STATUS_NOT_NEGOTIATED` without a text stream;
+    /// `SIPRAL_STATUS_EXHAUSTED` when the queue is full (nothing queued).
     ///
     /// # Safety
     ///
@@ -77,14 +62,8 @@ entry! {
 
 entry! {
     /// The next datagram due on the call's text socket.
-    ///
-    /// A `len` of zero in the packet means nothing is due; call it again at
-    /// the deadline `sipral_stack_poll` names, or with every frame of audio.
-    /// Send what it writes from the socket at `text_address`, never the
-    /// audio one.
-    ///
-    /// `now_ms` is read as the stack reads it and moves nothing, as with
-    /// every media entry point.
+    /// `len` zero means nothing due; poll again at the stack's deadline. Send
+    /// from the `text_address` socket, not the audio one.
     ///
     /// # Safety
     ///
@@ -106,11 +85,8 @@ entry! {
 
 entry! {
     /// Take a datagram off the call's text socket.
-    ///
-    /// `out_taken` is written with 1 when it was this call's text, and 0
-    /// when it was not: not RTP, another payload type, from somewhere other
-    /// than where the stream has latched, or on a call with no text. What it
-    /// carried arrives as `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    /// `out_taken` is 1 when it was this call's text, else 0 (not RTP, other
+    /// payload type, not the latched source, or no text stream).
     ///
     /// # Safety
     ///
@@ -165,13 +141,10 @@ mod tests {
     use std::ffi::c_char;
     use std::ptr;
 
-    /// Where this end's text arrives.
     const TEXT_ADDRESS: &str = "192.0.2.10:40002";
-    /// Where the far end's does.
     const PEER_TEXT: &str = "203.0.113.5:41002";
 
-    /// The far end's answer: the audio of `ANSWER`, and the text stream
-    /// taken with its redundancy.
+    /// Audio plus text with redundancy.
     const TEXT_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -222,8 +195,6 @@ a=sendrecv\r\n";
         (status, taken)
     }
 
-    /// The next text datagram due at or after `from_ms`, polled the way a
-    /// caller polls at each deadline.
     fn next_text(media: SipralHandle, from_ms: u64) -> Option<(Vec<u8>, String)> {
         let mut buffers = Buffers::new();
         for now_ms in (from_ms..from_ms + 2_000).step_by(20) {
@@ -237,7 +208,6 @@ a=sendrecv\r\n";
         None
     }
 
-    /// A call placed with a text socket, answered with `TEXT_ANSWER`.
     fn text_call(observed: &mut Observed) -> (SipralHandle, SipralHandle, Vec<u8>) {
         let (handle, account) = media_line(observed, |_| {});
         let mut config = managed_config();
@@ -332,7 +302,6 @@ a=sendrecv\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `invitation`, offering `offer` instead of its own description.
     fn invitation_offering(offer: &[u8]) -> Vec<u8> {
         let whole = String::from_utf8(invitation()).expect("text");
         let head = whole

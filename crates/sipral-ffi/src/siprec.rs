@@ -3,21 +3,13 @@
 
 //! Recording a call to a recording server (SIPREC, RFC 7866).
 //!
-//! [`sipral_call_record_to`] places the recording session: an INVITE to the
-//! server with two send-only streams, one per party, and the metadata that
-//! says who is on the call (RFC 7865). It is a call like any other from then
-//! on — its handle gets `SIPRAL_EVENT_KIND_CALL_ANSWERED` and
-//! `SIPRAL_EVENT_KIND_CALL_ENDED` — and the stack keeps it in step with the
-//! recorded call: the metadata follows a hold or a transfer, a new codec is
-//! offered again, and it ends when the recorded call does.
+//! [`sipral_call_record_to`] places the recording session: an INVITE with two
+//! send-only streams and RFC 7865 metadata. It is an ordinary call handle that
+//! the stack keeps in step with the recorded call, ending with it.
 //!
-//! The copies of the recorded call's audio come out of
-//! [`sipral_media_poll_recording`] on the recorded call's media handle, to
-//! send from the two sockets the configuration named. The copies of an
-//! encrypted call are SRTP, under SDES keys of their own in the recording
-//! session's offer (RFC 7866 §12.2), and a stream the server will not take as
-//! SRTP gets nothing — unless the account's `recording_in_clear` allows plain
-//! RTP (ABI 0.32).
+//! Audio copies come from [`sipral_media_poll_recording`]. An encrypted call's
+//! copies are SRTP with their own SDES keys (RFC 7866 §12.2); a stream the
+//! server will not take as SRTP gets nothing unless `recording_in_clear`.
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
@@ -43,37 +35,29 @@ record! {
     pub struct SipralRecordConfig {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// The recording server's URI, the INVITE's target. Required. Not
-        /// NUL-terminated.
+        /// The recording server's URI. Required, not NUL-terminated.
         pub server: *const c_char,
         /// How many bytes of it.
         pub server_len: usize,
-        /// Where to send the INVITE, as an address and a port, when not
-        /// where the recorded call's account sends. Null for there.
+        /// `host:port` to send the INVITE to; null for the account's route.
         pub destination: *const c_char,
         /// How many bytes of it.
         pub destination_len: usize,
-        /// The transport `destination` is reached over, as
-        /// `sipral_call_config_t::transport` names one. Read only with
-        /// `destination`.
+        /// The transport for `destination`, as in
+        /// `sipral_call_config_t::transport`; read only with `destination`.
         pub transport: u32,
-        /// The socket the copy of this end's audio goes from, as an address
-        /// and a port, and what the offer names for the stream labelled `1`.
-        /// Required: a socket the application bound.
+        /// Required bound socket, `host:port`, for this end's audio (label `1`).
         pub this_end: *const c_char,
         /// How many bytes of it.
         pub this_end_len: usize,
-        /// The same for the far end's audio, labelled `2`. Required, and a
-        /// socket of its own.
+        /// Required distinct socket for the far end's audio (label `2`).
         pub far_end: *const c_char,
         /// How many bytes of it.
         pub far_end_len: usize,
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and all-zero is valid: every pointer is null beside a length of
-// zero, and the required ones are refused by name.
+// Safety: plain data; all-zero is valid (null pointers, zero lengths).
 unsafe impl Versioned for SipralRecordConfig {
     const NAME: &'static str = "sipral_record_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralRecordConfig, far_end_len);
@@ -83,8 +67,7 @@ unsafe impl Versioned for SipralRecordConfig {
     }
 }
 
-/// What `config` asks for, read before the stack is locked but for the
-/// transport, which only the stack can name.
+/// `config` read before locking the stack; the transport needs the stack.
 struct Asked {
     server: Uri,
     destination: Option<SocketAddr>,
@@ -146,16 +129,11 @@ entry! {
     /// Record a call to a recording server (RFC 7866), and write the
     /// recording session's handle to `out_recording`.
     ///
-    /// The call must be one this stack runs the media of, with its audio
-    /// started: `SIPRAL_STATUS_WRONG_STATE` before
-    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for a call already being
-    /// recorded to a server. The recording session goes from the recorded
-    /// call's account, over a stream transport when the INVITE, which
-    /// carries the metadata beside the offer, is too large for UDP.
-    ///
-    /// Hanging the recording session up with
-    /// [`sipral_call_stop_recording_to`] or `sipral_call_hangup` stops the
-    /// recording; the server hanging it up does the same.
+    /// `SIPRAL_STATUS_WRONG_STATE` before `SIPRAL_EVENT_KIND_MEDIA_STARTED`,
+    /// for a call whose media this stack does not run, or one already
+    /// recorded. Sent from the call's account; a stream transport when too
+    /// large for UDP. Stopped by [`sipral_call_stop_recording_to`],
+    /// `sipral_call_hangup` on it, or the server hanging up.
     ///
     /// # Safety
     ///
@@ -192,11 +170,8 @@ entry! {
 }
 
 entry! {
-    /// Stop recording a call to its recording server: the copies stop at
-    /// once, and the recording session is hung up.
-    ///
-    /// `call` is the recorded call, not the recording session.
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call nothing records.
+    /// Stop copies at once and hang up the recording session. `call` is the
+    /// recorded call. `SIPRAL_STATUS_WRONG_STATE` when nothing records it.
     ///
     /// # Safety
     ///
@@ -214,12 +189,9 @@ entry! {
 
 entry! {
     /// The next copy of this call's audio for its recording server.
-    ///
-    /// A `len` of zero in the packet means none is waiting. Otherwise
-    /// `out_far_end` says which socket to send it from: 0 for `this_end`,
-    /// the copy of what this end sent, and 1 for `far_end`, the copy of what
-    /// it received. Collect them with every frame, in a loop to empty: a
-    /// copy nobody collects for a second is dropped, the oldest first.
+    /// `len` zero means none waiting. `out_far_end` is 0 to send from
+    /// `this_end`, 1 from `far_end`. Drain every frame: copies older than a
+    /// second are dropped, oldest first.
     ///
     /// # Safety
     ///
@@ -278,8 +250,7 @@ mod tests {
     use sipral_core::msg::HeaderName;
     use std::ptr;
 
-    /// The transport the recording server is reached over: a connection of
-    /// its own, since the INVITE is too large for UDP.
+    /// A connection, since the INVITE is too large for UDP.
     const TO_SERVER: u32 = 1;
     const SERVER: &str = "203.0.113.9:5060";
     const THIS_END: &str = "192.0.2.10:40010";
@@ -449,8 +420,7 @@ a=recvonly\r\n";
         assert_eq!(far_end, 0);
         assert_eq!(copy[1] & 0x7f, 0, "the call's codec");
 
-        // RFC 3550 A.1 holds a new source on probation for its first packet,
-        // and what is not taken is not copied either
+        // RFC 3550 A.1 probation drops the first packet, uncopied
         for sequence in 1..4_u16 {
             let mut heard = rtp(sequence, u32::from(sequence) * 160);
             let _ = arrive(media, &mut heard, crate::call::tests::PEER_MEDIA, 1_320);

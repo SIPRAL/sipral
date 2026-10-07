@@ -3,30 +3,12 @@
 
 //! What one stack does with two hundred calls on it at once.
 //!
-//! A softphone holds one call and a contact centre's dialler holds hundreds,
-//! and the shape that decides which of the two this library is good for is
-//! the locking: `sipral_media_*` reaches one call's session through that
-//! call's own lock, never the stack's (`docs/08-ffi.md`, "Audio on its own
-//! thread"), so the thread carrying one call's audio is never held up by
-//! another call being busy. That is a claim about contention, and contention
-//! is not something a single-call test can show.
-//!
-//! So this drives two hundred calls at once on four threads, one frame of
-//! audio in and one out per call per turn, exactly as an application's own
-//! audio threads would, and asks for two things: that no call ever answers
-//! [`SipralStatus::Busy`] — the answer a session already locked gives, which
-//! under this design should never be seen by a thread that holds no other
-//! session's lock — and that the work per frame stays flat as the calls pile
-//! up. The numbers it prints are the ones `scripts/bench.sh` collects into
-//! `docs/19-numbers.md`; the assertions are what makes it a test rather than
-//! a benchmark.
-//!
-//! Nothing here opens a socket. The calls are brought up the way every other
-//! test in this crate brings one up — an INVITE this stack wrote, answered
-//! from the test — and the audio is fed in as datagrams through
-//! `sipral_media_receive`, which is the same entry point a real transport
-//! calls. What is measured is therefore the library's own cost per frame,
-//! with no network underneath it to hide in.
+//! `sipral_media_*` locks only the call's own session, never the stack
+//! (`docs/08-ffi.md`, "Audio on its own thread"). This checks that claim under
+//! contention: 200 calls on 4 threads, asserting no [`SipralStatus::Busy`] and
+//! a bounded cost per frame. `scripts/bench.sh` collects the printed numbers
+//! into `docs/19-numbers.md`. No sockets: audio goes through
+//! `sipral_media_receive`, so only the library's cost is measured.
 
 use core::ffi::c_char;
 use core::ptr;
@@ -41,21 +23,15 @@ use crate::media::{sipral_media_playback, sipral_media_receive};
 use crate::stack::tests::{Observed, poll};
 use crate::status::SipralStatus;
 
-/// How many calls the stack is asked to hold at once.
 const CALLS: usize = 200;
 
-/// How many threads share them, the way an application would hand its calls
-/// to a pool rather than a thread each.
+/// A thread pool, as an application would use.
 const THREADS: usize = 4;
 
-/// Frames of audio per call, twenty milliseconds apiece. Five seconds of a
-/// call each, which is enough for the per-frame cost to settle and short
-/// enough that the gate does not wait on it; `SIPRAL_LOAD_FRAMES` raises it
-/// for `scripts/bench.sh`, which runs the same test for a minute of audio.
+/// Five seconds of 20 ms frames; `SIPRAL_LOAD_FRAMES` raises it for bench.
 const FRAMES: usize = 250;
 
-/// The far end's own answer for call `n`, each on a port of its own so that
-/// two calls' media can never be mistaken for one another.
+/// Each call on its own port, so media cannot be confused.
 fn answer_for(n: usize) -> Vec<u8> {
     format!(
         "v=0\r\n\
@@ -71,29 +47,23 @@ fn answer_for(n: usize) -> Vec<u8> {
     .into_bytes()
 }
 
-/// One twenty-millisecond packet of mu-law for call `n`, sequence `seq`.
 fn packet(n: usize, seq: u16) -> Vec<u8> {
     let mut out = vec![0x80, 0x00];
     out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(&(u32::from(seq) * 160).to_be_bytes());
-    // one source per call, so nothing in the receive path can take two
-    // calls' audio for one stream
+    // one SSRC per call
     out.extend_from_slice(&(0xDEAD_0000_u32 + u32::try_from(n).unwrap_or(0)).to_be_bytes());
     out.extend_from_slice(&[0xFF; FRAME]);
     out
 }
 
-/// Where call `n`'s packet came from, as the transport would say it: the
-/// port that call's own answer named, since a session takes audio from the
-/// address it negotiated and from nowhere else.
+/// The negotiated peer address; a session takes audio only from there.
 fn peer_for(n: usize) -> String {
     format!("203.0.113.5:{}", 41_000 + n)
 }
 
-/// What a run was asked for: the defaults above, unless the environment
-/// raises them. `scripts/bench.sh` sets both — a minute of audio rather than
-/// five seconds, and one call as well as two hundred, so that the difference
-/// between the two runs' peak memory is the cost of a call.
+/// An environment override; `scripts/bench.sh` runs 1 and 200 calls so the
+/// peak-memory difference is the cost of a call.
 fn sized(name: &str, fallback: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -102,26 +72,21 @@ fn sized(name: &str, fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
-// one run of one scenario, read top to bottom: two hundred calls brought up,
-// then driven, then judged. Cut into pieces it would only be harder to read
-// against the numbers it prints.
+// one scenario read top to bottom: set up, drive, judge
 #[allow(clippy::too_many_lines)]
 #[test]
 fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
     let calls = sized("SIPRAL_LOAD_CALLS", CALLS);
     let mut observed = Observed::default();
-    // the one codec `media_line` opens with: mu-law, the format every
-    // answer below names back
     let starting = Instant::now();
-    // past the default ceiling of 128 calls, the way a dialler raises it
+    // past the default ceiling of 128 calls
     let (stack, account) = media_line(&mut observed, |config| {
         config.max_dialogs = u32::try_from(calls).unwrap_or(u32::MAX);
     });
     let started = starting.elapsed();
 
     let mut media = Vec::with_capacity(calls);
-    // every call needs a media address of its own: two sessions on one port
-    // is what a stack refuses, and it is the caller who owns the port
+    // the stack refuses two sessions on one port
     let addresses: Vec<String> = (0..calls)
         .map(|n| format!("192.0.2.10:{}", 40_000 + n))
         .collect();
@@ -130,8 +95,7 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
         let mut config = managed_config();
         config.media_address = address.as_ptr().cast::<c_char>();
         config.media_address_len = address.len();
-        // the stack refuses a reading behind the one it has, so each call is
-        // placed a tenth of a second after the one before it
+        // time must not go backwards, so calls are 100 ms apart
         let at = 1_000 + u64::try_from(n).unwrap_or(0) * 100;
         let (status, call) = place(stack, account, &config, at);
         assert_eq!(
@@ -140,8 +104,7 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
             "call {n} was not placed: {}",
             crate::error::last_error_text()
         );
-        // not `one`: by the time two hundred calls are being placed the queue
-        // also carries the ACKs for the ones already answered
+        // not `one`: the queue also holds ACKs for earlier calls
         let invite = sent(stack)
             .into_iter()
             .rev()
@@ -241,11 +204,8 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
         0,
         "a frame was refused outright"
     );
-    // A frame is twenty milliseconds of audio. Anything near that per frame
-    // of wall time on its thread would mean one core could not carry even
-    // one call, and the figure measured on the machines this has run on is
-    // three orders below it; the assertion is a floor under a regression,
-    // not the number.
+    // A regression floor: a frame is 20 ms of audio, measured cost is about
+    // three orders of magnitude below.
     assert!(
         per_frame < 2_000_000,
         "a frame cost {per_frame} ns of wall time"
@@ -256,8 +216,7 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
     }
 }
 
-/// Count what a call answered, without stopping the run: a load test that
-/// panics on the first refusal says nothing about how often it happens.
+/// Count instead of panicking, so the run reports how often it happens.
 fn count(busy: &AtomicUsize, refused: &AtomicUsize, status: SipralStatus) {
     match status {
         SipralStatus::Ok => {}

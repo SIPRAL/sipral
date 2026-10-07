@@ -1,46 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Behind a NAT: where this end's sockets appear from, asked of a STUN
-//! server, and put where the far end reads it.
+//! Behind a NAT: asks a STUN server (RFC 8489) where this end's sockets appear from.
 //!
-//! Off unless `sipral_stack_config_t::nat` is [`SipralNat::Stun`]. Then the
-//! stack keeps one Binding transaction (RFC 8489) per socket against the
-//! `stun_server` the configuration names, and the answers go to the two
-//! places a far end with no NAT helper acts on:
+//! Off unless `sipral_stack_config_t::nat` is [`SipralNat::Stun`]. Then each socket keeps
+//! one Binding transaction against `stun_server`, refreshed every twenty-five seconds:
 //!
-//! - **The signalling socket's** goes into the `Contact` of every account on
-//!   that transport whose `Contact` names the socket's own address, and an
-//!   account holding a binding registers it at once. It is asked again every
-//!   twenty-five seconds for as long as the stack lives, which is what keeps
-//!   the mapping open through minutes of idle signalling, and an answer that
-//!   comes back different moves the accounts again. Nothing about this path
-//!   asks anything new of the application: the requests leave through
-//!   [`sipral_stack_poll_transmit`](crate::transport::sipral_stack_poll_transmit)
-//!   on that transport, and the answers come back through
-//!   [`sipral_stack_receive_datagram`](crate::transport::sipral_stack_receive_datagram)
-//!   like anything else arriving on the socket.
-//! - **A media socket's** goes into the `c=` and `m=` lines of the call that
-//!   is placed, rung or answered on it. A media socket is the application's
-//!   and is bound for one call, so the application names it with
-//!   [`sipral_stack_nat_map`] before that call, sends what
-//!   [`sipral_stack_poll_stun`] hands back from it, and hands in what arrives
-//!   on it with [`sipral_stack_receive_stun`] until the call is placed on it:
-//!   the socket is asked again every twenty-five seconds while it waits.
+//! - **Signalling socket:** its answer goes into the `Contact` of every account whose
+//!   `Contact` names the socket, and bound accounts register again. Requests and answers use
+//!   the transport's normal path.
+//! - **Media socket:** its answer goes into `c=` and `m=` of the call described on it. The
+//!   application names it with [`sipral_stack_nat_map`] and moves datagrams with
+//!   [`sipral_stack_poll_stun`] and [`sipral_stack_receive_stun`].
 //!
-//! [`SipralEventKind::NatMapping`](crate::event::SipralEventKind::NatMapping)
-//! says what each socket learned, and when a signalling socket's mapping
-//! moved. `docs/06-nat.md` has the reasons for each of these choices, and
-//! `docs/08-ffi.md` the order an application calls them in.
-//!
-//! A TURN server reached over TCP or TLS (`turn_transport`) is reached over
-//! a connection the application opens, one per media socket, the way it
-//! opens a SIP stream: [`SipralEventKind::TurnStream`](crate::event::SipralEventKind::TurnStream)
-//! asks for it, [`sipral_stack_turn_connected`] says it is open,
-//! [`sipral_stack_turn_receive`] hands in what it carried and
-//! [`sipral_stack_turn_closed`] says it has gone. What is written on it comes
-//! out of the queues a datagram for the server would, marked with the
-//! protocol to write it on.
+//! A TURN server over TCP or TLS uses one application-opened connection per media socket,
+//! driven by [`SipralEventKind::TurnStream`](crate::event::SipralEventKind::TurnStream) and
+//! [`sipral_stack_turn_connected`], [`sipral_stack_turn_receive`],
+//! [`sipral_stack_turn_closed`]. `docs/06-nat.md` has the reasons, `docs/08-ffi.md` the order.
 
 #[cfg(all(feature = "stun", feature = "ice"))]
 use std::collections::HashSet;
@@ -70,80 +46,54 @@ use crate::versioned::{read_versioned, write_versioned};
 
 codes! {
     /// What a stack does about a NAT in front of it. Names for
-    /// `sipral_stack_config_t::nat`.
-    ///
-    /// Zero is not one of them: it means this build's own built-in default,
-    /// which is [`SipralNat::Off`]. `docs/06-nat.md` says why that is the
-    /// default and what `rport` and symmetric RTP already carry without it.
+    /// `sipral_stack_config_t::nat`. Zero means the built-in default, [`SipralNat::Off`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralNat: u32 {
-        /// Ask nobody. Every address this stack writes is the one the
-        /// application gave it.
+        /// Ask nobody: every address written is the one the application gave.
         Off = 1,
-        /// Ask the STUN server `sipral_stack_config_t::stun_server` names
-        /// where each socket appears from, and write that instead: the
-        /// signalling socket's in the `Contact`, a media socket's in `c=` and
-        /// `m=`.
-        ///
-        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
-        /// `SIPRAL_FEATURE_STUN`.
+        /// Ask `stun_server` where each socket appears from and write that instead.
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` without `SIPRAL_FEATURE_STUN`.
         Stun = 2,
     }
 }
 
 codes! {
-    /// What a socket's mapping came to. Names for
-    /// `sipral_nat_event_t::mapping`.
+    /// What a socket's mapping came to. Names for `sipral_nat_event_t::mapping`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralNatMapping: u32 {
         /// The first answer: the socket appears at `public`.
         Learned = 1,
-        /// A later answer named another address: the NAT let the mapping go
-        /// and made a new one, or the network under the socket changed.
-        /// `previous` is what it was. About a signalling socket, or a media
-        /// socket still waiting for its call.
+        /// A later answer named another address; `previous` is the old one. Signalling socket, or a
+        /// media socket still waiting for its call.
         Moved = 2,
-        /// The server did not answer, in five and a half seconds, or refused.
-        /// The socket is described by its own address, exactly as it would
-        /// have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
-        /// its next refresh.
+        /// No answer within five and a half seconds, or refused. The socket is described by its own
+        /// address; a signalling socket asks again at its next refresh.
         Unanswered = 3,
     }
 }
 
 record! {
-    /// What a [`SipralEventKind::NatMapping`](crate::event::SipralEventKind::NatMapping)
-    /// carries.
-    ///
-    /// The three addresses are `host:port`, not NUL-terminated, and the
-    /// library's: valid for as long as the callback runs.
+    /// What a [`SipralEventKind::NatMapping`](crate::event::SipralEventKind::NatMapping) carries.
+    /// The addresses are `host:port`, not NUL-terminated, valid only during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralNatEvent {
         /// A [`SipralNatMapping`].
         pub mapping: Number<SipralNatMapping>,
-        /// Nonzero for a signalling socket — a transport of this stack's —
-        /// and zero for a media socket [`sipral_stack_nat_map`] named.
+        /// Nonzero for a signalling socket, zero for a media socket.
         pub signalling: u32,
-        /// The transport, when `signalling` is nonzero: `SIPRAL_TRANSPORT_MAIN`
-        /// or a number `sipral_stack_transport_bind` bound. Zero otherwise,
-        /// which is not a transport here.
+        /// The transport, when `signalling` is nonzero; zero otherwise.
         pub transport: u32,
-        /// How many accounts' `Contact` moved to `public` because of this —
-        /// each one that holds a binding, or is getting one, has registered it
-        /// already. Zero for a media socket, and for an answer no account's
-        /// `Contact` named the socket in.
+        /// How many accounts' `Contact` moved to `public`; bound ones have registered it already.
         pub accounts: u32,
         /// The socket, as the application named it.
         pub local: *const c_char,
         /// How many bytes of it.
         pub local_len: usize,
-        /// Where the server saw it: the public address. Empty for
-        /// `SIPRAL_NAT_MAPPING_UNANSWERED`.
+        /// The public address. Empty for `SIPRAL_NAT_MAPPING_UNANSWERED`.
         pub mapped: *const c_char,
         /// How many bytes of it.
         pub mapped_len: usize,
-        /// What it was before, for `SIPRAL_NAT_MAPPING_MOVED`. Empty
-        /// otherwise.
+        /// The old address, for `SIPRAL_NAT_MAPPING_MOVED`. Empty otherwise.
         pub previous: *const c_char,
         /// How many bytes of it.
         pub previous_len: usize,
@@ -151,55 +101,40 @@ record! {
 }
 
 codes! {
-    /// What a media socket's relay came to. Names for
-    /// `sipral_nat_relay_event_t::outcome`.
+    /// What a media socket's relay came to. Names for `sipral_nat_relay_event_t::outcome`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralNatRelay: u32 {
-        /// The TURN server allocated a relay for the socket: `relayed` is
-        /// the address it relays from. A call placed, rung or answered on
-        /// the socket from now on offers it as its relayed ICE candidate.
+        /// The relay exists at `relayed`; later calls on the socket offer it as an ICE candidate.
         Allocated = 1,
-        /// There is no relay for the socket: the server refused (`code` says
-        /// with what), did not answer in thirty-nine and a half seconds, or
-        /// took back an allocation it had made. A call on the socket goes
-        /// without one, and ICE finds what path it can on the rest.
+        /// No relay: refused (see `code`), no answer in 39.5 seconds, or allocation lost. Calls on
+        /// the socket go without one.
         Failed = 2,
     }
 }
 
 record! {
-    /// What a [`SipralEventKind::NatRelay`](crate::event::SipralEventKind::NatRelay)
-    /// carries.
-    ///
-    /// The addresses and the reason are text, not NUL-terminated, and the
-    /// library's: valid for as long as the callback runs. Nothing of the
-    /// credential is in any of them.
+    /// What a [`SipralEventKind::NatRelay`](crate::event::SipralEventKind::NatRelay) carries.
+    /// Text is not NUL-terminated, valid only during the callback, and holds no credential.
     #[derive(Clone, Copy)]
     pub struct SipralNatRelayEvent {
         /// A [`SipralNatRelay`].
         pub outcome: Number<SipralNatRelay>,
-        /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code the server
-        /// refused with — 401 for a credential it does not accept, 486 for a
-        /// user at its allocation quota, 508 for a server with nothing left —
-        /// and zero when there was none: no answer at all, or an answer this
-        /// end could not accept. Zero for `SIPRAL_NAT_RELAY_ALLOCATED`.
+        /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code (401 bad credential, 486 quota, 508
+        /// no capacity), or zero when there was no usable answer. Zero for `ALLOCATED`.
         pub code: u32,
         /// The media socket, as `sipral_stack_nat_map` named it.
         pub local: *const c_char,
         /// How many bytes of it.
         pub local_len: usize,
-        /// The relayed address, `host:port`. Empty for
-        /// `SIPRAL_NAT_RELAY_FAILED`.
+        /// The relayed `host:port`. Empty for `SIPRAL_NAT_RELAY_FAILED`.
         pub relayed: *const c_char,
         /// How many bytes of it.
         pub relayed_len: usize,
-        /// Where the server saw the socket from, when it said. Empty
-        /// otherwise.
+        /// Where the server saw the socket from, when it said. Empty otherwise.
         pub mapped: *const c_char,
         /// How many bytes of it.
         pub mapped_len: usize,
-        /// Why there is no relay, in English, for a log. Empty for
-        /// `SIPRAL_NAT_RELAY_ALLOCATED`.
+        /// Why there is no relay, in English. Empty for `SIPRAL_NAT_RELAY_ALLOCATED`.
         pub reason: *const c_char,
         /// How many bytes of it.
         pub reason_len: usize,
@@ -207,42 +142,30 @@ record! {
 }
 
 codes! {
-    /// What a media socket's connection to the TURN server is to do. Names
-    /// for `sipral_turn_stream_event_t::state`.
+    /// What to do with a media socket's TURN connection. Names for
+    /// `sipral_turn_stream_event_t::state`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralTurnStream: u32 {
-        /// Open a connection from the media socket `local` to the TURN
-        /// server at `server`, over `protocol` — TCP, or TLS with the
-        /// server's certificate checked by the platform's own stack — and
-        /// say so with `sipral_stack_turn_connected` once it is open, or
-        /// `sipral_stack_turn_closed` if it cannot be. The socket's relay is
-        /// allocated over it; a call on the socket before that answers
-        /// `SIPRAL_STATUS_WRONG_STATE`.
+        /// Open a connection from `local` to `server` over `protocol` (TLS verified by the
+        /// platform), then call `sipral_stack_turn_connected`, or `sipral_stack_turn_closed` on failure. Calls
+        /// on the socket before that answer `SIPRAL_STATUS_WRONG_STATE`.
         Open = 1,
-        /// Nothing more will be written for the connection from `local`:
-        /// its relay was given back or lost, or the call it carried has
-        /// ended. Write what the queues still hold for it —
-        /// `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
-        /// close it.
+        /// Nothing more will be written for `local`: flush `sipral_stack_poll_farewell` and
+        /// `sipral_stack_poll_stun` for it, then close it.
         Close = 2,
     }
 }
 
 record! {
-    /// What a [`SipralEventKind::TurnStream`](crate::event::SipralEventKind::TurnStream)
-    /// carries.
-    ///
-    /// The addresses are text, not NUL-terminated, and the library's: valid
-    /// for as long as the callback runs.
+    /// What a [`SipralEventKind::TurnStream`](crate::event::SipralEventKind::TurnStream) carries.
+    /// Addresses are not NUL-terminated, valid only during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralTurnStreamEvent {
         /// A [`SipralTurnStream`].
         pub state: Number<SipralTurnStream>,
-        /// What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
-        /// `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
+        /// `SIPRAL_TRANSPORT_TCP` or `SIPRAL_TRANSPORT_TLS`, as `turn_transport` named.
         pub protocol: Number<SipralTransport>,
-        /// The media socket, as `sipral_stack_nat_map` named it: the
-        /// connection's own name in the three calls that take one.
+        /// The media socket; the connection's name in the calls that take one.
         pub local: *const c_char,
         /// How many bytes of it.
         pub local_len: usize,
@@ -254,58 +177,44 @@ record! {
 }
 
 codes! {
-    /// What happened to the STUN servers a stack asks. Names for
-    /// `sipral_stun_server_event_t::state`.
+    /// What happened to the STUN servers. Names for `sipral_stun_server_event_t::state`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralStunServerState: u32 {
-        /// The server in use is another one now: `previous` failed and
-        /// `server`, the next in the list, took over; a refresh found
-        /// `server`, earlier in the list, answering again; or
-        /// `sipral_stack_stun_servers` named another list.
+        /// Another server is in use now: failover, an earlier one answering again, or a new list.
         Changed = 1,
-        /// Every server in the list has failed and each is backing off:
-        /// `server` is the last one that did. The sockets keep what they
-        /// learned, or are described by their own address, and a
-        /// signalling socket's refresh goes on asking. Said once until a
-        /// server answers again.
+        /// Every server failed and is backing off; `server` is the last. Sockets keep what they
+        /// learned. Said once until a server answers again.
         AllFailed = 2,
     }
 }
 
 record! {
-    /// What a [`SipralEventKind::StunServer`](crate::event::SipralEventKind::StunServer)
-    /// carries.
-    ///
-    /// The addresses are `host:port`, not NUL-terminated, and the library's:
-    /// valid for as long as the callback runs.
+    /// What a [`SipralEventKind::StunServer`](crate::event::SipralEventKind::StunServer) carries.
+    /// Addresses are not NUL-terminated, valid only during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralStunServerEvent {
         /// A [`SipralStunServerState`].
         pub state: Number<SipralStunServerState>,
-        /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
-        /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+        /// The server in use now (`CHANGED`) or the last that failed (`ALL_FAILED`).
         pub server: *const c_char,
         /// How many bytes of it.
         pub server_len: usize,
-        /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
-        /// Empty otherwise.
+        /// For `CHANGED`, the previous server. Empty otherwise.
         pub previous: *const c_char,
         /// How many bytes of it.
         pub previous_len: usize,
     }
 }
 
-/// The STUN servers a stack asks, in order: the first, and the ones turned
-/// to when it fails.
+/// The STUN servers a stack asks, in order of preference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StunServers {
     first: SocketAddr,
     rest: Vec<SocketAddr>,
 }
 
-/// A list of `host:port` addresses separated by commas, as `name` names
-/// it: an address each, not a name, since resolving one is the
-/// application's, and no entry empty.
+/// Comma-separated `host:port` addresses (not names, resolving is the application's), none
+/// empty.
 ///
 /// # Safety
 ///
@@ -335,8 +244,7 @@ unsafe fn addresses(
         .collect()
 }
 
-/// The servers a stack's configuration asks, or `None` for one that asks
-/// nobody.
+/// The servers the configuration asks, or `None`.
 ///
 /// # Safety
 ///
@@ -391,13 +299,8 @@ pub(crate) unsafe fn configured(config: &SipralStackConfig) -> Result<Option<Stu
     }
 }
 
-/// The TURN server a stack's configuration names, and the credential it
-/// knows this end by — or `None` for a stack that names none.
-///
-/// The two strings are the caller's, borrowed for as long as the
-/// configuration is: [`Nat::start`] copies them into the one place they are
-/// kept, whose password is overwritten when it is dropped, and nothing else
-/// holds a copy.
+/// The configured TURN server and credential, or `None`. Borrowed; [`Nat::start`] keeps the
+/// only copy and wipes the password on drop.
 ///
 /// # Safety
 ///
@@ -414,9 +317,7 @@ pub(crate) unsafe fn turn_configured<'a>(
             "turn_username",
         )
     }?;
-    // read as bytes and checked here rather than by `text`, whose refusal
-    // names the offset of what it refused: a password's shape is not
-    // something an error text should describe
+    // checked here, not by `text`, whose error would describe the password's shape
     let password = unsafe {
         crate::text::bytes(
             config.turn_password.cast::<u8>(),
@@ -482,8 +383,7 @@ pub(crate) unsafe fn turn_configured<'a>(
     })
 }
 
-/// How a relay reaches its TURN server, for a build with no ICE to relay for:
-/// the configuration naming one is refused before this is read.
+/// TURN transport without ICE: such a configuration is refused before this is read.
 #[cfg(not(feature = "ice"))]
 #[derive(Clone, Copy)]
 pub(crate) enum TurnTransport {
@@ -492,22 +392,17 @@ pub(crate) enum TurnTransport {
     Tls,
 }
 
-/// The relay a call described on a media socket takes: a
-/// [`sipral::Relay`], in a build with ICE to use one, and a type with no
-/// values in a build without.
+/// The relay a call on a media socket takes.
 #[cfg(feature = "ice")]
 pub(crate) type HeldRelay = Option<sipral::Relay>;
 
-/// The relay a call described on a media socket takes: never one, without
-/// ICE.
+/// Without ICE there is never a relay.
 #[cfg(not(feature = "ice"))]
 pub(crate) type HeldRelay = Option<core::convert::Infallible>;
 
-/// A TURN server and the credential it knows this end by, borrowed from the
-/// caller's configuration.
+/// A TURN server and credential, borrowed from the configuration.
 #[derive(Clone, Copy)]
-// read only where there is STUN to name media sockets with and ICE to hand
-// a relay to: a build without either refuses the configuration first
+// unused without STUN and ICE: such a configuration is refused first
 #[cfg_attr(not(all(feature = "stun", feature = "ice")), allow(dead_code))]
 pub(crate) struct Turn<'a> {
     server: SocketAddr,
@@ -553,8 +448,7 @@ pub(crate) struct Nat {
     active: Option<Active>,
 }
 
-/// Without the feature there is no stack's side of STUN to hold, only the
-/// answers a stack that asks nobody gives, so the type has no values.
+/// Without the feature nothing is kept.
 #[cfg(not(feature = "stun"))]
 pub(crate) enum Nat {}
 
@@ -562,57 +456,43 @@ pub(crate) enum Nat {}
 #[cfg(feature = "stun")]
 struct Active {
     mappings: sipral::Mappings,
-    /// The signalling sockets being kept mapped, by address, and the
-    /// transport each one is.
+    /// Signalling sockets kept mapped, with their transport.
     signalling: HashMap<SocketAddr, TransportId>,
-    /// Requests for a signalling socket, on their way out through
-    /// `sipral_stack_poll_transmit`.
     signalling_out: VecDeque<Transmit>,
-    /// Requests for a media socket, on their way out through
-    /// [`sipral_stack_poll_stun`].
     media_out: VecDeque<sipral::StunDatagram>,
-    /// The relays on the TURN server the configuration named, one per
-    /// media socket, until each is handed to its call.
+    /// One relay per media socket, until handed to its call.
     #[cfg(feature = "ice")]
     relays: Option<sipral::Relays>,
-    /// Requests for the TURN server, on their way out through
-    /// [`sipral_stack_poll_stun`] after the STUN ones. Not superseded the
-    /// way a Binding request is: an Allocate after its 401 is a different
-    /// request, not a newer copy of the first.
+    /// Requests for the TURN server. Never superseded: an Allocate after its 401 is a new
+    /// request, not a retransmission.
     #[cfg(feature = "ice")]
     relay_out: VecDeque<sipral::RelayDatagram>,
-    /// Over TCP or TLS, where each media socket's connection to the TURN
-    /// server stands.
     #[cfg(feature = "ice")]
     streams: Streams,
 }
 
-/// The connections a stack whose TURN server is reached over TCP or TLS has
-/// asked the application for, one per media socket.
+/// TURN connections over TCP or TLS, one per media socket.
 #[cfg(all(feature = "stun", feature = "ice"))]
 #[derive(Default)]
 struct Streams {
     /// Asked for, and not open yet: no Allocate has gone.
     connecting: HashSet<SocketAddr>,
-    /// Open, and carrying a relay being made or kept for the socket, or the
-    /// relay of a call described there.
+    /// Open, carrying a relay for the socket or its call.
     open: HashSet<SocketAddr>,
-    /// Open, and the relay on it taken by the call described on the socket:
-    /// closed when no call is described there any more.
+    /// Open, relay taken by the call; closed when the call is gone.
     carried: HashSet<SocketAddr>,
     /// What to tell the application, in order.
     said: VecDeque<(SipralTurnStream, SocketAddr)>,
-    /// Sockets whose connection closed before it opened: their relay is
-    /// `SIPRAL_NAT_RELAY_FAILED` without the server ever having been asked.
+    /// Closed before opening: the relay fails without the server being asked.
     lost: VecDeque<SocketAddr>,
 }
 
 /// The text one event's three addresses are read from, and the event.
 pub(crate) type Raised = (SipralEvent, String);
 
-/// Whether something was asked of a server for a socket, and what came of it.
+/// Whether a server was asked for a socket, and the result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-// answered only where there is STUN to ask: a build without it asks nothing
+// unused without STUN
 #[cfg_attr(not(feature = "stun"), allow(dead_code))]
 pub(crate) enum Asked<T> {
     /// Nothing was asked.
@@ -637,10 +517,7 @@ pub(crate) struct Tested {
 
 #[cfg(feature = "stun")]
 impl Nat {
-    /// Start asking, when the configuration named a server: the signalling
-    /// socket the stack was created with is the first one kept mapped. With
-    /// a TURN server named too, every media socket named later is given a
-    /// relay on it as well.
+    /// Start asking if the configuration named a server, beginning with the main socket.
     pub(crate) fn start(
         state: &mut StackState,
         servers: Option<StunServers>,
@@ -678,14 +555,9 @@ impl Nat {
         Self::bound(state, transport, protocol, local, now);
     }
 
-    /// A transport was bound, or bound again: a datagram one is kept
-    /// mapped from its address, and whatever it was mapped from before is
-    /// let go. Bound again at the same address, it is asked again at once.
-    ///
-    /// Only a datagram transport. A connection's far end already sees this
-    /// end's mapping and answers along it, which is `rport` and RFC 5626's
-    /// flow, and a STUN request over UDP would describe a different binding
-    /// from the one the connection is using.
+    /// A transport was bound: a datagram one is kept mapped from its new address. Rebinding at
+    /// the same address asks again at once. Connections are skipped: `rport` and RFC 5626 flows
+    /// already cover them, and a UDP request would describe a different binding.
     pub(crate) fn bound(
         state: &mut StackState,
         transport: TransportId,
@@ -713,10 +585,7 @@ impl Nat {
             }
             return;
         }
-        // bound again at the same address is what an application says after
-        // a network change, when the last answer is the one thing most
-        // likely to be wrong: it is asked again now rather than at the next
-        // refresh
+        // rebinding at the same address follows a network change, so ask now
         if active.signalling.insert(local, transport) == Some(transport) {
             active.mappings.ask_again(local, now);
         } else {
@@ -725,24 +594,16 @@ impl Nat {
         active.sort();
     }
 
-    /// The next request for a signalling socket, for
-    /// `sipral_stack_poll_transmit` to hand out before anything the user
-    /// agent wrote.
+    /// The next signalling request, sent before anything the user agent wrote.
     pub(crate) fn poll_signalling(state: &mut StackState) -> Option<Transmit> {
         let active = state.nat.active.as_mut()?;
         active.sort();
         active.signalling_out.pop_front()
     }
 
-    /// The socket a datagram handed in on `transport` arrived on, as far as
-    /// its STUN answer goes: the one that transport is kept mapped from.
-    ///
-    /// A datagram transport is one socket, and its number says which one
-    /// more surely than `to` does: an application that hands in a second
-    /// transport's datagrams by number alone leaves `to` meaning the address
-    /// the stack was created with, and the answer then has to reach the
-    /// transaction it answers rather than the main socket's. `arrived_on`
-    /// for a transport that is not kept mapped.
+    /// The socket a datagram on `transport` arrived on, for STUN purposes. The transport number
+    /// is more reliable than `to`, which may still name the main address. `arrived_on` if the
+    /// transport is not kept mapped.
     pub(crate) fn socket_of(
         state: &StackState,
         transport: TransportId,
@@ -762,8 +623,7 @@ impl Nat {
             .unwrap_or(arrived_on)
     }
 
-    /// Whether a datagram that arrived on `local` from `from` was the STUN
-    /// server's answer, which nothing else then reads.
+    /// Whether a datagram on `local` from `from` was the STUN server's answer.
     pub(crate) fn intercept(
         state: &mut StackState,
         local: SocketAddr,
@@ -774,9 +634,8 @@ impl Nat {
         let Some(active) = state.nat.active.as_mut() else {
             return false;
         };
-        // the relays first: a coturn is usually the STUN server too, from
-        // the same address, and `Mappings` takes whatever its server sends
-        // on a socket it asked about. `Relays` leaves Binding answers alone
+        // relays first: coturn often serves STUN from the same address, and `Mappings` would take
+        // any answer on a socket it asked about
         #[cfg(feature = "ice")]
         let relayed = active
             .relays
@@ -817,14 +676,12 @@ impl Nat {
             .min()
     }
 
-    /// What was learned since the last poll, as events, with every account
-    /// already moved onto what a signalling socket learned.
+    /// What was learned since the last poll, with accounts already moved.
     pub(crate) fn drain(state: &mut StackState, stack: SipralHandle, now: Instant) -> Vec<Raised> {
         let Some(active) = state.nat.active.as_mut() else {
             return Vec::new();
         };
-        // taken out first, with the transport each socket is, so that moving
-        // the accounts below can have the user agent to itself
+        // taken out first so the account moves below can borrow the user agent
         let mut learned_all = Vec::new();
         while let Some(learned) = active.mappings.poll_event() {
             let transport = match learned {
@@ -871,12 +728,8 @@ impl Nat {
                     continue;
                 }
             };
-            // what the accounts' `Contact` names now: the socket itself the
-            // first time, and the address the last answer gave after that
             let from = previous.unwrap_or(local);
-            // every account moved is counted, a REGISTER that could not
-            // leave included: its `Contact` names `public` either way, and
-            // the registration's own event says it is owed again
+            // counts a REGISTER that could not leave too: its `Contact` names `public` either way
             let accounts = match (transport, public) {
                 (Some(transport), Some(public)) => {
                     state.agent.readdress(transport, from, public, now)
@@ -923,8 +776,7 @@ impl Nat {
             }
             raised.push(relay_event(stack, said));
         }
-        // and a call's: once no call is described on the socket, its
-        // farewells are queued and nothing more will be written there
+        // once no call is described on the socket, its farewells are queued and the stream ends
         let done: Vec<SocketAddr> = streams
             .carried
             .iter()
@@ -942,9 +794,8 @@ impl Nat {
         }
     }
 
-    /// An account was added, or given a new `Contact`: when the signalling
-    /// socket it names has already been answered, the `Contact` moves now
-    /// rather than at the next answer that differs, which may never come.
+    /// An account was added or re-addressed: move its `Contact` now if its socket is already
+    /// answered, rather than waiting for a changed answer that may never come.
     pub(crate) fn contacts_changed(state: &mut StackState, now: Instant) {
         let Some(active) = state.nat.active.as_ref() else {
             return;
@@ -957,19 +808,13 @@ impl Nat {
             })
             .collect();
         for (local, transport, public) in answered {
-            // how many moved is the NAT_MAPPING event's to say, and there is
-            // no event here: nothing was learned, an account was added
+            // nothing was learned, so no event reports the count
             let _moved = state.agent.readdress(transport, local, public, now);
         }
     }
 
-    /// Where a call on the media socket `local` is described as being.
-    ///
-    /// `None` for a stack that asks nobody, a socket nobody named, and a
-    /// socket whose server never answered — all three described by the
-    /// socket's own address. A socket still being asked about is refused:
-    /// the answer is at most five and a half seconds away, and a description
-    /// written now would name an address nobody outside can reach.
+    /// Where a call on media socket `local` is described as being. `None` when nothing was asked
+    /// or nothing answered. Refused while still waiting: the answer is at most 5.5 s away.
     pub(crate) fn public_for(
         state: &StackState,
         local: SocketAddr,
@@ -991,15 +836,8 @@ impl Nat {
         }
     }
 
-    /// The relay a call described on the media socket `local` takes, which
-    /// is then the call's: the relayed ICE candidate (see
-    /// [`sipral::CallMedia::relay`]).
-    ///
-    /// `None` for a stack with no TURN server, a socket nobody named, and a
-    /// socket the server gave no relay — described without one, and ICE
-    /// finds what path it can. A socket still waiting for its relay is
-    /// refused, for the reason [`Nat::public_for`] refuses one still waiting
-    /// for its mapping.
+    /// The relay a call on `local` takes (see [`sipral::CallMedia::relay`]). `None` if there is
+    /// none; refused while still waiting, as in [`Nat::public_for`].
     #[cfg(feature = "ice")]
     pub(crate) fn relay_for(state: &mut StackState, local: SocketAddr) -> Result<HeldRelay, Fail> {
         let Some(active) = state.nat.active.as_mut() else {
@@ -1040,10 +878,8 @@ impl Nat {
         Ok(None)
     }
 
-    /// A call was described on `local`, and the mapping is spent: the next
-    /// call on the same socket is mapped again, since nothing kept this one
-    /// open in between. A relay the call did not take — a call already
-    /// described when it rang — goes back to the server.
+    /// A call was described on `local`: the mapping is spent, and the next call maps again. A
+    /// relay the call did not take goes back to the server.
     pub(crate) fn spent(state: &mut StackState, local: SocketAddr, now: Instant) {
         if let Some(active) = state.nat.active.as_mut()
             && !active.signalling.contains_key(&local)
@@ -1054,9 +890,7 @@ impl Nat {
             if let Some(relays) = active.relays.as_mut() {
                 let kept = relays.holds(local);
                 relays.release(local, now);
-                // the connection goes on for the relay a call took from it,
-                // and has nothing left to carry once the one nobody took has
-                // gone back
+                // the connection lives on for a relay a call took; otherwise it ends
                 let streams = &mut active.streams;
                 if streams.connecting.remove(&local) {
                     streams.said.push_back((SipralTurnStream::Close, local));
@@ -1075,14 +909,10 @@ impl Nat {
         let _ = now;
     }
 
-    /// Relays the engine handed back from descriptions that were refused go
-    /// back onto their sockets, kept alive for the next call there: nothing
-    /// that named them left, so they are exactly as good as before they were
-    /// taken.
+    /// Relays from refused descriptions go back onto their sockets: nothing that named them left.
     #[cfg(feature = "ice")]
     pub(crate) fn take_back(state: &mut StackState, now: Instant) {
         while let Some(relay) = state.engine.poll_returned_relay() {
-            // a stack with no TURN server took no relay to be handed back
             if let Some(active) = state.nat.active.as_mut()
                 && let Some(relays) = active.relays.as_mut()
             {
@@ -1096,9 +926,7 @@ impl Nat {
     #[cfg(not(feature = "ice"))]
     pub(crate) const fn take_back(_state: &mut StackState, _now: Instant) {}
 
-    /// Where a network test stands on the socket `local`: what its STUN
-    /// server said of it, and what its TURN server did, with the protocol
-    /// the TURN server is reached over.
+    /// A network test's state on `local`: STUN answer, TURN result, TURN protocol.
     pub(crate) fn tested(state: &StackState, local: SocketAddr) -> Tested {
         let Some(active) = state.nat.active.as_ref() else {
             return Tested::default();
@@ -1132,9 +960,7 @@ impl Nat {
         }
     }
 
-    /// A media socket named with [`sipral_stack_nat_map`] that will carry no
-    /// call after all: it is no longer kept mapped, and its relay goes back
-    /// to the server.
+    /// A named media socket that will carry no call: stop mapping it and release its relay.
     pub(crate) fn unmap(
         state: &mut StackState,
         local: SocketAddr,
@@ -1152,11 +978,8 @@ impl Nat {
                 ),
             ));
         }
-        // what the socket's relay still had queued asks for what nobody
-        // wants now: an Allocate not yet sent allocates nothing, and a
-        // keepalive or a refresh keeps nothing. Only while the socket is
-        // still named: once a call was described on it, what waits there is
-        // that call's
+        // drop what the socket's relay queued: an unsent Allocate or keepalive is now useless.
+        // Only while still named; after a call was described, the queue is the call's
         #[cfg(feature = "ice")]
         if active.mappings.state(local).is_some() {
             active.relay_out.retain(|queued| queued.local != local);
@@ -1165,15 +988,9 @@ impl Nat {
         Ok(())
     }
 
-    /// Ask `servers` from now on, on a running stack; `None` to ask nobody.
-    ///
-    /// A stack already asking keeps every socket and asks each one again of
-    /// the new list at once. A stack that asked nobody starts on its main
-    /// transport, exactly as if it had been created with these servers.
-    /// Asking nobody any more moves every account's `Contact` back to its
-    /// socket's own address — each one that holds a binding registers it —
-    /// and forgets every media socket named; refused while a TURN server is
-    /// configured, whose relays are made on the media sockets STUN names.
+    /// Ask `servers` from now on; `None` to ask nobody. Existing sockets are asked again at once.
+    /// Asking nobody moves every `Contact` back to its socket and forgets media sockets; refused
+    /// while a TURN server is configured.
     fn replace_servers(
         state: &mut StackState,
         servers: Option<StunServers>,
@@ -1220,9 +1037,7 @@ impl Nat {
                     .collect();
                 state.nat.active = None;
                 for (transport, public, local) in back {
-                    // how many moved is nobody's to report: no event says a
-                    // mapping was forgotten, the registrations say they are
-                    // owed again
+                    // no event for a forgotten mapping; registrations report themselves
                     let _moved = state.agent.readdress(transport, public, local, now);
                 }
                 Ok(())
@@ -1262,8 +1077,7 @@ impl Nat {
         Ok(())
     }
 
-    /// The connection a socket's relay is made over is open: its Allocate
-    /// goes.
+    /// A socket's TURN connection is open: its Allocate goes.
     #[cfg(feature = "ice")]
     fn connected(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
         let Some(active) = state.nat.active.as_mut() else {
@@ -1287,8 +1101,7 @@ impl Nat {
         Ok(())
     }
 
-    /// What a socket's connection to the TURN server carried: for the relay
-    /// being made or kept for it, or for the call that took the relay.
+    /// What a socket's TURN connection carried, for its relay or the call holding it.
     #[cfg(feature = "ice")]
     fn stream_received(
         state: &mut StackState,
@@ -1321,9 +1134,7 @@ impl Nat {
         match taken {
             Ok(_) => Ok(()),
             Err(error) => {
-                // lost with its relay: the relay's failure is raised as
-                // usual, and no SIPRAL_TURN_STREAM_CLOSE, since this answer
-                // already says to close it
+                // the relay fails as usual; no CLOSE, since this answer already says to close
                 if let Some(active) = state.nat.active.as_mut() {
                     active.streams.open.remove(&local);
                     active.streams.carried.remove(&local);
@@ -1340,8 +1151,7 @@ impl Nat {
         }
     }
 
-    /// A socket's connection to the TURN server closed, or could not be
-    /// opened.
+    /// A socket's TURN connection closed, or never opened.
     #[cfg(feature = "ice")]
     fn stream_gone(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
         let Some(active) = state.nat.active.as_mut() else {
@@ -1368,10 +1178,8 @@ impl Nat {
             return Ok(None);
         };
         active.sort();
-        // a call described on a socket with its relay, and still waiting for
-        // the session whose media handle would carry what its agent sends:
-        // the keepalives and the refresh leave by the queue the socket's
-        // relay used before the call, from the same socket, to the same server
+        // a call with a relay but no media handle yet: its keepalives and refresh still leave by
+        // the socket's STUN queue
         #[cfg(feature = "ice")]
         while let Some((_, datagram)) = state.engine.poll_waiting_transmit() {
             active.relay_out.push_back(datagram);
@@ -1410,8 +1218,7 @@ impl Nat {
         now: Instant,
     ) -> Result<(), Fail> {
         if state.nat.active.is_none() {
-            // a stack that asks nobody still has the branches of a forked
-            // call to hand a shared socket's datagrams to
+            // forked branches sharing a socket need this even without STUN
             if state.engine.receive_early(local, from, data, now) {
                 return Ok(());
             }
@@ -1420,12 +1227,8 @@ impl Nat {
         if Self::intercept(state, local, from, data, now) {
             return Ok(());
         }
-        // then the call described on the socket, which the application has
-        // no media handle for yet: the answers to what its relay sent through
-        // `sipral_stack_poll_stun`, its refresh above all, which keeps the
-        // allocation for a phone that rings longer than its lifetime; and the
-        // far end's first connectivity checks, which start with its answer
-        // and would otherwise be lost to the call's agent
+        // then the call described on the socket, before its media handle: TURN answers (the refresh
+        // keeps the allocation through a long ring) and the far end's first ICE checks
         if state.engine.receive_early(local, from, data, now) {
             return Ok(());
         }
@@ -1441,14 +1244,8 @@ impl Nat {
 
 #[cfg(feature = "stun")]
 impl Active {
-    /// Move what the transactions wrote into the queue of the path it
-    /// leaves by: the transport's own, for a signalling socket, and
-    /// [`sipral_stack_poll_stun`]'s for a media one.
-    ///
-    /// A media socket waits in that queue with one request at most: the
-    /// newest is the retransmission or the refresh that supersedes what is
-    /// there, and an application that leaves the queue alone while a socket
-    /// waits minutes for its call is owed that one, not a backlog of them.
+    /// Move transaction output to its queue: the transport's for signalling, the STUN queue for
+    /// media. A media socket holds at most one request; the newest supersedes the rest.
     fn sort(&mut self) {
         while let Some(request) = self.mappings.poll_transmit() {
             if let Some(transport) = self.signalling.get(&request.local) {
@@ -1480,8 +1277,7 @@ struct Outgoing {
     local: SocketAddr,
     destination: SocketAddr,
     payload: Vec<u8>,
-    /// A `SipralTransport`: UDP for a datagram from `local`, TCP or TLS for
-    /// `local`'s connection to the TURN server.
+    /// UDP for a datagram, TCP or TLS for the TURN connection.
     protocol: u32,
 }
 
@@ -1495,9 +1291,8 @@ pub(crate) const fn protocol_of(transport: TurnTransport) -> u32 {
     })
 }
 
-/// Without the feature a stack never asks, since `nat` naming STUN is refused
-/// when it is created, and every one of these is the answer for a stack that
-/// does not.
+/// Without the feature a STUN configuration is refused at creation; these are the answers
+/// for a stack that asks nobody.
 #[cfg(not(feature = "stun"))]
 impl Nat {
     pub(crate) fn start(
@@ -1568,7 +1363,6 @@ impl Nat {
 
     pub(crate) const fn spent(_state: &mut StackState, _local: SocketAddr, _now: Instant) {}
 
-    /// Without STUN no relay was ever taken, so none comes back.
     pub(crate) const fn take_back(_state: &mut StackState, _now: Instant) {}
 
     pub(crate) fn unmap(
@@ -1579,12 +1373,10 @@ impl Nat {
         Err(not_asking())
     }
 
-    /// Without STUN a test asks nothing of any socket.
     pub(crate) fn tested(_state: &StackState, _local: SocketAddr) -> Tested {
         Tested::default()
     }
 
-    /// Without STUN a stack names no media socket, so none has a relay.
     #[allow(clippy::unnecessary_wraps)]
     pub(crate) const fn relay_for(
         _state: &mut StackState,
@@ -1593,8 +1385,7 @@ impl Nat {
         Ok(None)
     }
 
-    /// Asking nobody is what a stack without STUN already does; asking
-    /// anybody is what it cannot.
+    /// Asking nobody is already the case; asking anybody is impossible.
     fn replace_servers(
         _state: &mut StackState,
         servers: Option<StunServers>,
@@ -1630,7 +1421,6 @@ impl Nat {
     }
 }
 
-/// What a build without the feature has in the queue it never fills.
 #[cfg(not(feature = "stun"))]
 enum Never {}
 
@@ -1641,11 +1431,8 @@ fn not_asking() -> Fail {
     )
 }
 
-/// One event, and the text its three addresses point into.
-///
-/// The addresses are written into one string, one after another, and the
-/// event points at the three pieces: the string's bytes live on the heap
-/// and stay where they are however often the delivery holding it moves.
+/// One event, and the text its addresses point into. The text is one heap string, so the
+/// pointers stay valid when the delivery moves.
 #[cfg(feature = "stun")]
 fn event(
     stack: SipralHandle,
@@ -1687,8 +1474,7 @@ fn event(
     (crate::event::nat_mapping(stack, payload), text)
 }
 
-/// One event about the STUN servers, laid out the way [`event`] lays out a
-/// mapping's.
+/// One STUN server event, laid out like [`event`].
 #[cfg(feature = "stun")]
 fn server_event(
     stack: SipralHandle,
@@ -1716,8 +1502,7 @@ fn server_event(
     (crate::event::stun_server(stack, payload), text)
 }
 
-/// One relay event, and the text its addresses and reason point into, laid
-/// out the way [`event`] lays out a mapping's.
+/// One relay event, laid out like [`event`].
 #[cfg(all(feature = "stun", feature = "ice"))]
 fn relay_event(stack: SipralHandle, said: sipral::RelayEvent) -> Raised {
     let (outcome, code, local, relayed, mapped, reason) = match said {
@@ -1794,9 +1579,8 @@ fn stream_event(
     (crate::event::turn_stream(stack, payload), text)
 }
 
-/// The STUN error code a relay failure stands for, or zero for a failure no
-/// server answered with (RFC 8656 §19, RFC 8489 §14.8): what a relay event
-/// carries, and what a path a relay refused or lost does.
+/// The STUN error code behind a relay failure, or zero if no server answered (RFC 8656 §19,
+/// RFC 8489 §14.8).
 #[cfg(feature = "ice")]
 pub(crate) fn refusal_code(failure: sipral::TurnFailure) -> u32 {
     use sipral::TurnFailure;
@@ -1827,29 +1611,17 @@ pub(crate) fn refusal_code(failure: sipral::TurnFailure) -> u32 {
 }
 
 entry! {
-    /// Ask these STUN servers from now on, without creating the stack again.
+    /// Replace the STUN server list without recreating the stack.
     ///
-    /// `servers` is `host:port` addresses separated by commas, in order of
-    /// preference: the first is what `stun_server` would have named, the
-    /// rest what `stun_fallbacks` would. On a stack that asks already, every
-    /// socket it keeps mapped is asked again of the new list at once, and
-    /// what each one learned stands until the new server answers —
-    /// `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
-    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
-    /// kept from the old list keeps its back-off. On a stack created with
-    /// `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
-    /// would have been with `SIPRAL_NAT_STUN`; a further datagram transport
-    /// joins it the next time it is bound with
-    /// `sipral_stack_transport_bind`.
+    /// `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
+    /// asked again at once and keeps its answer until the new server replies; servers kept from
+    /// the old list keep their back-off. On a `SIPRAL_NAT_OFF` stack the main transport starts
+    /// being mapped; further datagram transports join at their next `sipral_stack_transport_bind`.
     ///
-    /// An empty list — `servers_len` zero — asks nobody any more: every
-    /// account whose `Contact` a STUN answer moved goes back to the socket's
-    /// own address and registers it, every media socket named is forgotten,
-    /// and a call is described by its socket's own address from then on.
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
-    /// server, whose relays ride on the media sockets STUN names, and for an
-    /// entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
-    /// for a list in a build without `SIPRAL_FEATURE_STUN`.
+    /// An empty list stops asking: `Contact`s move back to socket addresses and re-register, and
+    /// named media sockets are forgotten. `SIPRAL_STATUS_INVALID_ARGUMENT` for that with a TURN
+    /// server configured, or for a bad entry. `SIPRAL_STATUS_NOT_SUPPORTED` for a list without
+    /// `SIPRAL_FEATURE_STUN`.
     ///
     /// # Safety
     ///
@@ -1872,34 +1644,20 @@ entry! {
 }
 
 entry! {
-    /// Ask where a media socket appears from, before a call is described
-    /// on it.
+    /// Ask where a media socket appears from, before a call is described on it.
     ///
-    /// `local` is the address the socket is bound to, as `host:port` — the
-    /// same text the call's `media_address` will be. The request is waiting
-    /// in [`sipral_stack_poll_stun`] when this returns, the answer goes in
-    /// through [`sipral_stack_receive_stun`], and
-    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what it came to, within five and
-    /// a half seconds whatever the server does. From then on a call placed,
-    /// rung or answered with that `media_address` is described by the public
-    /// address, and asks for `a=rtcp-mux`, since one mapping describes one
-    /// port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+    /// `local` is the bound `host:port`, the same text as the call's `media_address`. The request
+    /// waits in [`sipral_stack_poll_stun`]; hand the answer to [`sipral_stack_receive_stun`].
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` reports within 5.5 seconds. A call on that
+    /// `media_address` is then described by the public address and asks for `a=rtcp-mux`.
+    /// Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
     ///
-    /// Until that call, the socket is asked again every twenty-five seconds,
-    /// as the signalling socket is: nothing else crosses its NAT binding
-    /// while it waits, and an answer minutes old names a mapping the NAT may
-    /// have let go. Keep sending what `sipral_stack_poll_stun` hands out for
-    /// it and handing in what arrives; an answer that differs is
-    /// `SIPRAL_NAT_MAPPING_MOVED`, and the call is described by it. At most
-    /// one request per socket waits in the queue.
+    /// Until the call, the socket is asked again every twenty-five seconds to keep the NAT
+    /// binding alive; keep draining the queue. At most one request per socket waits there. The
+    /// call spends the mapping: name the socket again for a second call.
     ///
-    /// The mapping is spent by the call it describes. A socket used for a
-    /// second call is named here again — nothing kept the first answer true
-    /// in between.
-    ///
-    /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
-    /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
-    /// signalling socket of the stack's own, which is kept mapped already.
+    /// `SIPRAL_STATUS_WRONG_STATE` without `SIPRAL_NAT_STUN`; `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// for one of the stack's own signalling sockets.
     ///
     /// # Safety
     ///
@@ -1916,36 +1674,20 @@ entry! {
 }
 
 entry! {
-    /// Say that a media socket [`sipral_stack_nat_map`] named will carry no
-    /// call after all, and give back what the stack keeps for it.
+    /// Say that a media socket [`sipral_stack_nat_map`] named will carry no call, and release it.
     ///
-    /// Its mapping is no longer asked again every twenty-five seconds, and a
-    /// request for it still waiting in [`sipral_stack_poll_stun`] is
-    /// dropped. With a TURN server configured, its relay goes back to the
-    /// server: a Refresh with a lifetime of zero (RFC 8656 §8), waiting in
-    /// [`sipral_stack_poll_stun`] when this returns, to be sent from the
-    /// socket like everything else there. A socket whose Allocate was sent
-    /// and not answered yet asks nothing more, but the server may have
-    /// allocated all the same: the answer, handed in through
-    /// [`sipral_stack_receive_stun`] as before, is taken for up to the forty
-    /// seconds the request would have waited, and an allocation it reports
-    /// is given back the same way. Without this the stack keeps the
-    /// allocation refreshed for as long as it lives, and after
-    /// `sipral_stack_destroy`, which sends nothing, the server holds it — a
-    /// port and a share of the account's quota — until its lifetime runs
-    /// out, up to ten minutes later.
+    /// Its refreshes stop and a waiting request is dropped. A TURN relay is released with a
+    /// Refresh of lifetime zero (RFC 8656 §8), waiting in [`sipral_stack_poll_stun`]. If its
+    /// Allocate is still unanswered, a late answer is accepted through
+    /// [`sipral_stack_receive_stun`] for up to forty seconds and released the same way. Without
+    /// this call the server holds the allocation until its lifetime expires, up to ten minutes
+    /// after `sipral_stack_destroy`.
     ///
-    /// For a socket the application closes, a call it decides not to place,
-    /// and every socket still named before the stack is destroyed. A socket
-    /// a call was placed, rung or answered on has already been spent by that
-    /// call, whose relay goes back when the call ends; naming it here, or a
-    /// socket never named, does nothing. To be named again the socket goes
-    /// through [`sipral_stack_nat_map`] from the start.
+    /// Use it for a closed socket, a call not placed, and every named socket before destroy. A
+    /// socket already used by a call, or never named, is a no-op.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
-    /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
-    /// signalling socket of the stack's own, which is kept mapped for as long
-    /// as it is bound.
+    /// `SIPRAL_STATUS_WRONG_STATE` without `SIPRAL_NAT_STUN`; `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// for one of the stack's own signalling sockets.
     ///
     /// # Safety
     ///
@@ -1962,21 +1704,14 @@ entry! {
 }
 
 entry! {
-    /// Say that the TCP or TLS connection a
-    /// `SIPRAL_EVENT_KIND_TURN_STREAM` of state `SIPRAL_TURN_STREAM_OPEN`
-    /// asked for is open — for TLS, that the handshake has finished and the
-    /// server's certificate was checked against the name the application
-    /// configured, by the platform's own TLS stack, as for SIP over TLS.
+    /// Say that the connection a `SIPRAL_TURN_STREAM_OPEN` asked for is open (for TLS, with the
+    /// handshake done and the certificate checked by the platform).
     ///
-    /// The socket's Allocate is waiting in [`sipral_stack_poll_stun`] when
-    /// this returns, marked with the connection's `protocol`, to be written
-    /// on it; the answer comes back through [`sipral_stack_turn_receive`],
-    /// and `SIPRAL_EVENT_KIND_NAT_RELAY` says what the server gave, exactly
-    /// as over UDP.
+    /// The socket's Allocate then waits in [`sipral_stack_poll_stun`] marked with `protocol`;
+    /// the answer comes back through [`sipral_stack_turn_receive`].
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket no connection was asked
-    /// for, and `SIPRAL_STATUS_WRONG_STATE` on a stack created without
-    /// `SIPRAL_NAT_STUN`.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket with no requested connection,
+    /// `SIPRAL_STATUS_WRONG_STATE` without `SIPRAL_NAT_STUN`.
     ///
     /// # Safety
     ///
@@ -2001,24 +1736,15 @@ entry! {
 }
 
 entry! {
-    /// Hand over bytes read off a media socket's TCP or TLS connection to
-    /// the TURN server, in whatever pieces the connection delivered them.
+    /// Hand over bytes read from a media socket's TURN connection, in any chunking.
     ///
-    /// The messages in them are put back together here (RFC 8656 §12.5)
-    /// and each goes where a datagram from the server would: to the relay
-    /// being made or kept for the socket, or, once a call has taken it, to
-    /// that call — its agent while it waits for its session, and then its
-    /// media, as through `sipral_media_receive`, audio included. So the
-    /// connection is read here for as long as it is open, media handle or
-    /// not, and what the call owes the far end in reply comes out of
-    /// `sipral_media_poll_transmit` as it always does.
+    /// Messages are reassembled (RFC 8656 §12.5) and routed like a datagram from the server: to
+    /// the socket's relay, or to the call holding it (agent or media, audio included). Read the
+    /// connection for as long as it is open; replies leave through `sipral_media_poll_transmit`.
     ///
-    /// `SIPRAL_STATUS_STREAM_BROKEN` when the connection carried something
-    /// no TURN message starts with, which nothing in a stream can recover
-    /// from: close it. The socket's relay is lost with it —
-    /// `SIPRAL_NAT_RELAY_FAILED` for one still waiting for its call — and no
-    /// `SIPRAL_TURN_STREAM_CLOSE` follows. `SIPRAL_STATUS_INVALID_ARGUMENT`
-    /// for a socket with no open connection.
+    /// `SIPRAL_STATUS_STREAM_BROKEN` when the bytes are not TURN framing: close the connection.
+    /// The relay is lost with it and no `SIPRAL_TURN_STREAM_CLOSE` follows.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket with no open connection.
     ///
     /// # Safety
     ///
@@ -2048,17 +1774,12 @@ entry! {
 }
 
 entry! {
-    /// Say that a media socket's connection to the TURN server closed, or
-    /// could not be opened at all.
+    /// Say that a media socket's TURN connection closed, or could not be opened.
     ///
-    /// The server knew the socket's allocation by that connection (RFC 8656
-    /// §3.2), so the relay went with it: one still being made is
-    /// `SIPRAL_NAT_RELAY_FAILED` at the next poll, and a call on the socket
-    /// goes without it; a call that had taken it keeps the paths ICE found
-    /// that need none, and loses the one through it when its consent runs
-    /// out (RFC 7675). Naming the socket again with `sipral_stack_nat_map`
-    /// asks for a new connection. `SIPRAL_STATUS_OK` for a connection the
-    /// stack had already let go.
+    /// The allocation was tied to the connection (RFC 8656 §3.2), so the relay is gone: one in
+    /// progress becomes `SIPRAL_NAT_RELAY_FAILED`; a call using it loses that path when consent
+    /// expires (RFC 7675). Name the socket again to get a new connection. `SIPRAL_STATUS_OK` for
+    /// a connection already released.
     ///
     /// # Safety
     ///
@@ -2082,8 +1803,7 @@ entry! {
     }
 }
 
-/// What the three connection calls answer in a build that has no relay to
-/// carry over one.
+/// The connection calls in a build without a relay.
 #[cfg(not(all(feature = "stun", feature = "ice")))]
 fn no_turn_streams() -> Fail {
     fail(
@@ -2096,32 +1816,20 @@ fn no_turn_streams() -> Fail {
 entry! {
     /// Take the next STUN request a media socket has to send.
     ///
-    /// The same record and the same rules as `sipral_stack_poll_transmit`,
-    /// on a queue of its own: loop until `len` comes back zero, after every
-    /// [`sipral_stack_nat_map`], every [`sipral_stack_receive_stun`] and
-    /// every `sipral_stack_poll`, since the stack retransmits a request
-    /// nobody answered. `source` is always written, and it is the socket to
-    /// send from — the whole point is the address the server sees it come
-    /// from, so sending it from any other socket learns the wrong one.
-    /// `transport` is zero and names nothing here. `protocol` is UDP for a
-    /// datagram; on a stack whose `turn_transport` is TCP or TLS, what is for
-    /// the TURN server says that instead, and is written, as it is, on the
-    /// connection from `source` that `SIPRAL_EVENT_KIND_TURN_STREAM` asked
-    /// for — never sent as a datagram.
+    /// Same record and rules as `sipral_stack_poll_transmit`, on its own queue: loop until `len`
+    /// is zero after every [`sipral_stack_nat_map`], [`sipral_stack_receive_stun`] and
+    /// `sipral_stack_poll`. Send from `source` exactly: the server reports the address it sees.
+    /// `transport` is zero. `protocol` is UDP for a datagram, or TCP/TLS for bytes to write on
+    /// the TURN connection from `source`.
     ///
-    /// A call placed, rung or answered on a socket with its relay sends
-    /// through here too, for as long as it has no media handle: the Binding
-    /// indications that keep the NAT binding towards the TURN server open
-    /// while the phone rings, and the refresh that keeps the allocation past
-    /// its lifetime less a minute — nine minutes with coturn's default. From
-    /// the media handle on they leave through `sipral_media_poll_transmit`
-    /// with the rest of the call's media path.
+    /// A call on a relayed socket also sends here until it has a media handle: Binding
+    /// indications keeping the NAT open and the allocation refresh. After that they leave via
+    /// `sipral_media_poll_transmit`.
     ///
     /// # Safety
     ///
-    /// `transmit` must point at a `sipral_transmit_t` whose `size` member says
-    /// how long it is and whose buffers are writable for the capacities beside
-    /// them.
+    /// `transmit` must point at a `sipral_transmit_t` whose `size` member says how long it is
+    /// and whose buffers are writable for the capacities beside them.
     fn sipral_stack_poll_stun(stack: SipralHandle, transmit: *mut SipralTransmit) {
         let mut out = unsafe { read_versioned(transmit) }?;
         prepare(&mut out)?;
@@ -2157,8 +1865,8 @@ entry! {
 ///
 /// # Safety
 ///
-/// The buffers in `transmit` must be writable for the capacities beside them,
-/// which `prepare` has already been asked about, and the payload must fit.
+/// The buffers must be writable for their capacities, already checked by `prepare`, and the
+/// payload must fit.
 #[cfg(feature = "stun")]
 unsafe fn put(transmit: &mut SipralTransmit, request: &Outgoing) -> Result<(), Fail> {
     if !request.payload.is_empty() {
@@ -2191,49 +1899,29 @@ unsafe fn put(transmit: &mut SipralTransmit, request: &Outgoing) -> Result<(), F
 }
 
 entry! {
-    /// Hand over a datagram that arrived on a media socket
-    /// [`sipral_stack_nat_map`] named, before a call has media on it.
+    /// Hand over a datagram that arrived on a media socket [`sipral_stack_nat_map`] named,
+    /// before a call has media on it.
     ///
-    /// That includes a call already placed, rung or answered on the socket,
-    /// until its media handle exists: everything arriving on the socket
-    /// still comes in here, and the call takes what is its own. The TURN
-    /// server's answers to what a call with a relay sent through
-    /// [`sipral_stack_poll_stun`] — a refresh left unanswered loses the
-    /// relay. The far end's first connectivity checks on a call using ICE,
-    /// which start with its answer and can arrive before the 200 is read:
-    /// one signed with the password the call's description gave out is kept,
-    /// the newest sixteen for the socket, and answered by the call's agent
-    /// when its session opens (RFC 8445 §7.3) — unless it waited longer than
-    /// 39.5 seconds, the far end's transaction for it, or its call ended
-    /// first, when it is dropped. And once the session is open, in
-    /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
-    /// `sipral_call_media`, anything at all, which goes to the session as
-    /// through `sipral_media_receive`. From the media handle on, the socket's
-    /// datagrams go to `sipral_media_receive` instead — except on a socket
-    /// the branches of a forked call share (`keep_all_forks`), whose
-    /// datagrams keep coming here for as long as the branches last: one
-    /// offer described them all on the one socket, and each datagram goes to
-    /// the branch that claims it, by the ICE fragment a check names, the
-    /// check an answer answers, or the address its media comes from (RFC
-    /// 8839 §7.3). That much a stack that asks no server takes too; anything
-    /// else it refuses with `SIPRAL_STATUS_WRONG_STATE`.
+    /// Everything arriving on the socket comes here until the call's media handle exists:
+    /// - TURN answers to what the call's relay sent (an unanswered refresh loses the relay);
+    /// - the far end's early ICE checks: those signed with this call's password are kept, the
+    ///   newest sixteen, and answered when the session opens (RFC 8445 §7.3), unless older than
+    ///   39.5 seconds or the call ended;
+    /// - between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and `sipral_call_media`, anything, as through
+    ///   `sipral_media_receive`.
     ///
-    /// `to` is the socket it arrived on, as `local` was given there; `from`
-    /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
-    /// server's answer, which is then the stack's and nobody else's, or the
-    /// call's as above; `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else —
-    /// early media before the session opens, a datagram from a stranger, a
-    /// check nobody can authenticate, an answer from any address but the
-    /// server's, a datagram the session dropped — which costs that one
-    /// datagram and nothing more. Only the server's own address is believed,
-    /// and only an answer to a request this stack sent: that is the whole
-    /// defence against a forged answer naming an address of the attacker's
-    /// choosing as this end's own.
+    /// A socket shared by forked branches (`keep_all_forks`) keeps coming here; each datagram goes
+    /// to the branch matching its ICE fragment, transaction or source (RFC 8839 §7.3). A stack
+    /// without STUN accepts only that and returns `SIPRAL_STATUS_WRONG_STATE` otherwise.
+    ///
+    /// `to` is the receiving socket as named, `from` the sender. `SIPRAL_STATUS_OK` when taken;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else, dropping only that datagram. Only
+    /// answers from the server's own address to this stack's own requests are believed: that is
+    /// the defence against a forged mapping.
     ///
     /// # Safety
     ///
-    /// `data` must be readable for `len` bytes, `from` for `from_len`, and
-    /// `to` for `to_len`.
+    /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to` for `to_len`.
     fn sipral_stack_receive_stun(
         stack: SipralHandle,
         data: *const u8,
@@ -2291,13 +1979,11 @@ mod tests {
 
     const SERVER: &str = "198.51.100.1:3478";
     const MEDIA: &str = crate::call::tests::MEDIA;
-    /// What the NAT in front of these tests shows the world for the SIP
-    /// socket, and for the media one.
+    /// The public address the test NAT shows for the SIP and media sockets.
     const SIP_PUBLIC: &str = "203.0.113.7:41000";
     const MEDIA_PUBLIC: &str = "203.0.113.7:41002";
 
-    /// What one `SIPRAL_EVENT_KIND_NAT_MAPPING` said, copied out inside the
-    /// callback, the only time its pointers are good.
+    /// One `SIPRAL_EVENT_KIND_NAT_MAPPING`, copied out inside the callback.
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Mapped {
         mapping: u32,
@@ -2395,8 +2081,7 @@ mod tests {
         unsafe { record(event, user_data) };
     }
 
-    /// What one `SIPRAL_EVENT_KIND_NETWORK_TEST` said, copied out inside the
-    /// callback.
+    /// One `SIPRAL_EVENT_KIND_NETWORK_TEST`, copied out.
     #[derive(Clone, Debug, PartialEq)]
     struct NetworkSaid {
         test: u32,
@@ -2426,8 +2111,7 @@ mod tests {
         NETWORK.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
-    /// What one `SIPRAL_EVENT_KIND_TURN_STREAM` said, copied out inside the
-    /// callback.
+    /// One `SIPRAL_EVENT_KIND_TURN_STREAM`, copied out.
     #[cfg(feature = "ice")]
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct StreamSaid {
@@ -2447,8 +2131,7 @@ mod tests {
         STREAMS.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
-    /// What one `SIPRAL_EVENT_KIND_NAT_RELAY` said, copied out inside the
-    /// callback.
+    /// One `SIPRAL_EVENT_KIND_NAT_RELAY`, copied out.
     #[cfg(feature = "ice")]
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct RelaySaid {
@@ -2470,8 +2153,7 @@ mod tests {
         RELAYED.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
-    /// What one `SIPRAL_EVENT_KIND_STUN_SERVER` said, copied out inside the
-    /// callback.
+    /// One `SIPRAL_EVENT_KIND_STUN_SERVER`, copied out.
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ServerSaid {
         state: u32,
@@ -2508,9 +2190,8 @@ mod tests {
         handle
     }
 
-    /// A STUN server's success response to `request`, written out from RFC
-    /// 8489 §5 and §14.2 rather than with this tree's own builder: the
-    /// request's own transaction id, and `seen` in an XOR-MAPPED-ADDRESS.
+    /// A STUN success response to `request` built by hand from RFC 8489 §5 and §14.2, with `seen`
+    /// in XOR-MAPPED-ADDRESS.
     fn answer(request: &[u8], seen: &str) -> Vec<u8> {
         const COOKIE: u32 = 0x2112_a442;
         let seen: SocketAddr = seen.parse().expect("an address");
@@ -2596,8 +2277,7 @@ mod tests {
         }
     }
 
-    /// Everything `sipral_stack_poll_stun` hands out: the request, where it
-    /// goes, and the socket it has to leave from.
+    /// Everything `sipral_stack_poll_stun` hands out: request, destination, source socket.
     fn stun_out(stack: SipralHandle) -> Vec<(Vec<u8>, String, String)> {
         let mut buffers = Buffers::new();
         let mut all = Vec::new();
@@ -2698,9 +2378,7 @@ mod tests {
             SipralStatus::Ok
         );
 
-        // the Binding request goes first, to the server, on the SIP socket's
-        // own transport; the REGISTER sent before any answer came back still
-        // names the socket's own address
+        // the Binding request goes first; the earlier REGISTER still names the private address
         let out = signalling_out(stack);
         assert_eq!(out.len(), 2, "{out:?}");
         assert!(is_stun(&out[0].0));
@@ -2729,8 +2407,7 @@ mod tests {
                 previous: String::new(),
             }]
         );
-        // and the registrar is told at once, without waiting for a refresh,
-        // and told to drop the private binding the first REGISTER left it
+        // the registrar is told at once and the private binding dropped
         let out = signalling_out(stack);
         let register = out
             .iter()
@@ -2741,8 +2418,6 @@ mod tests {
             Some("<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.10:5060>;expires=0")
         );
     }
-
-    // -- more than one server, and a list replaced while running ------------
 
     const SECOND: &str = "198.51.100.2:3478";
     const THIRD: &str = "198.51.100.3:3478";
@@ -2763,8 +2438,7 @@ mod tests {
         }
     }
 
-    /// Poll every tenth of a second from `from_ms` to `to_ms`, and gather
-    /// what the signalling socket was given to send.
+    /// Poll every 100 ms from `from_ms` to `to_ms`, collecting signalling output.
     fn run_signalling(stack: SipralHandle, from_ms: u64, to_ms: u64) -> Vec<(Vec<u8>, String)> {
         let mut all = Vec::new();
         let mut now = from_ms;
@@ -2872,7 +2546,6 @@ mod tests {
         let said = mapped();
         assert_eq!(said.len(), 1, "{said:?}");
         assert_eq!(said[0].mapping, SipralNatMapping::Unanswered as u32);
-        // the refreshes go on, and the silence is not announced again
         let _ = run_signalling(stack, 12_100, 70_000);
         assert!(servers_said().is_empty());
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
@@ -3041,10 +2714,8 @@ mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 
-    /// A stack configured with `configure`, an account registered on it and
-    /// moved onto [`SIP_PUBLIC`] by the STUN answer, its REGISTER there
-    /// granted: what the registrar keep-alive tests start from. Answers the
-    /// stack and the registrar's address.
+    /// A stack moved onto [`SIP_PUBLIC`] with its REGISTER granted. Returns the stack and the
+    /// registrar's address.
     fn behind_the_nat(
         observed: &mut Observed,
         configure: impl FnOnce(&mut SipralStackConfig),
@@ -3097,9 +2768,7 @@ mod tests {
         (stack, registrar)
     }
 
-    /// How many keep-alives went to `registrar` between `from_ms` and
-    /// `until_ms`, polling once a second as an application that sleeps until
-    /// the stack's next deadline would, at worst, more often.
+    /// Keep-alives sent to `registrar` between `from_ms` and `until_ms`, polling once a second.
     fn keepalives_to(stack: SipralHandle, registrar: &str, from_ms: u64, until_ms: u64) -> usize {
         let mut count = 0;
         let mut now = from_ms;
@@ -3116,11 +2785,9 @@ mod tests {
         count
     }
 
-    /// The lab's failure: behind an address-and-port-filtering NAT, a call
-    /// 330 s after the REGISTER never arrived, because nothing but the STUN
-    /// refresh left the socket in between and it went to the STUN server.
-    /// Behind a NAT the stack now keeps the registrar's own flow open, by
-    /// default, every 20 to 25 seconds.
+    /// Lab regression: behind a port-restricted NAT, a call 330 s after REGISTER never arrived
+    /// because only the STUN refresh left the socket. The registrar flow is now kept open every
+    /// 20 to 25 seconds.
     #[test]
     fn an_account_behind_the_nat_keeps_its_registrars_flow_open() {
         let mut observed = Observed::default();
@@ -3139,8 +2806,7 @@ mod tests {
         let sent = keepalives_to(stack, &registrar, 1_000, 101_000);
         assert!((10..=12).contains(&sent), "{sent} keep-alives in 100 s");
 
-        // a phone going to sleep is woken by a push, not by a process that
-        // is not running
+        // a sleeping phone is woken by a push
         let mut report = crate::lifecycle::SipralSuspending {
             size: size_of::<crate::lifecycle::SipralSuspending>(),
             unverified: 0,
@@ -3203,13 +2869,11 @@ mod tests {
             "sent from any other socket it asks the wrong question"
         );
 
-        // before the answer, a call on the socket would name an address
-        // nobody outside can reach, so it is refused rather than written
+        // before the answer a call would name an unreachable address
         let (status, _) = place(stack, account, &managed_config(), 20);
         assert_eq!(status, SipralStatus::WrongState);
         assert!(last_error_text().contains("has not answered"));
 
-        // only the server is believed
         let forged = answer(&out[0].0, "198.51.100.66:9");
         assert_eq!(
             on_media_socket(stack, &forged, "198.51.100.66:3478", 30),
@@ -3240,7 +2904,6 @@ mod tests {
         assert!(text.contains("m=audio 41002 "), "{text}");
         assert!(text.contains("a=rtcp-mux\r\n"), "{text}");
 
-        // the answer was spent by the call it described
         let (status, _) = place(stack, account, &managed_config(), 50);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let out = signalling_out(stack);
@@ -3254,16 +2917,9 @@ mod tests {
         );
     }
 
-    /// The half a phone does not start: a registrar with no NAT helper sends
-    /// the INVITE to the `Contact` it holds, which after STUN is the public
-    /// address, and writes the same address in `To`. The call has to be
-    /// recognised as the account's, and answered through
-    /// `sipral_call_answer_media` — what the Kotlin and Swift layers call —
-    /// with that address in the 2xx's own `Contact` as well as in `c=`: the
-    /// ACK, and every request the far end sends in the dialog, go where the
-    /// `Contact` says (RFC 3261 §12.1.2: the far end, as UAC, sets its remote
-    /// target from this response's `Contact`), and the address the INVITE
-    /// arrived on is one nobody outside can reach.
+    /// Incoming call to the STUN `Contact`: the INVITE targets the public address, and the
+    /// 2xx from `sipral_call_answer_media` must carry it in `Contact` and `c=`, since the far end
+    /// takes its remote target from that `Contact` (RFC 3261 §12.1.2).
     #[test]
     fn a_call_to_the_public_contact_is_the_accounts_and_is_answered_from_it() {
         let mut observed = Observed::default();
@@ -3338,10 +2994,8 @@ mod tests {
 
     #[test]
     fn a_media_socket_mapped_long_before_its_call_is_described_by_a_fresh_answer() {
-        // mapped when the last call ended, placed ten minutes later: the
-        // stack asks again while the socket waits, holds at most one request
-        // for it however long the application leaves the queue alone, and the
-        // call names what the latest answer said
+        // placed ten minutes after mapping: refreshes continue, at most one request is queued, and
+        // the call uses the latest answer
         let mut observed = Observed::default();
         let stack = asking_stack(&mut observed);
         let account = account_on(stack);
@@ -3357,8 +3011,6 @@ mod tests {
         let _ = poll(stack, 30);
         let _ = mapped();
 
-        // ten minutes of an application that polls the stack and never the
-        // STUN queue: one request is waiting at the end, not two dozen
         let mut now = 30;
         while now < 600_000 {
             now += 1_000;
@@ -3373,8 +3025,7 @@ mod tests {
         );
         assert_eq!(waiting[0].2, MEDIA);
 
-        // and one that does send it hears the next refresh, whose answer is
-        // a mapping the NAT made again somewhere else
+        // the next refresh reports a new mapping
         let request = loop {
             now += 1_000;
             let _ = poll(stack, now);
@@ -3454,11 +3105,8 @@ mod tests {
         );
     }
 
-    /// A stack that asks nobody still takes a datagram for a call described
-    /// on the socket it arrived on: the loop that hands a socket the
-    /// branches of a forked call share to `sipral_stack_receive_stun` needs
-    /// no STUN server to do it. A datagram for no call is still refused as
-    /// before.
+    /// A stack without STUN still routes a datagram for a call on its socket (forked branches);
+    /// a datagram for no call is refused.
     #[test]
     fn a_stack_that_asks_nobody_still_hands_a_calls_datagrams_to_the_call() {
         let mut observed = Observed::default();
@@ -3472,8 +3120,7 @@ mod tests {
             out.extend_from_slice(&[0xFF; 160]);
             out
         };
-        // RFC 3550 A.1 wants two packets in a row before a source is
-        // believed, so the first is the session's and dropped by it
+        // RFC 3550 A.1 needs two packets before a source is believed
         let _ = on_media_socket(stack, &rtp(1), peer, 2_000);
         assert_eq!(
             on_media_socket(stack, &rtp(2), peer, 2_020),
@@ -3493,10 +3140,7 @@ mod tests {
 
     #[test]
     fn a_second_datagram_transport_is_mapped_by_its_own_answer() {
-        // a transport of the application's own beside the main one, whose
-        // datagrams are handed in by transport number alone, the way every
-        // SIP message on it is: the answer is that transport's socket's, and
-        // nobody else's
+        // a second transport whose datagrams are handed in by number only: the answer is its own
         const SECOND: u32 = 2;
         const SECOND_AT: &str = "192.0.2.10:5070";
         let mut observed = Observed::default();
@@ -3574,8 +3218,7 @@ mod tests {
         let _ = poll(stack, 20);
         assert_eq!(mapped().len(), 1);
 
-        // named again before any call used the answer: the same answer comes
-        // back, and the application waiting for the event still gets one
+        // named again before use: the same answer and a new event
         assert_eq!(map_media(stack, 30), SipralStatus::Ok);
         let (status, _) = place(stack, account, &managed_config(), 35);
         assert_eq!(
@@ -3605,8 +3248,7 @@ mod tests {
         assert_eq!(status, SipralStatus::InvalidArgument);
     }
 
-    /// Everything `sipral_stack_poll_stun` hands out, each with the protocol
-    /// it is marked to go over.
+    /// Everything `sipral_stack_poll_stun` hands out, with its protocol.
     #[cfg(feature = "ice")]
     fn stun_out_marked(stack: SipralHandle) -> Vec<(Vec<u8>, String, String, u32)> {
         let mut buffers = Buffers::new();
@@ -3627,8 +3269,7 @@ mod tests {
     #[cfg(feature = "ice")]
     const RELAYED_AT: &str = "198.51.100.1:50000";
 
-    /// A stack that asks `SERVER` for mappings and for relays, as one coturn
-    /// answering both usually is.
+    /// A stack asking `SERVER` for mappings and relays, like one coturn.
     #[cfg(feature = "ice")]
     fn relaying(observed: &mut Observed) -> SipralStackConfig {
         let mut settings = asking(observed);
@@ -3638,9 +3279,8 @@ mod tests {
         settings
     }
 
-    /// A TURN server's success response to `request`, written out from RFC
-    /// 8656 §7.3 and RFC 8489 §14.2: the request's own method and id, and
-    /// for an Allocate the relayed address, the mapped one and ten minutes.
+    /// A TURN success response to `request` (RFC 8656 §7.3, RFC 8489 §14.2): the relayed and
+    /// mapped addresses and ten minutes for an Allocate.
     #[cfg(feature = "ice")]
     fn turn_answer(request: &[u8], relayed: &str, seen: &str) -> Vec<u8> {
         const COOKIE: u32 = 0x2112_a442;
@@ -3662,8 +3302,7 @@ mod tests {
             body.extend(xor(0x0016, relayed));
             body.extend(xor(0x0020, seen));
         }
-        // an Allocate and a Refresh are both answered with the lifetime
-        // granted, ten minutes (RFC 8656 §7.3, §8)
+        // Allocate and Refresh both carry the lifetime (RFC 8656 §7.3, §8)
         if method == 0x0003 || method == 0x0004 {
             body.extend_from_slice(&[0x00, 0x0d, 0x00, 0x04]);
             body.extend_from_slice(&600_u32.to_be_bytes());
@@ -3703,7 +3342,6 @@ mod tests {
         let mut named = relaying(&mut observed);
         (named.turn_server, named.turn_server_len) = as_text("turn.example.com:3478");
         assert_eq!(create(&named).0, SipralStatus::InvalidArgument);
-        // and the password is in none of what was said about any of them
         assert!(!last_error_text().contains("correct horse"));
     }
 
@@ -3728,7 +3366,6 @@ mod tests {
         assert_eq!(out[1].1, SERVER);
         assert_eq!(out[1].2, MEDIA);
 
-        // the STUN answer alone is not enough: the relay is on its way
         assert_eq!(
             on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 20),
             SipralStatus::Ok
@@ -3740,7 +3377,6 @@ mod tests {
         assert_eq!(status, SipralStatus::WrongState);
         assert!(last_error_text().contains("TURN server has not answered"));
 
-        // the same server answers both, and each answer reaches its own
         assert_eq!(
             on_media_socket(
                 stack,
@@ -3791,8 +3427,7 @@ mod tests {
         assert_eq!(map_media(stack, 10), SipralStatus::Ok);
         let out = stun_out(stack);
         let allocate = &out[1].0;
-        // 486, Allocation Quota Reached (RFC 8656 §19), with no credential
-        // asked for first: the error class of the Allocate method
+        // 486 Allocation Quota Reached (RFC 8656 §19), error class of Allocate
         let mut refusal = vec![0x01, 0x13, 0x00, 0x08];
         refusal.extend_from_slice(allocate.get(4..20).expect("a whole header"));
         refusal.extend_from_slice(&[0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x04, 86]);
@@ -3810,8 +3445,7 @@ mod tests {
         assert!(!said[0].reason.contains("correct horse"));
     }
 
-    /// The lifetime a TURN Refresh request asks for (RFC 8656 §7.2, §18.2),
-    /// or `None` for a message that is not one.
+    /// The lifetime a TURN Refresh asks for (RFC 8656 §7.2, §18.2), or `None`.
     #[cfg(feature = "ice")]
     fn refresh_lifetime(message: &[u8]) -> Option<u32> {
         if message.get(..2) != Some(&[0x00, 0x04][..]) {
@@ -3873,9 +3507,8 @@ mod tests {
         }
     }
 
-    /// A stack over `protocol`, its media socket named and mapped, and the
-    /// connection it asked for said to be open: the stack and the account,
-    /// with the Allocate that went on the connection.
+    /// A stack over `protocol` with its media socket mapped and the connection open; returns the
+    /// stack, account and the Allocate sent on it.
     #[cfg(feature = "ice")]
     fn connected_stack(
         observed: &mut Observed,
@@ -3955,20 +3588,15 @@ mod tests {
         }
     }
 
-    /// Over TCP nothing about the relay is a datagram: the Allocate waits for
-    /// the connection, goes on it, is answered on it in whatever pieces, and
-    /// the call that takes the relay writes its permission and its checks
-    /// through it, and gives it back on it when it ends — after which the
-    /// connection has nothing left to carry, and the application is told to
-    /// close it.
+    /// Over TCP the relay never uses datagrams: Allocate, answer, permissions, checks and release
+    /// all go through the connection, which is then closed.
     #[cfg(feature = "ice")]
     #[test]
     fn a_relay_over_tcp_is_made_on_its_connection_and_the_call_carries_it_there() {
         let mut observed = Observed::default();
         let (stack, account, allocate) = connected_stack(&mut observed, TCP);
         let reply = turn_answer(&allocate, RELAYED_AT, "203.0.113.7:52000");
-        // the server answers on the connection, and the same answer in a
-        // datagram from its address allocates nothing
+        // the same answer as a datagram allocates nothing
         let _ = on_media_socket(stack, &reply, SERVER, 20);
         let _ = poll(stack, 20);
         assert!(relayed().is_empty(), "a datagram was believed");
@@ -3988,7 +3616,6 @@ mod tests {
                 code: 0,
                 local: MEDIA.to_owned(),
                 relayed: RELAYED_AT.to_owned(),
-                // the connection's own mapping says nothing about the socket
                 mapped: String::new(),
                 reason: String::new(),
             }]
@@ -3997,7 +3624,6 @@ mod tests {
         let (call, invite, _, _) = place_ice(stack, account, 30);
         let text = String::from_utf8_lossy(&invite).into_owned();
         assert!(text.contains("198.51.100.1 50000 typ relay"), "{text}");
-        // the connection's own mapping is no candidate of the socket's
         assert!(!text.contains("52000 typ srflx"), "{text}");
         assert!(text.contains("c=IN IP4 203.0.113.7\r\n"), "{text}");
         crate::call::tests::deliver(
@@ -4147,8 +3773,7 @@ mod tests {
         );
     }
 
-    /// Everything a call's media handle hands out, with where it goes and
-    /// what over.
+    /// Everything a call's media handle hands out, with destination and protocol.
     #[cfg(feature = "ice")]
     fn media_out_marked(media: SipralHandle, now_ms: u64) -> Vec<(Vec<u8>, String, u32)> {
         let mut data = vec![0_u8; crate::media::SIPRAL_MEDIA_PACKET_BYTES];
@@ -4183,8 +3808,7 @@ mod tests {
         }
     }
 
-    /// Everything `sipral_stack_poll_farewell` hands out, with where it goes
-    /// and what over.
+    /// Everything `sipral_stack_poll_farewell` hands out, with destination and protocol.
     #[cfg(feature = "ice")]
     fn farewells_marked(stack: SipralHandle) -> Vec<(Vec<u8>, String, u32)> {
         let mut data = vec![0_u8; crate::media::SIPRAL_MEDIA_PACKET_BYTES];
@@ -4221,10 +3845,8 @@ mod tests {
         }
     }
 
-    /// A relay allocated for a socket whose call was described when it rang
-    /// is not that call's: answering on the socket spends it, and it goes
-    /// back to the server rather than being kept alive for a call that will
-    /// never take it.
+    /// A relay allocated after the call rang is not that call's: answering spends the socket
+    /// and the relay goes back.
     #[cfg(feature = "ice")]
     #[test]
     fn a_relay_the_call_on_its_socket_does_not_take_goes_back_when_the_socket_is_spent() {
@@ -4248,7 +3870,6 @@ mod tests {
             last_error_text()
         );
 
-        // the socket named after the ring, and given a relay
         assert_eq!(map_media(stack, 1_200), SipralStatus::Ok);
         let out = stun_out(stack);
         assert_eq!(out.len(), 2, "a Binding request and an Allocate");
@@ -4288,9 +3909,7 @@ mod tests {
         );
     }
 
-    /// A transfer refused for a mistake in its configuration is still there
-    /// to take, and so is the socket's relay: nothing was placed, so nothing
-    /// may have been spent.
+    /// A transfer refused for a configuration mistake leaves the socket's relay unspent.
     #[cfg(feature = "ice")]
     #[test]
     fn a_transfer_refused_for_its_configuration_leaves_the_relay_for_the_one_taken_after() {
@@ -4332,8 +3951,7 @@ mod tests {
         );
     }
 
-    /// `MEDIA` named on `stack`, and both its STUN answer and its relay
-    /// given, at `now_ms`.
+    /// `MEDIA` named on `stack` with its mapping and relay given at `now_ms`.
     #[cfg(feature = "ice")]
     fn relay_on_the_socket(stack: SipralHandle, now_ms: u64) {
         assert_eq!(map_media(stack, now_ms), SipralStatus::Ok);
@@ -4362,8 +3980,7 @@ mod tests {
         }
     }
 
-    /// A socket named and then not used gives its relay back when the
-    /// application says so, and is kept alive no longer.
+    /// An unused named socket releases its relay on unmap, and nothing more is sent.
     #[cfg(feature = "ice")]
     #[test]
     fn a_socket_that_will_carry_no_call_gives_its_relay_back_when_unmapped() {
@@ -4390,14 +4007,11 @@ mod tests {
         );
         assert_eq!((out[0].1.as_str(), out[0].2.as_str()), (SERVER, MEDIA));
 
-        // and nothing more is sent for it: no Binding request every
-        // twenty-five seconds, no keepalive towards the TURN server
         for at in [30_000, 60_000, 600_000] {
             let _ = poll(stack, at);
             let out = stun_out(stack);
             assert!(out.is_empty(), "at {at} ms: {out:?}");
         }
-        // named again, it is asked about from the start
         assert_eq!(unmap(stack, MEDIA, 600_010), SipralStatus::Ok);
         assert!(
             stun_out(stack).is_empty(),
@@ -4411,10 +4025,7 @@ mod tests {
         );
     }
 
-    /// A socket unmapped while its Allocate is still on its way: the server
-    /// allocates all the same when the request reaches it, and the answer is
-    /// what says so, so the relay goes back when that answer arrives rather
-    /// than being held on the server for its whole lifetime.
+    /// Unmapped while its Allocate is in flight: the late answer triggers the release.
     #[cfg(feature = "ice")]
     #[test]
     fn a_socket_unmapped_before_its_relay_is_answered_gives_it_back_on_the_answer() {
@@ -4456,22 +4067,18 @@ mod tests {
         );
         let _ = poll(stack, 40);
         assert!(relayed().is_empty(), "a socket unmapped hears nothing more");
-        // and nothing more is sent for it
         for at in [30_000, 60_000, 600_000] {
             let _ = poll(stack, at);
             assert!(stun_out(stack).is_empty(), "at {at} ms");
         }
 
-        // named and unmapped before anything was taken out to send: nothing
-        // at all leaves for it, the Allocate included
+        // named and unmapped before anything was sent: nothing leaves, not even the Allocate
         assert_eq!(map_media(stack, 600_010), SipralStatus::Ok);
         assert_eq!(unmap(stack, MEDIA, 600_020), SipralStatus::Ok);
         assert!(stun_out(stack).is_empty(), "a request nobody wants went");
     }
 
-    /// Unmapping the socket a call is ringing on touches nothing of the
-    /// call's: its relay is the call's, kept alive and given back when the
-    /// call ends, and unmapping after that is as harmless.
+    /// Unmapping a socket a call rings on leaves the call's relay alone.
     #[cfg(feature = "ice")]
     #[test]
     fn unmapping_the_socket_of_a_call_leaves_the_call_its_relay() {
@@ -4493,8 +4100,7 @@ mod tests {
             .expect("the INVITE")
             .0;
         crate::call::tests::deliver(stack, &crate::call::tests::ringing(&invite), 30);
-        // a keepalive of the call's waits in the queue when the socket is
-        // unmapped: asked for with no room to take it, it stays there
+        // a call keepalive stays queued when polled with no room
         let _ = poll(stack, 15_100);
         let _ = signalling_out(stack);
         let mut buffers = Buffers::new();
@@ -4565,10 +4171,8 @@ mod tests {
         );
     }
 
-    /// A transfer the user agent refuses after the relay went into its offer
-    /// — a `Replaces` among its headers is the REFER's to give — sent
-    /// nothing that named the relay, and the relay goes back onto the socket
-    /// for the transfer taken after.
+    /// A transfer the user agent refuses (its `Replaces` belongs to the REFER) sent nothing
+    /// naming the relay, so the relay goes back onto the socket.
     #[cfg(feature = "ice")]
     #[test]
     fn a_transfer_the_user_agent_refuses_leaves_the_relay_for_the_one_taken_after() {
@@ -4619,8 +4223,7 @@ mod tests {
         );
     }
 
-    /// A second ring on a call already rung is refused, and the relay the
-    /// socket was given for it goes back onto the socket.
+    /// A second ring is refused and its relay goes back onto the socket.
     #[cfg(feature = "ice")]
     #[test]
     fn a_ring_refused_leaves_the_relay_on_its_socket() {
@@ -4653,7 +4256,6 @@ mod tests {
             },
             SipralStatus::WrongState
         );
-        // still the socket's: kept alive, and given back when it is unmapped
         let _ = poll(stack, 30_000);
         let out = stun_out(stack);
         assert!(
@@ -4670,11 +4272,8 @@ mod tests {
         );
     }
 
-    /// A relayed call that rings for a long time: until its media handle
-    /// exists, what its agent sends leaves through `sipral_stack_poll_stun`,
-    /// and the server's answers come back through
-    /// `sipral_stack_receive_stun`, so the allocation is refreshed and not
-    /// lost nine minutes in.
+    /// A long ring on a relayed call: its agent's traffic uses the STUN queues until the media
+    /// handle exists, so the allocation is refreshed rather than lost.
     #[cfg(feature = "ice")]
     #[test]
     fn a_relayed_call_that_rings_for_ten_minutes_keeps_its_relay() {
@@ -4708,7 +4307,6 @@ mod tests {
             for (request, destination, source) in stun_out(stack) {
                 assert_eq!((destination.as_str(), source.as_str()), (SERVER, MEDIA));
                 match request.get(..2) {
-                    // a Binding indication
                     Some([0x00, 0x11]) => keepalives += 1,
                     Some([0x00, 0x04]) => {
                         refreshes += 1;
@@ -4735,7 +4333,6 @@ mod tests {
         assert!(refreshes >= 1, "the allocation was never refreshed");
         assert!(relayed().is_empty(), "nothing about the relay was said");
 
-        // and it is still the call's to give back when the far end refuses
         crate::call::tests::deliver(
             stack,
             &crate::call::tests::answered_with(&invite, 486, "Busy Here"),
@@ -4761,10 +4358,8 @@ mod tests {
         assert!(given_back, "the relay was lost while the phone rang");
     }
 
-    /// The same ring, driven only by the deadline `sipral_stack_poll` names,
-    /// as an application that sleeps until then does: every keepalive
-    /// leaves within its fifteen seconds of the last, and the refresh before
-    /// the allocation's ten minutes are up.
+    /// The same ring, driven only by `sipral_stack_poll` deadlines: keepalives within fifteen
+    /// seconds, refresh before ten minutes.
     #[cfg(feature = "ice")]
     #[test]
     fn a_ringing_call_is_woken_in_time_for_its_keepalives_and_its_refresh() {
@@ -4822,16 +4417,13 @@ mod tests {
             refreshed_at.len() >= 2,
             "the allocation is refreshed every nine minutes: {refreshed_at:?}"
         );
-        // allocated at 10 ms for ten minutes, and refreshed a minute before
-        // they are up
         assert!(
             (530_000..=540_100).contains(&refreshed_at[0]),
             "the first refresh left at {refreshed_at:?} ms"
         );
     }
 
-    /// The far end's ICE credentials, in the answer below and in every check
-    /// it sends.
+    /// The far end's ICE credentials.
     #[cfg(feature = "ice")]
     const PEER_UFRAG: &str = "farend";
     #[cfg(feature = "ice")]
@@ -4840,8 +4432,7 @@ mod tests {
     #[cfg(feature = "ice")]
     const PEER_CHECKS_FROM: &str = crate::call::tests::PEER_MEDIA;
 
-    /// An answer that agrees to ICE: the far end's credentials, `a=rtcp-mux`
-    /// back, and one host candidate that is also its default destination.
+    /// An ICE answer: credentials, `a=rtcp-mux` and one host candidate.
     #[cfg(feature = "ice")]
     fn ice_answer() -> Vec<u8> {
         format!(
@@ -4871,16 +4462,13 @@ mod tests {
             .to_owned()
     }
 
-    /// The far end's connectivity check towards this end's socket (RFC 8445
-    /// §7.2.2): `USERNAME` is this end's fragment, a colon and the far end's,
-    /// and it is signed with the password this end's offer gave out.
+    /// The far end's check to this end (RFC 8445 §7.2.2), signed with this end's password.
     #[cfg(feature = "ice")]
     fn check(ufrag: &str, pwd: &str, id: [u8; 12]) -> Vec<u8> {
         signed_check(ufrag, Some(pwd), id)
     }
 
-    /// The same check, signed with `pwd` when there is one and with nothing
-    /// at all when there is not.
+    /// The same check, signed with `pwd` or unsigned.
     #[cfg(feature = "ice")]
     fn signed_check(ufrag: &str, pwd: Option<&str>, id: [u8; 12]) -> Vec<u8> {
         use sipral_nat::stun::{AttributeType, Class, MessageBuilder, Method, TransactionId};
@@ -4907,9 +4495,8 @@ mod tests {
         builder.finish()
     }
 
-    /// A stack that asks, a mapping for the media socket, and a call placed
-    /// on it that offers ICE: the stack, the call, the INVITE, and this end's
-    /// ICE fragment and password as the INVITE gave them out.
+    /// A stack with a mapped media socket and an ICE call on it: stack, call, INVITE, and this
+    /// end's ICE fragment and password.
     #[cfg(feature = "ice")]
     fn ice_call(observed: &mut Observed) -> (SipralHandle, SipralHandle, Vec<u8>, String, String) {
         let stack = asking_stack(observed);
@@ -4927,8 +4514,7 @@ mod tests {
         (stack, call, invite, ufrag, pwd)
     }
 
-    /// A call that offers ICE, placed on the mapped media socket at `now_ms`:
-    /// the call, its INVITE, and the ICE fragment and password it gave out.
+    /// An ICE call on the mapped socket at `now_ms`: call, INVITE, fragment, password.
     #[cfg(feature = "ice")]
     fn place_ice(
         stack: SipralHandle,
@@ -4981,10 +4567,8 @@ mod tests {
         }
     }
 
-    /// Everything the call's media handle hands out over the third of a
-    /// second from `from_ms`, the stack polled every twenty milliseconds the
-    /// way a loop polls it: a triggered check waits for its turn on the
-    /// pacing timer.
+    /// The media handle's output over a third of a second, polling every 20 ms so triggered
+    /// checks get their pacing turn.
     #[cfg(feature = "ice")]
     fn media_over(
         stack: SipralHandle,
@@ -5008,10 +4592,8 @@ mod tests {
         media
     }
 
-    /// Whether `sent` holds this end's answer to the check `id`, a Binding
-    /// success response (RFC 8489 §6.3.1), sent back where the check came
-    /// from; and whether it holds a check of this end's own towards there,
-    /// the triggered check RFC 8445 §7.3.1.4 runs on the same pair.
+    /// Whether `sent` answers check `id` (RFC 8489 §6.3.1) and holds the triggered check back
+    /// (RFC 8445 §7.3.1.4).
     #[cfg(feature = "ice")]
     fn answered_and_triggered(sent: &[(Vec<u8>, String)], id: [u8; 12]) -> (bool, bool) {
         let answered = sent.iter().any(|(message, to)| {
@@ -5025,9 +4607,7 @@ mod tests {
         (answered, triggered)
     }
 
-    /// How many answers `sent` holds to the check `id`, of any kind: a
-    /// success, or the refusal an agent sends a check it cannot
-    /// authenticate.
+    /// How many answers of any kind `sent` holds to check `id`.
     #[cfg(feature = "ice")]
     fn answers_to(sent: &[(Vec<u8>, String)], id: [u8; 12]) -> usize {
         sent.iter()
@@ -5038,29 +4618,20 @@ mod tests {
             .count()
     }
 
-    /// The far end starts checking the moment it sends its answer, and its
-    /// first checks can reach this end's socket before the 200 does. The
-    /// application has no media handle to give them to, and hands them in
-    /// here, as it hands in everything that arrives on the socket until then:
-    /// the stack keeps each one it can authenticate for the call described
-    /// on that socket, and the call's agent answers it and checks back once
-    /// its session opens (RFC 8445 §7.3), rather than the pair waiting for
-    /// the far end's next retransmission while early audio is refused.
+    /// Early checks reach the socket before the 200. They are kept for the call and answered
+    /// when its session opens (RFC 8445 §7.3), rather than waiting for retransmissions.
     #[cfg(feature = "ice")]
     #[test]
     fn a_check_that_arrives_before_the_answer_is_answered_once_the_call_has_media() {
         let mut observed = Observed::default();
         let (stack, call, invite, ufrag, pwd) = ice_call(&mut observed);
 
-        // signed with any other password, it is nobody's: refused, and kept
-        // for no call
         let forged = check(&ufrag, "notthepasswordthisendgaveout", [9; 12]);
         assert_eq!(
             on_media_socket(stack, &forged, PEER_CHECKS_FROM, 40),
             SipralStatus::InvalidArgument
         );
-        // and so is one signed with nothing at all, and one signed with the
-        // call's password that names some other fragment than the call's
+        // also refused: unsigned, or naming another fragment
         let unsigned = signed_check(&ufrag, None, [10; 12]);
         assert_eq!(
             on_media_socket(stack, &unsigned, PEER_CHECKS_FROM, 40),
@@ -5101,9 +4672,7 @@ mod tests {
         }
     }
 
-    /// The checks kept for a call with no session are the newest sixteen: one
-    /// more pushes out the oldest, which the far end has most likely sent
-    /// again or given up on, rather than being refused itself.
+    /// Only the newest sixteen checks are kept; the oldest is pushed out.
     #[cfg(feature = "ice")]
     #[test]
     fn the_newest_sixteen_checks_are_kept_for_the_call() {
@@ -5131,9 +4700,7 @@ mod tests {
         assert_eq!(answered, (5..=20).collect::<Vec<u8>>(), "{sent:?}");
     }
 
-    /// The far end retransmits a check it has no answer to under the same
-    /// transaction id (RFC 8489 §6.2.1): kept, the copy takes the place of
-    /// the one it repeats, so it pushes out no other check and is answered
+    /// A retransmitted check (same id, RFC 8489 §6.2.1) replaces its original and is answered
     /// once.
     #[cfg(feature = "ice")]
     #[test]
@@ -5162,10 +4729,7 @@ mod tests {
         assert_eq!(answers, vec![1; 16], "{sent:?}");
     }
 
-    /// A check kept for longer than the far end's transaction for it lasts
-    /// is not answered when the session finally opens: the far end gave up
-    /// on it 39.5 seconds after sending it (RFC 8489 §6.2.1). One that
-    /// arrived recently still is.
+    /// A check kept beyond the far end's 39.5 s transaction (RFC 8489 §6.2.1) is not answered.
     #[cfg(feature = "ice")]
     #[test]
     fn a_check_kept_past_its_transaction_is_dropped_rather_than_answered() {
@@ -5210,9 +4774,7 @@ mod tests {
         );
     }
 
-    /// A call that ends before its session opens takes what was kept for it
-    /// along: the next call on the same socket answers none of it, and a
-    /// check for the call that ended is refused like any stranger's.
+    /// A call ending before its session opens discards its kept checks.
     #[cfg(feature = "ice")]
     #[test]
     fn checks_kept_for_a_call_that_ended_go_with_it() {
@@ -5256,8 +4818,6 @@ mod tests {
         );
     }
 
-    /// A call that ends after its session opened answers nothing more
-    /// either: what arrives on its socket is refused.
     #[cfg(feature = "ice")]
     #[test]
     fn a_check_for_a_call_that_hung_up_is_refused() {
@@ -5284,10 +4844,8 @@ mod tests {
         );
     }
 
-    /// Between the session opening and the application taking its media
-    /// handle — the poll that raised `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
-    /// the `sipral_call_media` after it — what arrives on the socket still
-    /// comes in here, and the call's session takes it.
+    /// Between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and `sipral_call_media`, socket traffic still
+    /// goes to the session through here.
     #[cfg(feature = "ice")]
     #[test]
     fn a_check_that_arrives_before_the_media_handle_is_answered_through_it() {
@@ -5316,8 +4874,7 @@ mod tests {
         );
     }
 
-    /// A full peer's offer: its credentials, `a=rtcp-mux`, and one host
-    /// candidate that is also where its checks come from. No `a=ice-lite`.
+    /// A full peer's offer: credentials, `a=rtcp-mux`, one host candidate, no `a=ice-lite`.
     #[cfg(feature = "ice")]
     fn full_offer() -> Vec<u8> {
         format!(
@@ -5337,8 +4894,7 @@ mod tests {
         .into_bytes()
     }
 
-    /// The full peer's check towards a lite end: it is the controlling side
-    /// (RFC 8445 §6.1.1), and it nominates with `USE-CANDIDATE` (§8.1.1).
+    /// The full peer's check: controlling (RFC 8445 §6.1.1), nominating (§8.1.1).
     #[cfg(feature = "ice")]
     fn nominating_check(ufrag: &str, pwd: &str, id: [u8; 12]) -> Vec<u8> {
         use sipral_nat::stun::{AttributeType, Class, MessageBuilder, Method, TransactionId};
@@ -5366,12 +4922,8 @@ mod tests {
         builder.finish()
     }
 
-    /// `SIPRAL_ICE_LITE` through this ABI (RFC 8445 §2.5): a stack whose
-    /// calls are lite answers a full peer's offer with `a=ice-lite` and the
-    /// one host candidate its media socket is, answers the peer's checks
-    /// without ever checking back — a lite end sends none — and puts the call
-    /// on the pair the peer nominates, which `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`
-    /// reports as it does for a full agent.
+    /// `SIPRAL_ICE_LITE` (RFC 8445 §2.5): answers with `a=ice-lite` and one host candidate,
+    /// never checks back, and uses the pair the peer nominates.
     #[cfg(feature = "ice")]
     #[test]
     fn a_lite_stack_answers_a_full_offer_and_takes_the_pair_the_peer_nominates() {
@@ -5453,8 +5005,7 @@ Content-Type: application/sdp\r\n"
         );
     }
 
-    /// A call placed with ICE and answered with it: the stack, the call,
-    /// its media handle and the fragment its INVITE gave out.
+    /// An ICE call placed and answered: stack, call, media handle, fragment.
     #[cfg(feature = "ice")]
     fn answered_ice_call(
         observed: &mut Observed,
@@ -5509,9 +5060,7 @@ Content-Type: application/sdp\r\n"
         (status, path, text(&local), text(&remote))
     }
 
-    /// D5's path half over the ABI: the pairs the call's agent formed, each
-    /// between the addresses the two descriptions named, and what became of
-    /// each — here, nothing yet, since nothing has answered a check.
+    /// The pairs over the ABI, with nothing answered yet.
     #[cfg(feature = "ice")]
     #[test]
     fn a_call_says_which_paths_its_agent_tried_and_what_became_of_each() {
@@ -5543,16 +5092,13 @@ Content-Type: application/sdp\r\n"
             assert!(path.priority > 0);
             locals.push((local, path.local_kind));
         }
-        // a reflexive candidate is paired as its base (RFC 8445 §6.1.2.4),
-        // so every pair leaves from the socket itself
+        // reflexive candidates pair as their base (RFC 8445 §6.1.2.4)
         assert!(
             locals
                 .iter()
                 .all(|(local, kind)| local == MEDIA && *kind == SipralCandidateKind::Host as u32),
             "{locals:?}"
         );
-        // past the end, and an address buffer with no room, are refused
-        // before anything is written
         let (past, ..) = path_at(media, count);
         assert_eq!(past, SipralStatus::InvalidArgument);
         assert!(last_error_text().contains(&count.to_string()));
@@ -5593,8 +5139,7 @@ Content-Type: application/sdp\r\n"
         );
     }
 
-    /// A pair that lost, over the ABI: the far end refused this end's check,
-    /// and the list says so, with the STUN code it refused with.
+    /// A failed pair over the ABI, with the STUN code.
     #[cfg(feature = "ice")]
     #[test]
     fn a_pair_the_far_end_refused_says_so_with_its_code() {
@@ -5603,9 +5148,7 @@ Content-Type: application/sdp\r\n"
 
         let mut observed = Observed::default();
         let (stack, _, media, _) = answered_ice_call(&mut observed);
-        // this end's check towards the far end, answered with a 400 signed
-        // with the password the far end's answer gave out (RFC 8445
-        // §7.2.5.2.4): the pair has failed, and says why
+        // a signed 400 for this end's check (RFC 8445 §7.2.5.2.4)
         let sent = media_over(stack, media, 60);
         let check = sent
             .iter()
@@ -5646,10 +5189,8 @@ Content-Type: application/sdp\r\n"
         );
     }
 
-    /// A restart this end starts, over the ABI: the call goes out again as a
-    /// re-offer whose credentials are not the ones the first offer gave out
-    /// (RFC 8839 §4.4.1.1.1), and a second one is refused while the first is
-    /// on its way.
+    /// An ICE restart over the ABI: new credentials in the re-offer (RFC 8839 §4.4.1.1.1); a
+    /// second restart is refused while the first is pending.
     #[cfg(feature = "ice")]
     #[test]
     fn a_restart_this_end_starts_goes_out_with_new_credentials() {
@@ -5687,8 +5228,6 @@ Content-Type: application/sdp\r\n"
         );
     }
 
-    /// A call running no ICE agent has nothing to restart, and says so
-    /// rather than sending an offer.
     #[cfg(feature = "ice")]
     #[test]
     fn a_restart_asked_of_a_call_without_ice_is_the_wrong_state() {
@@ -5708,8 +5247,6 @@ Content-Type: application/sdp\r\n"
             SipralStatus::Ok
         );
     }
-
-    // -- the network test before a call ------------------------------------
 
     fn network_test(
         stack: SipralHandle,
@@ -5741,8 +5278,7 @@ Content-Type: application/sdp\r\n"
         (status, test)
     }
 
-    /// A final answer to `request`, from the request's own Via, From, To,
-    /// Call-ID and CSeq (RFC 3261 section 8.2.6.2).
+    /// A final answer to `request` (RFC 3261 section 8.2.6.2).
     fn answer_sip(request: &[u8], status: &str) -> Vec<u8> {
         let text = String::from_utf8_lossy(request);
         let mut out = format!("SIP/2.0 {status}\r\n");
@@ -5951,8 +5487,6 @@ Content-Type: application/sdp\r\n"
         let (status, _) = network_test(stack, SIPRAL_HANDLE_NONE, None, call, 0, 2_000);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let _ = poll(stack, 2_000);
-        // most of the second the echo is listened to, in twenty-millisecond
-        // frames, one of them missing
         let mut now = 2_000_u64;
         for sequence in 0..45_u16 {
             now += 20;

@@ -1,37 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What the operating system knows about sleep and about the network, handed
-//! across the boundary.
+//! Sleep and network facts from the operating system, handed across the
+//! boundary (`docs/16-lifecycle.md`).
 //!
-//! `docs/16-lifecycle.md` is the specification this module implements: the
-//! clock does not advance while a machine is suspended, so a stack that slept
-//! for eight hours comes back believing eight milliseconds passed and every
-//! binding it holds still valid. Nothing this library can measure contradicts
-//! that belief — only the platform knows, on the notification it already
-//! delivers, which is why these six entry points exist and why they are the
-//! application's to call rather than something this library could infer.
+//! The clock stops while a machine is suspended, so a stack that slept eight
+//! hours believes eight milliseconds passed and its bindings still valid. Only
+//! the platform knows otherwise, so the application calls these entry points.
 //!
-//! [`sipral_stack_suspending`] is a hard deadline: the process stops shortly
-//! and nothing here sends anything, because a datagram handed to a socket the
-//! operating system is about to stop servicing is a hope with a cost, not a
-//! guarantee. [`sipral_stack_resumed`] is the other side of it, and
-//! [`sipral_stack_network_changed`] is the one of the six meant to be called
-//! often and cheaply — most of the time nothing this stack uses is different,
-//! and the decision returned says so without a caller having to read an
-//! event for it. [`sipral_stack_interface_lost`] and
-//! [`sipral_stack_name_resolution_lost`] are the two ways a network can fail
-//! while it looks alive, and they get opposite treatment: with no interface
-//! nothing is tried, and with no resolver only the bindings that were pointed
-//! at a name stop being trusted. [`sipral_account_rebind`] is how an
-//! application hands over what the ladder asked for — a transport, or an
-//! address — before the wait for it runs out on its own.
+//! [`sipral_stack_suspending`] has a hard deadline and sends nothing.
+//! [`sipral_stack_resumed`] is the other side. [`sipral_stack_network_changed`]
+//! is cheap and meant to be called often; its return value says whether
+//! anything happened. [`sipral_stack_interface_lost`] and
+//! [`sipral_stack_name_resolution_lost`] are the two failures that look alive:
+//! with no interface nothing is tried; with no resolver only bindings aimed at
+//! a name stop being trusted. [`sipral_account_rebind`] hands over the
+//! transport or address recovery asked for, before its wait runs out.
 //!
-//! Every one of them moves [`SIPRAL_REGISTRATION_STATE_UNVERIFIED`] and
+//! These make [`SIPRAL_REGISTRATION_STATE_UNVERIFIED`] and
 //! [`SIPRAL_REGISTRATION_STATE_RESTORED`](crate::event::SipralRegistrationState::Restored)
-//! from names a C caller could only read to states it can actually cause, and
-//! [`SIPRAL_EVENT_KIND_RECOVERY`](crate::event::SipralEventKind::Recovery) is
-//! the event that says a ladder finished, one way or the other.
+//! reachable from C; [`SIPRAL_EVENT_KIND_RECOVERY`](crate::event::SipralEventKind::Recovery)
+//! says a recovery finished.
 //!
 //! [`SIPRAL_REGISTRATION_STATE_UNVERIFIED`]: crate::event::SipralRegistrationState::Unverified
 
@@ -54,14 +43,11 @@ use crate::text::{bytes, copy_bytes_out, required_text, text};
 use crate::versioned::{Versioned, declared_size, write_versioned};
 
 codes! {
-    /// What kind of link the application is on. Names for `from_link` and
-    /// `to_link` on [`sipral_stack_network_changed`].
+    /// What kind of link the application is on: `from_link` and `to_link` on
+    /// [`sipral_stack_network_changed`].
     ///
-    /// Coarse on purpose: nothing here changes what is sent, and the one
-    /// value that changes what is *done* is [`SipralLink::Down`]. The rest is
-    /// carried so that a change of kind over an unchanged address — a tunnel
-    /// coming up, a phone moving from Wi-Fi to a mobile network that kept the
-    /// address — is visible as a change at all.
+    /// Only [`SipralLink::Down`] changes what is done. The rest makes a change
+    /// of kind over an unchanged address (a tunnel, Wi-Fi to cellular) visible.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralLink: u32 {
         /// There is no usable interface.
@@ -78,29 +64,23 @@ codes! {
 }
 
 codes! {
-    /// What a change of network is worth doing about. Names for
-    /// [`sipral_stack_network_changed`]'s `out_recovery`.
-    ///
-    /// Returned from the call itself, so an application does not have to read
-    /// an event to find out whether anything happened: a laptop that flips
-    /// between two access points all day gets [`SipralRecovery::Nothing`]
-    /// every time and never sends a REGISTER over it.
+    /// What a change of network is worth doing about:
+    /// [`sipral_stack_network_changed`]'s `out_recovery`. Returned directly, so
+    /// a laptop flipping access points gets [`SipralRecovery::Nothing`] without
+    /// reading an event or sending a REGISTER.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralRecovery: u32 {
         /// Never written by this build.
         Unknown = 0,
-        /// Nothing this stack uses is different. Nothing is done and nothing
-        /// is sent.
+        /// Nothing this stack uses is different; nothing is done or sent.
         Nothing = 1,
-        /// The address still stands, so the transports do. What is upstream
-        /// of it may not.
+        /// The address stands, so the transports do; what is upstream may not.
         Reregister = 2,
-        /// A wake: the transport already there is used first, and a new one
-        /// is asked for only once it turns out to be dead. Never returned by
-        /// this entry point; it is what [`sipral_stack_resumed`] starts.
+        /// A wake: the existing transport is tried first, a new one asked for
+        /// only if it is dead. Started by [`sipral_stack_resumed`], never
+        /// returned here.
         Reprove = 3,
-        /// The address is gone. Everything bound to it is unusable and the
-        /// application has to open a transport again.
+        /// The address is gone; the application must open a transport again.
         Rebuild = 4,
         /// Packets can leave and names cannot be turned into addresses.
         Resolve = 5,
@@ -109,11 +89,8 @@ codes! {
     }
 }
 
-/// A transport this stack has bound, or why the number given is not one.
-///
-/// [`crate::transport::named`] is the same check on the same table; it is
-/// `pub(crate)` there and this stays its own three lines rather than a
-/// dependency between the two sibling modules for one comparison.
+/// A transport this stack has bound, or why the number is not one. Duplicates
+/// [`crate::transport::named`] to avoid coupling sibling modules.
 fn transport_named(state: &StackState, transport: u32) -> Result<TransportId, Fail> {
     state.transports.resolve(transport).ok_or_else(|| {
         fail(
@@ -127,7 +104,6 @@ fn transport_named(state: &StackState, transport: u32) -> Result<TransportId, Fa
     })
 }
 
-/// What a number names, or why it names none.
 fn link_of(value: u32, name: &'static str) -> Result<Link, Fail> {
     match value {
         0 => Ok(Link::Down),
@@ -142,8 +118,7 @@ fn link_of(value: u32, name: &'static str) -> Result<Link, Fail> {
     }
 }
 
-/// What a change of network is worth doing about, said the way a C caller
-/// reads it.
+/// A [`Recovery`] as C reads it.
 const fn recovery_code(recovery: Recovery) -> SipralRecovery {
     match recovery {
         Recovery::Nothing => SipralRecovery::Nothing,
@@ -152,14 +127,12 @@ const fn recovery_code(recovery: Recovery) -> SipralRecovery {
         Recovery::Rebuild => SipralRecovery::Rebuild,
         Recovery::Resolve => SipralRecovery::Resolve,
         Recovery::Detach => SipralRecovery::Detach,
-        // `Recovery` is `#[non_exhaustive]`: a value this build has not met
-        // yet is as safe to call unknown as one it cannot lose track of.
+        // `#[non_exhaustive]`
         _ => SipralRecovery::Unknown,
     }
 }
 
-/// One side of [`sipral_stack_network_changed`], built from what crossed the
-/// boundary.
+/// One side of [`sipral_stack_network_changed`], from C arguments.
 ///
 /// # Safety
 ///
@@ -195,7 +168,7 @@ unsafe fn network_of(
     Ok(network)
 }
 
-/// A URI a caller supplied, or why it will not parse.
+/// The `contact` URI, or why it will not parse.
 fn contact_uri(supplied: &str) -> Result<Uri, Fail> {
     Uri::parse_str(supplied).map_err(|error| {
         fail(
@@ -206,16 +179,11 @@ fn contact_uri(supplied: &str) -> Result<Uri, Fail> {
 }
 
 record! {
-    /// What was standing when the process was told it is about to stop
-    /// ([`sipral_stack_suspending`]'s `out_report`).
+    /// What was standing when [`sipral_stack_suspending`] was called. Set
+    /// `size` to `sizeof(sipral_suspending_t)` first.
     ///
-    /// Set `size` to `sizeof(sipral_suspending_t)` before the call. Counts
-    /// and nothing else, because the window this is produced in is one where
-    /// an allocation that grows with the number of accounts is a cost with no
-    /// upper bound worth paying. Everything in it is already past tense by
-    /// the time it is read: the bindings have stopped being evidence, the
-    /// subscriptions have stopped being evidence, and nothing was sent about
-    /// either.
+    /// Counts only: no allocation in the suspend window. All of it is past
+    /// tense when read, and nothing was sent about any of it.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralSuspending {
         /// How many bytes of this struct the library filled in.
@@ -224,16 +192,13 @@ record! {
         pub unverified: usize,
         /// Subscriptions whose last notification stopped being evidence.
         pub subscriptions: usize,
-        /// Calls that were up. Nothing was sent about them and nothing was
-        /// changed: a lid closing and opening again is seconds, and hanging
-        /// up a live call because the machine blinked is worse than finding
-        /// out a few seconds later that it is gone.
+        /// Calls that were up, left untouched: hanging up because the machine
+        /// blinked is worse than learning later that a call is gone.
         pub calls: usize,
     }
 }
 
-// Safety: three integers with no invariant between them, and all-zero is a
-// stack that had nothing standing when it was told to sleep.
+// Safety: integers only; all-zero means nothing was standing.
 unsafe impl Versioned for SipralSuspending {
     const NAME: &'static str = "sipral_suspending";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralSuspending, calls);
@@ -246,21 +211,10 @@ unsafe impl Versioned for SipralSuspending {
 entry! {
     /// The operating system says this process stops shortly.
     ///
-    /// Everything reached from here is synchronous, bounded by the number of
-    /// accounts and subscriptions, and cannot fail. Nothing is sent — see
-    /// `docs/16-lifecycle.md` for why a graceful de-registration is the wrong
-    /// thing to attempt in this window rather than the obvious one — and
-    /// nothing stays scheduled: a stack that is suspended and never resumed
-    /// has no deadline to fire and no work left behind.
-    ///
-    /// Calls that are up are left exactly as they are. A lid closing and
-    /// opening again is seconds, and hanging up a live call because the
-    /// machine blinked is worse than finding out a few seconds later that it
-    /// is gone.
-    ///
-    /// `out_report` receives what was found: bindings that stopped being
-    /// evidence, subscriptions whose last notification stopped being
-    /// evidence, and calls left untouched.
+    /// Synchronous, bounded by accounts and subscriptions, infallible. Nothing
+    /// is sent (`docs/16-lifecycle.md` says why de-registering here is wrong)
+    /// and nothing stays scheduled. Calls are left as they are. `out_report`
+    /// receives the counts.
     ///
     /// # Safety
     ///
@@ -271,8 +225,7 @@ entry! {
         now_ms: u64,
         out_report: *mut SipralSuspending,
     ) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the stack
+        // size first, so a wrong size is reported as such
         unsafe { declared_size(out_report.cast_const()) }?;
         let report = with_stack_at(stack, now_ms, |state, now| Ok(state.agent.suspending(now)))?;
         let out = SipralSuspending {
@@ -288,16 +241,11 @@ entry! {
 entry! {
     /// The process is awake again.
     ///
-    /// Arbitrary time has passed — arbitrary, not measurable, because the
-    /// clock this stack is driven by did not run while the machine was
-    /// suspended — and every transport may be dead. What was believed is
-    /// dropped and proved again: the transport already there is used first,
-    /// because most wakes are short and it still works, and
-    /// [`sipral_account_rebind`] is how the application hands over a new one
-    /// once this stack says it needs one.
-    ///
-    /// Safe to call without a matching [`sipral_stack_suspending`]. Some
-    /// platforms only notify on the way back.
+    /// An unmeasurable time passed and any transport may be dead. Beliefs are
+    /// dropped and proved again, on the existing transport first (most wakes
+    /// are short); [`sipral_account_rebind`] supplies a new one when asked.
+    /// Safe without a matching [`sipral_stack_suspending`]: some platforms
+    /// only notify on the way back.
     ///
     /// # Safety
     ///
@@ -311,26 +259,19 @@ entry! {
 }
 
 entry! {
-    /// The network is a different one, described before and after in as much
-    /// detail as the decision needs.
+    /// The network changed; before and after are described.
     ///
-    /// `from_link`/`to_link` is a [`SipralLink`]. `*_address` is the local
-    /// address this stack's transports are bound to, as an IPv4 or IPv6
-    /// literal with no port — a change of it invalidates every transport and
-    /// every binding at once. `*_interface` is the platform's own identity
-    /// for the interface, never parsed and only ever compared to another one
-    /// of itself; two networks can hand out the same address, and a phone
-    /// that walks from one office to another gets away with it until a call
-    /// comes in. `*_resolves` is whether a name can become an address there,
-    /// because that is the one failure that leaves everything else looking
-    /// healthy. Any of the four address or interface arguments may be null
-    /// with a length of zero, for a fact the application has none to give.
+    /// `*_link` is a [`SipralLink`]. `*_address` is the local address the
+    /// transports are bound to, an IP literal without port; a change
+    /// invalidates every transport and binding. `*_interface` is the
+    /// platform's interface id, only compared, since two networks can hand out
+    /// the same address. `*_resolves` says whether names resolve there, the
+    /// one failure that looks healthy. Address and interface may be null with
+    /// zero length.
     ///
-    /// `out_recovery` receives what was decided, as a [`SipralRecovery`], so
-    /// this is safe to call as often as the platform delivers the
-    /// notification — most of the time nothing this stack uses is different,
-    /// and `SIPRAL_RECOVERY_NOTHING` is the whole of what happens. It may be
-    /// null.
+    /// `out_recovery`, which may be null, receives a [`SipralRecovery`].
+    /// Cheap enough to call on every notification: usually the answer is
+    /// `SIPRAL_RECOVERY_NOTHING` and nothing happens.
     ///
     /// # Safety
     ///
@@ -391,13 +332,9 @@ entry! {
 }
 
 entry! {
-    /// There is no usable interface.
-    ///
-    /// Distinct from [`sipral_stack_name_resolution_lost`] because the
-    /// recovery is the opposite one: with nothing that can leave, nothing is
-    /// tried and nothing is scheduled, which is the cheapest this stack ever
-    /// is. The way out is [`sipral_stack_network_changed`], the notification
-    /// every platform delivers when an interface comes back.
+    /// There is no usable interface. Nothing is tried or scheduled until
+    /// [`sipral_stack_network_changed`] reports one back; the opposite of
+    /// [`sipral_stack_name_resolution_lost`].
     ///
     /// # Safety
     ///
@@ -413,11 +350,9 @@ entry! {
 entry! {
     /// Names no longer become addresses.
     ///
-    /// The dangerous one: the interface is up and packets leave, so
-    /// everything reads healthy, while every address this stack learned from
-    /// a name may now stand for somewhere else. A binding whose registrar was
-    /// written as a name stops being evidence; one pointed at a literal
-    /// address never needed a resolver and is left running.
+    /// Everything looks healthy while every address learned from a name may
+    /// be wrong. Bindings whose registrar is a name stop being trusted; ones
+    /// aimed at a literal address keep running.
     ///
     /// # Safety
     ///
@@ -433,27 +368,19 @@ entry! {
 entry! {
     /// Point an account at a transport and an address again.
     ///
-    /// `remote` is the far end this account's requests go to now, as
-    /// `host:port`. `contact` is where this endpoint can be reached, as it
-    /// goes in `Contact`; it is not optional, because after a change of
-    /// address the old one names somewhere the far end cannot reach, and a
-    /// stack that let it stand would register a binding that silently
-    /// receives nothing.
+    /// `remote` is where its requests go, `host:port`. `contact` is required:
+    /// after an address change the old one is unreachable, and keeping it
+    /// would register a binding that receives nothing.
     ///
-    /// `transport` must be one this stack already has —
+    /// `transport` must already exist:
     /// [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN) or
-    /// a further one [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
-    /// has bound — and any other number is `SIPRAL_STATUS_INVALID_ARGUMENT`:
-    /// this call points an account at a transport, it does not open one.
+    /// one [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
+    /// bound; anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. This does not
+    /// open one.
     ///
-    /// Safe to call whether or not this stack is waiting for it. When it is,
-    /// answering climbs the next rung at once rather than waiting out the
-    /// rest of the back-off — the application answering in milliseconds is
-    /// the normal case, and there is nothing to be gained by making a wake
-    /// take a further half minute. When it is not, this still repoints the
-    /// account, and the next REGISTER this stack sends for it — a refresh, or
-    /// the next rung of a ladder started afterwards — uses what was given
-    /// here.
+    /// When recovery is waiting for it, the next rung runs at once instead of
+    /// waiting out the back-off. Otherwise the account is still repointed and
+    /// the next REGISTER uses it.
     ///
     /// # Safety
     ///
@@ -479,30 +406,20 @@ entry! {
                 .agent
                 .rebind(id, transport, remote, &contact, now)
                 .map_err(|error| ua_failed(&error))?;
-            // a `Contact` naming a socket whose public address is already
-            // known is written as that address, the same as when it was added
+            // rewrite the Contact to a known public address, as on add
             crate::nat::Nat::contacts_changed(state, now);
             Ok(())
         })
     }
 }
 
-// -- a registration that survives the process --------------------------------
-
-/// Why a snapshot would not be read back.
-///
-/// `SnapshotError` is `#[non_exhaustive]`, and a reason this build has no
-/// number for is a reason a caller cannot act on differently from any other
-/// refusal, so it lands on the status a refused argument always lands on.
+/// Why a snapshot would not be read back. Unnumbered reasons of the
+/// `#[non_exhaustive]` [`SnapshotError`] map to a refused argument.
 fn snapshot_failed(error: SnapshotError) -> Fail {
     let status = match error {
-        // the header this caller was built against is older than the one that
-        // wrote these bytes, which is the same thing a short struct says and
-        // is answered the same way
+        // written by a newer header: answered as a short struct is
         SnapshotError::FromTheFuture { .. } => SipralStatus::UnsupportedVersion,
-        // an account that never registers has nothing to restore into, and
-        // this is the answer `sipral_account_refresh_binding` already gives
-        // for the same account
+        // nothing to restore into, as `sipral_account_refresh_binding` says
         SnapshotError::NotRegistering => SipralStatus::NotSupported,
         _ => SipralStatus::InvalidArgument,
     };
@@ -510,16 +427,10 @@ fn snapshot_failed(error: SnapshotError) -> Fail {
 }
 
 entry! {
-    /// Say the process has just started, so that time to ready is measured
-    /// from somewhere.
+    /// Mark the process start, the zero of [`sipral_account_time_to_ready`].
     ///
-    /// The zero of [`sipral_account_time_to_ready`], and a declaration rather
-    /// than something this library could observe: a stack is created long
-    /// before the launch it belongs to is over, and only the application
-    /// knows which moment its users are waiting from. Every account's
-    /// measurement is cleared and taken again, so calling this twice restarts
-    /// the clock rather than confusing two launches.
-    ///
+    /// Only the application knows the moment its users wait from. Each call
+    /// clears and restarts every account's measurement.
     /// # Safety
     ///
     /// Safe to call with any handle value.
@@ -532,33 +443,21 @@ entry! {
 }
 
 entry! {
-    /// Write an account's registration down, so a later start can carry it on
-    /// instead of paying for a whole handshake.
+    /// Write an account's registration down, so a later start can carry it
+    /// on without a full handshake.
     ///
-    /// `out_len` receives how many bytes it takes whether or not there was
-    /// room, so a caller passing a null `buffer` and a `capacity` of zero is
-    /// asking how much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`
-    /// with the answer — that is the question, not a failure. Nothing is
-    /// written to a buffer too short.
+    /// `out_len` always receives the size; a null `buffer` with `capacity`
+    /// zero asks for it and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is
+    /// written to a short buffer.
     ///
-    /// **The bytes are opaque, and reading them is not part of this ABI.**
-    /// They carry a version, and a build reads only the layouts it was made
-    /// for; an application that parses them is an application that stops
-    /// working when the layout grows a field. Storing them is the
-    /// application's, and so is protecting them: a snapshot is not a secret,
-    /// but it names an address of record, which is a record of who uses this
-    /// device.
+    /// **The bytes are opaque; parsing them is not part of this ABI.** They are
+    /// versioned and a build reads only its known layouts. Storing and
+    /// protecting them is the application's: they name an address of record.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` when there is nothing worth keeping — an
-    /// account that has never registered, one that never will, one whose
-    /// registration failed, or one whose binding has been given up. A cold
-    /// start after that is an ordinary cold start, which is what would have
-    /// happened anyway.
-    ///
-    /// The clock is read and not moved: this writes nothing and sends
-    /// nothing, so a snapshot taken on the way into suspend cannot be what
-    /// stops a later `now_ms` from being accepted.
-    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when there is nothing to keep: never
+    /// registered, never will, failed, or given up. The clock is read, not
+    /// moved, so a snapshot on the way into suspend cannot reject a later
+    /// `now_ms`.
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
@@ -588,29 +487,21 @@ entry! {
 }
 
 entry! {
-    /// Read one back, on an account that has been added and has not
-    /// registered.
+    /// Read one back, on an account that was added and has not registered.
     ///
-    /// `asleep_ms` is how long the snapshot sat unused, and it is the
-    /// caller's to supply because nothing here reads a wall clock and a
-    /// monotonic instant does not survive the process that minted it. The
-    /// application is the only one that knows whether this is a wake from
-    /// suspend or a cold launch a week later. What is left of the binding's
-    /// life is what was left when it was written down, less that.
+    /// `asleep_ms` is how long the snapshot sat unused: only the application
+    /// knows, since no wall clock is read here and instants die with the
+    /// process. The binding keeps what it had left, less that.
     ///
-    /// The account comes up in
-    /// [`SIPRAL_REGISTRATION_STATE_RESTORED`](crate::event::SipralRegistrationState::Restored)
-    /// rather than registered: a binding nobody has confirmed since the
-    /// machine slept is a belief, not evidence, and the refresh this books is
-    /// what turns one into the other.
+    /// The account comes up
+    /// [`SIPRAL_REGISTRATION_STATE_RESTORED`](crate::event::SipralRegistrationState::Restored),
+    /// not registered, until the refresh this books confirms it.
     ///
-    /// Refused, with the account left exactly as it was:
-    /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` for bytes a newer build wrote,
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account that does not register at
-    /// all, and `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
-    /// snapshot, are damaged, or are another account's — an address of record
-    /// that is not this account's is the one mix-up that would otherwise send
-    /// a REGISTER for somebody else.
+    /// Refused with the account unchanged: `SIPRAL_STATUS_UNSUPPORTED_VERSION`
+    /// for bytes a newer build wrote, `SIPRAL_STATUS_NOT_SUPPORTED` for an
+    /// account that does not register, `SIPRAL_STATUS_INVALID_ARGUMENT` for
+    /// bytes that are not a snapshot, are damaged, or belong to another
+    /// address of record (which would register somebody else).
     ///
     /// # Safety
     ///
@@ -641,19 +532,13 @@ entry! {
 }
 
 entry! {
-    /// How long this account took to become reachable, measured from
-    /// [`sipral_stack_cold_start`].
+    /// How long this account took to become reachable, from
+    /// [`sipral_stack_cold_start`]. A queue's ring timeout must exceed it, or
+    /// a waking phone is always skipped.
     ///
-    /// The number a queue needs: how long it rings each agent before giving
-    /// up and trying the next one has to be longer than this, or a phone that
-    /// was asleep is skipped every time and its owner is told the queue was
-    /// quiet.
-    ///
-    /// `out_has_value` is zero, and `out_ms` zero with it, until there is an
-    /// answer — before the account has registered, for an account that never
-    /// registers, and always when no cold start was ever declared, because
-    /// nothing marks the moment those became reachable. Zero milliseconds
-    /// with `out_has_value` set is a real answer and a different one.
+    /// `out_has_value` and `out_ms` are zero until there is an answer: before
+    /// registration, for an account that never registers, or with no cold
+    /// start declared. Zero with `out_has_value` set is a real answer.
     ///
     /// # Safety
     ///
@@ -875,8 +760,6 @@ mod tests {
         (handle, account)
     }
 
-    // -- suspending ------------------------------------------------------
-
     fn zeroed_report() -> SipralSuspending {
         SipralSuspending {
             size: size_of::<SipralSuspending>(),
@@ -930,20 +813,15 @@ mod tests {
         let mut observed = Observed::default();
         let (handle, _) = registered(&mut observed, &named_account(), 1_000);
         let mut out = zeroed_report();
-        // one byte short of the pin on whatever target this runs on: the
-        // struct is 16 bytes on a 32-bit one, where 31 is longer than it
+        // one byte short of the pin, on any target
         out.size = <SipralSuspending as crate::versioned::Versioned>::MIN_SIZE - 1;
         let status = unsafe { sipral_stack_suspending(handle, 1_100, &raw mut out) };
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(out.unverified, usize::MAX, "nothing was written");
     }
 
-    // -- resumed -----------------------------------------------------------
-
-    /// The event this module reports, captured whole rather than reduced to
-    /// its kind: `crate::stack::tests::Observed` does not know this payload's
-    /// shape, and this is the same pattern `transport.rs` uses to read the
-    /// registration event's message out of the callback.
+    /// The recovery event captured whole: `Observed` does not know its
+    /// payload (the same pattern as `transport.rs`).
     #[derive(Default)]
     struct Recoveries {
         seen: Vec<(SipralEventKind, u32, u32, u32, u32)>,
@@ -1019,8 +897,7 @@ mod tests {
             "{}",
             last_error_text()
         );
-        // a resume on a stack that never slept still distrusts what it held
-        // and proves it again
+        // a resume that never slept still proves what it held again
         let mut out = drain(handle);
         let request = out.pop().expect("a REGISTER");
         receive(handle, &granted(&request, 3_600), 1_004);
@@ -1029,8 +906,6 @@ mod tests {
             SipralRegistrationState::Registered as u32
         );
     }
-
-    // -- network_changed -----------------------------------------------------
 
     fn address(text_value: &'static str) -> (*const c_char, usize) {
         text(text_value)
@@ -1097,10 +972,8 @@ mod tests {
             "a binding nothing happened to is still a binding"
         );
 
-        // and nothing is announced, which is the half a phone would feel:
-        // a device that reports the same network on every wake would raise a
-        // recovery it never made, and an application cannot tell that one
-        // from the real thing
+        // and nothing is announced: a recovery that never happened is
+        // indistinguishable from a real one
         poll(handle, 1_200);
         assert!(
             !observed
@@ -1183,8 +1056,6 @@ mod tests {
         );
     }
 
-    // -- interface_lost --------------------------------------------------
-
     #[test]
     fn interface_lost_stops_everything_and_tries_nothing() {
         let mut observed = Observed::default();
@@ -1201,8 +1072,6 @@ mod tests {
             SipralRegistrationState::Unverified as u32
         );
     }
-
-    // -- name_resolution_lost ----------------------------------------------
 
     #[test]
     fn losing_the_resolver_untrusts_only_the_bindings_that_needed_one() {
@@ -1227,8 +1096,7 @@ mod tests {
             state_of(handle, named),
             SipralRegistrationState::Unverified as u32
         );
-        // said, not only readable: a binding that stopped being evidence is
-        // an event on the next poll
+        // the untrusted binding is also an event on the next poll
         let said: Vec<(SipralEventKind, SipralHandle)> = observed
             .events
             .iter()
@@ -1255,8 +1123,6 @@ mod tests {
         );
     }
 
-    // -- rebind --------------------------------------------------------------
-
     #[test]
     fn rebind_points_the_account_at_a_new_contact_before_the_next_register() {
         let mut observed = Observed::default();
@@ -1277,8 +1143,7 @@ mod tests {
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
 
-        // resumed distrusts the binding and re-registers it, on the contact
-        // rebind just set
+        // resumed re-registers on the contact rebind just set
         assert_eq!(
             unsafe { sipral_stack_resumed(handle, 1_100) },
             SipralStatus::Ok
@@ -1383,8 +1248,6 @@ mod tests {
         assert_eq!(status, SipralStatus::InvalidArgument);
     }
 
-    // -- a registration that survives the process ------------------------
-
     fn freeze(handle: SipralHandle, account: SipralHandle, now_ms: u64) -> (SipralStatus, Vec<u8>) {
         let mut needed = usize::MAX;
         let asked = unsafe {
@@ -1446,10 +1309,8 @@ mod tests {
         Some(took)
     }
 
-    /// C3: a registration written down on the way into suspend and read back
-    /// on the way out, on a process that has been and gone. The account comes
-    /// up restored rather than registered, because nobody has confirmed the
-    /// binding since.
+    /// A frozen registration thaws in a new process as restored, not
+    /// registered.
     #[test]
     fn a_frozen_registration_comes_back_restored() {
         let mut observed = Observed::default();
@@ -1482,8 +1343,7 @@ mod tests {
         );
     }
 
-    /// The probe is the question, not a failure: a null buffer with a
-    /// capacity of zero says how much room to bring.
+    /// A null buffer with zero capacity asks how much room is needed.
     #[test]
     fn freezing_into_no_room_says_how_much_is_needed() {
         let mut observed = Observed::default();
@@ -1497,7 +1357,7 @@ mod tests {
         );
         assert!(needed > 0 && needed != usize::MAX, "{needed}");
 
-        // and one byte short of it is still too small, with nothing written
+        // one byte short is still too small, nothing written
         let mut room = vec![0xAB_u8; needed];
         let mut written = usize::MAX;
         assert_eq!(
@@ -1524,8 +1384,7 @@ mod tests {
         );
     }
 
-    /// An account with nothing worth keeping says so rather than handing back
-    /// zero bytes, which a caller could not tell from a buffer question.
+    /// Nothing worth keeping says so, rather than returning zero bytes.
     #[test]
     fn freezing_an_account_that_never_registered_is_wrong_state() {
         let mut observed = Observed::default();
@@ -1587,10 +1446,8 @@ mod tests {
         );
     }
 
-    /// D4 and C3 meet here: what a snapshot has left is what it had when it
-    /// was written down, less the time the application says it sat unused.
-    /// A snapshot slept past its own life has nothing left, and the refresh
-    /// it books is due at once.
+    /// A thawed snapshot keeps what it had less the time it slept; one slept
+    /// past its life refreshes at once.
     #[test]
     fn what_a_snapshot_has_left_is_what_the_application_says_it_slept_through() {
         let mut observed = Observed::default();
@@ -1604,7 +1461,7 @@ mod tests {
         let mut woken = Observed::default();
         let second = stack(&mut woken);
         let restored = add(second, &named_account());
-        // the grant was an hour and the machine slept for a day
+        // an hour's grant, a day's sleep
         assert_eq!(
             thaw(second, restored, &snapshot, 86_400_000, 1_000),
             SipralStatus::Ok,
@@ -1621,8 +1478,7 @@ mod tests {
             "a binding with nothing left is due in {} ms, not at once",
             result.next_poll_in_ms
         );
-        // and it is really sent, rather than only scheduled: the refresh is
-        // what turns a restored binding back into evidence
+        // and the refresh is really sent
         crate::stack::tests::poll(second, 2_000);
         assert!(
             !drain(second).is_empty(),
@@ -1634,8 +1490,7 @@ mod tests {
         );
     }
 
-    /// An account that does not register has nothing to restore into, and it
-    /// is told apart from a snapshot that is wrong.
+    /// A non-registering account is told apart from a wrong snapshot.
     #[test]
     fn thawing_into_an_account_that_never_registers_is_not_supported() {
         let mut observed = Observed::default();
@@ -1656,7 +1511,7 @@ mod tests {
         );
     }
 
-    /// The number a queue needs, and the three ways there is not one yet.
+    /// Measured from the declared cold start; no number before registering.
     #[test]
     fn time_to_ready_is_measured_from_the_cold_start_the_application_declared() {
         let mut observed = Observed::default();
@@ -1693,9 +1548,7 @@ mod tests {
         );
     }
 
-    /// Without a cold start there is nothing to measure from, so there is no
-    /// answer at all — and an entry point that could only ever say that is
-    /// why `sipral_stack_cold_start` exists beside it.
+    /// Without a cold start there is no answer.
     #[test]
     fn time_to_ready_says_nothing_when_no_cold_start_was_declared() {
         let mut observed = Observed::default();
@@ -1728,12 +1581,8 @@ mod tests {
         );
     }
 
-    /// What an account reads between `sipral_account_unregister` and the
-    /// registrar's answer: `UNREGISTERED`, from the moment the call returns
-    /// and before the REGISTER that gives the binding up has even been
-    /// written. The answer is not a state of its own: it is the
-    /// `REGISTRATION_CHANGED` the 200 raises, which is what an application
-    /// that waits for the binding to be gone waits for.
+    /// After `sipral_account_unregister` the state reads `UNREGISTERED` at
+    /// once; the registrar's 200 raises one `REGISTRATION_CHANGED`.
     #[test]
     fn unregistered_is_read_at_once_and_the_registrars_answer_is_an_event() {
         let mut observed = Observed::default();

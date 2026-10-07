@@ -3,35 +3,15 @@
 
 //! A network test before a call, from C (ABI 1.2).
 //!
-//! [`sipral_stack_network_test`] asks, at once and without placing a call of
-//! its own, the questions whose answers decide whether a call will work:
+//! Parts: STUN on `probe_socket` (named as `sipral_stack_nat_map` names one;
+//! without it, the signalling socket's last answer), a TURN relay for that
+//! socket, released at the end; an `OPTIONS` to the account's server; and an
+//! echo call measured for `echo_ms`, rated with the E-model, then hung up.
 //!
-//! - **STUN.** With `probe_socket` set, the socket is named exactly as
-//!   `sipral_stack_nat_map` names one — the application binds it and sends
-//!   and receives for it through `sipral_stack_poll_stun` and
-//!   `sipral_stack_receive_stun` as it does for a call's — and its answer says
-//!   where this end appears from and, approximately, what the NAT in front of
-//!   it does. Without one, the answer the signalling socket was last given
-//!   stands in. On a stack that asks no STUN server, not tested.
-//! - **TURN.** On a stack with a TURN server, the probe socket is given a
-//!   relay over the configured `turn_transport` (a connection to open for
-//!   TCP or TLS, as `SIPRAL_EVENT_KIND_TURN_STREAM` asks for any socket), and
-//!   it is given back when the test ends.
-//! - **The account's server.** With `account` set, an `OPTIONS` on the
-//!   account's own transport, timed; any answer is the server.
-//! - **Echo.** With `echo_call` set — a call the application placed to an
-//!   echo service, an extension that plays back what it hears — the audio
-//!   that comes back is measured for `echo_ms` from the moment the call's
-//!   media starts, rated with the E-model, and the call is hung up.
-//!
-//! What the test came to arrives as one
-//! [`SipralEventKind::NetworkTest`](crate::event::SipralEventKind::NetworkTest),
-//! once every part has answered or `timeout_ms` has passed, with a verdict:
-//! good, acceptable or poor, the worst of the parts that were tested. The
-//! thresholds are `sipral::network_test`'s and `docs/08-ffi.md` lists them.
-//! The parts' own events — `SIPRAL_EVENT_KIND_NAT_MAPPING` and
-//! `SIPRAL_EVENT_KIND_NAT_RELAY` about the probe socket, the echo call's —
-//! arrive as they would for anything else.
+//! The result is one
+//! [`SipralEventKind::NetworkTest`](crate::event::SipralEventKind::NetworkTest)
+//! once every part answered or `timeout_ms` passed. The verdict is the worst
+//! part; thresholds are in `docs/08-ffi.md`. The parts' own events still arrive.
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
@@ -51,12 +31,10 @@ use crate::stack::{SipralTransport, StackState, handle_failed, with_stack_at};
 use crate::status::SipralStatus;
 use crate::versioned::{Versioned, read_versioned};
 
-/// How long a test waits for its parts when the configuration says nothing.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long an echo call is listened to when the configuration says nothing:
-/// long enough for the first RTCP report, which RFC 3550 §6.2 has wait up to
-/// about five seconds, to have brought a round trip back.
+/// Long enough for the first RTCP report (up to ~5 s, RFC 3550 §6.2) to bring
+/// a round trip back.
 const DEFAULT_ECHO: Duration = Duration::from_secs(8);
 
 codes! {
@@ -68,8 +46,7 @@ codes! {
         Unknown = 0,
         /// Calls should work and sound right.
         Good = 1,
-        /// Calls should work, and may not everywhere or may not sound their
-        /// best.
+        /// Calls should work, perhaps not everywhere or at best quality.
         Acceptable = 2,
         /// Calls are likely to fail or to sound bad.
         Poor = 3,
@@ -83,8 +60,7 @@ codes! {
     pub enum SipralNetworkProbe: u32 {
         /// Not part of this test.
         NotTested = 0,
-        /// The server answered as hoped; for the echo, audio came back and
-        /// was measured.
+        /// The server answered; for the echo, audio came back and was measured.
         Succeeded = 1,
         /// It did not.
         Failed = 2,
@@ -93,9 +69,8 @@ codes! {
 
 codes! {
     /// What a STUN answer says about the NAT in front of this end. Names for
-    /// `sipral_network_test_event_t::nat`. Approximate: one answer shows
-    /// whether the address and the port were translated, and nothing about
-    /// how the NAT filters what arrives (RFC 4787).
+    /// `sipral_network_test_event_t::nat`. Approximate: says nothing about
+    /// filtering (RFC 4787).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralNatKind: u32 {
         /// No answer to read.
@@ -116,8 +91,7 @@ codes! {
     pub enum SipralServerReach: u32 {
         /// Not part of this test.
         NotTested = 0,
-        /// It answered: `server_status` with what, `server_round_trip_ms`
-        /// after how long. Any final answer is a server that is there.
+        /// Any final answer; see `server_status` and `server_round_trip_ms`.
         Answered = 1,
         /// No answer before the request, or the test, timed out.
         TimedOut = 2,
@@ -135,29 +109,23 @@ record! {
     pub struct SipralNetworkTestConfig {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// The account whose server to probe, on the account's own
-        /// transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+        /// The account whose server to probe, or `SIPRAL_HANDLE_NONE`.
         pub account: SipralHandle,
-        /// A UDP socket the application bound for the test, `host:port`,
-        /// asked about as `sipral_stack_nat_map` asks about a media socket;
-        /// null to ask about the signalling socket only, and to test no
-        /// relay. Not NUL-terminated.
+        /// A UDP socket the application bound for the test, `host:port`, not
+        /// NUL-terminated; null for the signalling socket only and no relay.
         pub probe_socket: *const c_char,
         /// How many bytes of it.
         pub probe_socket_len: usize,
-        /// A call the application placed to an echo service, measured once
-        /// its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+        /// A call to an echo service, hung up by the test, or `SIPRAL_HANDLE_NONE`.
         pub echo_call: SipralHandle,
         /// How long the echo is measured. 8000 by default.
         pub echo_ms: u32,
-        /// How long the whole test may take. 30000 by default; a part that
-        /// has not answered by then counts as failed.
+        /// Test deadline, 30000 by default; a part silent by then failed.
         pub timeout_ms: u32,
     }
 }
 
-// Safety: the trait's contract. Integers, a handle and a pointer with its
-// length, and all-zero is a valid value of each: it leaves every part out.
+// Safety: plain data; all-zero is valid and leaves every part out.
 unsafe impl Versioned for SipralNetworkTestConfig {
     const NAME: &'static str = "sipral_network_test_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralNetworkTestConfig, timeout_ms);
@@ -169,11 +137,9 @@ unsafe impl Versioned for SipralNetworkTestConfig {
 
 record! {
     /// What a [`SipralEventKind::NetworkTest`](crate::event::SipralEventKind::NetworkTest)
-    /// carries: every part of one test, and the verdict (ABI 1.2). The
-    /// event's `account` is the account probed and its `call` the echo call,
-    /// when there were any. The two addresses are `host:port`, not
-    /// NUL-terminated, and the library's: valid for as long as the callback
-    /// runs.
+    /// carries (ABI 1.2). The event's `account` and `call` are the probed
+    /// account and the echo call. The addresses are `host:port`, not
+    /// NUL-terminated, owned by the library, valid during the callback.
     #[derive(Clone, Copy)]
     pub struct SipralNetworkTestEvent {
         /// The number [`sipral_stack_network_test`] gave the test.
@@ -184,11 +150,9 @@ record! {
         pub stun: Number<SipralNetworkProbe>,
         /// A [`SipralNatKind`], from that answer.
         pub nat: Number<SipralNatKind>,
-        /// A [`SipralNetworkProbe`]: whether the TURN server allocated a
-        /// relay for the probe socket.
+        /// A [`SipralNetworkProbe`]: whether a TURN relay was allocated.
         pub turn: Number<SipralNetworkProbe>,
-        /// A `SipralTransport`: what the TURN server was reached over, or
-        /// zero when it was not tested.
+        /// A `SipralTransport` the TURN server was reached over, or zero.
         pub turn_protocol: Number<SipralTransport>,
         /// A [`SipralServerReach`].
         pub server: Number<SipralServerReach>,
@@ -196,9 +160,7 @@ record! {
         pub server_status: u32,
         /// From sending the `OPTIONS` to its answer, in milliseconds.
         pub server_round_trip_ms: u32,
-        /// A [`SipralNetworkProbe`]: whether audio came back on the echo call
-        /// and was measured. Failed for a call whose media never started, or
-        /// that brought nothing back.
+        /// A [`SipralNetworkProbe`]: whether echo audio came back.
         pub echo: Number<SipralNetworkProbe>,
         /// A [`SipralNetworkVerdict`] for the echo alone.
         pub echo_verdict: Number<SipralNetworkVerdict>,
@@ -210,16 +172,13 @@ record! {
         pub has_round_trip: u32,
         /// That round trip, in milliseconds.
         pub round_trip_ms: u32,
-        /// The one-way delay the rating assumed: half the round trip and the
-        /// jitter buffer's delay, in milliseconds.
+        /// Half the round trip plus jitter buffer delay, in milliseconds.
         pub one_way_delay_ms: u32,
         /// G.107's transmission rating R, 0 to 100, for concealed G.711.
         pub r_factor: u32,
-        /// The conversational mean opinion score estimated from it, 1.0 to
-        /// 4.5.
+        /// Conversational MOS estimated from R, 1.0 to 4.5.
         pub mos: f32,
-        /// The socket the STUN answer was about: the probe socket, or the
-        /// signalling socket.
+        /// The socket the STUN answer was about.
         pub local: *const c_char,
         /// How many bytes of it.
         pub local_len: usize,
@@ -230,27 +189,23 @@ record! {
     }
 }
 
-/// Where an echo call stands.
 #[derive(Clone, Copy, Debug)]
 enum Echo {
-    /// No echo in this test.
     None,
     /// Waiting for the call's media to start.
     Waiting(CallHandle),
-    /// Measuring since the instant named, with the last figures read.
+    /// Measuring since the instant, with the last figures read.
     Measuring(CallHandle, Instant, EchoMeasurement),
-    /// Rated.
     Done(Option<EchoQuality>),
 }
 
-/// One test under way.
 struct Running {
     id: u32,
     account: SipralHandle,
     echo_handle: SipralHandle,
     probe: Option<ProbeHandle>,
     server: Option<ServerReach>,
-    /// The probe socket, which the test named and gives back.
+    /// The probe socket, unmapped when the test ends.
     socket: Option<SocketAddr>,
     /// The socket the STUN part reads.
     asked: Option<SocketAddr>,
@@ -259,7 +214,6 @@ struct Running {
     deadline: Instant,
 }
 
-/// Every test a stack has under way.
 #[derive(Default)]
 pub(crate) struct Tests {
     next: u32,
@@ -267,9 +221,7 @@ pub(crate) struct Tests {
 }
 
 impl Tests {
-    /// The account's server answered a test's `OPTIONS`, or never will. A
-    /// probe no test is waiting on any more — one whose test already timed
-    /// out — is nothing anybody else wants either.
+    /// A probe whose test already timed out is dropped.
     pub(crate) fn server_probed(&mut self, probe: ProbeHandle, outcome: ProbeOutcome) {
         let reach = match outcome {
             ProbeOutcome::Answered { status, round_trip } => ServerReach::Answered {
@@ -288,8 +240,7 @@ impl Tests {
         }
     }
 
-    /// When a test next has to be looked at: its deadline, or the end of its
-    /// echo window.
+    /// The earliest deadline or echo window end.
     pub(crate) fn poll_timeout(&self) -> Option<Instant> {
         self.running
             .iter()
@@ -305,8 +256,7 @@ impl Tests {
     }
 }
 
-/// Look at every test: measure the echo calls, and raise each test that has
-/// every answer it is going to get.
+/// Measure echo calls and raise each test that has all its answers.
 pub(crate) fn service(state: &mut StackState, stack: SipralHandle, now: Instant) -> Vec<Raised> {
     let mut raised = Vec::new();
     let mut kept = Vec::new();
@@ -325,9 +275,7 @@ pub(crate) fn service(state: &mut StackState, stack: SipralHandle, now: Instant)
             continue;
         }
         if let Some(socket) = test.socket {
-            // the relay goes back to the server, and the mapping is no
-            // longer kept; a socket the application unmapped itself
-            // meanwhile is nothing to give back
+            // the application may have unmapped it already
             let _ = Nat::unmap(state, socket, now);
         }
         raised.push(finish(stack, &test, tested.unwrap_or_default()));
@@ -336,8 +284,7 @@ pub(crate) fn service(state: &mut StackState, stack: SipralHandle, now: Instant)
     raised
 }
 
-/// The echo call's figures, read while it runs, and the call hung up once
-/// its window is over.
+/// Read the echo call's figures; hang it up when its window ends.
 fn listen_to_echo(state: &mut StackState, test: &mut Running, now: Instant) {
     let (call, since, last) = match test.echo {
         Echo::Waiting(call) => (call, None, EchoMeasurement::default()),
@@ -362,28 +309,24 @@ fn listen_to_echo(state: &mut StackState, test: &mut Running, now: Instant) {
             .ok()
     });
     test.echo = match (read, since) {
-        // the media has not started, and there is still time for it to
         (None, None) if now < test.deadline => Echo::Waiting(call),
-        // it never started, or the call is gone
         (None, None) => Echo::Done(None),
-        // gone while it was being measured: what was read last is the call
+        // gone while measured: the last read stands
         (None, Some(_)) => Echo::Done(Some(last.rate())),
         (Some(read), None) => Echo::Measuring(call, now, read),
         (Some(read), Some(since)) if now < since + test.echo_for && now < test.deadline => {
             Echo::Measuring(call, since, read)
         }
         (Some(read), Some(_)) => {
-            // the test's own call, and its last use: a call already ending
-            // refuses, which is the same thing
+            // a call already ending refuses; that is fine
             let _ = state.agent.hangup(call, now);
             Echo::Done(Some(read.rate()))
         }
     };
 }
 
-/// What one finished test found, and whether audio came back on its echo
-/// call: a call that never had media, or brought nothing back, is rated as
-/// everything lost.
+/// Findings, and whether echo audio came back. An echo with no media is
+/// rated as everything lost.
 fn findings_of(test: &Running, tested: crate::nat::Tested) -> (Findings, bool) {
     let mut findings = Findings::new();
     if let Some(local) = test.asked {
@@ -421,8 +364,7 @@ fn findings_of(test: &Running, tested: crate::nat::Tested) -> (Findings, bool) {
     (findings, heard)
 }
 
-/// The event one finished test raises, and the text its addresses point
-/// into.
+/// The event, and the text its addresses point into.
 fn finish(stack: SipralHandle, test: &Running, tested: crate::nat::Tested) -> Raised {
     let (findings, heard) = findings_of(test, tested);
     let local = test
@@ -494,7 +436,6 @@ fn finish(stack: SipralHandle, test: &Running, tested: crate::nat::Tested) -> Ra
     (event, addresses)
 }
 
-/// An echo call's rating, into the event.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "a percentage and milliseconds of jitter, both far inside an f32"
@@ -540,7 +481,6 @@ const fn probe(said: Probe) -> SipralNetworkProbe {
     }
 }
 
-/// Start a test as `config` says.
 fn start(
     state: &mut StackState,
     config: &SipralNetworkTestConfig,
@@ -603,17 +543,14 @@ fn start(
 
 entry! {
     /// Test the network before a call: STUN, TURN, the account's server and,
-    /// with an echo call, the audio path, as `config` says (ABI 1.2). The
-    /// answer arrives from a later `sipral_stack_poll` as one
-    /// `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
-    /// has answered or `timeout_ms` has passed. Tests may run side by side.
+    /// with an echo call, the audio path (ABI 1.2). The result arrives from a
+    /// later `sipral_stack_poll` as `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying
+    /// `*out_test`. Tests may run side by side.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
-    /// no STUN server, and for an account whose server has not been located
-    /// yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
-    /// an address or is a signalling socket of the stack's own; a handle
-    /// that names no account or call of this stack is refused as handles are.
-    /// Nothing is started when anything is refused.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` without a STUN server
+    /// or an account not located yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// `probe_socket` that is not an address or is a signalling socket.
+    /// Nothing starts when anything is refused.
     ///
     /// # Safety
     ///

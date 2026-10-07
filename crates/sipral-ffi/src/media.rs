@@ -4,55 +4,26 @@
 //! Audio across the boundary: what this build can encode, what a call agreed,
 //! what it is costing, and the four calls that carry the packets.
 //!
-//! Until this module existed the C ABI carried signalling alone, and an
-//! application on the other side of it had to parse its own descriptions, run
-//! its own RTP and reach its own conclusions about a bad call. What it could
-//! not do was any of that *with* the stack: a softphone written against this
-//! library was a softphone that had to bring a second one.
+//! No socket and no device: the application hands in datagrams
+//! ([`sipral_media_receive`]), pulls PCM for its speaker ([`sipral_media_playback`]),
+//! pushes microphone PCM and gets a datagram back ([`sipral_media_capture`]), and
+//! asks for due control traffic ([`sipral_media_poll_rtcp`]).
 //!
-//! # What crosses, and what does not
-//!
-//! No socket and no device, here as everywhere else in this tree. The
-//! application reads a datagram and hands it over ([`sipral_media_receive`]);
-//! it takes a frame of PCM and gives it to whichever device layer it linked
-//! ([`sipral_media_playback`]); it takes one from the microphone and gets a
-//! datagram back ([`sipral_media_capture`]); and it asks for the control
-//! traffic that is due ([`sipral_media_poll_rtcp`]). Four calls, and between
-//! them the whole media path.
-//!
-//! # A handle of its own
-//!
-//! All four, and every other entry point that works on one call's media, take
-//! a media handle from [`sipral_call_media`] rather than the stack and the
-//! call, and none of them takes the stack's lock. Each call's session has a
-//! lock of its own, which waits for a frame in progress on that call and for
-//! nothing else, so the thread that carries a call's audio is never refused a
-//! frame because signalling, the event callback or another call is busy. The
-//! reasoning, and what the handle answers once its call is gone, is in
+//! Every entry point takes a media handle from [`sipral_call_media`] and never the
+//! stack's lock. Each call's session has its own lock, so a call's audio thread
+//! never waits on signalling, the event callback or another call. See
 //! `docs/08-ffi.md`.
 //!
-//! Samples are 16-bit, one channel, at [`SipralMediaInfo::sample_rate`], and a
-//! frame is exactly [`SipralMediaInfo::frame_samples`] of them. That is the
-//! rate the codec hears at and not the one the RTP clock counts in; for G.722
-//! those two differ by a factor of two, which is the mistake this ABI exists to
-//! make impossible to write.
+//! Samples are 16-bit mono at [`SipralMediaInfo::sample_rate`], a frame exactly
+//! [`SipralMediaInfo::frame_samples`] of them. That is the codec's rate, not the
+//! RTP clock's; for G.722 they differ by a factor of two.
 //!
-//! # Which calls have media
+//! Only calls this stack manages have media: placed with `media_address` in
+//! `sipral_call_config_t`, or answered with `sipral_call_answer_media`. Any other
+//! call answers `SIPRAL_STATUS_WRONG_STATE` here.
 //!
-//! The ones this stack was asked to manage: placed with `media_address` set in
-//! `sipral_call_config_t`, or answered with `sipral_call_answer_media`. A call
-//! placed with a description of the caller's own is a call this stack describes
-//! nothing for, and every entry point here answers
-//! `SIPRAL_STATUS_WRONG_STATE` for it rather than inventing a stream. The two
-//! ways of placing a call are exclusive on purpose: two descriptions of one
-//! session is one too many.
-//!
-//! # Addresses
-//!
-//! As text, `host:port`, UTF-8 and length-delimited, which is how every other
-//! address in this ABI crosses. A packet-per-frame conversion is a rounding
-//! error next to the encoder that produced the frame, and one shape for every
-//! address is worth more than the microseconds.
+//! Addresses cross as UTF-8 `host:port` text, length-delimited, like every other
+//! address in this ABI.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void};
@@ -79,27 +50,15 @@ use crate::versioned::{Versioned, read_versioned, write_versioned};
 constants! {
     /// The buffer a caller has to bring for one outgoing packet.
     ///
-    /// Not a path MTU — RTP does not discover one — but the bound the session
-    /// itself builds against, so a payload larger than this is a payload no
-    /// codec in this build produces. It is checked before anything is encoded,
-    /// because a frame that was encoded and then had nowhere to go is a frame
-    /// lost from a stream whose timestamps have already moved past it.
+    /// The bound the session builds against, not a path MTU. Checked before
+    /// anything is encoded, so a frame is never encoded and then lost.
     pub const SIPRAL_MEDIA_PACKET_BYTES: usize = 1_500;
 
-    /// The bound a datagram of control gets instead, on the way in.
+    /// The bound for an incoming datagram that RFC 5761 §4 classifies as control.
     ///
-    /// RTCP is compound: one report packet carries a sender or receiver report
-    /// for every source being heard, then the source description, then whatever
-    /// extended reports the session agreed on. A call between two ends stays
-    /// far inside the media bound, but nothing in RFC 3550 says it has to, and
-    /// what arrives is the peer's arithmetic rather than ours. So the media
-    /// bound stops being the reason a report is refused: an arriving datagram
-    /// that RFC 5761 §4 says is control gets this one, and everything else
-    /// still gets [`SIPRAL_MEDIA_PACKET_BYTES`]. It bounds the read, so it is
-    /// still a bound: a caller that says a megabyte is still refused.
-    ///
-    /// Sending is unchanged — what this stack builds is its own arithmetic, and
-    /// it fits in the media bound.
+    /// Compound RTCP from a peer may exceed the media bound (RFC 3550 sets no
+    /// limit). Everything else still gets [`SIPRAL_MEDIA_PACKET_BYTES`]; outgoing
+    /// RTCP always fits the media bound.
     pub const SIPRAL_MEDIA_RTCP_BYTES: usize = 8_192;
 
     /// Room enough for any address this ABI writes, the NUL included:
@@ -110,10 +69,8 @@ constants! {
 codes! {
     /// The three answers a setting can give in a struct that starts out zeroed.
     ///
-    /// A boolean cannot carry them. Zero is what a caller who filled nothing in
-    /// leaves behind, so a plain `0`/`1` setting has no way to say "off" that is
-    /// not also "I said nothing", and the difference is the whole of B2: the
-    /// library must not turn a control off because the caller never touched it.
+    /// Not a boolean: zero must mean "unset", so the library never turns a
+    /// control off because the caller left it zeroed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralToggle: u32 {
         /// Nothing was said; whatever this build defaults to.
@@ -130,58 +87,44 @@ codes! {
     /// `sipral_stack_config_t::srtp` (the stack's default) and
     /// `sipral_call_config_t::srtp` (a per-call override).
     ///
-    /// Zero is not one of them, and it is not the same absence on the two
-    /// structs: on the stack it means this build's own built-in default,
-    /// which is [`SipralSrtp::NotOffered`]; on a call it means the stack's own
-    /// setting, whatever that came to. `docs/05-media.md` says what each
-    /// value writes and what each answers.
+    /// Zero means "unset": on the stack, the built-in default
+    /// [`SipralSrtp::NotOffered`]; on a call, the stack's setting.
+    /// `docs/05-media.md` details each value.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralSrtp: u32 {
-        /// Do not offer it, but answer an offer that arrives on the secure
-        /// profile with keys anyway.
+        /// Do not offer it, but answer an offer on the secure profile with keys.
         NotOffered = 1,
         /// Offer it, and answer a plain offer plainly.
         Offered = 2,
         /// Offer it, and let no stream on this call carry audio unencrypted.
         Required = 3,
-        /// Offer DTLS-SRTP (RFC 5764) on
-        /// `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
+        /// Offer DTLS-SRTP (RFC 5764) on `UDP/TLS/RTP/SAVP`, and answer a plain
+        /// offer plainly.
         ///
-        /// What `Offered` is for SDES, with the difference that matters: the
-        /// key never travels in the body, so this is the one policy here that
-        /// is sound over a SIP transport somebody else can read. The cost is
-        /// a round trip of silence at the start of every call while the
-        /// handshake runs, and an application that names it **must** drain
-        /// [`sipral_media_poll_transmit`] — a handshake whose records never
-        /// leave is a call that is up, silent, and reports no error.
+        /// The key never travels in the body, so this is sound over a readable
+        /// SIP transport. Costs a round trip of silence at call start. The
+        /// application **must** drain [`sipral_media_poll_transmit`], or the
+        /// call is up, silent, and reports no error.
         ///
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_DTLS_SRTP`.
         Dtls = 4,
-        /// Offer DTLS-SRTP, and let no stream on
-        /// this call carry audio any other way — an answer carrying
-        /// `a=crypto` included, since that key travelled in a body this
-        /// policy exists to avoid trusting.
+        /// Offer DTLS-SRTP and allow no other keying, including an answer
+        /// carrying `a=crypto`.
         DtlsRequired = 5,
-        /// DTLS-SRTP, falling back to SDES for a
-        /// peer that has no DTLS, and never unencrypted. The offer is one
-        /// `RTP/SAVP` stream carrying both the fingerprint and the crypto
-        /// lines, and the answer decides which keys the call; an offer that
-        /// arrives is answered the way it was keyed, and a plain one is
-        /// refused with 488. ABI 0.31.
+        /// DTLS-SRTP with SDES fallback, never unencrypted. The offer is one
+        /// `RTP/SAVP` stream with both fingerprint and crypto lines; the answer
+        /// decides. An incoming offer is answered the way it was keyed; a plain
+        /// one is refused with 488.
         ///
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_DTLS_SRTP`.
         DtlsOrSdes = 6,
-        /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the
-        /// answer takes one of the `a=crypto` lines and plain when it takes
-        /// none — the "SRTP optional" of desk phones, for a server that may
-        /// or may not encrypt and answers an offer on `RTP/SAVP` with 488
-        /// when it does not. RFC 4568 writes the attribute for the secure
-        /// profiles, so this is interoperability rather than a standard.
-        /// Answering, an offer on `RTP/AVP` carrying a line this end takes
-        /// is answered with a key, and anything else as under `Offered`.
-        /// ABI 0.34.
+        /// Offer SDES on plain `RTP/AVP` ("SRTP optional"): encrypted when the
+        /// answer takes an `a=crypto` line, plain otherwise. For servers that
+        /// reject `RTP/SAVP` with 488. Not standard (RFC 4568 defines the
+        /// attribute for secure profiles). An incoming `RTP/AVP` offer with a
+        /// usable line is answered with a key, anything else as `Offered`.
         BestEffort = 7,
     }
 }
@@ -191,56 +134,39 @@ codes! {
     /// `sipral_stack_config_t::ice` (the stack's default) and
     /// `sipral_call_config_t::ice` (a per-call override).
     ///
-    /// Zero is not one of them, and it is not the same absence on the two
-    /// structs: on the stack it means this build's own built-in default,
-    /// which is [`SipralIce::Off`]; on a call it means the stack's own
-    /// setting, whatever that came to.
+    /// Zero means "unset": on the stack, the built-in default
+    /// [`SipralIce::Off`]; on a call, the stack's setting.
     ///
     /// A call that offers ICE also asks for RFC 5761 multiplexing, whatever
-    /// `offer_rtcp_mux` says, because an ICE stream with a second component
-    /// needs a second address and this ABI names one.
+    /// `offer_rtcp_mux` says: this ABI names one address per stream.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralIce: u32 {
-        /// Do not offer it, and do not answer a peer that
-        /// does. The default, and `docs/06-nat.md` says why at length.
+        /// Do not offer it, and do not answer a peer that does. The default;
+        /// `docs/06-nat.md` says why.
         Off = 1,
-        /// Offer it, and use it against a peer that
-        /// offers it back.
+        /// Offer it, and use it against a peer that offers it back.
         ///
-        /// A peer that does not — an Asterisk with `ice_support=no`, which is
-        /// its default — is answered without it and the call runs on the
-        /// signalled address and symmetric RTP, exactly as it would have. An
-        /// application that names this **must** drain
-        /// [`sipral_media_poll_transmit`]: a check that never leaves is a
-        /// call that never chooses a path.
+        /// A peer without ICE gets the call on the signalled address and
+        /// symmetric RTP. The application **must** drain
+        /// [`sipral_media_poll_transmit`], or no path is ever chosen.
         ///
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_ICE`.
         Offered = 2,
-        /// Offer it, and let no stream on this call
-        /// carry audio on a path ICE did not check.
+        /// Offer it, and let no stream carry audio on a path ICE did not check.
         ///
-        /// Each of the three ways a peer can fail to do ICE ends the call's
-        /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
-        /// back. That is the whole difference between this and `Offered`.
+        /// A peer that fails ICE ends the call's media with
+        /// `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling back.
         Required = 3,
-        /// Be an ICE-lite endpoint (RFC 8445 §2.5) —
-        /// write `a=ice-lite` and one host candidate, answer the checks a
-        /// full peer sends, and put the audio on the pair it nominates.
+        /// Be an ICE-lite endpoint (RFC 8445 §2.5): `a=ice-lite`, one host
+        /// candidate, answer a full peer's checks, use the pair it nominates.
         ///
-        /// **Only for a server reachable at the address it advertises**: the
-        /// media socket's own, or the public address a one-to-one NAT in
-        /// front of it forwards (`sipral_stack_nat_map`'s mapping, when that
-        /// is what STUN reports). A WebRTC gateway or any other full-ICE peer
-        /// calling a voice agent in a data centre is the case it is for. RFC
-        /// 8445 Appendix A says ICE "will not function when a lite
-        /// implementation is placed behind a NAT", and a peer told this end
-        /// is lite stops doing the work that would have found another path —
-        /// so a softphone never names it. A peer that does no ICE, or is lite
-        /// itself, gets the call on the signalled address, as under
-        /// `Offered`; the application drains `sipral_media_poll_transmit`
-        /// for the answers to the checks exactly as it does for a full
-        /// agent's.
+        /// **Only for a server reachable at the address it advertises** (its
+        /// own, or a one-to-one NAT's via `sipral_stack_nat_map`); never for a
+        /// softphone. RFC 8445 Appendix A: lite "will not function when a lite
+        /// implementation is placed behind a NAT". A peer with no ICE, or lite
+        /// itself, gets the signalled address. The application still drains
+        /// `sipral_media_poll_transmit` for check answers.
         ///
         /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
         /// `SIPRAL_FEATURE_ICE`.
@@ -249,16 +175,10 @@ codes! {
 }
 
 codes! {
-    /// One codec this ABI has a number for. Names for every member that says
-    /// which.
+    /// One codec this ABI has a number for.
     ///
-    /// A value here is permanent, and that is all it is: a number that has left
-    /// this header is spent for good, so a binding compiled against one keeps
-    /// working whatever a later build contains. Whether *this* build can produce
-    /// the codec is a different question, and `SIPRAL_FEATURE_*` together with
-    /// `sipral_codec_at` are what answer it. A settings screen that offers this
-    /// list unfiltered is a settings screen with controls that do nothing, which
-    /// is the mistake `sipral_capabilities` exists to prevent.
+    /// Values are permanent. Whether this build contains a codec is answered by
+    /// `SIPRAL_FEATURE_*` and `sipral_codec_at`, not by this list.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralCodec: u32 {
         /// No codec: the call has none, or the event is not about one.
@@ -269,23 +189,16 @@ codes! {
         Pcma = 2,
         /// G.722, wideband at the price of a narrowband stream.
         G722 = 3,
-        /// Opus. Declared in every build, whether or not this one linked
-        /// libopus, for the reason the enumeration above gives. Whether the
-        /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
-        /// `sipral_codec_at` enumerates, never the presence of this name.
+        /// Opus. Declared in every build; presence is `SIPRAL_FEATURE_OPUS`.
         Opus = 4,
-        /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
-        /// speech. In every build and in no default offer: a call offers it
-        /// only when a codec order names `G729`. It offers `annexb=yes`,
-        /// answers with the offer's `annexb`, and uses Annex B's silence
-        /// compression where both descriptions allow it.
+        /// G.729 Annex A, payload type 18. Offered only when a codec order names
+        /// `G729`; offers `annexb=yes`, answers with the offer's `annexb`.
         G729 = 5,
-        /// L16 at 8 kHz, one channel: the samples themselves, on a dynamic
-        /// payload type as `L16/8000`. In every build and in no default
-        /// offer: a call offers it only when a codec order names `L16/8000`.
+        /// L16 at 8 kHz mono, dynamic payload type `L16/8000`. Offered only
+        /// when a codec order names it.
         L16Narrowband = 6,
-        /// L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
-        /// lost, offered only when a codec order names `L16/16000`.
+        /// L16 at 16 kHz mono, `L16/16000`. Offered only when a codec order
+        /// names it.
         L16Wideband = 7,
     }
 }
@@ -293,23 +206,14 @@ codes! {
 codes! {
     /// What became of one codec this call's catalogue could have used. Names
     /// for [`SipralCodecCandidate::outcome`].
-    ///
-    /// D5's codec half: a negotiation that ends in G.711 when the site
-    /// configured Opus is a support call, and the answer to it is a list
-    /// saying which of the two things happened — the far end never named
-    /// Opus, or it named it and something ahead of it in this end's order
-    /// won.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralCodecOutcome: u32 {
-        /// Not an outcome: either the candidate is from a build this ABI has
-        /// no number for, or the struct was never filled in.
+        /// Not an outcome: unknown to this ABI, or the struct was never filled.
         Unknown = 0,
-        /// This is what the call agreed on. Exactly one candidate carries it,
-        /// and it names the same codec as `sipral_media_info_t::codec`.
+        /// What the call agreed on. Exactly one candidate carries it, the same
+        /// codec as `sipral_media_info_t::codec`.
         Chosen = 1,
-        /// The far end's description did not name it, so it was never in the
-        /// running. The commonest answer, and the one that says the question
-        /// is about the far end's configuration rather than this one's.
+        /// The far end's description did not name it.
         NotNamed = 2,
         /// The far end named it and this end had something better: the codec
         /// in `outranked_by` came first in this call's order.
@@ -355,14 +259,9 @@ codes! {
 codes! {
     /// What became of one path a call's ICE agent tried. Names for
     /// [`SipralPathCandidate::outcome`].
-    ///
-    /// D5's transport and NAT half: a call that ended up relayed when a
-    /// direct path was expected, or found no path at all, is a support call,
-    /// and the answer to it is which of these happened to each pair.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralPathOutcome: u32 {
-        /// Not an outcome: either the path is from a build this ABI has no
-        /// number for, or the struct was never filled in.
+        /// Not an outcome: unknown to this ABI, or the struct was never filled.
         Unknown = 0,
         /// The path the call's media takes: the selected pair (RFC 8445
         /// §8.1.2), or the relay it runs through.
@@ -443,17 +342,13 @@ codes! {
 }
 
 codes! {
-    /// Why media failed. Names for `sipral_media_event_t::fault`.
-    ///
-    /// The sentence beside it says which case of the kind it was; this is the part
-    /// a machine acts on, and the two are never the same thing.
+    /// Why media failed, for a machine to act on. Names for
+    /// `sipral_media_event_t::fault`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralMediaFault: u32 {
         /// Nothing failed.
         None = 0,
-        /// The negotiation settled on something this build cannot encode or
-        /// decode, which means the peer answered with a format that was not in the
-        /// offer.
+        /// The peer answered with a format this build cannot encode or decode.
         UnsupportedCodec = 1,
         /// The two descriptions agree on nothing that can carry audio.
         NoCommonCodec = 2,
@@ -474,17 +369,12 @@ codes! {
         /// stack could use and the policy was `SIPRAL_ICE_REQUIRED`, the far
         /// end took `a=rtcp-mux` out of an answer to an ICE offer, or consent
         /// to send on the pair that was chosen was withdrawn part-way through
-        /// (RFC 7675 §5).
-        ///
-        /// A code of its own because it is the one an application can act on
-        /// differently: the call is up and the signalling is sound, and what
-        /// changed is only that no path could be checked. A deployment with a
-        /// non-ICE profile to fall back to falls back here.
+        /// (RFC 7675 §5). Signalling is still sound; an application may fall
+        /// back to a non-ICE profile.
         Ice = 9,
-        /// The call's SRTP policy refused what the far end described: a plain
-        /// answer to a call that requires SRTP, which this end then hangs up
-        /// with a `Reason` of 488, or a plain re-offer inside one, refused
-        /// with 488 and the call left on the keys it had. ABI 0.31.
+        /// The SRTP policy refused the far end's description: a plain answer
+        /// (hung up with `Reason` 488) or a plain re-offer (refused with 488,
+        /// old keys kept).
         SecurityPolicy = 10,
     }
 }
@@ -509,14 +399,11 @@ codes! {
         /// Control traffic that was not believed: from the wrong address, or not a
         /// well-formed compound packet.
         ControlRefused = 5,
-        /// A record of the DTLS-SRTP handshake that keys this call, which has
-        /// been taken. Whatever it owes the far end in reply is waiting in
-        /// [`sipral_media_poll_transmit`], and this is the signal to drain it.
+        /// A DTLS-SRTP handshake record, taken. Drain
+        /// [`sipral_media_poll_transmit`] for the reply.
         Handshake = 6,
-        /// Something arrived on a call that agreed to be encrypted and has no
-        /// keys yet, so there was nothing to verify it with. The ordinary way
-        /// this happens is a peer that starts sending the moment its own half
-        /// of the handshake finishes, which is before ours does.
+        /// Arrived on an encrypted call before its keys exist; usually a peer
+        /// that sends as soon as its half of the handshake ends.
         NotKeyed = 7,
     }
 }
@@ -536,19 +423,14 @@ codes! {
         /// `F8_128_HMAC_SHA1_80`, which is what 3GPP asks for. Reachable by
         /// SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
         AesF8 = 3,
-        /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188): `AesCm80` with a 256-bit
-        /// key. Reachable by SDES only, like `AesF8`: no DTLS-SRTP profile
-        /// names it.
+        /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188). SDES only.
         Aes256Cm80 = 4,
-        /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188): `AesCm32` with a 256-bit
-        /// key. SDES only, as `Aes256Cm80`.
+        /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188). SDES only.
         Aes256Cm32 = 5,
-        /// `AEAD_AES_128_GCM` (RFC 7714): AES-GCM, one transform for both
-        /// confidentiality and integrity. DTLS-SRTP profile 0x0007.
+        /// `AEAD_AES_128_GCM` (RFC 7714). DTLS-SRTP profile 0x0007.
         AeadAes128Gcm = 6,
-        /// `AEAD_AES_256_GCM` (RFC 7714): the same with a 256-bit key, and
-        /// what two ends of this stack settle on over DTLS-SRTP. Profile
-        /// 0x0008.
+        /// `AEAD_AES_256_GCM` (RFC 7714). DTLS-SRTP profile 0x0008, preferred
+        /// between two ends of this stack.
         AeadAes256Gcm = 7,
     }
 }
@@ -585,25 +467,20 @@ record! {
         /// The RTP timestamp clock, in hertz, which is what goes on the
         /// `a=rtpmap` line.
         pub clock_rate: u32,
-        /// The rate the codec actually hears at, which is what the samples crossing
-        /// this ABI are in. G.722's two differ, and RFC 3551 §4.5.2 says so.
+        /// The codec's own rate, which the samples crossing this ABI use. G.722's
+        /// differs from its clock (RFC 3551 §4.5.2).
         pub sample_rate: u32,
         /// The payload type RFC 3551 table 4 assigns it, when it has one.
         pub static_payload_type: u32,
-        /// Whether it has one. Opus does not: it is newer than the table and
-        /// always travels as a dynamic type.
+        /// Whether it has one. Opus does not.
         pub has_static_payload_type: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads to the alignment so later members start past this
+        /// header's length. Written zero, never read.
         pub reserved: u32,
     }
 }
 
-// Safety: integers, no invariant between them, and zero is a valid value of
-// each — a zeroed one reads as the codec that is not a codec.
+// Safety: integers with no invariant between them; zero is valid for each.
 unsafe impl Versioned for SipralCodecInfo {
     const NAME: &'static str = "sipral_codec_info";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCodecInfo, reserved);
@@ -618,11 +495,7 @@ record! {
     ///
     /// Set `size` to `sizeof(sipral_codec_candidate_t)` before the call.
     ///
-    /// The list is what the negotiation itself decided, kept from the moment
-    /// it decided it. It is not worked out again when it is asked for, because
-    /// a second run against a description that has since been renegotiated
-    /// would disagree with the first in exactly the case somebody is
-    /// debugging.
+    /// Recorded when the negotiation decided, never recomputed.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralCodecCandidate {
         /// How many bytes of this struct the library filled in.
@@ -632,22 +505,15 @@ record! {
         /// A [`SipralCodecOutcome`]: what became of it.
         pub outcome: Number<SipralCodecOutcome>,
         /// A [`SipralCodec`]: what beat it, when `outcome` is
-        /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
-        /// otherwise, because nothing beat a codec that was never named and
-        /// nothing beat the one that won.
+        /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`; `SIPRAL_CODEC_UNKNOWN` otherwise.
         pub outranked_by: Number<SipralCodec>,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads to the alignment so later members start past this
+        /// header's length. Written zero, never read.
         pub reserved: u32,
     }
 }
 
-// Safety: integers, no invariant between them, and zero is a valid value of
-// each — a zeroed one reads as the codec that is not a codec, with the outcome
-// that is not an outcome.
+// Safety: integers with no invariant between them; zero is valid for each.
 unsafe impl Versioned for SipralCodecCandidate {
     const NAME: &'static str = "sipral_codec_candidate";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCodecCandidate, reserved);
@@ -663,11 +529,9 @@ record! {
     /// into the caller's own buffers.
     ///
     /// The caller fills in `size`, the two pointers and the two capacities;
-    /// the library fills in the rest. A pointer left null with a capacity of
-    /// zero is an address the caller does not want. Written down by the
-    /// agent as each outcome happened, never worked out again when it is
-    /// asked for: RFC 8445 §8.1.2 takes the losing pairs off the checklist
-    /// the moment one is selected.
+    /// the library fills in the rest. Null with capacity zero skips an address.
+    /// Recorded as each outcome happened, since RFC 8445 §8.1.2 drops losing
+    /// pairs from the checklist on selection.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralPathCandidate {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -689,15 +553,12 @@ record! {
         /// A [`SipralCandidateKind`]: what `remote` is, when it is a
         /// candidate at all.
         pub remote_kind: Number<SipralCandidateKind>,
-        /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
-        /// both put them without padding at the end of the struct, so that a
-        /// member a later version appends starts past the length a caller built
-        /// against this header declares. The library writes zero here and reads
-        /// nothing from it.
+        /// Zero. Keeps the layout identical on 32- and 64-bit targets. Written
+        /// zero, never read.
         pub reserved: u32,
-        /// Where to write the local address, `host:port` with a trailing
-        /// NUL: for a pair, the candidate its checks left from — the host
-        /// candidate, or the relayed one; for a relay, the relayed address.
+        /// Where to write the local address, `host:port` with a trailing NUL:
+        /// for a pair, the candidate its checks left from; for a relay, the
+        /// relayed address.
         pub local: *mut c_char,
         /// How much room `local` has. At least [`SIPRAL_ADDRESS_BYTES`] when
         /// it is not null.
@@ -717,9 +578,8 @@ record! {
     }
 }
 
-// Safety: plain data with no invariant between the members. The two
-// pointers are the caller's own buffers, as in `SipralMediaPacket`, and
-// all-zero is a caller that wants neither address.
+// Safety: plain data, no invariant between members; the pointers are the
+// caller's buffers, and all-zero wants neither address.
 unsafe impl Versioned for SipralPathCandidate {
     const NAME: &'static str = "sipral_path_candidate";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPathCandidate, remote_len);
@@ -732,12 +592,6 @@ unsafe impl Versioned for SipralPathCandidate {
 record! {
     /// What one call's media settled on, and what it is doing now.
     ///
-    /// A4's reporting half and as much of D5 as this stack knows: the codec that
-    /// was agreed, the number it travels under, and the shape of the stream around
-    /// it. What is deliberately not here is why each other candidate lost —
-    /// RFC 3264 §6.1 leaves that decision with the peer, and a reason invented on
-    /// this side would be a reason nobody can act on.
-    ///
     /// Set `size` to `sizeof(sipral_media_info_t)` before the call.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralMediaInfo {
@@ -745,10 +599,8 @@ record! {
         pub size: usize,
         /// A [`SipralCodec`]: what the two ends agreed on.
         pub codec: Number<SipralCodec>,
-        /// The payload type on the wire. It is the offer's own number and not
-        /// necessarily ours: the two ends pick their own numbers for a format
-        /// with no static one, so a peer that numbers it 111 has said what we
-        /// say with 96.
+        /// The payload type on the wire: the offer's number, not necessarily
+        /// ours.
         pub payload_type: u32,
         /// The RTP timestamp clock, in hertz.
         pub clock_rate: u32,
@@ -793,11 +645,8 @@ record! {
         /// Whether both ends agreed reduced-size RTCP (RFC 5506,
         /// `a=rtcp-rsize`).
         pub reduced_size: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads to the alignment so later members start past this
+        /// header's length. Written zero, never read.
         pub reserved: u32,
     }
 }
@@ -816,27 +665,19 @@ unsafe impl Versioned for SipralMediaInfo {
 record! {
     /// What one call's media has cost, and what it is costing now.
     ///
-    /// A6. Cheap enough to read at the frame rate of a user interface — everything
-    /// in it is already counted and nothing walks a history — and complete enough
-    /// to keep as the record of a call, which is the same struct delivered with
-    /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends.
-    ///
-    /// The three delays are in microseconds and not milliseconds. Jitter on a
-    /// healthy call is a fraction of a millisecond, and a figure that reads zero
-    /// whenever things are going well is a figure nobody looks at twice.
+    /// Cheap enough to read at UI frame rate. The same struct arrives with
+    /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends. Delays are in
+    /// microseconds, since healthy jitter is below a millisecond.
     ///
     /// Set `size` to `sizeof(sipral_stream_stats_t)` before the call.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralStreamStats {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
-        /// A [`SipralCodec`]: what the call settled on, which is the first thing
-        /// anybody looking at a bad call wants to know.
+        /// A [`SipralCodec`]: what the call settled on.
         pub codec: Number<SipralCodec>,
-        /// Whether a round-trip time is known. Zero until a report has come back,
-        /// which on a short call may be never: the first one is deliberately
-        /// delayed (RFC 3550 §6.2) and a peer that sends no RTCP never provides
-        /// one.
+        /// Whether a round-trip time is known. Zero until a report comes back,
+        /// which may be never (RFC 3550 §6.2 delays the first one).
         pub has_round_trip: u32,
         /// The round trip, from RTCP.
         pub round_trip_us: u64,
@@ -856,35 +697,28 @@ record! {
         pub packets_duplicated: u64,
         /// Packets accepted after a higher sequence number had already arrived.
         pub packets_reordered: u64,
-        /// Frames dropped in a pause to bring the delay down. Deliberate, and
-        /// inaudible when the pause is real.
+        /// Frames dropped in a pause to bring the delay down.
         pub frames_shrunk: u64,
-        /// Frames the concealment was asked to invent in a pause to push the delay
-        /// up.
+        /// Frames concealment invented in a pause to push the delay up.
         pub frames_stretched: u64,
-        /// How far behind the newest packet the playout point is: the delay the
-        /// far end's voice is actually suffering.
+        /// How far behind the newest packet the playout point is.
         pub delay_us: u64,
         /// What the buffer is aiming at, from the arrival times it has seen.
         pub target_delay_us: u64,
         /// Interarrival jitter, the smoothed mean deviation of transit time
         /// (RFC 3550 §6.4.1).
         pub jitter_us: u64,
-        /// Frames concealed as a fraction of frames played, over the last ten
-        /// seconds or so. The counters above say what the call has cost; this says
-        /// whether it is bad right now.
+        /// Frames concealed as a fraction of frames played, over about the last
+        /// ten seconds.
         pub loss_rate: f32,
-        /// One number for a bar on a screen: a hundred for a call with nothing
-        /// wrong with it, zero for one nobody can hold. Not a mean opinion score,
-        /// and deliberately not shaped like one.
+        /// 100 for a flawless call, 0 for an unusable one. Not a MOS.
         pub score: f32,
         /// Whether the numbers say this call is in trouble now.
         pub suffering: u32,
         /// How long since a packet last arrived. A live call sits at one frame.
         pub silent_for_ms: u64,
-        /// Whether an RFC 3611 VoIP Metrics report is available at all —
-        /// zero until this stream has identified a source to report on.
-        /// Every `voip_*` member below is meaningless while this is zero.
+        /// Whether an RFC 3611 VoIP Metrics report is available. Every `voip_*`
+        /// member is meaningless while this is zero.
         pub has_voip_metrics: u32,
         /// RFC 3611 SS4.7.1's loss rate, as its own 256ths (multiply by
         /// 100 and divide by 256 for a percentage).
@@ -899,14 +733,10 @@ record! {
         pub voip_gap_density_256: u32,
         /// RFC 3611 SS4.7.2's mean gap duration.
         pub voip_gap_duration_us: u64,
-        /// RFC 3611 SS4.7.2's `Gmin`: the burst/gap classification
-        /// threshold this stream's jitter buffer used, fixed for the
-        /// stream's whole life.
+        /// RFC 3611 SS4.7.2's `Gmin`, the burst/gap threshold, fixed per stream.
         pub voip_gmin: u32,
-        /// RFC 3611 SS4.7.3's end-system delay. Zero for every build of
-        /// this stack today: SS4.7.3 defines it as the sending side's own
-        /// accumulation and encoding delay added to the receiving side's,
-        /// and nothing here has visibility into the sending side's half.
+        /// RFC 3611 SS4.7.3's end-system delay. Always zero: it needs the
+        /// sending side's delay, which this end cannot see.
         pub voip_end_system_delay_us: u64,
         /// RFC 3611 SS4.7.7's nominal jitter buffer delay.
         pub voip_jitter_buffer_nominal_us: u64,
@@ -914,9 +744,8 @@ record! {
         pub voip_jitter_buffer_maximum_us: u64,
         /// RFC 3611 SS4.7.7's absolute maximum jitter buffer delay.
         pub voip_jitter_buffer_abs_max_us: u64,
-        /// Whether `voip_r_factor` is available: zero when the active
-        /// codec is one ITU-T G.113 tabulates no `Ie`/`Bpl` for (RFC 3611
-        /// SS4.7.5's own `127` "unavailable" sentinel).
+        /// Whether `voip_r_factor` is available: zero when ITU-T G.113 has no
+        /// `Ie`/`Bpl` for the codec (RFC 3611 SS4.7.5's `127` sentinel).
         pub has_voip_r_factor: u32,
         /// RFC 3611 SS4.7.5's R factor, `0..=100`.
         pub voip_r_factor: u32,
@@ -931,17 +760,13 @@ record! {
         /// RFC 3611 SS4.7.5's estimated conversational-quality MOS, in
         /// tenths.
         pub voip_mos_cq_x10: u32,
-        /// Frames played as nothing because the jitter buffer had run dry
-        /// while the far end was still sending: the earpiece asked for audio
-        /// before it had arrived, and heard silence or comfort noise in its
-        /// place, wherever that fell. A frame the far end never sent, in its
-        /// own pause, is not one, and nor is a packet lost on the way, which
-        /// is `packets_lost`. No packet is lost or discarded by it, so none of
-        /// the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
-        /// `loss_rate`, `score` and `suffering` do.
+        /// Frames played empty because the jitter buffer ran dry while the far
+        /// end was still sending. Not lost packets (`packets_lost`), so the
+        /// `voip_*` rates miss it (RFC 3611 SS4.7.1 counts packets);
+        /// `loss_rate`, `score` and `suffering` include it.
         pub frames_underrun: u64,
-        /// Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
-        /// zero while it does not.
+        /// Whether the stream runs RTP/AVPF (RFC 4585). The counts below stay
+        /// zero otherwise.
         pub feedback: u32,
         /// The `trr-int` both ends agreed: the least time between two
         /// regular reports, in milliseconds. Zero for none.
@@ -954,19 +779,16 @@ record! {
         pub nacks_received: u64,
         /// The packets those asked this end for.
         pub packets_asked_for: u64,
-        /// Early RTCP packets this end sent: feedback that could not wait for
-        /// the next regular report.
+        /// Early RTCP packets this end sent.
         pub early_packets: u64,
         /// Reduced-size RTCP packets this end sent (RFC 5506).
         pub reduced_size_packets: u64,
-        /// Feedback this end had to hold back, because the stream's RTCP
-        /// bandwidth had none to spare.
+        /// Feedback held back for lack of RTCP bandwidth.
         pub feedback_suppressed: u64,
     }
 }
 
-// Safety: integers and two floats, no invariant between them, and zero is a
-// valid value of each.
+// Safety: integers and two floats, no invariant; zero is valid for each.
 unsafe impl Versioned for SipralStreamStats {
     const NAME: &'static str = "sipral_stream_stats";
     const PIN: crate::versioned::Pin =
@@ -981,13 +803,9 @@ record! {
     /// One datagram on its way out, written into the caller's own buffers.
     ///
     /// The caller fills in `size`, the two pointers and the two capacities; the
-    /// library fills in the two lengths and the bytes. A `len` of zero means there
-    /// was nothing to send, which on a capture is an ordinary answer: this end may
-    /// be held by the far end, or silence suppression may have swallowed the frame.
-    ///
-    /// Both buffers are checked before anything is produced. A packet that was
-    /// built and then had nowhere to go would be a packet missing from a stream
-    /// whose timestamps had already moved past it.
+    /// library fills in the two lengths and the bytes. A `len` of zero means
+    /// nothing to send (held, or silence suppression). Both buffers are checked
+    /// before anything is produced.
     #[derive(Clone, Copy)]
     pub struct SipralMediaPacket {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -1006,27 +824,20 @@ record! {
         pub destination_capacity: usize,
         /// How many bytes of it were written, the NUL not counted.
         pub destination_len: usize,
-        /// What to send it over, as a `SipralTransport`.
-        /// `SIPRAL_TRANSPORT_UDP` is a datagram from the call's media socket,
-        /// which is everything unless the stack reaches its TURN server over
-        /// TCP or TLS (`turn_transport`); then what goes through the relay
-        /// says that instead, `destination` is the server, and the bytes are
-        /// written, as they are and in order, on the media socket's
-        /// connection to it — never sent as a datagram.
+        /// What to send it over, as a `SipralTransport`. `SIPRAL_TRANSPORT_UDP`
+        /// is a datagram from the media socket. With a TURN server over TCP or
+        /// TLS (`turn_transport`), relayed traffic says so, `destination` is the
+        /// server, and the bytes go in order on that connection, never as a
+        /// datagram.
         pub protocol: Number<SipralTransport>,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. Set it to zero when the struct is handed in;
-        /// the library writes zero here and reads nothing from it.
+        /// Zero. Pads to the alignment so later members start past this
+        /// header's length. Set zero on input; written zero, never read.
         pub reserved: u32,
     }
 }
 
-// Safety: plain data with no invariant between the members. The two pointers
-// are the caller's own buffers, as in every other struct here, and all-zero is
-// a caller that brought no buffers — which is refused by reading it, not by
-// being undefined.
+// Safety: plain data, no invariant between members; the pointers are the
+// caller's buffers, and all-zero is refused when read, not undefined.
 unsafe impl Versioned for SipralMediaPacket {
     const NAME: &'static str = "sipral_media_packet";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralMediaPacket, reserved);
@@ -1036,15 +847,10 @@ unsafe impl Versioned for SipralMediaPacket {
     }
 }
 
-// -- what the layers below are called up here --------------------------------
-
 /// The name this ABI gives a codec.
 pub(crate) const fn named_codec(codec: Codec) -> SipralCodec {
-    // Opus asked of the value and not of a `cfg` on this crate's own `opus`
-    // feature: features are per-crate and additive, so that arm would go
-    // missing in a build of this crate whose facade did link the codec, and
-    // every answer below would then be wrong about a codec the build can
-    // negotiate. `Codec::is_opus` is the catalogue's own answer.
+    // Asked of the value, not a `cfg` on this crate's `opus` feature: the facade
+    // may link Opus while this crate's feature is off.
     if codec.is_opus() {
         return SipralCodec::Opus;
     }
@@ -1055,8 +861,7 @@ pub(crate) const fn named_codec(codec: Codec) -> SipralCodec {
         Codec::G729 => SipralCodec::G729,
         Codec::L16Narrowband => SipralCodec::L16Narrowband,
         Codec::L16Wideband => SipralCodec::L16Wideband,
-        // the layer below has grown a codec this ABI has no number for, and
-        // saying so beats picking one that is wrong
+        // a codec this ABI has no number for yet
         _ => SipralCodec::Unknown,
     }
 }
@@ -1079,10 +884,7 @@ pub(crate) const fn direction_of(direction: Direction) -> SipralDirection {
 
 /// Which kind of failure a media error is.
 pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
-    // asked of the value for the same reason `named_codec` asks it: the
-    // variant exists only where Opus does, and an arm under this crate's own
-    // `opus` would go missing in a build whose facade linked the codec, so a
-    // refusal that has a code of its own would leave as `Other`
+    // asked of the value, not a `cfg`, as in `named_codec`
     if error.is_codec() {
         return SipralMediaFault::Codec;
     }
@@ -1090,16 +892,12 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
         MediaError::UnsupportedCodec { .. } | MediaError::UnknownPayload { .. } => {
             SipralMediaFault::UnsupportedCodec
         }
-        // two descriptions that settled on no codec is the same failure said
-        // one layer down, and it is the one an application acts on
         MediaError::NoCommonCodec | MediaError::Description(SdpError::NoCodec { .. }) => {
             SipralMediaFault::NoCommonCodec
         }
         MediaError::StreamRefused => SipralMediaFault::StreamRefused,
         MediaError::NoDescription => SipralMediaFault::NoDescription,
         MediaError::Description(_) => SipralMediaFault::BadDescription,
-        // everything a recording can refuse or stop over is reported as a
-        // recording's, not as "something this ABI has no word for"
         MediaError::Recording(_)
         | MediaError::NotRecording
         | MediaError::AlreadyRecording
@@ -1115,26 +913,18 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
     }
 }
 
-/// Why the media layer would not do it.
-///
-/// The sentence comes from the error itself, which already names the codec, the
-/// interval or the file that was the problem. Only the code is decided here.
+/// Why the media layer would not do it. The message comes from the error; only
+/// the status is decided here.
 pub(crate) fn media_failed(error: &MediaError) -> Fail {
-    // the codec's own refusal, asked of the value and not of a `cfg` — see
-    // `fault_of`. It is a value that would be taken if it were corrected,
-    // which is what the two arms below it are
+    // asked of the value, not a `cfg`; see `fault_of`
     if error.is_codec() {
         return fail(SipralStatus::InvalidArgument, error.to_string());
     }
     let status = match *error {
-        // the value is right and there is nothing in this build behind it,
-        // which is the one case SIPRAL_STATUS_NOT_SUPPORTED exists for
         MediaError::UnsupportedCodec { .. } | MediaError::UnknownPayload { .. } => {
             SipralStatus::NotSupported
         }
-        // the file exists and would not take what was written to it: a disk
-        // that filled, a volume that went away. Not the path, which was
-        // refused before anything was asked of the session
+        // a write failure (disk full, volume gone); a bad path is refused earlier
         MediaError::Recording(_) => SipralStatus::RecordingFailed,
         // a value that would be taken if it were corrected
         MediaError::NoCodecs
@@ -1150,10 +940,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::RenderDelayTooLong { .. }
         | MediaError::NoSrtpSuite
         | MediaError::SameCall => SipralStatus::InvalidArgument,
-        // the numbers a session can bind ran out, which a corrected value
-        // does not fix and a different build does not either
-        // and the text still waiting to go is as much as a stream holds,
-        // which drains at the rate the far end reads
+        // a limit reached; the text buffer drains at the far end's pace
         MediaError::TooManyDigits
         | MediaError::NoPayloadType
         | MediaError::TextBufferFull { .. } => SipralStatus::Exhausted,
@@ -1167,7 +954,6 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::NotJoined
         | MediaError::JoinIncompatible => SipralStatus::WrongState,
         MediaError::PacketTooLong { .. } => SipralStatus::BufferTooSmall,
-        // the call was refused, with 488, by the policy it was answered under
         MediaError::SrtpRequired => SipralStatus::SecurityPolicy,
         MediaError::NoText => SipralStatus::NotNegotiated,
         MediaError::Signalling(ref refused) => return crate::call::ua_failed(refused),
@@ -1236,14 +1022,10 @@ pub(crate) fn stream_stats(record: &StreamStatistics) -> SipralStreamStats {
     }
 }
 
-/// A `u16` of milliseconds as microseconds, for the delay members that
-/// match the rest of this struct's unit rather than RFC 3611's own.
 fn ms_to_us(ms: u16) -> u64 {
     u64::from(ms).saturating_mul(1_000)
 }
 
-/// Saturating rather than wrapping: an interval too long to count is one
-/// nothing here measured.
 fn micros(span: Duration) -> u64 {
     u64::try_from(span.as_micros()).unwrap_or(u64::MAX)
 }
@@ -1275,20 +1057,14 @@ pub(crate) const fn toggle_of(value: bool) -> u32 {
 }
 
 /// A `sipral_stack_config_t::srtp` or `sipral_call_config_t::srtp` value, as a
-/// [`SrtpPolicy`] the caller actually named — `None` for the zero that means
-/// "unspecified", which the two structs resolve differently: the stack's own
-/// built-in default on one, the stack's own setting on the other. Neither
-/// meaning is decided here, only the value itself.
+/// [`SrtpPolicy`]; `None` for zero, which each struct resolves its own way.
 pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpPolicy>, Fail> {
     match value {
         0 => Ok(None),
         1 => Ok(Some(SrtpPolicy::NotOffered)),
         2 => Ok(Some(SrtpPolicy::Offered)),
         3 => Ok(Some(SrtpPolicy::Required)),
-        // the numbers are in the header of every build, because a value that
-        // has left it is spent; what a build without the feature has is no
-        // handshake to honour them with, and saying so is better than placing
-        // the unencrypted call the policy was chosen to prevent
+        // without the feature these are refused, never downgraded to plain
         #[cfg(feature = "dtls")]
         4 => Ok(Some(SrtpPolicy::DtlsOffered)),
         #[cfg(feature = "dtls")]
@@ -1329,10 +1105,7 @@ pub(crate) fn ice_policy(value: u32, name: &'static str) -> Result<Option<IcePol
     match value {
         0 => Ok(None),
         1 => Ok(Some(IcePolicy::Off)),
-        // the numbers are in the header of every build, because a value that
-        // has left it is spent; what a build without the feature has is no
-        // agent to honour them with, and saying so is better than placing the
-        // call on an unchecked path the policy was chosen to avoid
+        // without the feature these are refused, never run on an unchecked path
         #[cfg(feature = "ice")]
         2 => Ok(Some(IcePolicy::Offered)),
         #[cfg(feature = "ice")]
@@ -1357,13 +1130,8 @@ pub(crate) fn ice_policy(value: u32, name: &'static str) -> Result<Option<IcePol
     }
 }
 
-/// The catalogue a stack was asked for: an order, a frame length, what an
-/// offer says about itself, what it says about SRTP and about ICE, and
-/// whether G.729's Annex B is allowed.
-///
-/// A name this build has no encoder for is refused here, where the caller still
-/// knows which string it passed, rather than ignored later where nothing can
-/// tell it happened.
+/// The catalogue a stack was asked for. A codec name this build lacks is
+/// refused here, not ignored later.
 pub(crate) fn catalog_of(
     order: Option<&str>,
     frame_ms: u32,
@@ -1394,19 +1162,13 @@ pub(crate) fn catalog_of(
         .with_g729_annex_b(g729_annex_b))
 }
 
-/// The codec order a caller wrote, as a catalogue.
 fn ordered(list: &str) -> Result<CodecCatalog, Fail> {
     CodecCatalog::with_order(&names_in(list)?).map_err(|error| media_failed(&error))
 }
 
-/// The codec names a caller wrote, as a list, checked for the two faults that
-/// are the list's own rather than any one name's.
-///
-/// Separate from [`ordered`] because a call names its order on a structure
-/// that is read before the stack is locked, and the catalogue it becomes can
-/// only be derived from the stack's own once it is. The names are checked at
-/// the first of those two moments, where the caller still knows which string
-/// it passed.
+/// The codec names a caller wrote, checked for empty and duplicate entries.
+/// Separate from [`ordered`] because a call's order is read before the stack
+/// is locked.
 pub(crate) fn names_in(list: &str) -> Result<Vec<&str>, Fail> {
     let named: Vec<&str> = list.split(',').map(str::trim).collect();
     if let Some(empty) = named.iter().position(|name| name.is_empty()) {
@@ -1415,9 +1177,7 @@ pub(crate) fn names_in(list: &str) -> Result<Vec<&str>, Fail> {
             format!("codecs names nothing at position {empty}, so the list has a stray comma"),
         ));
     }
-    // a duplicate would put one payload type on the m= line twice, and the
-    // answer to it is a corrected list rather than a different build, so it is
-    // told apart from a codec that is genuinely absent
+    // a duplicate would put one payload type on the m= line twice
     for (index, name) in named.iter().enumerate() {
         if named
             .iter()
@@ -1433,50 +1193,31 @@ pub(crate) fn names_in(list: &str) -> Result<Vec<&str>, Fail> {
     Ok(named)
 }
 
-// -- reaching one call's media -----------------------------------------------
-
-/// Every media handle this process has handed out.
-///
-/// One table for the process, as the stacks have: a handle is a number, and a
-/// number has to be looked up somewhere. Its lock is held for an index and a
-/// reference count, never for a frame and never while anything else is waited
-/// for.
+/// Every media handle this process has handed out. Its lock is held for an
+/// index and a reference count, never for a frame.
 static MEDIA: HandleTable<MediaEntry> = HandleTable::new(Kind::Media);
 
 /// What a media handle names.
 pub(crate) struct MediaEntry {
-    /// The call's session, for as long as the call has one.
     share: SessionShare,
-    /// The stack that minted the handle, which a thread inside this call's
-    /// media is kept from calling into.
+    /// The minting stack, which a thread inside this media may not call into.
     stack: SipralHandle,
-    /// What `now_ms` of zero means on the stack that minted the handle, kept
-    /// here because that stack is exactly what a media entry point does not
-    /// touch.
+    /// The minting stack's clock origin, copied so media never touches it.
     origin: Instant,
-    /// Whether that stack runs its audio in device mode, where the engine and
-    /// not the application pumps the frames.
+    /// Whether the stack runs in device mode (the engine pumps frames).
     device: bool,
 }
 
 impl MediaEntry {
-    /// The caller's clock, as the stack that minted this handle reads it.
-    ///
-    /// Neither checked against the stack's last reading nor written back to
-    /// it: a media entry point runs on a thread that reads the clock apart
-    /// from the one that polls, and a reading a millisecond behind the last
-    /// poll is not a caller bug.
+    /// The caller's clock on the minting stack's origin. Not checked against
+    /// the last poll: media threads read the clock apart from the poller.
     pub(crate) fn instant(&self, now_ms: u64) -> Result<Instant, Fail> {
         instant_at(self.origin, now_ms)
     }
 }
 
-/// Do something with one call's media, or say why not.
-///
-/// The one way in for every entry point that takes a media handle, and the
-/// reason none of them reaches a stack: the table hands over the entry, the
-/// session's own lock is taken — waiting for a thread that is in the middle of
-/// a frame on this call, and for nothing else — and that is all.
+/// Do something with one call's media, or say why not. Takes only the
+/// session's own lock, never the stack's.
 pub(crate) fn with_media<R>(
     media: SipralHandle,
     act: impl FnOnce(&mut MediaSession, &MediaEntry) -> Result<R, Fail>,
@@ -1490,8 +1231,6 @@ pub(crate) fn with_media<R>(
             SipralStatus::Busy,
             "this thread is already inside this call's media, further down its own call stack",
         )),
-        // ended, and whatever the layer below one day adds beside it: either
-        // way there is no session here to act on
         Err(_) => Err(fail(
             SipralStatus::WrongState,
             "this call's media has ended: the call is over or its stack was destroyed, and all \
@@ -1500,17 +1239,10 @@ pub(crate) fn with_media<R>(
     }
 }
 
-/// Do something with two calls' media at once, for [`sipral_media_mix`]
-/// alone: every other entry point here touches one call's session, and this
-/// is the one place two must be held together, because a mixed frame cannot
-/// be built from either alone.
+/// Do something with two calls' media at once, for [`sipral_media_mix`].
 ///
-/// Locked in a fixed order — whichever handle is numerically smaller,
-/// regardless of which one `media_a`/`media_b` names first — so that two
-/// threads mixing the same pair with the arguments swapped wait for each
-/// other rather than deadlocking against each other, which two independent
-/// per-session locks taken in whatever order the caller happened to name
-/// them would otherwise invite.
+/// Locks the numerically smaller handle first, so two threads mixing the
+/// same pair in swapped order cannot deadlock.
 fn with_media_pair<R>(
     media_a: SipralHandle,
     media_b: SipralHandle,
@@ -1544,16 +1276,14 @@ fn with_media_pair<R>(
     }
 }
 
-/// Why a [`SessionShare`] did not reach its session, as the same [`Fail`]
-/// [`with_media`] itself turns it into.
+/// The same [`Fail`] [`with_media`] gives when a [`SessionShare`] is
+/// unavailable.
 fn media_unavailable(error: SessionUnavailable) -> Fail {
     match error {
         SessionUnavailable::Reentered => fail(
             SipralStatus::Busy,
             "this thread is already inside this call's media, further down its own call stack",
         ),
-        // ended, and whatever the layer below one day adds beside it: either
-        // way there is no session here to act on
         _ => fail(
             SipralStatus::WrongState,
             "this call's media has ended: the call is over or its stack was destroyed, and all \
@@ -1562,14 +1292,9 @@ fn media_unavailable(error: SessionUnavailable) -> Fail {
     }
 }
 
-/// Refuse a media entry point called from inside a frame of any call's
-/// media on this thread: from a processor, or from a local conference's tick.
-///
-/// The session lock waits for a frame another thread is in the middle of, so
-/// two processors on two threads, each reaching into the other's call, would
-/// each wait for the other's frame to end. Refusing every media handle from
-/// inside a frame, rather than only the one the frame is on, is what makes
-/// that impossible rather than merely documented.
+/// Refuse a media entry point called from inside any call's frame on this
+/// thread (a processor, or a local conference's tick). Refusing every handle,
+/// not just the frame's own, rules out two processors deadlocking across calls.
 fn refuse_from_inside_a_frame() -> Result<(), Fail> {
     if INSIDE.with_borrow(Vec::is_empty) {
         return Ok(());
@@ -1587,16 +1312,14 @@ thread_local! {
     static INSIDE: RefCell<Vec<SipralHandle>> = const { RefCell::new(Vec::new()) };
 }
 
-/// This thread's mark on a stack, for as long as it is working on the media
-/// of one of that stack's calls.
+/// This thread's mark on a stack while it works on one of its calls' media.
 pub(crate) struct Inside {
     stack: SipralHandle,
 }
 
 impl Inside {
-    /// Mark this thread as inside `stack`'s media — or inside a local
-    /// conference's tick, named by the conference's own handle — until the
-    /// mark is dropped.
+    /// Mark this thread as inside `stack`'s media (or a conference's tick,
+    /// by the conference handle) until dropped.
     pub(crate) fn enter(stack: SipralHandle) -> Self {
         INSIDE.with_borrow_mut(|inside| inside.push(stack));
         Self { stack }
@@ -1613,9 +1336,7 @@ impl Drop for Inside {
     }
 }
 
-/// Whether this thread is inside a frame of a call on `stack` — which only
-/// code run during that frame, such as a processor, can be when it calls into
-/// the library.
+/// Whether this thread is inside a frame of a call on `stack`.
 pub(crate) fn inside_media_of(stack: SipralHandle) -> bool {
     INSIDE.with_borrow(|inside| inside.contains(&stack))
 }
@@ -1632,23 +1353,17 @@ pub(crate) fn no_media() -> Fail {
 entry! {
     /// A handle on one call's media, written to `out_media`.
     ///
-    /// Mint it once the call's negotiation has settled —
-    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
-    /// that event's callback is allowed — and hand it to every `sipral_media_`
-    /// entry point in place of the stack and the call. None of those takes the
-    /// stack's lock, which is the point: the thread that carries a call's audio
-    /// is never refused a frame because signalling, the event callback or
-    /// another call is busy.
+    /// Mint it once negotiation settles (`SIPRAL_EVENT_KIND_MEDIA_STARTED`,
+    /// callback included) and pass it to every `sipral_media_` entry point.
+    /// None of those takes the stack's lock.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
-    /// description of the caller's own, or one whose negotiation has not
-    /// settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media. Written only on
+    /// `SIPRAL_STATUS_OK`.
     ///
-    /// The handle outlives the call. Once the call ends, or its stack is
-    /// destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
-    /// on it; a hold, a resume or a change of codec keeps it working. Each
-    /// handle minted is released once with `sipral_media_release`, and asking
-    /// twice for the same call gives two.
+    /// The handle outlives the call: after the call ends or the stack is
+    /// destroyed, media entry points answer `SIPRAL_STATUS_WRONG_STATE`. Hold,
+    /// resume and codec changes keep it valid. Each handle is released once with
+    /// `sipral_media_release`; asking twice gives two.
     ///
     /// # Safety
     ///
@@ -1657,8 +1372,7 @@ entry! {
         if out_media.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_media is null"));
         }
-        // stamped with its stack's tag like every other handle a stack mints,
-        // so a media handle is refused by name when handed to the wrong place
+        // the stack's tag lets a misplaced handle be refused by name
         let (entry, tag) = with_stack(stack, |state| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let share = state.engine.share(id).ok_or_else(no_media)?;
@@ -1681,11 +1395,9 @@ entry! {
 entry! {
     /// Let a media handle go.
     ///
-    /// Its one matching free, whether or not its call is still up and whether
-    /// or not its stack still exists. The session is not touched: it belongs to
-    /// the call and ends when the call does, so releasing a handle mid-call
-    /// stops nothing but the handle. A handle released twice is
-    /// `SIPRAL_STATUS_STALE_HANDLE` the second time.
+    /// Valid whether or not the call or stack still exists. The session is not
+    /// touched; releasing mid-call stops nothing. A second release is
+    /// `SIPRAL_STATUS_STALE_HANDLE`.
     ///
     /// # Safety
     ///
@@ -1696,17 +1408,13 @@ entry! {
     }
 }
 
-// -- what this build contains ------------------------------------------------
-
 entry! {
     /// The name of a codec, as a static NUL-terminated string, or null for a
     /// number this build has no codec for.
     ///
-    /// It is spelled as IANA registered it, which is also how it goes on an
-    /// `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
-    /// `L16/16000`, which is one encoding name at two rates and is named that
-    /// way in a codec order. The string belongs to the library and lives as
-    /// long as it is loaded.
+    /// Spelled as IANA registered it; L16 carries its rate (`L16/8000`,
+    /// `L16/16000`), as in a codec order. Owned by the library, valid while
+    /// it is loaded.
     ///
     /// # Safety
     ///
@@ -1716,13 +1424,9 @@ entry! {
             1 => c"PCMU".as_ptr(),
             2 => c"PCMA".as_ptr(),
             3 => c"G722".as_ptr(),
-            // the number stays in the enumeration whether or not this build
-            // linked the codec; the name is what the build has, which the
-            // catalogue says and no feature of this crate's does
+            // the catalogue, not this crate's feature, says whether Opus is linked
             4 if linked(SipralCodec::Opus) => c"opus".as_ptr(),
             5 => c"G729".as_ptr(),
-            // one encoding name at two rates, so the name a codec order
-            // uses, which carries the rate
             6 => c"L16/8000".as_ptr(),
             7 => c"L16/16000".as_ptr(),
             _ => std::ptr::null(),
@@ -1731,10 +1435,7 @@ entry! {
 }
 
 entry! {
-    /// How many codecs this build contains.
-    ///
-    /// A compile-time fact, and the reason A4 starts here rather than at a
-    /// configuration: no setting can add a codec that was not linked.
+    /// How many codecs this build contains, fixed at compile time.
     ///
     /// # Safety
     ///
@@ -1751,9 +1452,8 @@ entry! {
 entry! {
     /// One of them, by index, from zero to what `sipral_codec_count` said.
     ///
-    /// The order is this build's own preference, quality first, which is what
-    /// is offered when nobody has said otherwise — all of it but G.729, which
-    /// is listed last and offered only where a codec order names it.
+    /// In this build's preference order, the default offer; G.729 comes last
+    /// and is offered only when a codec order names it.
     ///
     /// # Safety
     ///
@@ -1782,11 +1482,9 @@ entry! {
 entry! {
     /// The codecs this stack offers, in the order it offers them.
     ///
-    /// The other half of the configuration: `codecs` in
-    /// `sipral_stack_config_t` says what to offer, and this says what that came
-    /// to. `out_count` always receives the number there are, so a caller that
-    /// passes a capacity of zero and a null buffer learns how much room to
-    /// bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
+    /// What `sipral_stack_config_t::codecs` came to. `out_count` always gets
+    /// the total; a short buffer (or null with zero capacity) gets
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
     ///
     /// # Safety
     ///
@@ -1819,16 +1517,13 @@ entry! {
                 format!("this stack offers {} codecs and there is room for {capacity}", order.len()),
             ));
         }
-        // the capacity reaches the length, so a non-empty order has a
-        // buffer; an empty one is nothing to copy, and the buffer may be null
+        // capacity covers the length, so a non-empty order has a buffer
         if !order.is_empty() {
             unsafe { std::ptr::copy_nonoverlapping(order.as_ptr(), out_codecs, order.len()) };
         }
         Ok(())
     }
 }
-
-// -- what one call agreed, and what it cost ----------------------------------
 
 entry! {
     /// What one call's media settled on.
@@ -1838,8 +1533,7 @@ entry! {
     /// `out_info` must point at a `sipral_media_info_t` whose `size` member
     /// says how long it is.
     fn sipral_media_info(media: SipralHandle, out_info: *mut SipralMediaInfo) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the call
+        // size first, so a wrong size is reported before anything about the call
         unsafe { crate::versioned::declared_size(out_info.cast_const()) }?;
         let info = with_media(media, |session, _| Ok(media_info(session)))?;
         unsafe { write_versioned(out_info, info) }
@@ -1849,10 +1543,8 @@ entry! {
 entry! {
     /// How many codecs were in the running on this call.
     ///
-    /// This call's own catalogue, which is the stack's order unless
-    /// `sipral_call_config_t::codecs` named another. Zero is an answer, not a
-    /// failure: a call negotiated from a description with no media line in it
-    /// had nothing in the running at all.
+    /// This call's catalogue: the stack's order unless
+    /// `sipral_call_config_t::codecs` named another. Zero is a valid answer.
     ///
     /// # Safety
     ///
@@ -1871,9 +1563,7 @@ entry! {
     /// One of them, by index, from zero to what
     /// `sipral_media_codec_candidate_count` said, in this call's own order.
     ///
-    /// D5 in one place: what this end offered, what the far end named, and
-    /// which of the two ran out first. An index past the end is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+    /// An index past the end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
     /// # Safety
     ///
@@ -1884,8 +1574,7 @@ entry! {
         index: usize,
         out_candidate: *mut SipralCodecCandidate,
     ) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the call
+        // size first, so a wrong size is reported before anything about the call
         unsafe { crate::versioned::declared_size(out_candidate.cast_const()) }?;
         let candidate = with_media(media, |session, _| {
             let candidates = session.codec_candidates();
@@ -1908,9 +1597,8 @@ entry! {
     /// How many paths this call's ICE agent tried: every candidate pair its
     /// checklist held, then every relay it held.
     ///
-    /// Zero is an answer, not a failure: a call not using ICE has one path,
-    /// the address its description named, and nothing here to explain. A
-    /// restart (RFC 8445 §9) starts the list again with the new session.
+    /// Zero for a call not using ICE. A restart (RFC 8445 §9) starts the list
+    /// again.
     ///
     /// # Safety
     ///
@@ -1930,12 +1618,7 @@ entry! {
     /// `sipral_media_path_candidate_count` said: the pairs in the order the
     /// checklist took them in, then the relays.
     ///
-    /// D5's transport and NAT half, beside `sipral_media_codec_candidate_at`:
-    /// which path the media took, and for every other one whether its check
-    /// went unanswered, the far end refused it, the answer came back from
-    /// elsewhere, the relay would not let the far end through, or it worked
-    /// and lost to a better one. An index past the end is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are; an address
+    /// An index past the end is `SIPRAL_STATUS_INVALID_ARGUMENT`; an address
     /// buffer smaller than `SIPRAL_ADDRESS_BYTES` is
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, before anything is written.
     ///
@@ -1987,8 +1670,7 @@ entry! {
     }
 }
 
-/// Every path a call's agent tried, as the numbers this ABI has for it and
-/// the two addresses to write beside them.
+/// Every path a call's agent tried, with its two addresses.
 #[cfg(feature = "ice")]
 fn paths_of(
     session: &MediaSession,
@@ -2023,8 +1705,7 @@ fn paths_of(
                 PathOutcome::Held => (SipralPathOutcome::Held, 0),
                 PathOutcome::Released => (SipralPathOutcome::Released, 0),
                 PathOutcome::Lost(why) => (SipralPathOutcome::Lost, crate::nat::refusal_code(why)),
-                // the layer below has grown an outcome this ABI has no number
-                // for, and saying so beats picking one that is wrong
+                // an outcome this ABI has no number for yet
                 _ => (SipralPathOutcome::Unknown, 0),
             };
             let numbers = SipralPathCandidate {
@@ -2054,7 +1735,6 @@ fn paths_of(
         .collect()
 }
 
-/// Without the agent there is no path to explain.
 #[cfg(not(feature = "ice"))]
 fn paths_of(
     _session: &MediaSession,
@@ -2062,15 +1742,11 @@ fn paths_of(
     Vec::new()
 }
 
-/// What the negotiation recorded about one codec, as the numbers this ABI has
-/// for it.
 fn candidate_of(candidate: &CodecCandidate) -> SipralCodecCandidate {
     let (outcome, outranked_by) = match &candidate.outcome {
         CodecOutcome::Chosen => (SipralCodecOutcome::Chosen, SipralCodec::Unknown),
         CodecOutcome::NotNamed => (SipralCodecOutcome::NotNamed, SipralCodec::Unknown),
         CodecOutcome::Outranked(winner) => (SipralCodecOutcome::Outranked, named_codec(*winner)),
-        // the layer below has grown an outcome this ABI has no number for,
-        // and saying so beats picking one that is wrong
         _ => (SipralCodecOutcome::Unknown, SipralCodec::Unknown),
     };
     SipralCodecCandidate {
@@ -2122,16 +1798,10 @@ const fn rtcp_of(plan: RtcpPlan) -> SipralRtcp {
 entry! {
     /// What one call's media has cost, and what it is costing now.
     ///
-    /// A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
-    /// else, because "how long since a packet arrived" is a question about the
-    /// present and nothing here reads a clock to answer it. Like every media
-    /// entry point, this does not move the stack's own clock: it is read at the
-    /// frame rate of a user interface, often from the thread that draws one,
-    /// and a reading a millisecond behind the last poll is not a caller bug.
-    ///
-    /// The end-of-call record arrives instead as
-    /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
-    /// gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
+    /// `now_ms` is the caller's monotonic clock; it does not move the stack's
+    /// clock. The end-of-call record arrives as
+    /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`; by then this answers
+    /// `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// # Safety
     ///
@@ -2142,8 +1812,7 @@ entry! {
         now_ms: u64,
         out_stats: *mut SipralStreamStats,
     ) {
-        // checked before the handle is even looked up, so a caller that got
-        // its size wrong is told that rather than something about the call
+        // size first, so a wrong size is reported before anything about the call
         unsafe { crate::versioned::declared_size(out_stats.cast_const()) }?;
         let stats = with_media(media, |session, entry| {
             let now = entry.instant(now_ms)?;
@@ -2153,25 +1822,15 @@ entry! {
     }
 }
 
-// -- the packets -------------------------------------------------------------
-
 entry! {
     /// Take a datagram off the media socket.
     ///
-    /// One entry point for both sockets: RTP and RTCP are told apart by
-    /// RFC 5761 §4's rule on the payload type field, so a caller that put both
-    /// on one socket does not have to sort them, and one that did not can hand
-    /// over whichever arrived.
+    /// RTP and RTCP are told apart by RFC 5761 §4, so either socket's traffic
+    /// goes here.
     ///
-    /// `data` is written through. A secured stream is opened in place, and a
-    /// caller that needs the ciphertext afterwards keeps its own copy.
-    ///
-    /// `out_arrival` may be null for a caller that does not want to know what
-    /// the datagram turned out to be.
-    ///
-    /// `now_ms` is when it arrived, on the stack's clock. Reading it here moves
-    /// nothing: the network thread and the poll thread read that clock apart,
-    /// and a datagram a millisecond behind the last poll is not refused.
+    /// `data` is decrypted in place; keep a copy if the ciphertext is needed.
+    /// `out_arrival` may be null. `now_ms` is the arrival time on the stack's
+    /// clock and moves nothing.
     ///
     /// # Safety
     ///
@@ -2214,14 +1873,9 @@ entry! {
     }
 }
 
-/// Whether the second byte of a datagram says control, by RFC 5761 §4.
-///
-/// The field is the payload type with the marker bit above it in RTP, and the
-/// packet type in RTCP; 64 to 95 are the numbers RTP never uses and RTCP
-/// always does, which is what lets the two share a socket. Read here only to
-/// pick which bound the datagram is held to — the session tells them apart
-/// again for itself, and disagreeing with it would only mean a report is read
-/// as media a moment later.
+/// Whether the second byte of a datagram says control, by RFC 5761 §4
+/// (64 to 95 after the marker bit). Only picks the size bound; the session
+/// classifies again itself.
 const fn is_control(second: u8) -> bool {
     matches!(second & 0x7f, 64..=95)
 }
@@ -2245,10 +1899,8 @@ entry! {
     ///
     /// Exactly `sipral_media_info_t::frame_samples` samples are written, and a
     /// smaller buffer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the number
-    /// needed in `out_written`. Every source fills the frame, concealment and
-    /// silence included: a device handed nothing for one frame plays whatever
-    /// was in its buffer last, and that is a far worse sound than the one being
-    /// concealed.
+    /// needed in `out_written`. Every source fills the whole frame, silence
+    /// included.
     ///
     /// # Safety
     ///
@@ -2276,7 +1928,7 @@ entry! {
                     format!("a frame is {frame} samples and there is room for {capacity}"),
                 ));
             }
-            // the capacity reaches the frame, so the buffer is not null
+            // capacity covers the frame, so the buffer is not null
             let out = unsafe { slice::from_raw_parts_mut(samples, frame) };
             Ok(session.playback_at_application_rate(out))
         })?;
@@ -2300,24 +1952,16 @@ const fn playback_of(played: Playback) -> SipralPlayback {
 entry! {
     /// Put one frame from the microphone on the wire.
     ///
-    /// `sample_count` is `sipral_media_info_t::frame_samples` and nothing else:
-    /// a codec cuts one frame at one length, and half a frame encoded as a
-    /// whole one is what a peer hears as a stutter.
+    /// `sample_count` must equal `sipral_media_info_t::frame_samples`.
     ///
-    /// A `len` of zero in the packet means the frame was deliberately not sent:
-    /// the far end is holding this end, silence suppression swallowed it, or
-    /// ICE has not chosen a path for this call yet. The RTP timestamp moves by
-    /// a frame in the first two cases, because RFC 3550 §5.1 makes it a
-    /// measure of time rather than of packets; in the third nothing is
-    /// encoded at all, since there is no packet for the timestamp to belong
-    /// to and a codec that carries state would have moved it for nothing.
-    /// While this end holds the far end the frame goes out as silence, never
-    /// as the microphone.
+    /// A packet `len` of zero means the frame was deliberately not sent: held
+    /// by the far end, suppressed as silence, or ICE has no path yet. The RTP
+    /// timestamp still advances in the first two cases (RFC 3550 §5.1); in the
+    /// third nothing is encoded. While this end holds the far end, silence
+    /// goes out instead of the microphone.
     ///
-    /// `now_ms` is read as the stack reads it and moves nothing, as with every
-    /// media entry point. It is what tells ICE that traffic went out on the
-    /// pair it chose, which is what RFC 8445 §11 lets it stop sending
-    /// keepalives for.
+    /// `now_ms` moves nothing; it tells ICE traffic went out on the chosen pair
+    /// (RFC 8445 §11 keepalives).
     ///
     /// # Safety
     ///
@@ -2364,21 +2008,15 @@ entry! {
     /// application mode: what `sipral_media_playback` fills and what
     /// `sipral_media_capture` takes, whatever rate the codec runs at.
     ///
-    /// `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
-    /// which is where every call starts. The frame keeps the call's
-    /// duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
-    /// `sipral_media_info_t::sample_rate` and `frame_samples` report the
-    /// rate chosen as soon as it is set. The conversion is the library's
-    /// own resampler, both ways, and follows a re-negotiation onto another
-    /// codec by itself; the codec, an attached processor, a recording and the
-    /// in-band detectors keep working at the codec's rate. Asking again for
-    /// the rate already set changes nothing.
+    /// `hz` is 8000, 16000, 24000 or 48000; 0 (the start) is the codec's rate.
+    /// The frame keeps its duration (20 ms at 24 kHz is 480 samples), and
+    /// `sipral_media_info_t::sample_rate`/`frame_samples` follow at once. The
+    /// library resamples both ways and follows codec renegotiation; processors,
+    /// recordings and detectors stay at the codec's rate.
     ///
-    /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
-    /// left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
-    /// where the audio engine pumps the frames at the devices' rate, and
-    /// `sipral_media_mix` refuses a pair while either call has a rate of its
-    /// own: a local conference takes calls at any rate.
+    /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, setting unchanged.
+    /// `SIPRAL_STATUS_WRONG_STATE` in device mode. `sipral_media_mix` refuses
+    /// a pair while either call has its own rate.
     ///
     /// # Safety
     ///
@@ -2404,42 +2042,29 @@ record! {
     /// What [`SipralProcessorCallback`] is handed for one call: an ordinary
     /// frame to process, or a request to forget what has been learned.
     ///
-    /// Filled by the library and handed to the callback as a `const`
-    /// pointer, the same shape [`crate::screening::SipralScreenRequest`] is:
-    /// read `size` before anything past it, and read nothing once the
-    /// callback has returned — `near_end`, `far_end` and `out` borrow from
-    /// buffers that belong to this one call and are not this ABI's to keep
-    /// alive a moment longer.
+    /// Library-owned, passed as a `const` pointer. Read `size` first; read
+    /// nothing after the callback returns, since the buffers are borrowed.
     #[derive(Clone, Copy)]
     pub struct SipralProcessorFrame {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
-        /// 0 for an ordinary frame; 1 for a request to forget whatever state
-        /// the processor holds — a device change or a codec change mid-call
-        /// asks for this, and `near_end`, `far_end` and `out`, with the three
-        /// lengths beside them, are all null and zero when it is set.
+        /// 0 for an ordinary frame; 1 to forget learned state (device or codec
+        /// change). When 1, all three buffers are null and lengths zero.
         pub reset: u32,
-        /// The frame just captured from the microphone. Null when `reset` is
-        /// set.
+        /// The frame just captured from the microphone. Null on reset.
         pub near_end: *const i16,
-        /// How many samples `near_end` is. Always the same number as
-        /// `far_end_len` and `out_len` — carried three times, once beside
-        /// each buffer, because that is the one buffer each binding marshals
-        /// on its own. 0 when `reset` is set.
+        /// Samples in `near_end`; always equal to `far_end_len` and `out_len`.
+        /// 0 on reset.
         pub near_end_len: usize,
-        /// The far-end audio rendered to the loudspeaker over the same span
-        /// of time as `near_end`, the same length. Null when `reset` is set.
+        /// The far-end audio played over the same span as `near_end`. Null on
+        /// reset.
         pub far_end: *const i16,
-        /// How many samples `far_end` is. See `near_end_len`. 0 when `reset`
-        /// is set.
+        /// Samples in `far_end`. 0 on reset.
         pub far_end_len: usize,
-        /// Where the callback writes the frame that replaces `near_end` —
-        /// every sample of it, since what is not written is read back as
-        /// whatever was there before. Null when `reset` is set, since there
-        /// is nothing to write.
+        /// Where the callback writes the replacement for `near_end`; every
+        /// sample must be written. Null on reset.
         pub out: *mut i16,
-        /// How many samples `out` has room for, which is also how many the
-        /// callback has to write. See `near_end_len`. 0 when `reset` is set.
+        /// Samples `out` holds, all of which must be written. 0 on reset.
         pub out_len: usize,
     }
 }
@@ -2449,39 +2074,29 @@ alias! {
     /// frame, or told to forget what it has learned — [`SipralProcessorFrame`]
     /// says which. Installed with [`sipral_media_attach_processor`].
     ///
-    /// **It runs with this call's media locked**, which is the opposite of
-    /// [`crate::event::SipralEventCallback`] and the reason
-    /// [`sipral_media_attach_processor`]'s own doc comment says so before it
-    /// says anything else — read it there. In consequence: **this callback
-    /// must not call back into the media handle it was attached through**,
-    /// on this thread or on any other. It must not unwind, for the same
-    /// reason nothing in this ABI may.
+    /// **It runs with this call's media locked** (see
+    /// [`sipral_media_attach_processor`]): it must not call into the media
+    /// handle it was attached through, on any thread, and must not unwind.
     ///
-    /// `frame` and everything it points at belong to the library and are
-    /// valid for the duration of this one call and no longer.
+    /// `frame` and what it points at are library-owned, valid only during the
+    /// call.
     pub type SipralProcessorCallback = fn(
         frame: *const SipralProcessorFrame,
         user_data: *mut c_void,
     );
 }
 
-/// A [`Processor`] that hands both operations [`SipralProcessorFrame`] can
-/// mean to one C callback.
+/// A [`Processor`] backed by one C callback.
 ///
 /// # Safety
 ///
-/// `callback` is the caller's own function, called under the contract
-/// [`SipralProcessorCallback`]'s doc comment states: it must not unwind, and
-/// it must not call back into the media handle this was attached through,
-/// enforced by that handle's own re-entry guard rather than by anything
-/// here. `user_data` is the caller's own pointer, read by nothing here and
-/// only ever handed back to the same callback it arrived with.
+/// `callback` follows [`SipralProcessorCallback`]'s contract (no unwinding;
+/// re-entry is refused by the handle's guard). `user_data` is only handed
+/// back to it.
 struct CProcessor {
     callback: unsafe extern "C" fn(frame: *const SipralProcessorFrame, user_data: *mut c_void),
     user_data: *mut c_void,
-    /// Where the callback writes the frame it hands back, sized to the last
-    /// frame seen — which changes when a codec change gives this call a
-    /// different frame length, and never otherwise.
+    /// The callback's output buffer, resized when the frame length changes.
     out: Vec<i16>,
 }
 
@@ -2504,11 +2119,8 @@ impl Processor for CProcessor {
             out: self.out.as_mut_ptr(),
             out_len: near_end.len(),
         };
-        // Safety: `near_end` and `reference` are each `near_end.len()`
-        // samples, readable for the length of this call; `self.out` was just
-        // sized to the same length and is writable for it. `frame` is read
-        // by the callback for the duration of this one call, under
-        // `SipralProcessorCallback`'s contract.
+        // Safety: `near_end`, `reference` and `self.out` each hold
+        // `near_end.len()` samples for this call; `frame` lives across it.
         unsafe { (self.callback)(&raw const frame, self.user_data) };
         near_end.copy_from_slice(&self.out);
     }
@@ -2524,46 +2136,30 @@ impl Processor for CProcessor {
             out: ptr::null_mut(),
             out_len: 0,
         };
-        // Safety: as in `process` above; there is nothing beyond `frame`
-        // itself for the callback to read or write this time.
+        // Safety: as in `process`; only `frame` itself is passed.
         unsafe { (self.callback)(&raw const frame, self.user_data) };
     }
 }
 
 entry! {
-    /// Run `callback` over every frame captured on this call, against the
-    /// far-end audio this call played a render delay earlier — echo
-    /// cancellation, gain control and noise suppression are all this one
-    /// seam, and `docs/05-media.md` says why.
+    /// Run `callback` over every captured frame, against the far-end audio
+    /// played a render delay earlier: the seam for echo cancellation, gain
+    /// control and noise suppression (`docs/05-media.md`).
     ///
-    /// What was attached before is dropped, along with the echo path it had
-    /// learned. Attaching mid-call is allowed and costs the first few hundred
-    /// milliseconds of a fresh adaptation, the same price a call pays at its
-    /// start.
+    /// Replaces any previous processor and its learned state. Attaching
+    /// mid-call costs a fresh adaptation.
     ///
-    /// **`callback` runs with this call's media locked**, the same as the
-    /// screening callback and unlike the event callback: it is called from
-    /// inside [`sipral_media_playback`] (to learn what the loudspeaker was
-    /// just given) and inside [`sipral_media_capture`] (to run the frame just
-    /// captured), and — with [`SipralProcessorFrame`]'s `reset` set — whenever
-    /// this call's media forgets what it has learned, a device change or a
-    /// codec change mid-call. All three run on whichever thread called the
-    /// entry point that triggered them. **From inside `callback`, call
-    /// nothing on any media handle and nothing on this call's stack**: every
-    /// such call answers `SIPRAL_STATUS_BUSY` and does nothing. Another
-    /// thread that calls into this call's media meanwhile waits for the
-    /// frame to finish, so a processor that reached into a second call's
-    /// media while that call's processor reached into this one would wait on
-    /// the other for ever; refusing every media handle from inside a frame
-    /// is what rules that out. It must not unwind: a panic that reached C
-    /// across this boundary would take the host process with it, the same
-    /// rule every callback in this ABI is held to.
+    /// **`callback` runs with this call's media locked**, unlike the event
+    /// callback: inside [`sipral_media_playback`], inside
+    /// [`sipral_media_capture`], and with [`SipralProcessorFrame`]'s `reset`
+    /// set on a device or codec change, on the thread that called in. **From
+    /// inside it, call nothing on any media handle or this call's stack**:
+    /// such calls answer `SIPRAL_STATUS_BUSY`. This rules out two processors
+    /// deadlocking across calls. It must not unwind.
     ///
-    /// `user_data` is handed back to `callback` untouched on every call, read
-    /// by nothing here, and has to outlive the last one — which the caller
-    /// who installed it is the one to know is over:
-    /// `sipral_media_detach_processor` returning, or `sipral_media_release`
-    /// of this handle, are the two ways.
+    /// `user_data` is handed back untouched and must outlive the last call,
+    /// which ends when `sipral_media_detach_processor` or
+    /// `sipral_media_release` returns.
     ///
     /// # Safety
     ///
@@ -2597,12 +2193,9 @@ entry! {
     /// Stop running the processor [`sipral_media_attach_processor`] attached,
     /// if there was one.
     ///
-    /// `out_was_attached`, when not null, says whether there was one to stop:
-    /// 1 if a processor was attached and is now detached, 0 if there was
-    /// none. The frames the application hands over reach the encoder
-    /// untouched again from the next one, and the loudspeaker history kept
-    /// for it is released. Once this returns, `callback` is not called again
-    /// for this attachment — the moment `user_data` may be freed.
+    /// `out_was_attached`, when not null, gets 1 if one was detached, else 0.
+    /// Once this returns, `callback` is not called again and `user_data` may
+    /// be freed.
     ///
     /// # Safety
     ///
@@ -2620,14 +2213,10 @@ entry! {
     /// Forget the echo path, the noise floor and the gain the attached
     /// processor has learned, keeping the processor itself attached.
     ///
-    /// What a device change asks for: the estimate was built for a different
-    /// loudspeaker and a different microphone, and carrying it forward makes
-    /// the processor fight it for a while instead of adapting cleanly. Calls
-    /// the `callback` given to [`sipral_media_attach_processor`] with
-    /// [`SipralProcessorFrame`]'s `reset` set.
+    /// For a device change. Calls the [`sipral_media_attach_processor`]
+    /// callback with [`SipralProcessorFrame`]'s `reset` set.
     ///
-    /// `out_was_attached`, when not null, says whether there was a processor
-    /// to reset: 1 if there was, 0 if there was none.
+    /// `out_was_attached`, when not null, gets 1 if a processor exists, else 0.
     ///
     /// # Safety
     ///
@@ -2642,34 +2231,21 @@ entry! {
 }
 
 entry! {
-    /// One frame of a local conference of two calls: decode what `media_a`'s
-    /// and `media_b`'s far ends each sent, mix what each of the three
-    /// parties — the two far ends and this end — is owed, and send the two
-    /// frames the far ends are owed.
+    /// One frame of a two-call local conference: decode both far ends, mix
+    /// what each of the three parties is owed, and send the two far-end frames.
     ///
-    /// `sipral_call_join` must already have paired the two calls these two
-    /// handles belong to. Nothing here checks that itself: checking it would
-    /// mean taking the stack's lock on every frame, which is exactly what a
-    /// media handle exists to avoid, so this mixes whatever two handles it is
-    /// given — the same trust every other `sipral_media_` entry point places
-    /// in the caller having minted the handle from a call worth acting on.
+    /// `sipral_call_join` must already have paired the calls. Not checked here,
+    /// since that would take the stack's lock every frame.
     ///
-    /// `mic` is this end's own frame, `mic_count` long; `local` is filled
-    /// with what this end's own loudspeaker is owed, `local_count` long. Both
-    /// are `sipral_media_info_t::frame_samples` on a call this pair actually
-    /// agreed on — `sipral_call_join` already made that the same on both.
-    /// `packet_a` and `packet_b` are filled the way `sipral_media_capture`
-    /// fills one, each with what its own call's far end is now owed: `mic`
-    /// mixed with the *other* far end's frame rather than `mic` alone, which
-    /// is also what each call's own recording keeps if one is running.
+    /// `mic` (`mic_count`) is this end's frame; `local` (`local_count`) gets
+    /// what this end's speaker is owed. Both are
+    /// `sipral_media_info_t::frame_samples`. `packet_a`/`packet_b` are filled
+    /// as by `sipral_media_capture`, each with `mic` mixed with the other far
+    /// end; recordings keep the same.
     ///
-    /// Drive a joined pair from one thread, one frame at a time. The two
-    /// sessions are locked together for the length of the call, in a fixed
-    /// order that does not depend on which handle is named first, so a
-    /// second `sipral_media_mix` on the same pair waits for this one rather
-    /// than deadlocking against it — but a thread still calling
-    /// `sipral_media_playback`/`sipral_media_capture` on either call alone at
-    /// the same time is a second driver this mix does not know about.
+    /// Drive a joined pair from one thread. Concurrent mixes of the same pair
+    /// serialize without deadlock, but calling `sipral_media_playback` or
+    /// `sipral_media_capture` on either call meanwhile is a second driver.
     ///
     /// # Safety
     ///
@@ -2700,8 +2276,7 @@ entry! {
         }
         let origin = MEDIA.get(media_a).map_err(handle_failed)?.origin;
         let now = instant_at(origin, now_ms)?;
-        // a slice is never built over a null pointer, not even an empty one:
-        // (NULL, 0) is a pair the checks above let through
+        // never build a slice over null, even empty; (NULL, 0) passes the checks
         let taken: &[i16] = if mic_count == 0 {
             &[]
         } else {
@@ -2758,18 +2333,12 @@ entry! {
 entry! {
     /// The control traffic this call has due.
     ///
-    /// A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
-    /// decides when, and at most one report is due at a time, so one call per
-    /// frame is enough.
+    /// A `len` of zero means nothing is due. RFC 3550 §6.3 decides when; at
+    /// most one report is due at a time.
     ///
-    /// It asks one call rather than the whole stack, so the thread that sends
-    /// a call's audio sends its reports too, on the same socket and without
-    /// reaching the stack: call it after every frame that goes out, and
-    /// whenever `sipral_stack_poll` reports a deadline while a call is not
-    /// capturing. On a call that negotiated no RTCP it answers zero for ever.
-    ///
-    /// `now_ms` is read as the stack reads it and moves nothing, as with every
-    /// media entry point.
+    /// Call it after every outgoing frame, and at each `sipral_stack_poll`
+    /// deadline while not capturing. Always zero without negotiated RTCP.
+    /// `now_ms` moves nothing.
     ///
     /// # Safety
     ///
@@ -2791,23 +2360,15 @@ entry! {
 
 entry! {
     /// A datagram this call owes the far end that is neither audio nor a
-    /// report: today, a record of the DTLS-SRTP handshake that keys it.
+    /// report: DTLS-SRTP handshake records and ICE checks.
     ///
-    /// A `len` of zero means nothing is due. On a call that is not keyed by a
-    /// handshake — every call in a build without `SIPRAL_FEATURE_DTLS_SRTP`,
-    /// and every SDES or plain call in a build with it — that is the answer
-    /// for ever, and calling this costs one comparison.
+    /// A `len` of zero means nothing is due; always so on a call without a
+    /// handshake or ICE, at the cost of one comparison.
     ///
-    /// **Drain it to empty**, in a loop, after every `sipral_media_receive`
-    /// that answered `SIPRAL_ARRIVAL_HANDSHAKE` and at every deadline
-    /// `sipral_stack_poll` names. A handshake whose records never leave is a
-    /// ClientHello that never goes out: the call rings, answers, carries no
-    /// audio in either direction, and reports nothing wrong for the two
-    /// minutes it takes to give up. That is the one failure this entry point
-    /// exists to prevent, and there is no way to notice it from the outside.
-    ///
-    /// `now_ms` is read as the stack reads it and moves nothing, as with every
-    /// media entry point.
+    /// **Drain it to empty** after every `sipral_media_receive` that answered
+    /// `SIPRAL_ARRIVAL_HANDSHAKE` and at every `sipral_stack_poll` deadline.
+    /// Otherwise the call connects, carries no audio, and reports nothing for
+    /// the two minutes until it gives up. `now_ms` moves nothing.
     ///
     /// # Safety
     ///
@@ -2817,9 +2378,6 @@ entry! {
         let mut out = unsafe { read_versioned(packet) }?;
         prepare(&mut out)?;
         with_media(media, |session, entry| {
-            // the clock is read the way every other media entry point reads
-            // it: against the stack's origin, and not held to the stack's
-            // last reading, which a media thread does not share
             #[cfg_attr(
                 not(any(feature = "dtls", feature = "ice")),
                 allow(clippy::let_underscore_untyped)
@@ -2841,38 +2399,22 @@ entry! {
 }
 
 entry! {
-    /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
+    /// The RTCP goodbye of a call whose media has ended.
     ///
-    /// The library builds the BYE RFC 3550 §6.3.7 owes the far end
-    /// the moment a call's session stops, but by then the call's media
-    /// handle is already gone — every `sipral_media_` entry point on it
-    /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
-    /// instead, the one place left that still knows the goodbye belonged to
-    /// that call.
+    /// The RFC 3550 §6.3.7 BYE is built when the session stops, after the
+    /// media handle stops working, so it is polled from the stack.
     ///
-    /// `out_call` is written with the handle of the call the goodbye
-    /// belonged to — `SIPRAL_HANDLE_NONE` when nothing was waiting. The
-    /// call itself is already over; the handle is there only so the
-    /// application knows which media socket to send the datagram from, since
-    /// it owns that socket and this ABI never did. Passing it to any other
-    /// entry point answers whatever a stale handle of its kind already
-    /// answers.
+    /// `out_call` gets the call it belonged to, or `SIPRAL_HANDLE_NONE` when
+    /// nothing was waiting. The call is over; the handle only says which media
+    /// socket to send from.
     ///
-    /// One at a time, like every other poll in this crate: call it after
-    /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
-    /// for a call this stack was running media on, and keep calling until
-    /// `packet` comes back with a `len` of zero. A call whose media never
-    /// ran leaves nothing here, but for one thing.
+    /// One at a time: after each `sipral_stack_poll` that delivered
+    /// `SIPRAL_EVENT_KIND_CALL_ENDED`, call until `packet` has `len` zero.
     ///
-    /// A call given a relay on a TURN server (`turn_server` on the stack's
-    /// configuration) gives it back through here too: the Refresh with a
-    /// lifetime of zero that RFC 8656 §8 deletes an allocation with,
-    /// addressed to the TURN server, from the same socket. It is queued when
-    /// the call ends, whether or not its media ever ran, and earlier when the
-    /// call turns out not to use the relay at all — its ICE policy is off, or
-    /// the far end answered without ICE — so polling here after every
-    /// `sipral_stack_poll`, not only the ones that ended a call, gives the
-    /// relay back sooner.
+    /// A TURN relay (`turn_server`) is given back here too: the zero-lifetime
+    /// Refresh of RFC 8656 §8, to the TURN server, from the same socket. It is
+    /// queued at call end, or earlier when the call does not use the relay, so
+    /// polling after every `sipral_stack_poll` releases it sooner.
     ///
     /// # Safety
     ///
@@ -2900,14 +2442,8 @@ entry! {
     }
 }
 
-/// Check the caller brought buffers big enough for anything this can produce,
-/// and empty the two lengths it is about to fill in.
-///
-/// Asked before anything is built, so that a packet is never made and then
-/// dropped for want of somewhere to put it. The lengths are cleared here for
-/// the same reason the buffers are checked here: they are the library's to
-/// write, and whatever the caller left in them must never read as a packet that
-/// was produced.
+/// Check the caller's buffers before anything is built, and clear the output
+/// lengths so stale values never read as a packet.
 pub(crate) fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
     packet.len = 0;
     packet.destination_len = 0;
@@ -2935,8 +2471,7 @@ pub(crate) fn prepare(packet: &mut SipralMediaPacket) -> Result<(), Fail> {
     Ok(())
 }
 
-/// Put one datagram a session produced in the caller's buffers, with what
-/// to send it over.
+/// Put one session datagram in the caller's buffers, with its transport.
 ///
 /// # Safety
 ///
@@ -2954,13 +2489,9 @@ pub(crate) unsafe fn put_datagram(
 
 /// Put one datagram in the caller's buffers.
 ///
-/// [`prepare`] promised the caller a datagram no longer than
-/// [`SIPRAL_MEDIA_PACKET_BYTES`] and checked the buffer holds that much, and
-/// RTP and RTCP are built in buffers that size. A DTLS record, an ICE check
-/// or a TURN-wrapped packet is built elsewhere, so the length is compared
-/// with the room here rather than trusted: one that does not fit is
-/// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, naming how many bytes it needed, and
-/// nothing is written.
+/// DTLS, ICE and TURN-wrapped datagrams are built outside the
+/// [`SIPRAL_MEDIA_PACKET_BYTES`] bound, so the length is checked here: too
+/// long is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written.
 ///
 /// # Safety
 ///
@@ -2990,8 +2521,7 @@ pub(crate) unsafe fn put(
     }
     let written = destination.to_string();
     if written.len() >= SIPRAL_ADDRESS_BYTES {
-        // an address longer than the room this ABI promises cannot happen: the
-        // longest a socket address prints as is a bracketed IPv6 and a port
+        // unreachable: a bracketed IPv6 and port fit
         return Err(fail(
             SipralStatus::BufferTooSmall,
             format!("the destination prints as {} bytes", written.len()),
@@ -3028,14 +2558,9 @@ pub(crate) unsafe fn address(
     })
 }
 
-// -- dialling ----------------------------------------------------------------
-
-/// Put a whole dial string in the media: as named telephone events, or in
-/// the audio as the two tones of each key where the call negotiated no
-/// telephone event or `in_band` asks for it anyway.
-///
-/// Reached from [`sipral_call_send_dtmf`](crate::call), which chooses between
-/// this and the two INFO bodies.
+/// Put a dial string in the media: as telephone events, or as in-band tones
+/// when none were negotiated or `in_band` asks. Reached from
+/// [`sipral_call_send_dtmf`](crate::call).
 pub(crate) fn dial_in_media(
     state: &mut StackState,
     call: sipral_ua::CallHandle,
@@ -3043,9 +2568,8 @@ pub(crate) fn dial_in_media(
     length: Duration,
     in_band: bool,
 ) -> Result<(), Fail> {
-    // the one media operation reached through the stack, because choosing
-    // between the media and an INFO is a question about the call; it waits
-    // for a frame in progress on this call like any other holder
+    // the one media operation reached through the stack: media versus INFO is
+    // a call decision
     let mut session = state.engine.session(call).ok_or_else(|| {
         fail(
             SipralStatus::WrongState,
@@ -3065,9 +2589,7 @@ entry! {
     /// Whether a digit is going out or waiting to, and how many have not
     /// started yet.
     ///
-    /// Either out parameter may be null. A user interface that greys out the
-    /// keypad while a number is being sent wants the first; one that shows how
-    /// much of a pasted number is left wants the second.
+    /// Either out parameter may be null.
     ///
     /// # Safety
     ///
@@ -3094,8 +2616,7 @@ entry! {
 entry! {
     /// Drop everything queued and stop the digit going out.
     ///
-    /// The digit in flight gets no closing packet, which is right for a call
-    /// whose media is being taken away: there is nowhere left to send one.
+    /// The digit in flight gets no closing packet.
     ///
     /// # Safety
     ///
@@ -3142,16 +2663,13 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
-    /// Samples in one frame of the codec every media fixture negotiates:
-    /// G.711 at eight kilohertz, twenty milliseconds.
+    /// One G.711 frame: 20 ms at 8 kHz.
     pub(crate) const FRAME: usize = 160;
 
-    /// An order naming two of the four this build contains, to read back.
     const ORDER: &str = "G722,PCMA";
 
-    /// What the far end answers an offer of Opus alone with: the dynamic
-    /// payload type this build's offer put it on, and the channel count RFC
-    /// 7587 §7 makes every Opus line carry whatever is really being sent.
+    /// The far end's answer to an Opus-only offer; RFC 7587 §7 requires the
+    /// `/2` channel count.
     pub(crate) const OPUS_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -3161,9 +2679,7 @@ m=audio 41000 RTP/AVP 96\r\n\
 a=rtpmap:96 opus/48000/2\r\n\
 a=sendrecv\r\n";
 
-    /// The same for G.722, which is the codec at the top of a build that has
-    /// no Opus. Its static type, and the clock rate RFC 3551 §4.5.2 fixes at
-    /// half the rate it hears at.
+    /// The same for G.722, whose clock is half its rate (RFC 3551 §4.5.2).
     const WIDEBAND_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -3173,8 +2689,7 @@ m=audio 41000 RTP/AVP 9\r\n\
 a=rtpmap:9 G722/8000\r\n\
 a=sendrecv\r\n";
 
-    /// One RTP packet of mu-law from the far end: version two, payload type
-    /// zero, and a source of its own.
+    /// One mu-law RTP packet from the far end.
     pub(crate) fn rtp(sequence: u16, timestamp: u32) -> Vec<u8> {
         let mut out = vec![0x80, 0x00];
         out.extend_from_slice(&sequence.to_be_bytes());
@@ -3184,8 +2699,7 @@ a=sendrecv\r\n";
         out
     }
 
-    /// A media info struct with nothing in it, so that a call that writes
-    /// nothing can be told from one that wrote zeroes.
+    /// Filled with sentinels, so an unwritten struct differs from zeroes.
     pub(crate) fn media_info_zeroed() -> SipralMediaInfo {
         SipralMediaInfo {
             reserved: 0,
@@ -3213,7 +2727,6 @@ a=sendrecv\r\n";
         }
     }
 
-    /// Buffers big enough for anything this build produces, as the ABI asks.
     pub(crate) struct Buffers {
         packet: [u8; SIPRAL_MEDIA_PACKET_BYTES],
         address: [c_char; SIPRAL_ADDRESS_BYTES],
@@ -3241,7 +2754,6 @@ a=sendrecv\r\n";
             }
         }
 
-        /// What was written, and where it was going.
         pub(crate) fn taken(&self, packet: &SipralMediaPacket) -> (Vec<u8>, String) {
             let payload = self.packet[..packet.len].to_vec();
             let written = unsafe { CStr::from_ptr(self.address.as_ptr()) }
@@ -3251,8 +2763,6 @@ a=sendrecv\r\n";
         }
     }
 
-    /// The media handle of a call that has audio, minted the way a binding
-    /// mints it on `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
     pub(crate) fn media_of(stack: SipralHandle, call: SipralHandle) -> SipralHandle {
         let mut media = SIPRAL_HANDLE_NONE;
         let status = unsafe { sipral_call_media(stack, call, &raw mut media) };
@@ -3261,7 +2771,6 @@ a=sendrecv\r\n";
         media
     }
 
-    /// Let a media handle go, as every one that is minted has to be.
     pub(crate) fn release(media: SipralHandle) {
         assert_eq!(
             unsafe { sipral_media_release(media) },
@@ -3271,7 +2780,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// Take the frame that is due for the earpiece.
     pub(crate) fn play_one(media: SipralHandle) -> SipralPlayback {
         let mut samples = [0_i16; FRAME];
         let mut written = 0_usize;
@@ -3296,7 +2804,7 @@ a=sendrecv\r\n";
         }
     }
 
-    /// Put one frame on the wire, and say how long the packet was.
+    /// Capture one frame; returns the packet length.
     pub(crate) fn capture_one(media: SipralHandle, samples: &[i16]) -> usize {
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
@@ -3375,7 +2883,6 @@ a=sendrecv\r\n";
         }
     }
 
-    /// Hand a datagram to a call as if it had arrived on the media socket.
     pub(crate) fn arrive(
         media: SipralHandle,
         datagram: &mut [u8],
@@ -3417,9 +2924,7 @@ a=sendrecv\r\n";
         )
     }
 
-    /// The names are written out rather than derived, so this is what says the
-    /// two agree. A name that drifted from the one on the `a=rtpmap` line would
-    /// be a settings screen naming a codec no peer has heard of.
+    /// The names are written out by hand; this keeps them in step with the wire.
     #[test]
     fn every_codec_is_named_the_way_it_goes_on_the_wire() {
         for codec in Codec::ALL {
@@ -3560,9 +3065,6 @@ a=sendrecv\r\n";
         assert_eq!(refused.status, SipralStatus::NotSupported);
     }
 
-    /// A duplicate is a different mistake and gets a different answer: a
-    /// corrected list would be taken, so it is an argument that was wrong
-    /// rather than a build that is missing something.
     #[test]
     fn a_codec_named_twice_is_an_argument_that_was_wrong() {
         let refused = ordered("PCMU,pcmu").expect_err("one format is listed once");
@@ -3578,16 +3080,8 @@ a=sendrecv\r\n";
         assert_eq!(catalog.codecs(), [Codec::G722, Codec::Pcma]);
     }
 
-    /// Where Opus was linked an order naming it is taken, and where it was
-    /// not it is refused where it is set, by name, like any other codec this
-    /// build has no encoder for. That is the whole of what a build without
-    /// Opus does differently: no special error, no silent substitution.
-    ///
-    /// One test rather than a `cfg`-ed pair, because the two halves are told
-    /// apart by the catalogue and not by this crate's `opus` feature: that
-    /// feature is this crate's own, and a build with it off can sit on a
-    /// facade that linked the codec, which would run whichever half of a
-    /// pair was the wrong one.
+    /// Branches on the catalogue, not this crate's `opus` feature, which can be
+    /// off over a facade that linked Opus.
     #[test]
     fn an_order_that_names_opus_follows_the_catalogue() {
         let asked = ordered(" opus , PCMA ");
@@ -3605,15 +3099,7 @@ a=sendrecv\r\n";
         }
     }
 
-    /// Seven milliseconds is a frame Opus has no size for, so an order that
-    /// names it is refused — and where the codec was never linked the same
-    /// order is refused one step earlier, by name, before any frame length
-    /// is looked at. Both configurations refuse, which is what the name
-    /// says; only the reason differs, and each one is asserted.
-    ///
-    /// Told apart by the catalogue rather than by a `cfg` on this crate's
-    /// `opus` feature, for the reason
-    /// `an_order_that_names_opus_follows_the_catalogue` gives.
+    /// Opus cannot cut 7 ms; without Opus the name itself is refused first.
     #[test]
     fn an_order_naming_a_codec_that_cannot_cut_the_frame_length_is_refused() {
         let refused = catalog_of(Some("opus"), 7, true, false, None, None, true)
@@ -3628,10 +3114,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The other half: a frame length every codec in the order can cut is
-    /// taken, in every build. G.711 cuts at any whole millisecond, so this
-    /// one says the refusal above is the codec's opinion and not a limit on
-    /// the setting itself.
     #[test]
     fn a_frame_length_every_codec_in_the_order_cuts_is_taken() {
         let taken = catalog_of(Some("PCMU"), 7, true, false, None, None, true)
@@ -3639,9 +3121,6 @@ a=sendrecv\r\n";
         assert_eq!(taken.frame_length(), 7);
     }
 
-    /// Zero is unspecified rather than a fourth policy, and the three named
-    /// values are `sipral::SrtpPolicy`'s three, in the same order this ABI
-    /// gives them numbers.
     #[test]
     fn srtp_policy_reads_the_three_named_values_and_zero_as_unspecified() {
         assert_eq!(srtp_policy(0, "srtp").expect("zero is valid"), None);
@@ -3669,9 +3148,6 @@ a=sendrecv\r\n";
         assert_eq!(refused.status, SipralStatus::InvalidArgument);
     }
 
-    /// What reaches the facade: `catalog_of` leaves the catalogue's own
-    /// default alone for `None`, and calls `with_srtp` for `Some`, which is
-    /// the one door this ABI has into `sipral::SrtpPolicy`.
     #[test]
     fn catalog_of_applies_srtp_only_when_one_was_named() {
         let default =
@@ -3683,8 +3159,7 @@ a=sendrecv\r\n";
         assert_eq!(required.srtp(), SrtpPolicy::Required);
     }
 
-    /// The Annex B knob reaches the catalogue, on an order that names G.729
-    /// and one that does not alike: a call's own order may name it later.
+    /// Carried even without G.729 in the order: a call's order may name it.
     #[test]
     fn catalog_of_carries_annex_b_either_way() {
         for order in [Some("G729"), Some("PCMU"), None] {
@@ -3696,19 +3171,8 @@ a=sendrecv\r\n";
         }
     }
 
-    /// The codec's own refusal: the one media error both answers to the C
-    /// side decide before they reach their tables, and the one this crate
-    /// may write no `cfg` about, because `sipral-ffi` with its own `opus`
-    /// off over a facade that linked the codec is a build somebody can
-    /// compile.
-    ///
-    /// Produced the way it is really produced rather than assembled here:
-    /// the encoder of the codec at the top of this build's catalogue is
-    /// handed half a frame. Opus encodes one length and refuses every other,
-    /// and the three written codecs cut whatever they are given — so a build
-    /// without Opus produces nothing here at all, which is the other half of
-    /// what this asserts and what says those two answers are unreachable
-    /// there rather than merely untested.
+    /// The top codec's encoder gets half a frame. Only Opus refuses it, so a
+    /// build without Opus produces no codec error at all.
     #[test]
     fn the_codecs_own_refusal_is_answered_before_the_table() {
         let opus = Capabilities::of_this_build().opus;
@@ -3727,8 +3191,7 @@ a=sendrecv\r\n";
         );
 
         let refused = super::with_media(media, |session, _| {
-            // loud, so that nothing on the way down mistakes it for silence
-            // and swallows the frame before the encoder sees it
+            // loud, so silence suppression does not swallow it
             Ok(session
                 .capture(
                     &vec![8_000_i16; session.frame_samples() / 2],
@@ -3799,8 +3262,6 @@ a=sendrecv\r\n";
                 SipralStatus::InvalidArgument,
                 SipralMediaFault::Other,
             ),
-            // a file that stopped taking what was written is the disk's,
-            // and not a path a corrected argument would fix
             (
                 MediaError::Recording(std::io::ErrorKind::StorageFull),
                 SipralStatus::RecordingFailed,
@@ -3828,10 +3289,6 @@ a=sendrecv\r\n";
         }
     }
 
-    // -- what a live call says about itself ----------------------------------
-
-    /// A4's reporting half: what the two ends actually agreed, read off a call
-    /// that is up.
     #[test]
     fn a_call_reports_what_it_negotiated() {
         let mut observed = Observed::default();
@@ -3856,8 +3313,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A far end that names two of the three formats this end offered, so
-    /// that one negotiation produces all three outcomes at once.
+    /// Names two of three offered formats, giving all three outcomes at once.
     const TWO_FORMATS: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -3892,10 +3348,6 @@ a=sendrecv\r\n";
         candidate
     }
 
-    /// D5, the codec half: the list names every codec this call could have
-    /// used and what became of each. The far end named two of the three, so
-    /// all three answers are in one negotiation — the one that won, the one
-    /// it beat, and the one that was never in the running at all.
     #[test]
     fn every_codec_this_call_could_have_used_says_what_became_of_it() {
         let mut observed = Observed::default();
@@ -3927,9 +3379,6 @@ a=sendrecv\r\n";
             "the answer does not say what beat it"
         );
 
-        // and the one that won is the one the call is actually using, which
-        // is what makes this list an explanation of that number rather than a
-        // second opinion about it
         assert_eq!(won.codec, media_info(media).codec);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
@@ -3937,9 +3386,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The list is this call's own catalogue, so a call that named its own
-    /// order has exactly that order in it and nothing the stack offers
-    /// besides.
     #[test]
     fn the_candidates_are_the_calls_own_order_not_the_stacks() {
         let mut observed = Observed::default();
@@ -3955,8 +3401,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// An index past the end names how many there are, the way every other
-    /// indexed reader in this ABI does.
     #[test]
     fn a_candidate_index_past_the_end_says_how_many_there_are() {
         let mut observed = Observed::default();
@@ -3975,9 +3419,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// And the size is checked before the handle is looked up, the same way
-    /// `sipral_media_info` checks it, so a caller that got its header wrong
-    /// is told that rather than something about the call.
+    /// The size is checked before the handle.
     #[test]
     fn a_candidate_struct_shorter_than_its_min_size_is_unsupported_version() {
         let mut candidate = candidate_zeroed();
@@ -3997,9 +3439,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The size is checked before the handle is even looked up: a media
-    /// handle nothing minted and an info struct too short to be any version
-    /// of this one both fail, and the size is the one this answers with.
+    /// The size is checked before the handle.
     #[test]
     fn a_media_info_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
@@ -4011,8 +3451,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The event that says audio started carries the same answer, so an
-    /// application that only listens does not have to ask.
     #[test]
     fn the_event_that_starts_the_audio_names_the_codec_too() {
         let mut observed = Observed::default();
@@ -4029,8 +3467,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The codec order a stack was given is the one it reads back, which is the
-    /// other half of a setting that was accepted rather than ignored.
     #[test]
     fn the_order_a_stack_was_given_is_the_order_it_offers() {
         let mut observed = Observed::default();
@@ -4069,16 +3505,8 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A compound report is held to the control bound and media to the media
-    /// one, and the two are told apart by RFC 5761 §4 before either is read.
-    ///
-    /// Two kilobytes is past `SIPRAL_MEDIA_PACKET_BYTES` and inside
-    /// `SIPRAL_MEDIA_RTCP_BYTES`. As control it reaches the session, which
-    /// refuses it for what it is rather than for how long it is; as media it
-    /// never gets that far. The difference is the whole of the change: a report
-    /// a peer built larger than this end builds one used to be an argument
-    /// error, which says the caller did something wrong when the caller only
-    /// handed over what arrived.
+    /// 2 KB is past the media bound and inside the RTCP bound: as control it
+    /// reaches the session (RFC 5761 §4), as media it is refused by length.
     #[test]
     fn a_long_report_is_read_and_a_long_media_packet_is_not() {
         let mut observed = Observed::default();
@@ -4121,10 +3549,6 @@ a=sendrecv\r\n";
         );
     }
 
-    // -- what the call cost ---------------------------------------------------
-
-    /// A6's live half. A call with nothing wrong with it reads a hundred, and
-    /// the counters move with what actually crossed the boundary.
     #[test]
     fn the_statistics_count_what_went_out_and_what_came_in() {
         let mut observed = Observed::default();
@@ -4166,20 +3590,15 @@ a=sendrecv\r\n";
         );
     }
 
-    /// An earpiece that asks for frames faster than the far end sends them
-    /// runs the buffer dry, and plays silence where the far end was still
-    /// talking. The frames it played that way are counted where the C
-    /// caller reads the call's quality, as `frames_underrun`, and they are
-    /// the frames of silence between the last packet played and the next
-    /// one on the far end's clock, no more.
+    /// Exactly the silent frames between the last packet played and the next
+    /// one on the far end's clock count as `frames_underrun`.
     #[test]
     fn frames_played_as_nothing_while_the_far_end_talked_are_counted_as_under_runs() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
         let media = media_of(stack, call);
         let timestamp = |sequence: u16| 8_000 + u32::from(sequence - 100) * 160;
-        // each on time for its timestamp, so the path has no jitter to
-        // blame and the buffer's target stays where a clean path puts it
+        // each on time, so there is no jitter
         let due = |sequence: u16| 1_100 + u64::from(sequence - 100) * 20;
 
         for sequence in 100..104_u16 {
@@ -4195,8 +3614,7 @@ a=sendrecv\r\n";
                 _ => {}
             }
         }
-        // one of the four may go to shortening the far end's pause, since
-        // what the mu-law silence decodes to is a pause
+        // one may be dropped to shorten a pause
         assert!(played >= 3, "only {played} of four packets played");
         assert!(dry > 0, "the earpiece never ran ahead of the far end");
         assert_eq!(
@@ -4205,8 +3623,7 @@ a=sendrecv\r\n";
             "nothing says yet whether that silence was the far end's pause"
         );
 
-        // the far end's clock ran on unbroken: the silence was its words,
-        // and so is whatever the buffer waits out before it plays again
+        // the far end's clock ran on unbroken, so the silence was underrun
         for sequence in 104..110_u16 {
             let mut packet = rtp(sequence, timestamp(sequence));
             arrive(media, &mut packet, PEER_MEDIA, due(sequence));
@@ -4233,24 +3650,17 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A media entry point reads the caller's clock through the handle it was
-    /// minted with, not through the stack, so a stack that has since been
-    /// polled far ahead does not make a media reading that lags behind it a
-    /// caller bug. Before the media handle existed, `sipral_call_media_receive`
-    /// resolved through the stack and so refused exactly this: a `now_ms`
-    /// behind the stack's own last-polled time was `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    /// Media reads the clock through its handle, so lagging the stack's last
+    /// poll is not an error.
     #[test]
     fn a_datagram_read_on_a_clock_behind_the_stacks_own_is_not_refused() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
         let media = media_of(stack, call);
 
-        // the poll thread's clock runs far ahead of the network thread's
         crate::stack::tests::poll(stack, 50_000);
 
-        // RFC 3550 A.1 keeps a new source on probation until it has sent two
-        // in a row, so only the last of these is audio arriving rather than
-        // held for probation
+        // RFC 3550 A.1 probation: only the last of these is queued
         let mut arrival = SipralArrival::Unknown;
         for (index, sequence) in (1..4_u16).enumerate() {
             let mut packet = rtp(sequence, u32::try_from(index).unwrap_or(0) * 160);
@@ -4267,20 +3677,14 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The other half of the same guarantee: an older reading is not only
-    /// accepted where it was asked, it also leaves the stack's own clock
-    /// exactly where signalling put it, so the very next poll is not refused
-    /// as if the media call had dragged the watermark backward.
+    /// An older media reading leaves the stack's clock untouched.
     #[test]
     fn a_media_call_with_an_older_now_ms_does_not_refuse_the_next_signalling_call() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
         let media = media_of(stack, call);
 
-        // the stack's own clock is already at 1_100 from bringing the call
-        // up; a reading forty times further behind than the slack this
-        // stack's own signalling gets is answered anyway, because a media
-        // entry point never checks against that clock at all
+        // the stack is at 1_100; media never checks against it
         let stats = statistics(media, 100);
         assert_eq!(
             stats.codec,
@@ -4288,9 +3692,6 @@ a=sendrecv\r\n";
             "the reading was answered"
         );
 
-        // and signalling picks up exactly where it left off: a normal next
-        // poll is not refused as more than the slack behind some watermark
-        // the media call never touched
         let mut result = crate::stack::tests::poll_result();
         let polled = unsafe { crate::stack::sipral_stack_poll(stack, 1_101, &raw mut result) };
         assert_eq!(polled, SipralStatus::Ok, "{}", last_error_text());
@@ -4302,9 +3703,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The size is checked before the handle is even looked up: a media
-    /// handle nothing minted and a stats struct too short to be any version
-    /// of this one both fail, and the size is the one this answers with.
+    /// The size is checked before the handle.
     #[test]
     fn a_stream_stats_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
@@ -4316,10 +3715,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The size is checked before the handle is even looked up: a media
-    /// handle nothing minted and a packet struct too short to be any version
-    /// of this one both fail, and the size is the one this answers with — on
-    /// the way out with a frame and on the way out with a report alike.
+    /// The size is checked before the handle, for frames and reports alike.
     #[test]
     fn a_media_packet_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
@@ -4348,9 +3744,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A6's other half: the record has to survive the call it is about. The
-    /// stream is gone by the time this arrives, so the numbers travel in the
-    /// event rather than behind a lookup that would now fail.
+    /// The stream is gone by then, so the numbers travel in the event.
     #[test]
     fn the_end_of_call_record_arrives_after_the_call_that_it_is_about() {
         let mut observed = Observed::default();
@@ -4409,10 +3803,6 @@ a=sendrecv\r\n";
         );
     }
 
-    // -- the watchdog ---------------------------------------------------------
-
-    /// B5: media that stops while signalling stays happy, and the recovery
-    /// that follows it.
     #[test]
     fn media_that_stops_is_reported_and_so_is_its_return() {
         let mut observed = Observed::default();
@@ -4437,8 +3827,7 @@ a=sendrecv\r\n";
         );
         assert_eq!(media_info(media).stalled, 1);
 
-        // RFC 3550 A.1 keeps a new source on probation until it has sent two
-        // in a row, so one packet is not yet audio arriving
+        // RFC 3550 A.1 probation needs two in a row
         for (index, sequence) in (200..203_u16).enumerate() {
             let mut packet = rtp(sequence, 16_000 + u32::try_from(index).unwrap_or(0) * 160);
             arrive(media, &mut packet, PEER_MEDIA, 1_700);
@@ -4459,8 +3848,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The watchdog is a setting, and one that a neighbouring value has
-    /// switched off does not quietly take a threshold nothing will read.
     #[test]
     fn a_stall_threshold_with_the_watchdog_off_is_refused() {
         let mut observed = Observed::default();
@@ -4473,10 +3860,6 @@ a=sendrecv\r\n";
         assert!(last_error_text().contains("media_stall_watchdog"));
     }
 
-    // -- and why -------------------------------------------------------------
-
-    /// D5's failing half: an answer naming a format nobody offered leaves the
-    /// call up and says, in a code and in a sentence, exactly what happened.
     #[test]
     fn a_negotiation_that_settles_on_nothing_says_which_failure_it_was() {
         let mut observed = Observed::default();
@@ -4506,8 +3889,6 @@ a=sendrecv\r\n";
         );
     }
 
-    // -- the packets ---------------------------------------------------------
-
     #[test]
     fn a_captured_frame_comes_back_addressed_to_where_the_audio_goes() {
         let mut observed = Observed::default();
@@ -4536,10 +3917,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// `sipral_call_join` refuses a call joined to itself and a second
-    /// pairing of a call already in one; `sipral_media_mix` then moves one
-    /// frame between the two calls' own far ends; and `sipral_call_leave`
-    /// refuses a call that has already left.
     #[test]
     fn join_leave_and_mix_move_a_frame_between_two_calls_on_one_stack() {
         let mut observed = Observed::default();
@@ -4615,10 +3992,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// `sipral_media_mix` accepts (NULL, 0) for both sample buffers, as its
-    /// argument checks say, and answers for the frame length rather than
-    /// building a slice over a null pointer — which a debug build's own
-    /// precondition checks abort the process for, before any answer.
+    /// A slice over null would abort a debug build before any answer.
     #[test]
     fn a_mix_given_no_samples_at_all_is_answered_rather_than_sliced() {
         let mut observed = Observed::default();
@@ -4667,13 +4041,8 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A call that hangs up while joined tells its former partner over the C
-    /// ABI too — `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, naming the call that is
-    /// still up — and that survivor keeps carrying its own audio directly,
-    /// exactly as an unjoined call always has.
-    /// `crates/sipral/src/tests.rs` already proves the facade's own half of
-    /// this (`MediaEvent::Unjoined`); this proves the translation across the
-    /// boundary does not silently drop it.
+    /// The facade half (`MediaEvent::Unjoined`) is tested in
+    /// `crates/sipral/src/tests.rs`; this covers the ABI translation.
     #[test]
     fn a_call_that_hangs_up_while_joined_tells_the_survivor_over_the_abi() {
         let mut observed = Observed::default();
@@ -4725,8 +4094,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// Half a frame encoded as a whole one is what a peer hears as a stutter,
-    /// so the length is checked rather than trusted.
     #[test]
     fn a_frame_of_the_wrong_length_is_refused_before_it_is_encoded() {
         let mut observed = Observed::default();
@@ -4750,8 +4117,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A buffer too small is answered before anything is built, so the frame is
-    /// not lost from a stream whose timestamps have already moved past it.
     #[test]
     fn a_packet_buffer_too_small_costs_no_audio() {
         let mut observed = Observed::default();
@@ -4786,8 +4151,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// Every source fills the frame, silence included: a device handed nothing
-    /// plays whatever was in its buffer last.
     #[test]
     fn playback_fills_the_frame_even_when_nothing_has_arrived() {
         let mut observed = Observed::default();
@@ -4823,8 +4186,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The control traffic RFC 3550 §6.3 schedules, addressed to the port the
-    /// negotiation put it on rather than to the media port.
+    /// RFC 3550 §6.3 reports go to the negotiated control port.
     #[test]
     fn the_report_that_becomes_due_comes_out_addressed_to_the_control_port() {
         let mut observed = Observed::default();
@@ -4867,16 +4229,10 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The two buffer sizes this ABI promises are the ones the layers below
-    /// actually need. A packet bound that drifted below what a session builds
-    /// would be a caller told to bring a buffer that is one octet short of the
-    /// largest Opus frame.
     #[test]
     fn the_promised_buffers_hold_what_this_build_produces() {
         for codec in Codec::ALL {
-            // twelve octets of RTP header in front of the largest payload, at
-            // the longest frame the codec is let cut: sixty milliseconds, or
-            // less for L16, whose longer frames a catalogue refuses
+            // RTP header plus the largest payload at the longest allowed frame
             let millis = (1..=60).rev().find(|ms| codec.fits(*ms)).unwrap_or(0);
             let largest = codec.max_payload(millis) + 12;
             assert!(
@@ -4890,12 +4246,6 @@ a=sendrecv\r\n";
         assert!(longest.to_string().len() < SIPRAL_ADDRESS_BYTES);
     }
 
-    // -- a handle of its own -------------------------------------------------
-
-    /// A media handle outlives its call, and says so: every entry point that
-    /// takes one answers that the media has ended, rather than acting on a
-    /// stream that has already said goodbye, and the handle is still released
-    /// exactly once.
     #[test]
     fn a_media_handle_whose_call_has_ended_says_so_and_is_released_once() {
         let mut observed = Observed::default();
@@ -4988,9 +4338,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The same when the stack goes first: destroying it ends every call's
-    /// media, and a handle says so rather than keeping a stream running for a
-    /// stack that no longer exists.
     #[test]
     fn a_media_handle_outlives_its_stack_and_says_so() {
         let mut observed = Observed::default();
@@ -5020,10 +4367,8 @@ a=sendrecv\r\n";
     static PLAYED: AtomicI32 = AtomicI32::new(-1);
     static PLAYED_WROTE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-    /// A binding's own event handler. On the news that audio has started it
-    /// mints the call's media handle from inside the callback, and a device
-    /// thread asks for the frame that is due while the poll thread is still in
-    /// here.
+    /// On media start, mints the handle inside the callback while another
+    /// thread asks for a frame.
     unsafe extern "C" fn mint_and_play_from_the_callback(
         event: *const SipralEvent,
         user_data: *mut c_void,
@@ -5057,10 +4402,6 @@ a=sendrecv\r\n";
         let _ = unsafe { sipral_media_release(media) };
     }
 
-    /// The re-entry this change exists for, and B5's glitch from the audit that
-    /// found it: a callback that answers an event by calling into the library
-    /// is not refused, and neither is the audio thread that wants its frame at
-    /// the same moment.
     #[test]
     fn a_callback_that_mints_the_media_handle_while_a_frame_is_due_is_not_refused() {
         let mut observed = Observed::default();
@@ -5084,9 +4425,7 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A processor that asks for the frame that is due from inside the frame it
-    /// is processing: the one way a thread arrives at a call's media it is
-    /// already inside.
+    /// A processor that asks for a frame from inside the frame it processes.
     struct ReachesBack {
         media: SipralHandle,
         heard: Arc<Mutex<Option<SipralStatus>>>,
@@ -5112,9 +4451,6 @@ a=sendrecv\r\n";
         fn reset(&mut self) {}
     }
 
-    /// Re-entry on one session is the only thing a media entry point answers
-    /// `SIPRAL_STATUS_BUSY` for, and it is answered rather than left as a
-    /// thread waiting for itself.
     #[test]
     fn a_thread_that_reaches_back_into_the_media_it_is_inside_is_told_so() {
         let mut observed = Observed::default();
@@ -5131,8 +4467,7 @@ a=sendrecv\r\n";
         })
         .expect("the call has media");
 
-        // on a thread of its own, so that a capture waiting for itself is a
-        // test that fails rather than a run that never ends
+        // on its own thread, so a self-wait fails instead of hanging
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
             let mut buffers = Buffers::new();
@@ -5158,10 +4493,8 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A processor that reaches its own call through the stack instead: it
-    /// hangs the call up, polls the stack and destroys it, all from inside the
-    /// frame it is processing. Each of those can need the very session the
-    /// frame is holding.
+    /// A processor that hangs up, polls and destroys its own stack from
+    /// inside its frame.
     struct ReachesTheStack {
         stack: SipralHandle,
         call: SipralHandle,
@@ -5186,11 +4519,6 @@ a=sendrecv\r\n";
         fn reset(&mut self) {}
     }
 
-    /// The same re-entry, through the stack: a thread inside a call's media
-    /// that calls into that call's stack is answered, as it was when a frame
-    /// held the stack's lock, rather than left waiting for a session it is
-    /// itself holding — with the stack's own lock held the whole time, so that
-    /// every other thread would be refused for ever after.
     #[test]
     fn a_processor_that_calls_into_its_own_stack_is_told_so() {
         let mut observed = Observed::default();
@@ -5248,17 +4576,12 @@ a=sendrecv\r\n";
         );
     }
 
-    /// The callback for [`the_c_callback_s_frame_replaces_what_was_captured`]:
-    /// writes a value derived from, but distinguishable from, `near_end` into
-    /// `out` — a real callback's whole reason to exist, and exactly what
-    /// [`CProcessor::process`] has to carry back into the caller's own frame
-    /// once this returns.
+    /// Writes `near_end` doubled into `out`.
     unsafe extern "C" fn doubles_into_out(
         frame: *const SipralProcessorFrame,
         _user_data: *mut c_void,
     ) {
-        // Safety: the caller of this test-only callback (`CProcessor::process`,
-        // below) upholds the same contract `SipralProcessorCallback` documents.
+        // Safety: `CProcessor::process` upholds `SipralProcessorCallback`'s contract.
         let frame = unsafe { &*frame };
         let near = unsafe { std::slice::from_raw_parts(frame.near_end, frame.near_end_len) };
         let out = unsafe { std::slice::from_raw_parts_mut(frame.out, frame.out_len) };
@@ -5267,14 +4590,8 @@ a=sendrecv\r\n";
         }
     }
 
-    /// [`CProcessor`] hands the C callback a frame to fill and has to carry
-    /// what it wrote back into the caller's own buffer once the callback
-    /// returns — the one step `bindings/c/smoke.c`'s own processor test never
-    /// actually checks, since it only asserts on what the callback was
-    /// *handed*, not on what a caller sees afterwards. Breaking the copy-back
-    /// in `CProcessor::process` (commenting out
-    /// `near_end.copy_from_slice(&self.out)`) leaves this test the only one
-    /// in the workspace that fails.
+    /// The only test covering [`CProcessor`]'s copy-back of `out` into the
+    /// caller's frame; `bindings/c/smoke.c` checks only what is handed in.
     #[test]
     fn the_c_callback_s_frame_replaces_what_was_captured() {
         let mut processor = CProcessor {
@@ -5292,10 +4609,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A datagram longer than the room the caller gave is refused with the
-    /// length it needed, and not a byte of it lands past the buffer — or in
-    /// it. Before the comparison the copy trusted every producer to stay
-    /// within 1500 bytes, which only RTP and RTCP are built to.
     #[test]
     fn a_datagram_longer_than_the_packet_buffer_is_refused_and_nothing_is_written() {
         let mut room = [0xAA_u8; 16];
@@ -5317,12 +4630,7 @@ a=sendrecv\r\n";
         assert_eq!(packet.len, 0);
     }
 
-    /// A thread inside a frame of one call's media — which only a processor
-    /// or a local conference's tick running on it can be — is refused every
-    /// media handle, a second call's included, and the same call is served
-    /// again once the frame is over. Two processors on two threads that each
-    /// reached into the other's call would otherwise wait on each other's
-    /// frame for ever.
+    /// Inside any frame every media handle is busy; once it ends, served again.
     #[test]
     fn a_media_handle_called_from_inside_a_frame_is_busy_whichever_call_it_names() {
         let mut observed = Observed::default();
@@ -5342,13 +4650,10 @@ a=sendrecv\r\n";
         );
     }
 
-    /// Whether the slow callback below sleeps: off while the fixture builds
-    /// the call, so that setting up is not the slow part of the test.
+    /// Off while the fixture builds the call.
     static SLOW: AtomicBool = AtomicBool::new(false);
 
-    /// A binding's event handler that takes its time: fifty milliseconds for
-    /// every event, which is a user interface thread in a layout pass or a log
-    /// line going to a busy disk.
+    /// An event handler that takes 50 ms per event.
     unsafe extern "C" fn fifty_milliseconds(event: *const SipralEvent, user_data: *mut c_void) {
         unsafe { crate::stack::tests::record(event, user_data) };
         if SLOW.load(Ordering::SeqCst) {
@@ -5356,12 +4661,8 @@ a=sendrecv\r\n";
         }
     }
 
-    /// B5 for ten seconds. One thread polls a stack whose callback takes fifty
-    /// milliseconds over every event, and hands the same call's packets over as
-    /// a network thread would; another asks for a frame every twenty
-    /// milliseconds, as a device does. While the stack's lock was held across
-    /// the callback and the media path took that lock, a frame that fell due
-    /// during a callback was refused. None may be now.
+    /// Ten seconds: one thread polls with a slow callback and feeds packets,
+    /// another plays a frame every 20 ms. No frame may be refused.
     #[test]
     fn a_frame_every_twenty_milliseconds_is_never_refused_while_a_slow_callback_runs() {
         const FRAMES: usize = 500;
@@ -5383,8 +4684,7 @@ a=sendrecv\r\n";
                 while !stop.load(Ordering::SeqCst) {
                     let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(0);
                     let now_ms = 2_000 + elapsed;
-                    // an event for the slow callback to sit on: an account that
-                    // starts registering, taken away again once that is said
+                    // gives the slow callback an event
                     let account = account_on(stack);
                     let registered =
                         unsafe { crate::account::sipral_account_register(stack, account, now_ms) };
@@ -5469,15 +4769,8 @@ a=sendrecv\r\n";
         );
     }
 
-    // -- the goodbye a call's media owes when it ends (task 8.4.21) ----------
-
-    /// The first SSRC named in the one RTCP BYE (RFC 3550 §6.4.2, packet type
-    /// 203) inside a compound packet — enough to check what
-    /// `sipral_stack_poll_farewell` handed over against the session's own
-    /// wire output, without a second RTCP parser: a compound packet is
-    /// nothing but concatenated fixed-header sub-packets, each stating its
-    /// own length in 32-bit words, and that much is universal to every one of
-    /// them.
+    /// The first SSRC in the RTCP BYE (RFC 3550 §6.4.2, type 203) of a
+    /// compound packet, walking sub-packets by their length in 32-bit words.
     fn first_bye_ssrc(compound: &[u8]) -> Option<u32> {
         const BYE: u8 = 203;
         let mut rest = compound;
@@ -5494,18 +4787,14 @@ a=sendrecv\r\n";
         None
     }
 
-    /// A call whose media is running leaves exactly one farewell when it
-    /// ends: the RTCP BYE RFC 3550 §6.3.7 owes the far end, addressed to its
-    /// RTCP port and naming this call's own SSRC, readable only through the
-    /// stack once the call's media handle has already gone.
+    /// The RFC 3550 §6.3.7 BYE, to the RTCP port, naming this call's SSRC.
     #[test]
     fn a_call_that_ends_with_media_running_leaves_exactly_one_farewell() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
         let media = media_of(stack, call);
 
-        // this call's own SSRC, read off one outgoing RTP packet rather than
-        // reached for directly: the packet is what the far end actually sees
+        // the SSRC as the far end sees it
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
         let status = unsafe {
@@ -5540,7 +4829,6 @@ a=sendrecv\r\n";
             "the goodbye should name this call's own SSRC: {bye:02x?}"
         );
 
-        // and nothing after it
         let mut second_call = SIPRAL_HANDLE_NONE;
         let mut second = farewell_buffers.packet();
         let status =
@@ -5555,11 +4843,8 @@ a=sendrecv\r\n";
         );
     }
 
-    /// An application that never calls `sipral_stack_poll_farewell` — a
-    /// binding built against a header from before that entry point existed,
-    /// among others — does not keep every ended call's goodbye for as long
-    /// as the stack lives: past `FAREWELL_CEILING` the oldest is dropped, and
-    /// each drop is counted in `farewells_dropped` (task 8.4.21).
+    /// Unpolled farewells are capped at `FAREWELL_CEILING`; the oldest is
+    /// dropped and counted in `farewells_dropped`.
     #[test]
     fn a_queue_of_farewells_past_its_ceiling_drops_the_oldest_and_counts_it() {
         let mut observed = Observed::default();
@@ -5568,15 +4853,13 @@ a=sendrecv\r\n";
         let mut first_call = SIPRAL_HANDLE_NONE;
         let mut second_call = SIPRAL_HANDLE_NONE;
         let mut now = 1_000;
-        // one call's worth of farewells past the ceiling, ended one at a
-        // time and none of them ever polled
+        // one past the ceiling, never polled
         for i in 0..=crate::stack::FAREWELL_CEILING {
             let (status, call) = place(handle, account, &managed_config(), now);
             assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
             let invite = one(handle);
             deliver(handle, &accepted(&invite, ANSWER, true), now + 100);
             crate::stack::tests::poll(handle, now + 100);
-            // the ACK the answer produced, which is not this test's to keep
             let _ = sent(handle);
             match i {
                 0 => first_call = call,
@@ -5619,7 +4902,6 @@ a=sendrecv\r\n";
         );
     }
 
-    /// A stack that never ran any call's media has nothing queued for it.
     #[test]
     fn a_stack_that_never_ran_media_has_no_farewell() {
         let mut observed = Observed::default();
@@ -5655,10 +4937,8 @@ a=sendrecv\r\n";
         );
     }
 
-    // -- RTCP feedback (RFC 4585, RFC 5506) ----------------------------------
-
-    /// What the far end answers an offer of feedback with when it takes it
-    /// all: RTP/AVPF, Generic NACKs and reduced-size RTCP.
+    /// An answer taking all feedback: RTP/AVPF (RFC 4585), Generic NACKs and
+    /// reduced-size RTCP (RFC 5506).
     const FEEDBACK_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -5670,8 +4950,7 @@ a=rtcp-fb:* nack\r\n\
 a=rtcp-rsize\r\n\
 a=sendrecv\r\n";
 
-    /// A call placed with `feedback` set as given, answered with `answer`;
-    /// hands back the stack, the call and the offer.
+    /// Returns the stack, the call and the offer.
     fn feedback_call(
         observed: &mut Observed,
         feedback: u32,

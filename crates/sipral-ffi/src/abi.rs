@@ -3,32 +3,19 @@
 
 //! The ABI, described by the declarations that are the ABI.
 //!
-//! A C seam declared in four places — the Rust, the header, and three
-//! bindings — is four things that have to agree, and the way they stop
-//! agreeing is that somebody adds a function to one of them. The header and
-//! the bindings are therefore not written: they are printed from what is
-//! here, by `tools/abi-gen`, and `scripts/check.sh` prints them again and
-//! fails if what is committed is not what came out.
+//! The header and bindings are printed from this module by `tools/abi-gen`;
+//! `scripts/check.sh` reprints them and fails if the committed copies differ.
 //!
-//! Nothing here is a second declaration of anything. Every macro in this
-//! module emits the Rust item exactly as it would have been written by hand
-//! and, beside it, a `const` saying what shape it emitted — the name, the
-//! members, their types, and the documentation, all taken from the tokens the
-//! declaration is made of. There is no parser for Rust anywhere in this
-//! arrangement, and there is nothing for a `cfg` to hide, because the compiler
-//! is what reads the source.
+//! Each macro here emits the Rust item as written plus a `const` describing
+//! it (name, members, types, docs), taken from the declaration's tokens. No
+//! Rust parser is involved and no `cfg` can hide anything.
 //!
-//! What is written by hand is [`SURFACE`]: one line per item, naming it. That
-//! line is the only thing a person can forget, and forgetting it is caught
-//! three ways. The descriptor beside an unlisted item is dead code, and this
-//! workspace builds with `-D warnings`. `scripts/check.sh` compares the items
-//! the modules declare against the lines here and names the difference. And
-//! the generator refuses to print a surface in which one type is reachable
-//! from another that is not listed, because a header that mentions a struct it
-//! never defined is not a header.
+//! The only hand-written list is [`SURFACE`]. A missing line is caught three
+//! ways: the unread descriptor is dead code under `-D warnings`;
+//! `scripts/check.sh` names the difference; and the generator refuses a type
+//! reachable from the surface but not listed in it.
 //!
-//! The costs of that arrangement are in `docs/08-ffi.md`, along with what the
-//! gate does not catch.
+//! Costs and gaps of this scheme: `docs/08-ffi.md`.
 
 /// One parameter of an entry point, or one member of a struct.
 #[derive(Clone, Copy, Debug)]
@@ -72,19 +59,16 @@ pub struct Record {
     pub doc: &'static [&'static str],
     /// Struct or union.
     pub shape: Shape,
-    /// Its members, in declaration order, which for a struct is also the
-    /// order they sit in memory.
+    /// Its members, in declaration order (memory order for a struct).
     pub fields: &'static [Member],
-    /// How many bytes this build compiled it to, padding and all. Not the
-    /// ABI — a struct of pointers is one length on a 32-bit target and
-    /// another on a 64-bit one — but what this build will read and write,
-    /// which is the number a C caller checks its own `sizeof` against.
+    /// Size in bytes on this build, padding included. Not portable across
+    /// targets; it is what a C caller checks its `sizeof` against.
     pub size: usize,
 }
 
 impl Record {
-    /// Whether the first member is the `size` that makes appending a member
-    /// to a released struct safe. The bindings fill it in for the caller.
+    /// Whether the first member is the `size` that makes appending safe. The
+    /// bindings fill it in for the caller.
     #[must_use]
     pub fn is_versioned(&self) -> bool {
         self.fields
@@ -99,16 +83,12 @@ impl Record {
     }
 }
 
-/// Whether a struct that starts with its own `size` ends exactly where its
-/// last member does, with no padding after it on the target this build is
-/// for. A struct without a `size` is not asked: it never grows.
+/// Whether a struct starting with `size` ends exactly at its last member,
+/// with no trailing padding on this target. Structs without `size` never grow.
 ///
-/// Padding at the end is where the next appended member would land on one
-/// target and not on another. A caller compiled against the shorter header
-/// declares the padded length, and a library that has since put a member in
-/// that padding reads whatever the caller's stack held there as a value it
-/// set. `ends` is the end of each member in declaration order, so the last
-/// member's end is the largest of them.
+/// Trailing padding is where an appended member would land on some targets:
+/// an older caller declares the padded length and the library would read its
+/// garbage as a set value. `ends` holds each member's end offset.
 #[must_use]
 pub const fn ends_with_its_last_member(names: &[&str], ends: &[usize], size: usize) -> bool {
     let [first, ..] = names else {
@@ -143,19 +123,13 @@ const fn same_text(left: &str, right: &str) -> bool {
     }
 }
 
-/// The one rule for turning a Rust name into the name the C side spells:
-/// `SipralStackConfig` becomes `sipral_stack_config`.
+/// Rust name to C name: `SipralStackConfig` becomes `sipral_stack_config`.
 ///
-/// Here rather than in the generator because the library answers questions
-/// about the C names too — [`crate::version::sipral_abi_struct_size`] is asked one
-/// — and a derivation written twice is a derivation that can disagree with
-/// itself.
+/// Here, not in the generator, because the library also answers about C
+/// names ([`crate::version::sipral_abi_struct_size`]).
 ///
-/// A capital starts a word after a lower-case letter or a digit, and also
-/// after another capital when a lower-case letter follows it: the `F` in
-/// `NotAFocus` starts `focus`, so the name is `not_a_focus` and not the
-/// `not_afocus` a rule that only looked backwards printed into the header,
-/// under a name no sentence in the documentation used.
+/// A capital starts a word after a lower-case letter or digit, and after a
+/// capital when a lower-case letter follows: `NotAFocus` is `not_a_focus`.
 #[must_use]
 pub fn snake(name: &str) -> String {
     let mut out = String::new();
@@ -191,8 +165,7 @@ pub struct Code {
     pub value: i64,
 }
 
-/// A number spent on a feature that does not exist yet, so that two features
-/// cannot arrive holding the same one.
+/// A number reserved for a future feature, so two features cannot take it.
 #[derive(Clone, Copy, Debug)]
 pub struct Held {
     /// The number.
@@ -225,8 +198,7 @@ pub struct Value {
     pub doc: &'static [&'static str],
     /// Its type, as the Rust declaration spells it.
     pub rust_type: &'static str,
-    /// What it comes to. Read from the declaration itself, so an expression
-    /// that changes changes this with it.
+    /// Its value, read from the declaration itself.
     pub value: u64,
 }
 
@@ -235,12 +207,9 @@ pub struct Value {
 pub enum Stands {
     /// Another name for a plain integer.
     For(&'static str),
-    /// A function the caller supplies and the library calls, with its
-    /// arguments and what it answers with: a plain integer, as the Rust
-    /// declaration spells it, or nothing for a callback that only reports.
-    /// Nothing is what every callback declared today answers with, and it is
-    /// what a listener that throws instead of answering is read as, for one
-    /// that does.
+    /// A function the caller supplies and the library calls: its arguments,
+    /// and a plain integer answer or nothing. A listener that throws reads as
+    /// nothing.
     Callback(&'static [Member], Option<&'static str>),
 }
 
@@ -257,9 +226,8 @@ pub struct Alias {
 
 /// Everything that crosses the C boundary.
 ///
-/// The generator reads this and nothing else. Every list is in the order the
-/// header should read in, which is the order the modules are introduced in
-/// `crate`'s own documentation rather than alphabetical.
+/// The generator reads only this. Lists are in header order, the order the
+/// crate documentation introduces the modules.
 #[derive(Clone, Copy, Debug)]
 pub struct Surface {
     /// The version this ABI reports, as three numbers.
@@ -268,8 +236,7 @@ pub struct Surface {
     pub aliases: &'static [Alias],
     /// Enumerations, before the records that hold their numbers.
     pub enumerations: &'static [Enumeration],
-    /// Structs and unions, in an order where nothing is used before it is
-    /// defined.
+    /// Structs and unions, each defined before use.
     pub records: &'static [Record],
     /// Published constants, grouped as the modules declare them.
     pub constants: &'static [&'static [Value]],
@@ -277,8 +244,7 @@ pub struct Surface {
     pub functions: &'static [Function],
 }
 
-/// An enumeration `codes!` declared, and the plain integer its numbers cross
-/// as.
+/// An enumeration `codes!` declared, and the integer its numbers cross as.
 pub trait Enumerated {
     /// The integer the `repr` fixes it to.
     type Raw;
@@ -286,28 +252,20 @@ pub trait Enumerated {
 
 /// A parameter or a member that holds one of `E`'s numbers.
 ///
-/// It is `E`'s integer and nothing else, so a caller's number is read as a
-/// number and checked where it is used, the way every value that crosses is:
-/// a Rust enumeration built from a number no variant has is undefined
-/// behaviour before any check could run. What the alias adds is the name.
-/// The header spells the parameter with the enumeration's own `typedef` —
-/// `sipral_codec_t codec` rather than `uint32_t codec` — so the declaration a
-/// caller compiles against says which numbers go there, and a binding
-/// generated from it can know without a list kept by hand.
+/// Only `E`'s integer, checked where used: building a Rust enum from an
+/// unknown number would be undefined behaviour. The alias gives the header
+/// the enum's `typedef` (`sipral_codec_t codec`, not `uint32_t codec`), so
+/// callers and generated bindings know which numbers belong there.
 pub type Number<E> = <E as Enumerated>::Raw;
 
 /// Declare a `#[repr(C)]` struct or union that crosses the boundary.
 ///
-/// The declaration is emitted exactly as it is written, and a [`Record`]
-/// beside it saying what was emitted. The `#[repr(C)]` is the macro's rather
-/// than the author's on purpose: `scripts/check.sh` refuses a `repr` written
-/// at the top level of any module here, so a type that crosses cannot be
-/// declared anywhere this does not see it.
+/// Emits the declaration as written plus a [`Record`] describing it. The
+/// macro adds `#[repr(C)]` itself: `scripts/check.sh` refuses a top-level
+/// `repr` here, so no crossing type escapes this macro.
 macro_rules! record {
-    // A declaration is documentation, then derives, then the type, and two
-    // repetitions of attributes side by side is more than the macro parser can
-    // tell apart. So the documentation is taken a line at a time and set aside
-    // first, and what is left starts with something that is not a doc comment.
+    // Doc lines are peeled off one at a time first: two attribute repetitions
+    // side by side are ambiguous to the macro parser.
     (
         @doc [$($taken:literal)*]
         #[doc = $line:literal]
@@ -350,9 +308,8 @@ macro_rules! record {
             };
         }
 
-        // Checked on whatever target this is compiled for, which is the
-        // point: a struct that ends where its last member does on this Mac
-        // can still end in padding on a 32-bit ARM phone.
+        // checked per target: no padding on a Mac can still be padding on
+        // 32-bit ARM
         const _: () = assert!(
             $crate::abi::ends_with_its_last_member(
                 &[$(stringify!($member)),*],
@@ -412,9 +369,8 @@ macro_rules! record {
 
 /// Declare an enumeration whose numbers are part of the ABI.
 ///
-/// The width is written out rather than left to the compiler, because a C
-/// compiler left to itself picks its own and the two do not have to agree.
-/// Documentation is set aside a line at a time for the reason [`record`] is.
+/// The width is explicit because a C compiler picks its own. Docs are peeled
+/// off as in [`record`].
 macro_rules! codes {
     (
         @doc [$($taken:literal)*]
@@ -469,9 +425,8 @@ macro_rules! codes {
 
 /// Declare the constants one module publishes.
 ///
-/// The value in the descriptor is the constant itself rather than a copy of
-/// the literal, so an expression that is rewritten is printed as whatever it
-/// now comes to.
+/// The descriptor holds the constant itself, so a changed expression prints
+/// its new value.
 macro_rules! constants {
     (
         $(
@@ -499,10 +454,8 @@ macro_rules! constants {
 /// Declare a published type alias, or the shape of a callback: one that only
 /// reports, or one that answers.
 ///
-/// The callback arms come first because a function type is also a type, and
-/// the arms are tried in order. The answering arm comes before the
-/// fire-and-forget one for the same reason: a return type is more tokens
-/// than none, and a pattern that would match a shorter input is tried second.
+/// Callback arms come first (a function type is also a type), and the
+/// answering arm before the reporting one (longer pattern first).
 macro_rules! alias {
     (
         $(#[doc = $doc:literal])*
@@ -564,8 +517,7 @@ macro_rules! alias {
 
 pub(crate) use {alias, codes, constants, record};
 
-/// One line of [`MIN_SIZES`] for a struct, read off its [`Record`] and its
-/// `Versioned` impl so that nothing in it is spelled a second time.
+/// One [`MIN_SIZES`] line, read off the [`Record`] and the `Versioned` impl.
 macro_rules! pinned {
     ($($record:path),* $(,)?) => {
         &[$((
@@ -576,14 +528,10 @@ macro_rules! pinned {
     };
 }
 
-/// Every versioned struct a caller declares to us, the member its oldest
-/// frozen version ends with, and where that member ends on the target this
-/// was compiled for — for the generator, which prints the same length for
-/// every other layout from the member's name, and for the test that says the
-/// table is complete.
-///
-/// The Rust name, so that it can be matched against [`SURFACE`] without
-/// anything being spelled twice.
+/// Every versioned struct a caller declares to us, the last member of its
+/// oldest frozen version, and where that member ends on this target. Used by
+/// the generator and by the completeness test. Keyed by Rust name to match
+/// [`SURFACE`].
 pub const MIN_SIZES: &[(&str, &str, usize)] = pinned![
     crate::version::SipralAbiVersion,
     crate::audio::SipralAudioDevice,
@@ -625,13 +573,9 @@ pub const MIN_SIZES: &[(&str, &str, usize)] = pinned![
 
 /// The versioned-shaped structs with no pinned length, and why.
 ///
-/// `sipral_event_t` and `sipral_screen_request_t` start with a `size` like the
-/// rest, but the library is what fills them in: each is handed to a callback
-/// as a `const` pointer and the caller reads no further than the `size` says.
-/// Nothing ever declares one to us, so there is no declared size to refuse and
-/// no oldest published length that matters. The exceptions are named here
-/// rather than left to be noticed, because a struct that quietly went unpinned
-/// would look exactly like these two.
+/// `sipral_event_t` and `sipral_screen_request_t` have a `size` but are filled
+/// by the library and passed to callbacks as `const`; no caller declares one,
+/// so there is no length to pin. Named here so a new unpinned struct stands out.
 pub const FILLED_BY_US: &[&str] = &[
     "SipralEvent",
     "SipralScreenRequest",
@@ -642,9 +586,8 @@ pub const FILLED_BY_US: &[&str] = &[
 
 /// Everything this ABI publishes, and the only list a person maintains.
 ///
-/// A line here is one item. Adding an item without adding its line leaves a
-/// descriptor nothing reads, which is a dead-code warning and therefore a
-/// failed build; `scripts/check.sh` says the same thing in a sentence.
+/// An item without its line leaves an unread descriptor: a dead-code warning,
+/// so a failed build. `scripts/check.sh` reports it too.
 pub const SURFACE: Surface = Surface {
     version: (
         crate::version::SIPRAL_ABI_VERSION_MAJOR,
@@ -1033,9 +976,8 @@ mod tests {
     use super::{SURFACE, Shape, Stands, snake};
     use std::collections::HashSet;
 
-    /// Every name a type can be referred to by, so that a member whose type is
-    /// not in the surface is a test failure rather than a header that mentions
-    /// a struct it never defined.
+    /// Every name a type can be referred to by, so a member of an unlisted
+    /// type fails here rather than in the header.
     fn declared() -> HashSet<&'static str> {
         let mut names = HashSet::new();
         for alias in SURFACE.aliases {
@@ -1097,8 +1039,7 @@ mod tests {
         }
     }
 
-    /// Whether `doc` names `name` as a type: the word itself, not a longer
-    /// name it begins and not a path to one of its values.
+    /// Whether `doc` names `name` as a whole word, not a prefix or a path.
     fn names_the_type(doc: &str, name: &str) -> bool {
         doc.match_indices(name).any(|(at, _)| {
             let before = doc[..at].chars().next_back();
@@ -1111,10 +1052,8 @@ mod tests {
         })
     }
 
-    /// A `u32` member whose documentation says which enumeration it holds is
-    /// declared as that enumeration's [`Number`](super::Number), so the header
-    /// spells it with the `typedef` and a binding can tell which numbers go
-    /// there without reading the prose.
+    /// A `u32` member whose docs name an enumeration is declared as its
+    /// [`Number`](super::Number), so the header uses the `typedef`.
     #[test]
     fn a_member_documented_as_an_enumeration_is_declared_as_one() {
         let enumerations: Vec<_> = SURFACE
@@ -1187,9 +1126,8 @@ mod tests {
         }
     }
 
-    /// The rule the generator prints four files with and the library answers
-    /// `sipral_abi_struct_size` with. The cases are written out rather than derived,
-    /// because a test that derived them would move with the rule.
+    /// The naming rule used by the generator and `sipral_abi_struct_size`.
+    /// Cases written out so the test does not move with the rule.
     #[test]
     fn a_rust_name_becomes_the_name_c_spells() {
         assert_eq!(snake("SipralStackConfig"), "sipral_stack_config");
@@ -1200,8 +1138,7 @@ mod tests {
         assert_eq!(snake("G729AnnexB"), "g729_annex_b");
     }
 
-    /// The size is the compiler's answer, carried so that the one entry point
-    /// that reports it does not have to name every type.
+    /// The compiler's size, carried so the entry point need not name each type.
     #[test]
     fn every_record_carries_the_length_it_was_compiled_to() {
         for record in SURFACE.records {
@@ -1232,12 +1169,9 @@ mod tests {
         }
     }
 
-    /// The size member is what makes appending to a released struct safe, so
-    /// every struct a caller fills in or reads back has to have one. The ones
-    /// that do not are the event payload arms, which live inside an event that
-    /// carries the size for all of them, and the element of an array whose
-    /// length travels beside it, which an appended member would re-stride and
-    /// which therefore never grows.
+    /// Every struct a caller fills or reads needs a `size`. Exceptions: event
+    /// payload arms (the event carries the size) and array elements (their
+    /// length travels beside them, and they never grow).
     #[test]
     fn every_record_a_caller_hands_over_carries_its_own_size() {
         let inside_an_event = [

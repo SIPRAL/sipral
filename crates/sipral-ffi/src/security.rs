@@ -1,34 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Who is calling, as a signature says, and how a call's media is protected,
-//! across the boundary (ABI 0.31).
+//! Caller verification and media protection across the boundary (ABI 0.31).
 //!
 //! # STIR/SHAKEN
 //!
-//! An account given a P-256 key and the URL of its certificate
-//! (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`) signs
-//! every call it places (RFC 8224 §6.1, with RFC 8588's SHAKEN claims). A
-//! stack given trust anchors ([`sipral_stack_stir`]) verifies the callers of
-//! the calls its accounts receive (§6.2): the certificate is the
-//! application's to fetch, from its cache or over HTTPS, when
-//! `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` asks for it with
-//! `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`, and to hand over with
-//! [`sipral_call_stir_certificate`]. The verdict follows as the same kind of
-//! event with `SIPRAL_VERIFICATION_STAGE_VERIFIED`, just before
-//! `SIPRAL_EVENT_KIND_INCOMING_CALL`, and rides on every event of the call
-//! (`sipral_call_event_t::verification`). An account set to
-//! `SIPRAL_STIR_VERIFICATION_STRICT` refuses a call that does not verify with
-//! the response RFC 8224 §6.2.2 prescribes; every other account reports and
-//! delivers.
+//! An account with `stir_key` and `stir_certificate_url` signs every call it
+//! places (RFC 8224 §6.1, RFC 8588 claims). A stack with trust anchors
+//! ([`sipral_stack_stir`]) verifies incoming callers (§6.2). The application
+//! fetches the certificate when `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` asks
+//! (`SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`) and hands it over with
+//! [`sipral_call_stir_certificate`]. The verdict follows with
+//! `SIPRAL_VERIFICATION_STAGE_VERIFIED`, before `SIPRAL_EVENT_KIND_INCOMING_CALL`,
+//! and rides on every call event. `SIPRAL_STIR_VERIFICATION_STRICT` refuses a
+//! call that does not verify (RFC 8224 §6.2.2); otherwise the call is delivered.
 //!
 //! # The encryption report
 //!
-//! [`sipral_media_encryption_at`] says, for each stream of a call, whether
-//! it is encrypted, how its keys were exchanged, which suite it runs, and
-//! whether the exchange authenticated the far end — the same facts
-//! `SIPRAL_EVENT_KIND_MEDIA_STARTED` and `SIPRAL_EVENT_KIND_MEDIA_SECURED`
-//! carry in `sipral_media_event_t`.
+//! [`sipral_media_encryption_at`] reports per stream what
+//! `SIPRAL_EVENT_KIND_MEDIA_STARTED` and `SIPRAL_EVENT_KIND_MEDIA_SECURED` carry.
 
 use std::ffi::c_char;
 use std::slice;
@@ -47,19 +37,16 @@ use crate::status::SipralStatus;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
 
 codes! {
-    /// How a stream's SRTP keys were exchanged. Names for
-    /// `sipral_stream_encryption_t::key_exchange` and
-    /// `sipral_media_event_t::key_exchange`.
+    /// How a stream's SRTP keys were exchanged
+    /// (`sipral_stream_encryption_t::key_exchange`, `sipral_media_event_t::key_exchange`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralKeyExchange: u32 {
-        /// None: the stream was never meant to be encrypted, or the event is
-        /// not about one.
+        /// None: the stream is not encrypted, or the event is not about one.
         None = 0,
-        /// In the session description (RFC 4568's `a=crypto`): as protected
-        /// as the signalling transport that carried it.
+        /// In the SDP (RFC 4568 `a=crypto`): as protected as the signalling.
         Sdes = 1,
-        /// By a DTLS handshake on the media path (RFC 5764), the far end's
-        /// certificate checked against the fingerprint its signalling named.
+        /// DTLS on the media path (RFC 5764), checked against the signalled
+        /// fingerprint.
         Dtls = 2,
     }
 }
@@ -76,34 +63,28 @@ codes! {
 }
 
 codes! {
-    /// What an account does with the `Identity` header fields of the calls
-    /// it receives (RFC 8224 §6.2). Names for
-    /// `sipral_account_config_t::stir_verification`.
+    /// What an account does with incoming `Identity` header fields
+    /// (RFC 8224 §6.2). Values of `sipral_account_config_t::stir_verification`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralStirVerification: u32 {
         /// This build's default, which is `REPORT`.
         Default = 0,
         /// Verify nothing.
         Off = 1,
-        /// Verify, report the verdict on the call, and deliver every call
-        /// whatever it says. In force once the stack has trust anchors
-        /// (`sipral_stack_stir`); without any, nothing is fetched or
-        /// verified.
+        /// Verify, report the verdict, deliver every call. Active only once
+        /// the stack has trust anchors (`sipral_stack_stir`).
         Report = 2,
-        /// Verify, and refuse a call that does not verify with the response
-        /// RFC 8224 §6.2.2 prescribes: 428 with no `Identity`, 436 for a
-        /// certificate that cannot be had, 437 for one nobody trusted, 438
-        /// for a signature that does not hold, 403 "Stale Date". In force
-        /// with or without trust anchors: with none, nothing verifies.
+        /// Verify and refuse what does not verify (RFC 8224 §6.2.2): 428 no
+        /// `Identity`, 436 certificate unavailable, 437 untrusted, 438 bad
+        /// signature, 403 "Stale Date". Active even with no anchors, where
+        /// nothing verifies.
         Strict = 3,
     }
 }
 
 codes! {
-    /// The attestation level of a SHAKEN PASSporT (RFC 8588 §4). Names for
-    /// `sipral_account_config_t::stir_attestation`,
-    /// `sipral_verification_event_t::attestation` and
-    /// `sipral_call_event_t::attestation`.
+    /// SHAKEN attestation level (RFC 8588 §4), for
+    /// `sipral_account_config_t::stir_attestation` and the verdict fields.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralAttestation: u32 {
         /// None said: on an account, full attestation; on a verdict, a
@@ -113,36 +94,31 @@ codes! {
         A = 1,
         /// Partial: the signer knows the caller, not the number.
         B = 2,
-        /// Gateway: the signer knows only where the call entered its
-        /// network.
+        /// Gateway: the signer knows only where the call entered its network.
         C = 3,
     }
 }
 
 codes! {
-    /// What a verification came to. Names for
-    /// `sipral_verification_event_t::outcome` and
-    /// `sipral_call_event_t::verification`.
+    /// What a verification came to (`sipral_verification_event_t::outcome`,
+    /// `sipral_call_event_t::verification`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralVerificationOutcome: u32 {
-        /// Nothing was verified: the account does not verify, or the stack
-        /// has no trust anchors and the account only reports.
+        /// Nothing verified: the account does not verify, or no anchors.
         None = 0,
-        /// A PASSporT signed by a certificate with authority over the calling
-        /// number, fresh, for the numbers the request names.
+        /// Signed by a certificate with authority over the calling number,
+        /// fresh, for the numbers the request names.
         Valid = 1,
         /// One was there and does not hold: `failure` says why.
         Invalid = 2,
-        /// Nothing this end could verify: no `Identity`, or only ones naming
-        /// a PASSporT extension it does not support.
+        /// Nothing to verify: no `Identity`, or only unsupported extensions.
         Absent = 3,
     }
 }
 
 codes! {
-    /// Why a verification did not hold. Names for
-    /// `sipral_verification_event_t::failure` and
-    /// `sipral_call_event_t::verification_failure`.
+    /// Why a verification did not hold (`sipral_verification_event_t::failure`,
+    /// `sipral_call_event_t::verification_failure`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralVerificationFailure: u32 {
         /// Nothing failed.
@@ -179,19 +155,18 @@ codes! {
 }
 
 codes! {
-    /// Which half of a caller's verification an event reports. Names for
-    /// `sipral_verification_event_t::stage`.
+    /// Which half of a verification an event reports
+    /// (`sipral_verification_event_t::stage`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralVerificationStage: u32 {
         /// Never sent.
         Unknown = 0,
-        /// The certificate at `certificate_url` is wanted: fetch it and hand
-        /// it to `sipral_call_stir_certificate`, or hand over nothing to say
-        /// it could not be had. The call waits, unannounced, until then or
-        /// until `certificate_wait_ms` runs out.
+        /// Fetch the certificate at `certificate_url` and pass it to
+        /// `sipral_call_stir_certificate` (or nothing, if unavailable). The
+        /// call waits unannounced until then or `certificate_wait_ms`.
         CertificateWanted = 1,
-        /// The verdict is in. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or,
-        /// when `refused` is set, `SIPRAL_EVENT_KIND_CALL_ENDED`.
+        /// The verdict. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED` when `refused` is set.
         Verified = 2,
     }
 }
@@ -199,54 +174,39 @@ codes! {
 record! {
     /// How a stack verifies the callers of the calls its accounts receive.
     ///
-    /// Set `size` to `sizeof(sipral_stir_config_t)` and zero the rest before
-    /// filling anything in.
+    /// Set `size` to `sizeof(sipral_stir_config_t)` and zero the rest first.
     #[derive(Clone, Copy)]
     pub struct SipralStirConfig {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// The trust anchors — the STI-PA's approved roots in a SHAKEN
-        /// deployment — as PEM or DER certificates, one after another. Null
-        /// and zero for none, which turns verification off for every account
-        /// that only reports.
+        /// Trust anchors (in SHAKEN, the STI-PA roots), PEM or DER,
+        /// concatenated. Null and zero for none: reporting accounts then verify
+        /// nothing.
         pub anchors: *const u8,
         /// How many bytes of them.
         pub anchors_len: usize,
-        /// How far a PASSporT's `iat` may be from now, either way, in
-        /// seconds; zero for RFC 8224 §6.2's sixty.
+        /// Allowed `iat` skew either way, in seconds; zero for 60 (RFC 8224 §6.2).
         pub freshness_seconds: u64,
-        /// How long a call waits for `sipral_call_stir_certificate` before
-        /// its certificate counts as one that could not be had, in
-        /// milliseconds; zero for four seconds.
+        /// How long a call waits for `sipral_call_stir_certificate`, in ms,
+        /// before the certificate counts as unavailable; zero for 4000.
         pub certificate_wait_ms: u64,
-        /// The wall clock at `now_ms`, in seconds since 1970, or zero to keep
-        /// the one an earlier call gave. A PASSporT is signed and judged by
-        /// the time, and only the caller can say which `now_ms` a time goes
-        /// with, so the first call must give it.
-        /// (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
-        /// `now_ms` at all, and is not taken for it.) A stack created with no
-        /// media clock dates its RTCP sender reports by this one too.
+        /// The wall clock at `now_ms`, in Unix seconds, or zero to keep the
+        /// previous one. The first call must set it. Not taken from
+        /// `sipral_stack_config_t::media_clock_unix_seconds`, which has no
+        /// `now_ms`. A stack with no media clock also dates RTCP sender reports
+        /// by it.
         pub unix_seconds: u64,
-        /// A `SipralToggle`: whether a certificate whose TNAuthList names a
-        /// service provider code (RFC 8226 §9) has authority over every
-        /// calling number. Off by default, when only the numbers and ranges a
-        /// certificate names are its own: a code names a provider, not
-        /// numbers, and taking it as covering any number is a decision about
-        /// the providers the anchors certify — the one a SHAKEN deployment,
-        /// whose certificates carry codes and no numbers, makes by turning
-        /// this on. ABI 0.32.
+        /// A `SipralToggle`: whether a TNAuthList service provider code
+        /// (RFC 8226 §9) covers every calling number. Off by default; a SHAKEN
+        /// deployment, whose certificates carry codes, turns it on. ABI 0.32.
         pub accept_service_provider_codes: Number<SipralToggle>,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. Set it to zero; the library reads nothing from
-        /// it.
+        /// Zero. Pads the struct to its alignment so an appended member starts
+        /// past the declared length. Never read.
         pub reserved: u32,
     }
 }
 
-// Safety: integers and one pointer beside its length, and all-zero is valid:
-// no anchors, the defaults, and the stack's own clock.
+// Safety: integers and one pointer with its length; all-zero is valid.
 unsafe impl Versioned for SipralStirConfig {
     const NAME: &'static str = "sipral_stir_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralStirConfig, reserved);
@@ -257,8 +217,7 @@ unsafe impl Versioned for SipralStirConfig {
 }
 
 record! {
-    /// How one stream of a call is protected: one entry of the encryption
-    /// report.
+    /// How one stream of a call is protected.
     ///
     /// Set `size` to `sizeof(sipral_stream_encryption_t)` before the call.
     #[derive(Clone, Copy, Debug)]
@@ -267,27 +226,22 @@ record! {
         pub size: usize,
         /// A [`SipralMediaKind`]: what the stream carries.
         pub media: Number<SipralMediaKind>,
-        /// Whether what it sends is encrypted and what it takes
-        /// authenticated, now. Zero while it waits for the handshake that
-        /// keys it.
+        /// Whether it is encrypted now. Zero while waiting for its keys.
         pub encrypted: u32,
         /// A [`SipralKeyExchange`]: how its keys were exchanged.
         pub key_exchange: Number<SipralKeyExchange>,
         /// A [`SipralSrtpSuite`]: the transform it runs, once it runs one.
         pub suite: Number<SipralSrtpSuite>,
-        /// Whether the key exchange authenticated the far end: set for a
-        /// DTLS-SRTP stream once its handshake finished, the far end's
-        /// certificate having matched its signalled fingerprint; never for
-        /// SDES, whose key is exactly as authentic as the signalling
-        /// transport, which this library cannot see.
+        /// Whether the key exchange authenticated the far end: set for
+        /// DTLS-SRTP after a handshake matching the fingerprint; never for
+        /// SDES, which is only as authentic as the signalling.
         pub authenticated: u32,
-        /// Whether it agreed to be encrypted and is still waiting for its
-        /// keys.
+        /// Agreed to be encrypted and still waiting for keys.
         pub awaiting_keys: u32,
     }
 }
 
-// Safety: integers, and zero is a valid value of each.
+// Safety: integers; zero is valid for each.
 unsafe impl Versioned for SipralStreamEncryption {
     const NAME: &'static str = "sipral_stream_encryption";
     const PIN: crate::versioned::Pin =
@@ -376,9 +330,7 @@ pub(crate) const fn failure_code(
         Some(VerificationFailure::NumberNotCovered) => SipralVerificationFailure::NumberNotCovered,
         Some(VerificationFailure::OrigMismatch) => SipralVerificationFailure::OrigMismatch,
         Some(VerificationFailure::DestMismatch) => SipralVerificationFailure::DestMismatch,
-        // `Malformed`, and a failure the layer below learned to name after
-        // this ABI did, which is still a failure and reads as the broadest
-        // one there is
+        // `Malformed`, and any failure added below later: the broadest one
         Some(_) => SipralVerificationFailure::Malformed,
     }
 }
@@ -448,8 +400,7 @@ pub(crate) fn srtp_suites(names: Option<&str>) -> Result<Option<Vec<SrtpSuite>>,
     Ok(Some(suites))
 }
 
-/// Bytes a caller supplied that may be longer than any text this ABI takes:
-/// a certificate chain, or a bundle of trust anchors.
+/// Caller bytes longer than a text: a certificate chain or trust anchors.
 ///
 /// # Safety
 ///
@@ -477,26 +428,21 @@ unsafe fn blob<'a>(
     }
 }
 
-/// The most trust anchors one call takes, in bytes: a store of several
-/// hundred roots in PEM.
+/// Most trust-anchor bytes per call: several hundred PEM roots.
 const MAX_ANCHORS: usize = 4 * 1024 * 1024;
 
 entry! {
-    /// Verify the callers of the calls this stack's accounts receive, against
-    /// `config`'s trust anchors, from now on (RFC 8224 §6.2).
+    /// Verify incoming callers against `config`'s trust anchors from now on
+    /// (RFC 8224 §6.2).
     ///
-    /// Replaces whatever an earlier call set. Every account that reports —
-    /// the default — verifies once there is at least one anchor, and none
-    /// does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
-    /// verifies either way. `config.unix_seconds` is the wall clock at
-    /// `now_ms`, and the stack signs and verifies by it from here on; zero
-    /// keeps what an earlier call gave, and is `SIPRAL_STATUS_WRONG_STATE`
-    /// on the first. A stack whose accounts only sign calls makes this call
-    /// too, with no anchors.
+    /// Replaces any earlier setting. Reporting accounts verify only with at
+    /// least one anchor; `SIPRAL_STIR_VERIFICATION_STRICT` accounts always do.
+    /// `config.unix_seconds` sets the wall clock at `now_ms`; zero keeps the
+    /// previous one and is `SIPRAL_STATUS_WRONG_STATE` the first time. A stack
+    /// whose accounts only sign also calls this, with no anchors.
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
-    /// certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`
-    /// in a build without `SIPRAL_FEATURE_STIR`.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not P-256
+    /// certificates; `SIPRAL_STATUS_NOT_SUPPORTED` without `SIPRAL_FEATURE_STIR`.
     ///
     /// # Safety
     ///
@@ -531,9 +477,7 @@ fn configure_stir(
     )?;
     if config.unix_seconds != 0 {
         state.agent.set_wall_clock(now, config.unix_seconds);
-        // RFC 3550 §6.4.1: a sender report carries the wall clock, and a
-        // stack created without one takes it from the first that pairs one
-        // with a `now_ms`
+        // RFC 3550 §6.4.1: sender reports carry the wall clock
         if !state.media_clock {
             state
                 .engine
@@ -572,17 +516,13 @@ fn configure_stir(
 }
 
 entry! {
-    /// The certificate chain a call's `Identity` named, as fetched from the
-    /// URL `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` gave with
-    /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED` — PEM or DER, the
-    /// signing certificate first — or null and zero for one that could not
-    /// be fetched.
+    /// The certificate chain for a call's `Identity`, fetched from the URL of
+    /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: PEM or DER, signing
+    /// certificate first. Null and zero if it could not be fetched.
     ///
-    /// The call's verdict is reached here and reported, and the call
-    /// delivered or refused, before this returns; the events come out of the
-    /// next `sipral_stack_poll`. `SIPRAL_STATUS_STALE_HANDLE` for a call no
-    /// longer waiting: it was already answered, its wait ran out, or the
-    /// caller gave up.
+    /// The verdict is reached and the call delivered or refused before this
+    /// returns; the events come from the next `sipral_stack_poll`.
+    /// `SIPRAL_STATUS_STALE_HANDLE` for a call no longer waiting.
     ///
     /// # Safety
     ///
@@ -630,8 +570,7 @@ fn certificate(
 }
 
 entry! {
-    /// How many streams one call's encryption report has: one per stream
-    /// the call carries, which for this library is its one audio stream.
+    /// How many streams one call's encryption report has (one audio stream).
     ///
     /// # Safety
     ///
@@ -647,9 +586,7 @@ entry! {
 }
 
 entry! {
-    /// How one stream of a call is protected, now: whether it is encrypted,
-    /// how its keys were exchanged, which suite it runs, and whether the
-    /// exchange authenticated the far end. An index past the end is
+    /// How one stream of a call is protected now. An index past the end is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
     /// # Safety
@@ -678,13 +615,11 @@ entry! {
     }
 }
 
-/// The verification an account asks for, and how it signs, from what crossed
-/// the boundary.
+/// An account's verification policy and signing setup, from the C config.
 ///
 /// # Safety
 ///
-/// Every `stir_*` pointer in `config` must be readable for the length beside
-/// it.
+/// Every `stir_*` pointer in `config` must be readable for its length.
 pub(crate) unsafe fn with_stir(
     state: &crate::stack::StackState,
     mut account: sipral_ua::Account,
@@ -807,8 +742,7 @@ fn signing(
     ))
 }
 
-/// A text a verdict carries, as a pointer and a length C reads; null and
-/// zero for none.
+/// A verdict's text as pointer and length; null and zero for none.
 pub(crate) fn text_of(text: Option<&str>) -> (*const c_char, usize) {
     text.map_or((std::ptr::null(), 0), |text| {
         (text.as_ptr().cast::<c_char>(), text.len())

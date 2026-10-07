@@ -1,32 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! One machine-readable answer to "what does this build support", across the
-//! boundary — D8, and B2 seen from the outside.
+//! What this build supports, across the boundary (D8, and B2 seen from outside).
 //!
-//! A binding that ships a control for something this build cannot do finds
-//! out from a support ticket, months after the control shipped, because
-//! nothing before this call said otherwise. [`sipral_capabilities`] answers
-//! once, before any stack exists: which codecs this build contains, which
-//! transports its signalling can carry, and which optional features are
-//! compiled in. An application reads it at start-up and greys out exactly the
-//! controls this build cannot honour, instead of shipping every control and
-//! discovering which ones do nothing from whoever files the ticket.
+//! [`sipral_capabilities`] answers before any stack exists: codecs, signalling
+//! transports and compiled-in features. An application reads it at start-up and
+//! greys out the controls this build cannot honour.
 //!
-//! # Two layers, one honest answer each
-//!
-//! [`sipral::Capabilities::of_this_build`] answers for the `sipral` crate:
-//! what `sipral_ua::UserAgent` can do, whether or not this ABI has grown an
-//! entry point for it yet. This module answers for the ABI itself, and the
-//! two are always allowed to differ: a thing `UserAgent` can do and this ABI
-//! has no entry point in front of reads absent here, whatever the crate
-//! underneath answers. [`SIPRAL_FEATURE_SUBSCRIPTIONS`] was the one that did,
-//! from the first version of this module until
-//! [`crate::subscription::sipral_account_subscribe`] arrived with event kind
-//! 15 behind it; it now reads whatever the facade says, and every bit here is
-//! once again the facade's own answer. The next feature to be built below
-//! before it is built here takes its place, and this paragraph is the shape of
-//! the answer for it.
+//! [`sipral::Capabilities::of_this_build`] answers for the `sipral` crate; this
+//! module answers for the ABI. They may differ: a feature `UserAgent` has but
+//! this ABI has no entry point for reads absent here.
 
 use sipral::{Capabilities, SrtpKeying};
 use sipral_ua::TransportProtocol;
@@ -37,15 +20,11 @@ use crate::stack::SipralTransport;
 use crate::versioned::{Versioned, write_versioned};
 
 constants! {
-    /// Bits of [`SipralCapabilities::transports`]. A caller checks
-    /// `capabilities.transports & SIPRAL_TRANSPORT_BIT_TLS != 0` rather than a
-    /// growing list of booleans, so a transport this ABI has not learned a bit
-    /// for yet reads as absent rather than refusing to compile against an
-    /// older header.
+    /// Bits of [`SipralCapabilities::transports`]. A transport this ABI has no
+    /// bit for yet reads as absent.
     ///
-    /// Named after [`SipralTransport`]'s own numbers (`1 << (value - 1)`), so
-    /// a transport added there in the future gets a bit here without the two
-    /// numbering schemes ever being asked to agree by hand.
+    /// Derived from [`SipralTransport`]'s numbers (`1 << (value - 1)`), so the
+    /// two numberings never have to be kept in step by hand.
     pub const SIPRAL_TRANSPORT_BIT_UDP: u32 = 1 << (SipralTransport::Udp as u32 - 1);
     /// See [`SIPRAL_TRANSPORT_BIT_UDP`].
     pub const SIPRAL_TRANSPORT_BIT_TCP: u32 = 1 << (SipralTransport::Tcp as u32 - 1);
@@ -70,195 +49,121 @@ constants! {
     /// dialog-state package a busy lamp field is built on, reached with
     /// [`sipral_account_subscribe`](crate::subscription::sipral_account_subscribe).
     pub const SIPRAL_FEATURE_SUBSCRIPTIONS: u32 = 1 << 5;
-    /// See [`SIPRAL_FEATURE_DTMF`]. Opus is behind a compile-time feature,
-    /// because libopus is the one part of the audio path that is licensed
-    /// rather than written, so a build meant for hardware can leave it out.
-    /// The bit is how an application finds out without having to enumerate
-    /// the codecs, and it is set from the catalogue this build offers rather
-    /// than from any crate's feature flag; `SIPRAL_CODEC_OPUS` keeps its
-    /// number either way, since a value that has left this header is spent
-    /// for good.
+    /// See [`SIPRAL_FEATURE_DTMF`]. Opus is behind a compile-time feature
+    /// (libopus is licensed, not written here). Set from the codec catalogue,
+    /// not from a crate feature flag. `SIPRAL_CODEC_OPUS` keeps its number either way.
     pub const SIPRAL_FEATURE_OPUS: u32 = 1 << 6;
-    /// DTLS-SRTP (RFC 5764): the keys for a call's media come from a
-    /// handshake on the media path rather than from the body of a message.
+    /// DTLS-SRTP (RFC 5764): media keys come from a handshake on the media path.
     ///
-    /// Behind a compile-time feature for the reason Opus is: a build that
-    /// will only ever place SDES calls over a protected SIP transport has no
-    /// use for an elliptic curve, and a desk phone counts its flash. Both
-    /// `SIPRAL_SRTP_DTLS` and `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers
-    /// in a build without it — a value that has left this header is spent —
-    /// and naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED` rather than
-    /// quietly placing an unencrypted call.
+    /// Behind a compile-time feature. `SIPRAL_SRTP_DTLS` and
+    /// `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers in a build without it and
+    /// answer `SIPRAL_STATUS_NOT_SUPPORTED` there, never an unencrypted call.
     ///
     /// An application that sets one of those policies must also drain
     /// `sipral_media_poll_transmit`; see there.
     pub const SIPRAL_FEATURE_DTLS_SRTP: u32 = 1 << 7;
     /// See [`SIPRAL_FEATURE_DTMF`]. ICE in the full role (RFC 8445), with
-    /// consent freshness (RFC 7675) and the SDP attributes of RFC 8839: a
-    /// call's media path is chosen by checking it rather than taken from what
-    /// the signalling said.
+    /// consent freshness (RFC 7675) and the SDP attributes of RFC 8839.
     ///
-    /// Behind a compile-time feature for the reason DTLS-SRTP is, and off by
-    /// policy even where it is compiled in — `docs/06-nat.md` tabulates what
-    /// it costs on the wire and why it buys nothing against a PBX that learns
-    /// the caller's address from the media it receives. Both `SIPRAL_ICE_OFFERED`
-    /// and `SIPRAL_ICE_REQUIRED` keep their numbers in a build without it, and
-    /// naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    /// Behind a compile-time feature and off by policy (`docs/06-nat.md`).
+    /// `SIPRAL_ICE_OFFERED` and `SIPRAL_ICE_REQUIRED` keep their numbers in a
+    /// build without it and answer `SIPRAL_STATUS_NOT_SUPPORTED` there.
     ///
     /// An application that sets one of those policies must also drain
     /// `sipral_media_poll_transmit`; see there.
     pub const SIPRAL_FEATURE_ICE: u32 = 1 << 8;
     /// See [`SIPRAL_FEATURE_DTMF`]. STUN (RFC 8489): a stack created with
-    /// `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
-    /// writes the answer in the `Contact` and in `c=` and `m=`.
-    ///
-    /// Behind a compile-time feature of its own, which brings nothing ICE
-    /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
-    /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    /// `SIPRAL_NAT_STUN` learns its public address and writes it in `Contact`,
+    /// `c=` and `m=`. Without the feature, `SIPRAL_NAT_STUN` answers
+    /// `SIPRAL_STATUS_NOT_SUPPORTED`.
     pub const SIPRAL_FEATURE_STUN: u32 = 1 << 9;
-    /// See [`SIPRAL_FEATURE_DTMF`]. A TURN server reached over TCP or TLS
-    /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport`, and the
-    /// connection the application opens for each media socket when
-    /// `SIPRAL_EVENT_KIND_TURN_STREAM` asks — for the network that lets no
-    /// UDP out.
-    ///
-    /// It comes with `SIPRAL_FEATURE_ICE`, since a relay is only ever a
-    /// call's relayed ICE candidate, and without it `turn_transport` other
-    /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
-    /// does.
+    /// See [`SIPRAL_FEATURE_DTMF`]. A TURN server over TCP or TLS
+    /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport` and
+    /// `SIPRAL_EVENT_KIND_TURN_STREAM`. Comes with `SIPRAL_FEATURE_ICE`;
+    /// without it a non-UDP `turn_transport` answers `SIPRAL_STATUS_NOT_SUPPORTED`.
     pub const SIPRAL_FEATURE_TURN_STREAM: u32 = 1 << 10;
-    /// See [`SIPRAL_FEATURE_DTMF`]. The built-in audio engine: a stack
-    /// created with `sipral_stack_config_t::audio` set to
-    /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
-    /// managed call itself, with the `sipral_audio_*` entry points to list,
-    /// choose and control them. Clear where there is no backend — on Linux,
-    /// and on an Android phone below API level 28, where AAudio cannot open
-    /// a voice-communication stream — and `SIPRAL_AUDIO_DEVICE` then
-    /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
-    /// frames as it always has. On Android the answer is the phone's, read
-    /// when asked, not the build's.
-    ///
-    /// This crate's own answer rather than the facade's: the engine sits
-    /// beside the facade, not under it, so the facade has nothing to say.
+    /// See [`SIPRAL_FEATURE_DTMF`]. The built-in audio engine
+    /// (`sipral_stack_config_t::audio` = `SIPRAL_AUDIO_DEVICE`, and the
+    /// `sipral_audio_*` entry points). Clear where there is no backend (Linux,
+    /// Android below API 28); `SIPRAL_AUDIO_DEVICE` then answers
+    /// `SIPRAL_STATUS_NOT_SUPPORTED`. On Android it is the phone's answer, read
+    /// at call time. This crate's own answer: the engine is not under the facade.
     pub const SIPRAL_FEATURE_AUDIO_DEVICE: u32 = 1 << 11;
-    /// See [`SIPRAL_FEATURE_DTMF`]. Who is calling and how the call asked to
-    /// be answered, on every call event: the asserted identity behind the
-    /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
-    /// `Diversion` and `History-Info`, `Answer-Mode` and `Alert-Info`;
-    /// why a call ended (`cause_sip`, `cause_q850`, RFC 3326) and
-    /// `sipral_call_hangup_for` to say why this end is ending one;
-    /// `sipral_call_redirect`; and an account's `privacy` and
-    /// `session_timer`.
+    /// See [`SIPRAL_FEATURE_DTMF`]. Caller identity on every call event:
+    /// asserted identity behind `trusted_peers` (RFC 3325), `verstat`,
+    /// `Privacy`, `Diversion`, `History-Info`, `Answer-Mode`, `Alert-Info`;
+    /// end causes (RFC 3326) and `sipral_call_hangup_for`;
+    /// `sipral_call_redirect`; an account's `privacy` and `session_timer`.
     pub const SIPRAL_FEATURE_CALLER_IDENTITY: u32 = 1 << 12;
-    /// See [`SIPRAL_FEATURE_DTMF`]. A call in progress moves with the
-    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
-    /// call whose media address is gone, and `sipral_call_media_readdress`
-    /// offers it at the socket the application bound on the new network.
+    /// See [`SIPRAL_FEATURE_DTMF`]. A call follows a network change:
+    /// `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` and `sipral_call_media_readdress`.
     pub const SIPRAL_FEATURE_CALL_READDRESS: u32 = 1 << 13;
-    /// See [`SIPRAL_FEATURE_DTMF`]. The engine's log through a callback,
-    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
-    /// snapshot of a stack's state for a crash report
-    /// (`sipral_stack_state_text`). Set in every build of this library, which
-    /// always carries the redaction both depend on; a bit so that a binding
-    /// asks before it shows a "send diagnostics" control.
+    /// See [`SIPRAL_FEATURE_DTMF`]. The redacted, rate-limited log callback
+    /// (`sipral_stack_log`) and the state snapshot (`sipral_stack_state_text`).
+    /// Set in every build.
     pub const SIPRAL_FEATURE_LOGGING: u32 = 1 << 14;
-    /// See [`SIPRAL_FEATURE_DTMF`]. The ceilings a stack is created with
-    /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
-    /// `diagnostic_records` in `sipral_stack_config_t`, read back through
-    /// `sipral_stack_settings_t`), `SIPRAL_STATUS_LIMIT_REACHED` for a call
-    /// placed past `max_dialogs`, and the counters of what went out again,
-    /// what timed out and what was refused at a limit in
-    /// `sipral_counters_t`.
+    /// See [`SIPRAL_FEATURE_DTMF`]. Stack ceilings (`max_dialogs`,
+    /// `max_server_transactions`, `diagnostic_decisions`, `diagnostic_records`),
+    /// `SIPRAL_STATUS_LIMIT_REACHED`, and the counters in `sipral_counters_t`.
     pub const SIPRAL_FEATURE_LIMITS: u32 = 1 << 15;
-    /// See [`SIPRAL_FEATURE_DTMF`]. STIR/SHAKEN (RFC 8224, RFC 8588): an
-    /// account given a key and a certificate URL signs every call it places
-    /// (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
-    /// a stack given trust anchors (`sipral_stack_stir`) verifies who is
-    /// calling before the phone rings — `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
-    /// `sipral_call_stir_certificate`, and the verdict on every call event.
-    /// Behind a compile-time feature, on by default. ABI 0.31.
+    /// See [`SIPRAL_FEATURE_DTMF`]. STIR/SHAKEN (RFC 8224, RFC 8588): signing
+    /// (`stir_key`, `stir_certificate_url`) and verification
+    /// (`sipral_stack_stir`, `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+    /// `sipral_call_stir_certificate`). Behind a compile-time feature, on by default.
     pub const SIPRAL_FEATURE_STIR: u32 = 1 << 16;
-    /// See [`SIPRAL_FEATURE_DTMF`]. An SRTP policy and suites per account
-    /// (`srtp`, `srtp_suites` in `sipral_account_config_t`), the policy that
-    /// falls back from DTLS-SRTP to SDES (`SIPRAL_SRTP_DTLS_OR_SDES`), calls
-    /// refused by it with `SIPRAL_STATUS_SECURITY_POLICY`, and the
-    /// encryption report of every call (`sipral_media_encryption_at`). ABI
-    /// 0.31.
+    /// See [`SIPRAL_FEATURE_DTMF`]. SRTP policy and suites per account,
+    /// `SIPRAL_SRTP_DTLS_OR_SDES`, `SIPRAL_STATUS_SECURITY_POLICY`, and
+    /// `sipral_media_encryption_at`.
     pub const SIPRAL_FEATURE_SRTP_POLICY: u32 = 1 << 17;
-    /// See [`SIPRAL_FEATURE_DTMF`]. What a call carries inside its audio:
-    /// keypad digits heard in the far end's audio
-    /// (`sipral_stack_config_t::dtmf_detection`,
-    /// `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
-    /// written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
-    /// on a call with no telephone event), call-progress tones, who answered
-    /// and the machine's beep (`sipral_call_detect_progress`,
-    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
-    /// is recorded (`sipral_call_consent_tone`).
+    /// See [`SIPRAL_FEATURE_DTMF`]. In-band signals: DTMF detection
+    /// (`sipral_stack_config_t::dtmf_detection`, `sipral_call_dtmf_detection`,
+    /// `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and generation (`SIPRAL_DTMF_IN_BAND`),
+    /// progress and answering-machine detection (`sipral_call_detect_progress`,
+    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and `sipral_call_consent_tone`.
     pub const SIPRAL_FEATURE_IN_BAND_SIGNALS: u32 = 1 << 18;
-    /// See [`SIPRAL_FEATURE_DTMF`]. A recording written as
-    /// `sipral_recording_options_t` says (`sipral_media_record_start_with`):
-    /// mixed or stereo, WAV growing into RF64, at a rate of its own and
-    /// checkpointed against a crash, and Ogg Opus where
-    /// [`SIPRAL_FEATURE_OPUS`] is set too. And L16 as a codec, at 8 and 16
-    /// kHz, which `sipral_codec_at` lists.
+    /// See [`SIPRAL_FEATURE_DTMF`]. Recording formats
+    /// (`sipral_media_record_start_with`): mixed or stereo, WAV/RF64,
+    /// checkpointed, Ogg Opus with [`SIPRAL_FEATURE_OPUS`]; and L16 at 8 and 16 kHz.
     pub const SIPRAL_FEATURE_RECORDING_FORMATS: u32 = 1 << 19;
-    /// See [`SIPRAL_FEATURE_DTMF`]. A call recorded to a recording server
-    /// (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
-    /// session, and `sipral_media_poll_recording` hands out the copies of
-    /// the call's audio.
+    /// See [`SIPRAL_FEATURE_DTMF`]. SIPREC (RFC 7866): `sipral_call_record_to`
+    /// and `sipral_media_poll_recording`.
     pub const SIPRAL_FEATURE_SIPREC: u32 = 1 << 20;
-    /// See [`SIPRAL_FEATURE_DTMF`]. The conference package kept for the
-    /// application (RFC 4575, `sipral_subscription_conference`), a focus
-    /// known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
-    /// presence published (RFC 3903, `sipral_account_publish_presence`) and
-    /// watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+    /// See [`SIPRAL_FEATURE_DTMF`]. Conference package (RFC 4575,
+    /// `sipral_subscription_conference`), focus `isfocus` (RFC 4579,
+    /// `sipral_call_conference_uri`), presence publish (RFC 3903) and watch (RFC 3856).
     pub const SIPRAL_FEATURE_CONFERENCE: u32 = 1 << 21;
-    /// See [`SIPRAL_FEATURE_DTMF`]. Real-time text in a call (RFC 4103):
-    /// `text_address` on the call's configuration, `sipral_media_send_text`
-    /// and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+    /// See [`SIPRAL_FEATURE_DTMF`]. Real-time text (RFC 4103): `text_address`,
+    /// `sipral_media_send_text`, `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
     pub const SIPRAL_FEATURE_REALTIME_TEXT: u32 = 1 << 22;
-    /// See [`SIPRAL_FEATURE_DTMF`]. RTP/AVPF with Generic NACKs and
-    /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
-    /// configuration, and what it agreed in `sipral_media_info_t`.
+    /// See [`SIPRAL_FEATURE_DTMF`]. RTP/AVPF with Generic NACK and reduced-size
+    /// RTCP (RFC 4585, RFC 5506): `feedback`, reported in `sipral_media_info_t`.
     pub const SIPRAL_FEATURE_RTCP_FEEDBACK: u32 = 1 << 23;
-    /// See [`SIPRAL_FEATURE_DTMF`]. A local conference of any number of
-    /// calls, each on its own codec and rate, with or without this end
-    /// (ABI 0.32): `sipral_local_conference_create` and
+    /// See [`SIPRAL_FEATURE_DTMF`]. A local conference of calls on any codec
+    /// and rate: `sipral_local_conference_create`,
     /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
     pub const SIPRAL_FEATURE_LOCAL_CONFERENCE: u32 = 1 << 24;
 }
 
 record! {
-    /// What this build of the library can do: codecs compiled in, transports
-    /// this ABI carries signalling over, and which optional features are
-    /// present.
+    /// What this build can do: codecs, signalling transports, optional features.
     ///
-    /// Nothing here is configuration — this answers "can this build ever do X",
-    /// never "is X turned on for this stack". `sipral_stack_settings` answers
-    /// that once a stack exists, and `sipral_codec_count` /
-    /// `sipral_stack_codec_order` already enumerate the codecs this reports only
-    /// the count of, so this does not repeat what they say.
+    /// Not configuration: `sipral_stack_settings` answers what a stack has on.
     ///
     /// Set `size` to `sizeof(sipral_capabilities_t)` before the call.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralCapabilities {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
-        /// How many codecs this build contains. `sipral_codec_count` gives the
-        /// same number; `sipral_codec_at` says which, and in what order they are
-        /// offered by default.
+        /// How many codecs this build contains (same as `sipral_codec_count`).
         pub codec_count: usize,
-        /// Which transports this build carries signalling over, as the bits
-        /// named `SIPRAL_TRANSPORT_BIT_*`.
+        /// Transports for signalling, as `SIPRAL_TRANSPORT_BIT_*` bits.
         pub transports: u32,
-        /// Which optional features this build has compiled in, as the bits named
-        /// `SIPRAL_FEATURE_*`.
+        /// Compiled-in features, as `SIPRAL_FEATURE_*` bits.
         pub features: u32,
     }
 }
 
-// Safety: integers, no invariant between them, and zero is a valid value of
-// each.
+// Safety: integers only, zero is valid for each.
 unsafe impl Versioned for SipralCapabilities {
     const NAME: &'static str = "sipral_capabilities";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCapabilities, features);
@@ -275,8 +180,7 @@ const fn transport_bit(protocol: TransportProtocol) -> u32 {
         TransportProtocol::Tls => SIPRAL_TRANSPORT_BIT_TLS,
         TransportProtocol::Ws => SIPRAL_TRANSPORT_BIT_WS,
         TransportProtocol::Wss => SIPRAL_TRANSPORT_BIT_WSS,
-        // sipral-core has grown a transport this ABI has no bit for yet;
-        // saying nothing beats picking one that is wrong
+        // a transport this ABI has no bit for: say nothing rather than guess
         _ => 0,
     }
 }
@@ -302,30 +206,19 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.srtp {
         features |= SIPRAL_FEATURE_SRTP;
     }
-    // opus: read off the value the facade handed down like every other bit
-    // here, and deliberately not off this crate's own `opus` feature. Cargo
-    // features are per-crate and additive, so a build of this crate with the
-    // feature off can sit on a facade that linked the codec -- and a bit
-    // derived from the wrong crate's flag would tell an application to grey
-    // out a control this build can honour. A build genuinely without it
-    // offers G.711 and G.722, `codec_count` is one lower, and this bit is
-    // clear
+    // opus: from the facade's answer, not this crate's `opus` feature. Cargo
+    // features are per-crate, so this crate's flag can be off over a facade
+    // that linked the codec.
     if capabilities.opus {
         features |= SIPRAL_FEATURE_OPUS;
     }
-    // subscriptions: reached from C since `sipral_account_subscribe`, so the
-    // bit is the facade's answer like every other one here
     if capabilities.subscriptions {
         features |= SIPRAL_FEATURE_SUBSCRIPTIONS;
     }
-    // read off the facade's own list of what a call can actually complete,
-    // not off this crate's feature flag, for the reason the Opus bit gives:
-    // the two crates are compiled separately and a bit derived from the wrong
-    // one would promise what the build below cannot do
+    // from the facade's list, for the reason the Opus bit gives
     if capabilities.srtp_keying.contains(&SrtpKeying::Dtls) {
         features |= SIPRAL_FEATURE_DTLS_SRTP;
     }
-    // and the same again: the facade's own answer, not this crate's flag
     if capabilities.ice {
         features |= SIPRAL_FEATURE_ICE;
     }
@@ -344,8 +237,7 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.caller_identity {
         features |= SIPRAL_FEATURE_CALLER_IDENTITY;
     }
-    // the ceilings and counters are this crate's own surface over what every
-    // endpoint underneath has, so no build is without them
+    // this crate's own surface, present in every build
     features |= SIPRAL_FEATURE_LIMITS;
     if capabilities.logging {
         features |= SIPRAL_FEATURE_LOGGING;
@@ -388,18 +280,15 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
 entry! {
     /// What this build of the library can do, in one call.
     ///
-    /// Names no stack, and answers the same way before any stack is created
-    /// as after: a build's capabilities do not change while it runs. Safe to
-    /// call from any thread, at any time, including from inside the event
-    /// callback.
+    /// Answers the same before and after any stack exists. Safe from any
+    /// thread, including the event callback.
     ///
     /// # Safety
     ///
     /// `out_capabilities` must point at a `sipral_capabilities_t` whose
     /// `size` member says how long it is.
     fn sipral_capabilities(out_capabilities: *mut SipralCapabilities) {
-        // checked before it is filled in, so a caller that got its size
-        // wrong is told that rather than reading a struct it never asked for
+        // size checked first, so a wrong size is reported, not half-filled
         unsafe { crate::versioned::declared_size(out_capabilities.cast_const()) }?;
         let capabilities = capabilities_of(Capabilities::of_this_build());
         unsafe { write_versioned(out_capabilities, capabilities) }
@@ -477,14 +366,9 @@ mod tests {
         }
     }
 
-    /// The bit and the codec list are two ways of asking the same question
-    /// and have to agree, or an application greys out a control this build
-    /// can honour, or offers one it cannot.
-    ///
-    /// Asked of the catalogue and never of `cfg!(feature = "opus")`: this
-    /// crate's feature is its own, and `--no-default-features` here over a
-    /// facade built with `sipral/opus` is a legal configuration in which the
-    /// flag says no and the build can negotiate the codec.
+    /// The bit and the codec list must agree. Checked against the catalogue,
+    /// not `cfg!(feature = "opus")`: this crate's flag can be off over a facade
+    /// built with `sipral/opus`.
     #[test]
     fn opus_reads_present_exactly_when_the_catalogue_contains_it() {
         let capabilities = read();
@@ -502,8 +386,7 @@ mod tests {
         );
     }
 
-    /// The four protocol bits of ABI 0.31 are the facade's answers, at the
-    /// numbers they were published at.
+    /// The protocol bits are the facade's answers, at their published numbers.
     #[test]
     fn the_protocol_bits_read_what_the_facade_says() {
         let features = read().features;
@@ -527,11 +410,7 @@ mod tests {
 
     #[test]
     fn subscriptions_read_present_now_that_this_abi_reaches_one() {
-        // the bit was off for as long as `sipral_ua::UserAgent` could
-        // subscribe and this crate had no way to ask it to; it is the
-        // facade's answer again now that `sipral_account_subscribe` exists,
-        // and this test is what would catch an entry point removed without
-        // the bit following it
+        // catches an entry point removed without the bit following it
         assert_eq!(
             read().features & SIPRAL_FEATURE_SUBSCRIPTIONS != 0,
             Capabilities::of_this_build().subscriptions,
@@ -540,9 +419,7 @@ mod tests {
         assert!(read().features & SIPRAL_FEATURE_SUBSCRIPTIONS != 0);
     }
 
-    /// A relay over TCP or TLS is the facade's answer too, and comes with
-    /// ICE: a build that has no agent to hand a relay to has no connection to
-    /// carry one on.
+    /// TURN over a stream is the facade's answer and comes with ICE.
     #[test]
     fn turn_over_a_stream_reads_present_exactly_when_the_facade_says() {
         let features = read().features;
@@ -558,16 +435,14 @@ mod tests {
         assert_eq!(SIPRAL_FEATURE_TURN_STREAM, 1024);
     }
 
-    /// The engine's bit is this crate's answer, and it is set exactly where
-    /// `sipral-audio` has a backend for the platform the test runs on.
+    /// This crate's answer: set where `sipral-audio` has a backend.
     #[test]
     fn the_audio_engine_reads_present_exactly_where_the_platform_has_a_backend() {
         assert_eq!(
             read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
             sipral_audio::platform_has_backend()
         );
-        // on Android the answer is the phone's API level, which the line
-        // above already holds it to; everywhere else it is the build's
+        // on Android it depends on the phone's API level
         if cfg!(not(target_os = "android")) {
             assert_eq!(
                 read().features & SIPRAL_FEATURE_AUDIO_DEVICE != 0,
@@ -581,8 +456,6 @@ mod tests {
         assert_eq!(SIPRAL_FEATURE_AUDIO_DEVICE, 2048);
     }
 
-    /// Moving a call with the network is the facade's answer as well, and
-    /// has no feature of its own to be missing from.
     #[test]
     fn moving_a_call_with_the_network_reads_present_exactly_when_the_facade_says() {
         assert_eq!(
@@ -601,8 +474,6 @@ mod tests {
         assert_eq!(SIPRAL_FEATURE_CALLER_IDENTITY, 1 << 12);
     }
 
-    /// The log and the state snapshot come with the redaction this library
-    /// always carries, so every build of it says yes.
     #[test]
     fn logging_reads_present_in_every_build_of_this_library() {
         assert!(Capabilities::of_this_build().logging);
@@ -616,8 +487,6 @@ mod tests {
         assert_eq!(SIPRAL_FEATURE_LIMITS, 1 << 15);
     }
 
-    /// STIR/SHAKEN is the facade's answer, behind its feature; the SRTP
-    /// policy per account and the encryption report are in every build.
     #[test]
     fn stir_and_the_srtp_policy_read_present_exactly_when_the_facade_says() {
         let features = read().features;
@@ -631,8 +500,6 @@ mod tests {
         assert_eq!(SIPRAL_FEATURE_SRTP_POLICY, 1 << 17);
     }
 
-    /// Both bits of what the audio carries and how a recording is written
-    /// are the facade's answer, at the numbers the wave was given.
     #[test]
     fn in_band_signals_and_recording_formats_read_as_the_facade_says() {
         let facade = Capabilities::of_this_build();

@@ -25,63 +25,39 @@ import 'dart:io' show FileSystemEntity, Platform;
 
 /// An opaque reference to something this library owns.
 ///
-/// It is a number, not a pointer: nothing is to be read from it, and
-/// nothing but this library can make one. Zero is never a live handle,
-/// which is what a caller can zero a variable to.
+/// A number, not a pointer: nothing is read from it, and only this
+/// library makes one. Zero is never a live handle.
 ///
-/// An account or a call handle names something only on the stack that
-/// minted it. Used with any other stack — one alive beside it, or one
-/// created after it was destroyed — it is `SIPRAL_STATUS_INVALID_HANDLE`.
+/// An account or call handle is valid only on the stack that minted it;
+/// on any other stack it is `SIPRAL_STATUS_INVALID_HANDLE`.
 typedef SipralHandle = ffi.Uint64;
 
 /// The one callback a stack has.
 ///
-/// It is called from inside `sipral_stack_poll`, on the thread that called
-/// it, with the `user_data` the stack was created with, and never on two
-/// threads at once for one stack. It must not unwind. Nothing is held
-/// while it runs, so it may call back into the library, the stack it was
-/// given included (`docs/08-ffi.md`, "The shape").
+/// Called inside `sipral_stack_poll` on its thread, never concurrently
+/// for one stack. Must not unwind. May call back into the library
+/// (`docs/08-ffi.md`, "The shape").
 typedef SipralEventCallback = ffi.Void Function(ffi.Pointer<SipralEvent> event, ffi.Pointer<ffi.Void> userData);
 
 /// The Dart function a `NativeCallable<SipralEventCallback>` is built from.
 typedef SipralEventCallbackDart = void Function(ffi.Pointer<SipralEvent> event, ffi.Pointer<ffi.Void> userData);
 
-/// The screening policy: consulted once for every INVITE, before it has
-/// any effect. Installed with sipral_stack_screen.
+/// The screening policy: called once per INVITE, before it has any
+/// effect. Installed with sipral_stack_screen.
 ///
-/// **It runs with the stack's own lock held**, which is the opposite of
-/// SipralEventCallback and is the
-/// whole reason this type's module documentation exists — read it there.
-/// In consequence: **this callback must not call back into the stack it
-/// was given**, on this thread or on any other. Doing so does not
-/// deadlock — every entry point that takes a stack takes its lock
-/// without waiting and answers `SIPRAL_STATUS_BUSY` rather than block —
-/// but it is refused outright rather than relied on, and a policy that
-/// tries it gets an error code back instead of the call it wanted made.
-/// A *different* stack is unaffected. It must not unwind, for the same
-/// reason nothing in this ABI may: a panic that reached C across this
-/// boundary would take the host process with it.
+/// **It runs with the stack's lock held** (see the module docs), unlike
+/// SipralEventCallback. **It must
+/// not call back into the stack it was given**, from any thread; such a
+/// call is answered `SIPRAL_STATUS_BUSY`. Another stack is fine. It must
+/// not unwind across the boundary.
 ///
-/// `request` and everything it points at belong to the library and are
-/// valid for the duration of this one call and no longer.
+/// `request` and what it points at are valid for this call only.
 ///
-/// **The answer is a SIP status code, and the numbers are chosen so that
-/// no answer at all is a refusal.** `SIPRAL_SCREEN_ACCEPT` — 200 — lets
-/// the INVITE through, exactly as it would arrive with no policy
-/// installed. Anything else is a refusal, answered with that status when
-/// that status refuses — 400 to 699 — and with 500 when it does not.
-///
-/// Three ranges do not refuse, and each fails the same way. Zero is what
-/// a binding hands back when the application's own listener threw and
-/// the exception was caught at the boundary, and it is no status at all.
-/// A 1xx is a provisional answer: it would leave the caller ringing at a
-/// call this end has already forgotten, holding a server transaction
-/// nothing here will ever answer. A 2xx that is not the one acceptance
-/// is spelled with accepts nothing, and a 3xx redirects nowhere without
-/// a `Contact` this ABI has no way to give it. So a policy whose answer
-/// went missing does not let a stranger in on the strength of it, and a
-/// policy that meant to refuse and named a number that cannot refuse is
-/// a bug to fix rather than a reason to wave one through.
+/// **The answer is a SIP status code.** `SIPRAL_SCREEN_ACCEPT` (200) lets
+/// the INVITE through as if no policy were installed. 400 to 699 refuses
+/// with that status. Anything else refuses with 500: zero (a listener that
+/// threw), a 1xx (would leave the transaction open), another 2xx, or a 3xx
+/// (no `Contact` to redirect to).
 typedef SipralScreenCallback = ffi.Uint32 Function(ffi.Pointer<SipralScreenRequest> request, ffi.Pointer<ffi.Void> userData);
 
 /// The Dart function a `NativeCallable<SipralScreenCallback>` is built from.
@@ -91,16 +67,12 @@ typedef SipralScreenCallbackDart = int Function(ffi.Pointer<SipralScreenRequest>
 /// frame, or told to forget what it has learned — SipralProcessorFrame
 /// says which. Installed with sipral_media_attach_processor.
 ///
-/// **It runs with this call's media locked**, which is the opposite of
-/// SipralEventCallback and the reason
-/// sipral_media_attach_processor's own doc comment says so before it
-/// says anything else — read it there. In consequence: **this callback
-/// must not call back into the media handle it was attached through**,
-/// on this thread or on any other. It must not unwind, for the same
-/// reason nothing in this ABI may.
+/// **It runs with this call's media locked** (see
+/// sipral_media_attach_processor): it must not call into the media
+/// handle it was attached through, on any thread, and must not unwind.
 ///
-/// `frame` and everything it points at belong to the library and are
-/// valid for the duration of this one call and no longer.
+/// `frame` and what it points at are library-owned, valid only during the
+/// call.
 typedef SipralProcessorCallback = ffi.Void Function(ffi.Pointer<SipralProcessorFrame> frame, ffi.Pointer<ffi.Void> userData);
 
 /// The Dart function a `NativeCallable<SipralProcessorCallback>` is built from.
@@ -116,14 +88,11 @@ typedef SipralAudioTransmitCallbackDart = void Function(ffi.Pointer<SipralAudioT
 /// Where a stack's log lines go. Installed with
 /// sipral_stack_log.
 ///
-/// Called on whichever thread has just finished a call into this stack,
-/// after the stack has been let go and with nothing of the library held,
-/// so it may call back into the library — this stack included — as an
-/// ordinary call. One line at a time, and never on two threads at once.
-/// It must not unwind, for the reason nothing in this ABI may.
+/// Called on the thread that just finished a call into this stack, with
+/// nothing held, so it may call back into the library. One line at a
+/// time, never on two threads at once. It must not unwind.
 ///
-/// `record` and everything it points at belong to the library and are
-/// valid for the duration of this one call and no longer.
+/// `record` and what it points at are valid for this call only.
 typedef SipralLogCallback = ffi.Void Function(ffi.Pointer<SipralLogRecord> record, ffi.Pointer<ffi.Void> userData);
 
 /// The Dart function a `NativeCallable<SipralLogCallback>` is built from.
@@ -131,18 +100,11 @@ typedef SipralLogCallbackDart = void Function(ffi.Pointer<SipralLogRecord> recor
 
 /// The result of a call across the C ABI.
 ///
-/// The numbers are part of the ABI. A value keeps its meaning for the life of
-/// the ABI's major version, and a new one is only ever added at the end.
+/// The numbers are ABI: stable for the major version, new ones only at the
+/// end. 17 is reserved forever and never returned.
 ///
-/// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
-/// statuses, and it stays reserved, never used and never to be given to a
-/// status. No build returns it and `sipral_status_name` has no name for it.
-///
-/// The one signed number in the ABI, and the only enumeration typed
-/// `int32_t`: zero is success, every failure is positive, and no build
-/// returns a negative one. A binding that treats it as unsigned loses
-/// nothing. A newer library may return a status an older binding has no
-/// name for; read it as a failure, with the last error for the sentence.
+/// Typed `int32_t`: zero is success, failures are positive, none negative.
+/// Read an unknown status from a newer library as a failure.
 abstract final class SipralStatus {
   /// The call did what it was asked to.
   static const int ok = 0;
@@ -171,144 +133,99 @@ abstract final class SipralStatus {
   /// down the same call stack. Nothing was done, and nothing blocked.
   static const int busy = 6;
 
-  /// There is no room for another one: the library's table of objects
-  /// of this kind is full (256 stacks, say), the stack's RTP port range
-  /// is spent, or a queue a call feeds is full — the DTMF digits waiting
-  /// to go out, the dynamic payload types an offer can number, the
-  /// real-time text not yet sent. Nothing was done. Room comes back as
-  /// objects are released, ports given back, or the queue drains; which
-  /// of those the last error says. Not the same as
-  /// `SIPRAL_STATUS_LIMIT_REACHED`, which is a ceiling the application
-  /// set itself.
+  /// No room: an object table is full, the RTP port range is spent, or a
+  /// call's queue (DTMF, payload types, real-time text) is full. Nothing
+  /// was done; the last error says which. `SIPRAL_STATUS_LIMIT_REACHED`
+  /// is the application's own ceiling.
   static const int exhausted = 7;
 
-  /// A panic was caught at the boundary. The call did not finish, and the
-  /// last error carries whatever the panic said.
+  /// A panic was caught at the boundary. The call did not finish; the last
+  /// error carries the panic's message.
   static const int panic = 8;
 
-  /// What was asked for cannot be done where the object is: answering a call
-  /// this end placed, holding one that is not up, sending DTMF before there
-  /// is a dialog to send it in. Not an argument that was wrong; a moment
-  /// that was.
+  /// Not possible in the object's current state, e.g. answering a call
+  /// this end placed, or DTMF before there is a dialog.
   static const int wrongState = 9;
 
   /// The request could not be assembled or handed to a transport. Nothing
-  /// went out, and nothing about the call changed.
+  /// went out, and the call did not change.
   static const int notSent = 10;
 
-  /// The value is one this ABI has a word for and this build has no code
-  /// behind. Nothing was applied, and asking again will not change that.
-  ///
-  /// The third of the three answers a configuration call may give, and the
-  /// one that has to be told apart from the other two by a machine.
-  /// SipralStatus.invalidArgument says the value is wrong and a
-  /// corrected one would be taken; this says the value is right and there is
-  /// nothing here to take it. SipralStatus.unsupportedVersion is about
-  /// the shape of what crossed the boundary, not about what was set in it.
-  ///
-  /// It exists so that "accepted and ignored" is not a thing this library
-  /// can do. An application that gets it turns the control off, because the
-  /// control is genuinely dead in this build; one that gets a silence
-  /// instead ships a control that does nothing and finds out from a
-  /// customer.
+  /// The value is valid in this ABI but this build has no code for it.
+  /// Nothing was applied, and retrying will not help. Unlike
+  /// SipralStatus.invalidArgument, the value is not wrong; unlike
+  /// SipralStatus.unsupportedVersion, it is not about struct shape.
+  /// Exists so that nothing is ever silently accepted and ignored.
   static const int notSupported = 11;
 
-  /// A byte stream carried something no message this library reads
-  /// starts with. Nothing in a stream marks where the next message
-  /// begins, so nothing arriving on it later can be read either: close
-  /// the connection. What rode on it is lost with it, and the call that
-  /// said so says what that was.
+  /// A byte stream carried something that starts no known message. A
+  /// stream has no resync point: close the connection. The last error
+  /// says what was lost.
   static const int streamBroken = 12;
 
-  /// An audio device id names nothing this stack's engine has ever
-  /// listed. Refused before any platform call is made;
-  /// `sipral_audio_device_at` says what the ids are.
+  /// An audio device id the engine never listed. Refused before any
+  /// platform call; `sipral_audio_device_at` lists the ids.
   static const int noSuchDevice = 13;
 
-  /// The audio device exists and cannot serve: it has no channels in
-  /// the direction asked, it is not plugged in, or the platform
-  /// refused to open it. The last error says which.
+  /// The audio device cannot serve: no channels in that direction,
+  /// unplugged, or the platform refused it. The last error says which.
   static const int deviceUnusable = 14;
 
   /// The platform did not answer about its audio devices within
-  /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
-  /// the engine is not waiting on it. What was asked was not done.
+  /// `sipral_stack_config_t::audio_probe_ms`. Nothing was done.
   static const int deviceTimedOut = 15;
 
-  /// A limit the stack was created with refused new work: a call placed
-  /// while the calls this stack holds, has let in or has placed and
-  /// not yet heard back about already come to
-  /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
-  /// that ends makes room; raising the limit means a new stack.
+  /// The stack already holds or awaits `sipral_stack_config_t::max_dialogs`
+  /// calls. Nothing went out. An ended call makes room; a higher limit
+  /// needs a new stack.
   static const int limitReached = 16;
 
-  /// Refused by the account's security policy (ABI 0.31): a call that
-  /// would carry audio unencrypted where its account, or its own
-  /// configuration, requires SRTP, or that names a policy weaker than
-  /// its account's. An INVITE refused this way has been answered with
-  /// 488 Not Acceptable Here; a call being placed never left. The last
-  /// error says which.
+  /// Refused by the security policy (ABI 0.31): unencrypted audio where
+  /// SRTP is required, or a policy weaker than the account's. A refused
+  /// INVITE was answered 488; an outgoing call never left.
   static const int securityPolicy = 18;
 
-  /// A recording's file would not take what was written to it: the disk
-  /// filled, the volume went away, the file was taken away underneath.
-  /// Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
-  /// anything is written. The recording has stopped; the file holds the
-  /// audio up to the last checkpoint it could write.
+  /// The recording file would not take a write (disk full, volume gone).
+  /// A bad path is `SIPRAL_STATUS_INVALID_ARGUMENT` instead. The recording
+  /// stopped; the file holds audio up to the last checkpoint.
   static const int recordingFailed = 19;
 
-  /// The call never agreed on what this asks for: text sent on a call
-  /// whose answer took no `m=text` stream, say. Nothing was done, and
-  /// only a new offer that the far end accepts changes it.
+  /// The call never negotiated this, e.g. text on a call with no `m=text`
+  /// stream. Only a new accepted offer changes it.
   static const int notNegotiated = 20;
 
-  /// The far end of this call is not a conference focus: its Contact
-  /// never carried `isfocus` (RFC 4579 §4.1), so there is no
-  /// conference to name or subscribe to.
+  /// The far end's Contact never carried `isfocus` (RFC 4579 §4.1), so
+  /// there is no conference to name or subscribe to.
   static const int notAFocus = 21;
 
-  /// The transport the request would leave on has failed or closed and
-  /// has not been bound again. Nothing went out. The failure was
-  /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
-  /// the stack with `sipral_stack_transport_bind`, and ask again.
+  /// The transport has failed or closed and was not bound again. Nothing
+  /// went out. Reconnect, call `sipral_stack_transport_bind`, retry.
   static const int transportDown = 22;
 
-  /// A local conference would not take the call (ABI 0.32): it is
-  /// full, the call is already in a conference or joined into a pair
-  /// with `sipral_call_join`, or its codec hears at a rate the
-  /// conference does not mix. The last error says which.
+  /// A local conference would not take the call (ABI 0.32): full, the
+  /// call is already conferenced or joined with `sipral_call_join`, or its
+  /// codec rate is not mixed. The last error says which.
   static const int conferenceRefused = 23;
 
-  /// `now_ms` was more than fifty milliseconds behind the last reading
-  /// of the caller's clock this stack saw (ABI 0.33). Two threads that
-  /// read one clock a moment apart and race for the stack can disagree
-  /// by a little, not by that much. Nothing was done and the stack's
-  /// clock did not move: read the clock again and ask again. A caller
-  /// that keeps getting this has a clock that went backwards.
+  /// `now_ms` was more than 50 ms behind the last reading this stack saw
+  /// (ABI 0.33). Nothing was done and the clock did not move; read the
+  /// clock again and retry. Repeated, it means the clock went backwards.
   static const int clockBehind = 24;
 
-  /// The TLS server's certificate is not the one the account pins
-  /// (ABI 0.34): `sipral_account_check_certificate` compared its
-  /// SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
-  /// and they differ. Refuse the handshake: with a pin, the
-  /// fingerprint is the whole verdict (`docs/22-tls.md`).
+  /// The TLS certificate's SHA-256 fingerprint differs from
+  /// `sipral_account_config_t::tls_pin_sha256` (ABI 0.34). Refuse the
+  /// handshake (`docs/22-tls.md`).
   static const int certificateRefused = 25;
 
-  /// This end was about to advertise an address the peer cannot reach
-  /// it at (ABI 0.34): a loopback address, in a `Contact` or a session
-  /// description, handed to a peer that is not on this machine, or the
-  /// unspecified address in a `Contact`. Nothing was sent; the last
-  /// error names both addresses. Bind to, and advertise, the address
-  /// of the interface that routes to the peer —
-  /// `sipral_advertised_address` finds it.
+  /// About to advertise an address the peer cannot reach (ABI 0.34):
+  /// loopback to a remote peer, or the unspecified address in a `Contact`.
+  /// Nothing was sent; the last error names both addresses.
+  /// `sipral_advertised_address` finds the right one.
   static const int unreachableAddress = 26;
 }
 
-/// What a stack speaks. Names for `sipral_stack_config_t::transport`.
-///
-/// Zero is not one of them: a stack is told what it is speaking, because
-/// guessing wrong in the direction of the plainest transport is how a caller
-/// that meant TLS ends up on the wire in the clear.
+/// What a stack speaks. Names for `sipral_stack_config_t::transport`. Zero is
+/// not one, so a caller who meant TLS is never put on the wire in the clear.
 abstract final class SipralTransport {
   /// UDP.
   static const int udp = 1;
@@ -326,15 +243,12 @@ abstract final class SipralTransport {
   static const int wss = 5;
 }
 
-/// Why a transport could not deliver. Names for
-/// sipral_stack_transport_failed's `error`.
+/// Why a transport could not deliver. Names for sipral_stack_transport_failed's `error`.
 ///
-/// Coarse on purpose, and it is the layer below that is coarse: a client
-/// transaction informs its user and terminates on every one of these (§17), and
-/// the detail belongs in the caller's log, where the real message still is.
+/// Coarse on purpose: a client transaction terminates on every one of these (§17); the
+/// detail belongs in the caller's log.
 abstract final class SipralTransportError {
-  /// Anything the caller could not classify. Zero, because a caller that
-  /// knows only that the write failed is telling the truth by saying nothing.
+  /// Anything the caller could not classify.
   static const int other = 0;
 
   /// Nothing is listening at the far end.
@@ -353,23 +267,17 @@ abstract final class SipralTransportError {
   static const int closed = 5;
 }
 
-/// Why a TLS connection was refused, as the platform's TLS library said
-/// it. Names for `sipral_transport_failure_t::tls` and
-/// `sipral_transport_failed_event_t::tls`.
+/// Why a TLS connection was refused, as the platform's TLS library said it. Names for
+/// `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
 ///
-/// Sipral links no TLS library (`docs/22-tls.md`), so these are the
-/// application's words, mapped from its own library's error: the stack
-/// only carries them to whoever reads the event, so that a user can be
-/// told which of the four it was rather than "the connection closed".
-/// A connection that was never answered is not one of them: that is
-/// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
+/// Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
+/// classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
+/// with this left at none.
 abstract final class SipralTlsFailure {
   /// Not a TLS failure, or one the application could not classify.
   static const int none = 0;
 
-  /// No trusted authority stands behind the server's certificate: a
-  /// self-signed one, a private authority not handed over, or an
-  /// authority other than the one pinned.
+  /// No trusted authority: self-signed, an unprovided private CA, or not the pinned one.
   static const int untrusted = 1;
 
   /// The certificate is trusted and names another server.
@@ -378,18 +286,14 @@ abstract final class SipralTlsFailure {
   /// The certificate has expired, or is not valid yet.
   static const int expired = 3;
 
-  /// The handshake itself failed: no protocol version or cipher in
-  /// common, an alert from the server, or a server that does not speak
-  /// TLS on that port.
+  /// The handshake failed: no common version or cipher, a server alert, or no TLS there.
   static const int handshakeRefused = 4;
 }
 
 /// The three answers a setting can give in a struct that starts out zeroed.
 ///
-/// A boolean cannot carry them. Zero is what a caller who filled nothing in
-/// leaves behind, so a plain `0`/`1` setting has no way to say "off" that is
-/// not also "I said nothing", and the difference is the whole of B2: the
-/// library must not turn a control off because the caller never touched it.
+/// Not a boolean: zero must mean "unset", so the library never turns a
+/// control off because the caller left it zeroed.
 abstract final class SipralToggle {
   /// Nothing was said; whatever this build defaults to.
   static const int default$ = 0;
@@ -405,14 +309,11 @@ abstract final class SipralToggle {
 /// `sipral_stack_config_t::srtp` (the stack's default) and
 /// `sipral_call_config_t::srtp` (a per-call override).
 ///
-/// Zero is not one of them, and it is not the same absence on the two
-/// structs: on the stack it means this build's own built-in default,
-/// which is SipralSrtp.notOffered; on a call it means the stack's own
-/// setting, whatever that came to. `docs/05-media.md` says what each
-/// value writes and what each answers.
+/// Zero means "unset": on the stack, the built-in default
+/// SipralSrtp.notOffered; on a call, the stack's setting.
+/// `docs/05-media.md` details each value.
 abstract final class SipralSrtp {
-  /// Do not offer it, but answer an offer that arrives on the secure
-  /// profile with keys anyway.
+  /// Do not offer it, but answer an offer on the secure profile with keys.
   static const int notOffered = 1;
 
   /// Offer it, and answer a plain offer plainly.
@@ -421,47 +322,36 @@ abstract final class SipralSrtp {
   /// Offer it, and let no stream on this call carry audio unencrypted.
   static const int required = 3;
 
-  /// Offer DTLS-SRTP (RFC 5764) on
-  /// `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
+  /// Offer DTLS-SRTP (RFC 5764) on `UDP/TLS/RTP/SAVP`, and answer a plain
+  /// offer plainly.
   ///
-  /// What `Offered` is for SDES, with the difference that matters: the
-  /// key never travels in the body, so this is the one policy here that
-  /// is sound over a SIP transport somebody else can read. The cost is
-  /// a round trip of silence at the start of every call while the
-  /// handshake runs, and an application that names it **must** drain
-  /// sipral_media_poll_transmit — a handshake whose records never
-  /// leave is a call that is up, silent, and reports no error.
+  /// The key never travels in the body, so this is sound over a readable
+  /// SIP transport. Costs a round trip of silence at call start. The
+  /// application **must** drain sipral_media_poll_transmit, or the
+  /// call is up, silent, and reports no error.
   ///
   /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
   /// `SIPRAL_FEATURE_DTLS_SRTP`.
   static const int dtls = 4;
 
-  /// Offer DTLS-SRTP, and let no stream on
-  /// this call carry audio any other way — an answer carrying
-  /// `a=crypto` included, since that key travelled in a body this
-  /// policy exists to avoid trusting.
+  /// Offer DTLS-SRTP and allow no other keying, including an answer
+  /// carrying `a=crypto`.
   static const int dtlsRequired = 5;
 
-  /// DTLS-SRTP, falling back to SDES for a
-  /// peer that has no DTLS, and never unencrypted. The offer is one
-  /// `RTP/SAVP` stream carrying both the fingerprint and the crypto
-  /// lines, and the answer decides which keys the call; an offer that
-  /// arrives is answered the way it was keyed, and a plain one is
-  /// refused with 488. ABI 0.31.
+  /// DTLS-SRTP with SDES fallback, never unencrypted. The offer is one
+  /// `RTP/SAVP` stream with both fingerprint and crypto lines; the answer
+  /// decides. An incoming offer is answered the way it was keyed; a plain
+  /// one is refused with 488.
   ///
   /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
   /// `SIPRAL_FEATURE_DTLS_SRTP`.
   static const int dtlsOrSdes = 6;
 
-  /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the
-  /// answer takes one of the `a=crypto` lines and plain when it takes
-  /// none — the "SRTP optional" of desk phones, for a server that may
-  /// or may not encrypt and answers an offer on `RTP/SAVP` with 488
-  /// when it does not. RFC 4568 writes the attribute for the secure
-  /// profiles, so this is interoperability rather than a standard.
-  /// Answering, an offer on `RTP/AVP` carrying a line this end takes
-  /// is answered with a key, and anything else as under `Offered`.
-  /// ABI 0.34.
+  /// Offer SDES on plain `RTP/AVP` ("SRTP optional"): encrypted when the
+  /// answer takes an `a=crypto` line, plain otherwise. For servers that
+  /// reject `RTP/SAVP` with 488. Not standard (RFC 4568 defines the
+  /// attribute for secure profiles). An incoming `RTP/AVP` offer with a
+  /// usable line is answered with a key, anything else as `Offered`.
   static const int bestEffort = 7;
 }
 
@@ -469,74 +359,51 @@ abstract final class SipralSrtp {
 /// `sipral_stack_config_t::ice` (the stack's default) and
 /// `sipral_call_config_t::ice` (a per-call override).
 ///
-/// Zero is not one of them, and it is not the same absence on the two
-/// structs: on the stack it means this build's own built-in default,
-/// which is SipralIce.off; on a call it means the stack's own
-/// setting, whatever that came to.
+/// Zero means "unset": on the stack, the built-in default
+/// SipralIce.off; on a call, the stack's setting.
 ///
 /// A call that offers ICE also asks for RFC 5761 multiplexing, whatever
-/// `offer_rtcp_mux` says, because an ICE stream with a second component
-/// needs a second address and this ABI names one.
+/// `offer_rtcp_mux` says: this ABI names one address per stream.
 abstract final class SipralIce {
-  /// Do not offer it, and do not answer a peer that
-  /// does. The default, and `docs/06-nat.md` says why at length.
+  /// Do not offer it, and do not answer a peer that does. The default;
+  /// `docs/06-nat.md` says why.
   static const int off = 1;
 
-  /// Offer it, and use it against a peer that
-  /// offers it back.
+  /// Offer it, and use it against a peer that offers it back.
   ///
-  /// A peer that does not — an Asterisk with `ice_support=no`, which is
-  /// its default — is answered without it and the call runs on the
-  /// signalled address and symmetric RTP, exactly as it would have. An
-  /// application that names this **must** drain
-  /// sipral_media_poll_transmit: a check that never leaves is a
-  /// call that never chooses a path.
+  /// A peer without ICE gets the call on the signalled address and
+  /// symmetric RTP. The application **must** drain
+  /// sipral_media_poll_transmit, or no path is ever chosen.
   ///
   /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
   /// `SIPRAL_FEATURE_ICE`.
   static const int offered = 2;
 
-  /// Offer it, and let no stream on this call
-  /// carry audio on a path ICE did not check.
+  /// Offer it, and let no stream carry audio on a path ICE did not check.
   ///
-  /// Each of the three ways a peer can fail to do ICE ends the call's
-  /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
-  /// back. That is the whole difference between this and `Offered`.
+  /// A peer that fails ICE ends the call's media with
+  /// `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling back.
   static const int required = 3;
 
-  /// Be an ICE-lite endpoint (RFC 8445 §2.5) —
-  /// write `a=ice-lite` and one host candidate, answer the checks a
-  /// full peer sends, and put the audio on the pair it nominates.
+  /// Be an ICE-lite endpoint (RFC 8445 §2.5): `a=ice-lite`, one host
+  /// candidate, answer a full peer's checks, use the pair it nominates.
   ///
-  /// **Only for a server reachable at the address it advertises**: the
-  /// media socket's own, or the public address a one-to-one NAT in
-  /// front of it forwards (`sipral_stack_nat_map`'s mapping, when that
-  /// is what STUN reports). A WebRTC gateway or any other full-ICE peer
-  /// calling a voice agent in a data centre is the case it is for. RFC
-  /// 8445 Appendix A says ICE "will not function when a lite
-  /// implementation is placed behind a NAT", and a peer told this end
-  /// is lite stops doing the work that would have found another path —
-  /// so a softphone never names it. A peer that does no ICE, or is lite
-  /// itself, gets the call on the signalled address, as under
-  /// `Offered`; the application drains `sipral_media_poll_transmit`
-  /// for the answers to the checks exactly as it does for a full
-  /// agent's.
+  /// **Only for a server reachable at the address it advertises** (its
+  /// own, or a one-to-one NAT's via `sipral_stack_nat_map`); never for a
+  /// softphone. RFC 8445 Appendix A: lite "will not function when a lite
+  /// implementation is placed behind a NAT". A peer with no ICE, or lite
+  /// itself, gets the signalled address. The application still drains
+  /// `sipral_media_poll_transmit` for check answers.
   ///
   /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
   /// `SIPRAL_FEATURE_ICE`.
   static const int lite = 4;
 }
 
-/// One codec this ABI has a number for. Names for every member that says
-/// which.
+/// One codec this ABI has a number for.
 ///
-/// A value here is permanent, and that is all it is: a number that has left
-/// this header is spent for good, so a binding compiled against one keeps
-/// working whatever a later build contains. Whether *this* build can produce
-/// the codec is a different question, and `SIPRAL_FEATURE_*` together with
-/// `sipral_codec_at` are what answer it. A settings screen that offers this
-/// list unfiltered is a settings screen with controls that do nothing, which
-/// is the mistake `sipral_capabilities` exists to prevent.
+/// Values are permanent. Whether this build contains a codec is answered by
+/// `SIPRAL_FEATURE_*` and `sipral_codec_at`, not by this list.
 abstract final class SipralCodec {
   /// No codec: the call has none, or the event is not about one.
   static const int unknown = 0;
@@ -550,49 +417,33 @@ abstract final class SipralCodec {
   /// G.722, wideband at the price of a narrowband stream.
   static const int g722 = 3;
 
-  /// Opus. Declared in every build, whether or not this one linked
-  /// libopus, for the reason the enumeration above gives. Whether the
-  /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
-  /// `sipral_codec_at` enumerates, never the presence of this name.
+  /// Opus. Declared in every build; presence is `SIPRAL_FEATURE_OPUS`.
   static const int opus = 4;
 
-  /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
-  /// speech. In every build and in no default offer: a call offers it
-  /// only when a codec order names `G729`. It offers `annexb=yes`,
-  /// answers with the offer's `annexb`, and uses Annex B's silence
-  /// compression where both descriptions allow it.
+  /// G.729 Annex A, payload type 18. Offered only when a codec order names
+  /// `G729`; offers `annexb=yes`, answers with the offer's `annexb`.
   static const int g729 = 5;
 
-  /// L16 at 8 kHz, one channel: the samples themselves, on a dynamic
-  /// payload type as `L16/8000`. In every build and in no default
-  /// offer: a call offers it only when a codec order names `L16/8000`.
+  /// L16 at 8 kHz mono, dynamic payload type `L16/8000`. Offered only
+  /// when a codec order names it.
   static const int l16Narrowband = 6;
 
-  /// L16 at 16 kHz, one channel, as `L16/16000`: wideband with nothing
-  /// lost, offered only when a codec order names `L16/16000`.
+  /// L16 at 16 kHz mono, `L16/16000`. Offered only when a codec order
+  /// names it.
   static const int l16Wideband = 7;
 }
 
 /// What became of one codec this call's catalogue could have used. Names
 /// for SipralCodecCandidate.outcome.
-///
-/// D5's codec half: a negotiation that ends in G.711 when the site
-/// configured Opus is a support call, and the answer to it is a list
-/// saying which of the two things happened — the far end never named
-/// Opus, or it named it and something ahead of it in this end's order
-/// won.
 abstract final class SipralCodecOutcome {
-  /// Not an outcome: either the candidate is from a build this ABI has
-  /// no number for, or the struct was never filled in.
+  /// Not an outcome: unknown to this ABI, or the struct was never filled.
   static const int unknown = 0;
 
-  /// This is what the call agreed on. Exactly one candidate carries it,
-  /// and it names the same codec as `sipral_media_info_t::codec`.
+  /// What the call agreed on. Exactly one candidate carries it, the same
+  /// codec as `sipral_media_info_t::codec`.
   static const int chosen = 1;
 
-  /// The far end's description did not name it, so it was never in the
-  /// running. The commonest answer, and the one that says the question
-  /// is about the far end's configuration rather than this one's.
+  /// The far end's description did not name it.
   static const int notNamed = 2;
 
   /// The far end named it and this end had something better: the codec
@@ -637,13 +488,8 @@ abstract final class SipralCandidateKind {
 
 /// What became of one path a call's ICE agent tried. Names for
 /// SipralPathCandidate.outcome.
-///
-/// D5's transport and NAT half: a call that ended up relayed when a
-/// direct path was expected, or found no path at all, is a support call,
-/// and the answer to it is which of these happened to each pair.
 abstract final class SipralPathOutcome {
-  /// Not an outcome: either the path is from a build this ABI has no
-  /// number for, or the struct was never filled in.
+  /// Not an outcome: unknown to this ABI, or the struct was never filled.
   static const int unknown = 0;
 
   /// The path the call's media takes: the selected pair (RFC 8445
@@ -737,17 +583,13 @@ abstract final class SipralRtcp {
   static const int off = 3;
 }
 
-/// Why media failed. Names for `sipral_media_event_t::fault`.
-///
-/// The sentence beside it says which case of the kind it was; this is the part
-/// a machine acts on, and the two are never the same thing.
+/// Why media failed, for a machine to act on. Names for
+/// `sipral_media_event_t::fault`.
 abstract final class SipralMediaFault {
   /// Nothing failed.
   static const int none = 0;
 
-  /// The negotiation settled on something this build cannot encode or
-  /// decode, which means the peer answered with a format that was not in the
-  /// offer.
+  /// The peer answered with a format this build cannot encode or decode.
   static const int unsupportedCodec = 1;
 
   /// The two descriptions agree on nothing that can carry audio.
@@ -776,18 +618,13 @@ abstract final class SipralMediaFault {
   /// stack could use and the policy was `SIPRAL_ICE_REQUIRED`, the far
   /// end took `a=rtcp-mux` out of an answer to an ICE offer, or consent
   /// to send on the pair that was chosen was withdrawn part-way through
-  /// (RFC 7675 §5).
-  ///
-  /// A code of its own because it is the one an application can act on
-  /// differently: the call is up and the signalling is sound, and what
-  /// changed is only that no path could be checked. A deployment with a
-  /// non-ICE profile to fall back to falls back here.
+  /// (RFC 7675 §5). Signalling is still sound; an application may fall
+  /// back to a non-ICE profile.
   static const int ice = 9;
 
-  /// The call's SRTP policy refused what the far end described: a plain
-  /// answer to a call that requires SRTP, which this end then hangs up
-  /// with a `Reason` of 488, or a plain re-offer inside one, refused
-  /// with 488 and the call left on the keys it had. ABI 0.31.
+  /// The SRTP policy refused the far end's description: a plain answer
+  /// (hung up with `Reason` 488) or a plain re-offer (refused with 488,
+  /// old keys kept).
   static const int securityPolicy = 10;
 }
 
@@ -815,15 +652,12 @@ abstract final class SipralArrival {
   /// well-formed compound packet.
   static const int controlRefused = 5;
 
-  /// A record of the DTLS-SRTP handshake that keys this call, which has
-  /// been taken. Whatever it owes the far end in reply is waiting in
-  /// sipral_media_poll_transmit, and this is the signal to drain it.
+  /// A DTLS-SRTP handshake record, taken. Drain
+  /// sipral_media_poll_transmit for the reply.
   static const int handshake = 6;
 
-  /// Something arrived on a call that agreed to be encrypted and has no
-  /// keys yet, so there was nothing to verify it with. The ordinary way
-  /// this happens is a peer that starts sending the moment its own half
-  /// of the handshake finishes, which is before ours does.
+  /// Arrived on an encrypted call before its keys exist; usually a peer
+  /// that sends as soon as its half of the handshake ends.
   static const int notKeyed = 7;
 }
 
@@ -844,22 +678,17 @@ abstract final class SipralSrtpSuite {
   /// SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
   static const int aesF8 = 3;
 
-  /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188): `AesCm80` with a 256-bit
-  /// key. Reachable by SDES only, like `AesF8`: no DTLS-SRTP profile
-  /// names it.
+  /// `AES_256_CM_HMAC_SHA1_80` (RFC 6188). SDES only.
   static const int aes256Cm80 = 4;
 
-  /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188): `AesCm32` with a 256-bit
-  /// key. SDES only, as `Aes256Cm80`.
+  /// `AES_256_CM_HMAC_SHA1_32` (RFC 6188). SDES only.
   static const int aes256Cm32 = 5;
 
-  /// `AEAD_AES_128_GCM` (RFC 7714): AES-GCM, one transform for both
-  /// confidentiality and integrity. DTLS-SRTP profile 0x0007.
+  /// `AEAD_AES_128_GCM` (RFC 7714). DTLS-SRTP profile 0x0007.
   static const int aeadAes128Gcm = 6;
 
-  /// `AEAD_AES_256_GCM` (RFC 7714): the same with a 256-bit key, and
-  /// what two ends of this stack settle on over DTLS-SRTP. Profile
-  /// 0x0008.
+  /// `AEAD_AES_256_GCM` (RFC 7714). DTLS-SRTP profile 0x0008, preferred
+  /// between two ends of this stack.
   static const int aeadAes256Gcm = 7;
 }
 
@@ -883,22 +712,11 @@ abstract final class SipralPlayback {
   static const int silence = 4;
 }
 
-/// Which way a digit goes to the far end. Names for
-/// sipral_call_send_dtmf's `via`.
-///
-/// The choice is per send, not per call, because it is a fact about the peer
-/// rather than about this end, and the way to find out which one a peer takes
-/// is to try. A carrier that ignores one of these ignores it silently.
+/// Which way a digit goes to the far end: sipral_call_send_dtmf's `via`. Chosen per
+/// send, since it is a fact about the peer, and a peer ignores an unsupported one silently.
 abstract final class SipralDtmf {
-  /// In the media, as an RFC 4733 named telephone event. What to reach for:
-  /// it is the only one carried end to end by every gateway on the path, and
-  /// the only one whose timing survives transcoding.
-  ///
-  /// It is one rather than zero on purpose. Zero is what a caller who
-  /// filled nothing in leaves behind, and the way a digit travels is the
-  /// one setting here that a peer can ignore in silence: a call that
-  /// meant INFO and sent nothing at all looks, from this end, exactly
-  /// like a call that sent it. So zero names no form and is refused.
+  /// In the media, as an RFC 4733 telephone event: the one to reach for, carried end to
+  /// end and surviving transcoding. One, not zero: zero is an unfilled field, refused.
   static const int rtp = 1;
 
   /// An INFO per digit carrying `application/dtmf-relay`, which states the
@@ -909,34 +727,24 @@ abstract final class SipralDtmf {
   /// character. Some switches take only this one.
   static const int infoPlain = 3;
 
-  /// In the media, as the two tones of each key written into the audio in
-  /// place of the microphone, whatever the negotiation settled on: for
-  /// the far end that negotiated a telephone event and then listens only
-  /// to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
-  /// negotiated no telephone event.
+  /// In the media, as the key's two tones written into the audio in place of the microphone,
+  /// for a far end that listens only to the audio. `SIPRAL_DTMF_RTP` falls back to this on a
+  /// call with no telephone event.
   static const int inBand = 4;
 }
 
-/// What an event is about.
-///
-/// The numbers are part of the ABI and are only ever added to. A binding
-/// that meets a kind it does not know must ignore that event rather than
-/// refuse it, which is what makes adding one safe.
+/// What an event is about. Numbers are only ever added; a binding must
+/// ignore a kind it does not know.
 ///
 /// Numbers already spent on features this build does not have:
 /// - 16: held for the set of audio devices changed (A2), which shipped as 43 in the wave that allocated its number; spent all the same
 /// - 44: held for a second audio device event, which the audio engine did not need; spent all the same
 abstract final class SipralEventKind {
-  /// The stack is running on this thread.
-  ///
-  /// The first event on every stack, delivered by the first poll and never
-  /// again. A binding that has a callback to hand out, a queue to open or a
-  /// thread to name has somewhere definite to do it, before anything that
-  /// matters can arrive.
+  /// The stack is running on this thread: the first event, delivered
+  /// once by the first poll.
   static const int started = 1;
 
-  /// A registration moved: it went out, it took, it is being refreshed, it
-  /// was given up, or it failed. `payload.registration` says which, and
+  /// A registration moved. `payload.registration` says how, and
   /// `account` says whose.
   static const int registrationChanged = 2;
 
@@ -970,86 +778,48 @@ abstract final class SipralEventKind {
   /// A transfer this end asked for is under way.
   static const int transferProgress = 11;
 
-  /// And how it ended: the final status the far end reported, a 2xx
-  /// hanging this call up. A REFER the far end refused outright
-  /// (4xx–6xx, RFC 3515 §2.4.2) ends here too, with the refusal's
-  /// status, and so does one that went unanswered, as a 408, or whose
-  /// transport failed, as a 503 (ABI 1.2); either way the call stays
-  /// as it was.
+  /// And how it ended: the far end's final status, a 2xx hanging this
+  /// call up. A refused REFER (RFC 3515 §2.4.2) ends here with its status,
+  /// a timeout as 408, a transport failure as 503; the call stays up.
   static const int transferDone = 12;
 
   /// A call arrived carrying a `Replaces` and took over one already up.
   /// `payload.call.other` is the one being replaced.
   static const int callReplaced = 13;
 
-  /// The call is over, and its handle is stale from here on.
-  ///
-  /// `message` is the refusal when a response ended it, and the BYE
-  /// or the CANCEL when the far end did (ABI 1.2), so that a header
-  /// field of the far end's own on it can be read with
-  /// `sipral_message_header`; null otherwise.
+  /// The call is over; its handle is stale from here on. `message` is
+  /// the refusal, or the far end's BYE or CANCEL, or null.
   static const int callEnded = 14;
 
-  /// A subscription moved: it was asked for, granted, put on probation,
-  /// scheduled for another attempt, or ended.
-  ///
-  /// A1. `payload.subscription` says which one and where it is now, and
-  /// `reason` why it is not live when it is not. Not sent on every
-  /// refresh — a lamp does not move because a refresh was scheduled —
-  /// and not sent for a notification arriving, which is
-  /// SipralEventKind.notified instead.
+  /// A1. A subscription moved: asked for, granted, on probation,
+  /// retrying, or ended. `payload.subscription` says which and where it
+  /// is, `reason` why it is not live. Not sent per refresh or per NOTIFY.
   static const int subscriptionChanged = 15;
 
-  /// What one call's media cost, delivered once, after
-  /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
-  ///
-  /// A6's second consumer. `payload.media.statistics` points at the
-  /// completed record; it is the library's and lives as long as the callback
-  /// does. The stream is gone by the time this arrives, which is why the
-  /// numbers travel in the event rather than behind a lookup that would now
-  /// fail.
+  /// A6. What one call's media cost, once, after
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED`. `payload.media.statistics` points
+  /// at the record, library-owned and valid for the callback.
   static const int mediaStatistics = 17;
 
-  /// A request grew too large for a datagram (RFC 3261 §18.1.1) and this
-  /// stack has no stream transport open to the destination it names.
-  /// `payload.transport_wanted` says where it was going, over what
-  /// protocol, and how it measured against the datagram it did not fit.
-  ///
-  /// B1. The call that asked for the request — placing a call,
-  /// registering — was refused with `SIPRAL_STATUS_NOT_SENT`, and
-  /// nothing went on the wire. Answered with
-  /// sipral_stack_transport_bind:
-  /// once the application has bound a transport to that destination,
-  /// asking again sends the request on it, and this ABI raises nothing
-  /// further about it — there is no "it went" event, the same way there
-  /// is none for an ordinary request that fit the first time.
+  /// B1. A request grew too large for a datagram (RFC 3261 §18.1.1) and
+  /// no stream transport is open to its destination; it was refused with
+  /// `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
+  /// Bind with
+  /// sipral_stack_transport_bind
+  /// and ask again.
   static const int transportWanted = 18;
 
-  /// Nothing has arrived on the media path for longer than the configured
-  /// threshold, while signalling is perfectly happy.
-  ///
-  /// B5. `payload.media.silent_for_ms` says how long. The call is untouched:
-  /// whether to hang up over silence is a decision with a person on the other
-  /// end of it.
+  /// B5. No media has arrived for longer than the configured threshold.
+  /// `payload.media.silent_for_ms` says how long. The call is left up.
   static const int mediaStalled = 19;
 
-  /// A call a push announced never arrived.
-  ///
-  /// C2, and not an error. A wake-up chain has a notification service,
-  /// a proxy, a bucket timer and a radio in it, and when a call does not
-  /// come through it this is the only place that says which end gave up:
-  /// the push was delivered, this device woke, refreshed its binding,
-  /// and no INVITE followed. `payload.announce` says which announcement
-  /// and how long it was waited for; the screen the application raised
-  /// can come down.
+  /// C2. A call a push announced never arrived: the device woke and
+  /// refreshed, and no INVITE followed. `payload.announce` says which
+  /// announcement and how long it was waited for.
   static const int announcedCallMissing = 20;
 
-  /// Audio is running: the negotiation settled and an RTP session is open.
-  ///
-  /// A4's reporting half and the first half of D5: `payload.media.codec` is
-  /// what the two ends agreed on. This is the moment to mint the call's
-  /// media handle with `sipral_call_media`, and `sipral_media_info` on it
-  /// says the rest.
+  /// A4, D5. Audio is running; `payload.media.codec` is the agreed codec.
+  /// Mint the media handle now with `sipral_call_media`.
   static const int mediaStarted = 21;
 
   /// The session changed under a live call: a hold, a resume, a peer that
@@ -1064,485 +834,197 @@ abstract final class SipralEventKind {
   /// untouched; `payload.media.fault` and `payload.media.reason` say why.
   static const int mediaFailed = 24;
 
-  /// A recording stopped on its own, part-way through: the disk filled, the
-  /// file went away, the volume was unmounted.
-  ///
-  /// Never an abort. `payload.media.recorded_ms` says how much audio reached
-  /// the file before it stopped, and the call carries on without it.
+  /// A recording stopped on its own (disk full, file gone).
+  /// `payload.media.recorded_ms` says how much was written.
   static const int recordingStopped = 25;
 
-  /// The far end pressed a key: an RFC 4733 named telephone event, or an
-  /// INFO carrying `application/dtmf-relay` or `application/dtmf`.
-  ///
-  /// One per keypress, not one per packet: an RFC 4733 digit goes out as
-  /// a run of updates and then its closing packet three times, and the
-  /// layer below collapses them on the timestamp that identifies the
-  /// event; an INFO is one request. `payload.media.digit` is the
-  /// character, `event_code` the number behind it for the events no
-  /// keypad has a key for, `held_ms` how long it lasted, and `source`
-  /// a `SIPRAL_DIGIT_SOURCE` naming which of the two reported it.
-  /// `held_ms` zero means either of two different facts: an
-  /// `application/dtmf` INFO never carries a duration at all, and a
-  /// peer using the other form may have said `Duration=0` and held the
-  /// key for no time at all — this C ABI does not tell the two apart.
+  /// The far end pressed a key (RFC 4733 event, or INFO with
+  /// `application/dtmf-relay` or `application/dtmf`), one per press.
+  /// `payload.media` gives `digit`, `event_code`, `held_ms` and `source`.
+  /// `held_ms` zero means no duration or `Duration=0`, not told apart.
   static const int digitReceived = 26;
 
-  /// An INFO this end sent for `sipral_call_send_dtmf` reached a final
-  /// answer. `payload.call.digit` is the character and
-  /// `payload.call.status_code` what the far end answered — a 415 from
-  /// a switch that does not take this `Content-Type` included, so the
-  /// application learns which of the two INFO forms to try without
-  /// guessing from silence. A digit that waited behind another and whose
-  /// own INFO could then not be sent at all is reported the same way,
-  /// with 503: nothing reached the far end for that one, and no digit
-  /// after it is sent.
+  /// An INFO from `sipral_call_send_dtmf` got a final answer:
+  /// `payload.call.digit` and `payload.call.status_code` (415: try the
+  /// other INFO form). An unsendable queued digit reports 503 and stops
+  /// the rest.
   static const int dtmfSent = 27;
 
-  /// The lifecycle machine settled: a registrar answered again and
-  /// proved a path this stack had stopped believing in, or every rung
-  /// of a recovery ladder was climbed and none of them worked.
-  /// `payload.recovery` says which, and carries what the ladder that
-  /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
-  /// and `docs/16-lifecycle.md` are the ladder this reports on.
+  /// The lifecycle ladder settled: a path proved again, or every rung
+  /// failed. `payload.recovery` says which (`docs/16-lifecycle.md`).
   static const int recovery = 28;
 
-  /// A dialog's next hop is a name, and this library does not look
-  /// names up.
-  ///
-  /// RFC 3263 §4's TARGET, before any NAPTR, SRV or A lookup: the
-  /// route set and the remote target say where this dialog's requests
-  /// should go, and what they say is not where they are going. Nothing
-  /// here owns a resolver — nothing here owns a socket either — so the
-  /// answer is the application's, through
-  /// sipral_stack_resolved,
-  /// with `payload.resolve.dialog` as the handle it takes.
-  ///
-  /// **Ignoring it is legitimate and is the common case.** The dialog
-  /// keeps the flow its first message travelled on, which §8.1.2 allows
-  /// as an alternate address and which is the only thing that survives
-  /// a NAT. Nothing times out, nothing retries, and no second event
-  /// says the first went unanswered.
+  /// A dialog's next hop is a name to resolve (RFC 3263 §4 TARGET).
+  /// Answer with
+  /// sipral_stack_resolved
+  /// and `payload.resolve.dialog`. **Ignoring it is fine**: the dialog
+  /// keeps its first flow (§8.1.2), which survives a NAT.
   static const int resolveNeeded = 29;
 
-  /// A notification arrived on a subscription, and has been answered.
-  ///
-  /// A1's other half. The NOTIFY is in `message`, whole and unparsed,
-  /// which is where every package this ABI has no reader for is read
-  /// from. `payload.subscription.has_dialog_info` says the body was
-  /// `application/dialog-info+xml` and could be read, and the picture it
-  /// updated is behind
+  /// A1. A notification arrived and was answered; the NOTIFY is in
+  /// `message`. `payload.subscription.has_dialog_info` says the body was
+  /// readable dialog-info, read via
   /// sipral_subscription_dialog_count.
-  /// A body that could not be read arrives here all the same, with that
-  /// member zero and the request whole: a lamp showing what was last
-  /// known beats one showing what a malformed document happened to
-  /// contain.
+  /// An unreadable body arrives with it zero; the old picture is kept.
   static const int notified = 30;
 
-  /// The INVITE for a call a push had already announced has arrived
-  /// (RFC 8599).
-  ///
-  /// C2's other half. Queued immediately before the
-  /// SipralEventKind.incomingCall naming the same call, and never
-  /// without one, so that an application reading its events in order
-  /// knows which screen the call belongs to before it is told there is a
-  /// call at all. That is the whole point: on a phone the ringing screen
-  /// exists first, and a stack that reports the INVITE without saying
-  /// which announcement it answers has made the application guess.
-  ///
-  /// `call` is the call, and `payload.announce.announcement` what
-  /// announced it. That announcement is spent: it is not waited for any
-  /// more, and `sipral_announcement_forget` on it answers
-  /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
+  /// C2. The INVITE for a call a push announced arrived (RFC 8599),
+  /// queued just before its SipralEventKind.incomingCall.
+  /// `payload.announce.announcement` is now spent:
+  /// `sipral_announcement_forget` answers `SIPRAL_STATUS_WRONG_STATE`.
   static const int callAnnounced = 31;
 
-  /// The handshake that keys a call finished, and audio can move
-  /// (RFC 5764).
-  ///
-  /// Only DTLS-SRTP produces it, and it is the moment the call becomes
-  /// what it agreed to be: between `SIPRAL_EVENT_KIND_MEDIA_STARTED`
-  /// and this one the stream exists, has an address and a codec, and
-  /// carries nothing in either direction. An application that draws a
-  /// padlock draws it here.
-  ///
-  /// `call` is the call and `payload.media.suite` is the transform the
-  /// handshake chose — the signalling does not, which is why there is
-  /// an event for it at all. A call keyed by SDES never produces one,
-  /// because such a call is keyed before its session is opened.
-  ///
-  /// A handshake that does not finish produces
-  /// `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead, and the call is left up:
-  /// whether to hang it up is a decision with a person on the other end
-  /// of it.
+  /// The DTLS-SRTP handshake finished and audio can move (RFC 5764).
+  /// `payload.media.suite` is the chosen transform. SDES calls never
+  /// raise it; a failed handshake raises `SIPRAL_EVENT_KIND_MEDIA_FAILED`
+  /// and leaves the call up.
   static const int mediaSecured = 32;
 
-  /// `sipral_media_event_t`: ICE chose the path this call's media takes
-  /// (RFC 8445 §8.1.1), and audio can move.
-  ///
-  /// The moment the connectivity checks stop, and the answer to "why is
-  /// this call sending to an address the signalling never named" —
-  /// which, behind a NAT, is the ordinary outcome rather than a fault.
-  /// It arrives again if a nomination of higher priority replaces the
-  /// pair part-way through the call.
-  ///
-  /// The two addresses of the pair are deliberately not carried here,
-  /// for the reason `SIPRAL_EVENT_KIND_MEDIA_SECURED` gives about its
-  /// own: every packet `sipral_media_capture` and
-  /// `sipral_media_poll_transmit` hand back already names the
-  /// destination to send it to, so an application that puts this
-  /// stack's media on a socket at all has the address the moment it
-  /// matters. `sipral_media_statistics` does not repeat it either.
-  ///
-  /// A call not using ICE never emits it, and that is most calls: the
-  /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
+  /// ICE chose this call's media path (RFC 8445 §8.1.1), and audio can
+  /// move; again if a higher-priority pair replaces it. Addresses are not
+  /// carried: each outgoing packet names its destination. Never raised
+  /// without ICE (default `SIPRAL_ICE_OFF`).
   static const int mediaPathChosen = 33;
 
-  /// A MESSAGE arrived (RFC 3428 §7) and has already been answered:
-  /// 200, because this stack delivers rather than relays.
-  /// `payload.message` carries the body, and `account`/`call` on
-  /// `sipral_event_t` say where it was addressed and whether it rode
-  /// inside a call's dialog.
+  /// A MESSAGE arrived (RFC 3428 §7) and was answered 200.
+  /// `payload.message` carries the body; `call` is set if it was in-dialog.
   static const int messageReceived = 34;
 
-  /// A MESSAGE `sipral_account_message` sent reached its final answer,
-  /// or never will. `payload.message.status_code` is 200, a 202 from a
-  /// relay, a refusal, or the 408/503 this stack reports for one that
-  /// timed out or lost its transport.
+  /// A MESSAGE from `sipral_account_message` got its final answer:
+  /// `payload.message.status_code` (408/503 for timeout or transport).
   static const int messageSent = 35;
 
-  /// A `message-summary` `NOTIFY` reported the state of a mailbox
-  /// (RFC 3842 §3.9). `payload.message` carries the counts of the
-  /// `voice-message` class, the one a phone's message-waiting light is
-  /// about.
+  /// A `message-summary` NOTIFY reported a mailbox (RFC 3842 §3.9);
+  /// `payload.message` has the `voice-message` counts.
   static const int messagesWaiting = 36;
 
-  /// The account this call belongs to asked for an RFC 6035 voice
-  /// quality report and the attempt to publish it has now been made,
-  /// once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
-  ///
-  /// `payload.media.quality_report_sent` says whether the PUBLISH
-  /// left this end — not whether a collector accepted it, which this
-  /// stack never waits to learn. Raised only when the account named
-  /// a collector to publish to at all
-  /// (`sipral_account_config_t::quality_report_uri`); a call whose
-  /// account named none raises nothing here, since nothing was ever
-  /// attempted.
+  /// The RFC 6035 quality report PUBLISH was attempted once, after
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED`, if `quality_report_uri` was set.
+  /// `payload.media.quality_report_sent` says it left, not that it landed.
   static const int qualityReportSent = 37;
 
-  /// The call this one was joined to has ended, taking the local
-  /// conference of two down with it.
-  ///
-  /// `sipral_call_join` paired the two calls and neither one ever
-  /// called `sipral_call_leave` — the partner's own call simply ended
-  /// first, the same way any call does, and this is the half of that
-  /// this call has to be told: the pairing does not outlive either
-  /// side of it. `call` is the survivor; its own session is untouched
-  /// and carries on exactly as an unjoined call always has, on
-  /// whatever `sipral_media_playback`/`sipral_media_capture` it is
-  /// next given directly rather than through `sipral_media_mix`.
+  /// The call this one was joined to ended. `call` is the survivor and
+  /// carries on unjoined, fed directly rather than by `sipral_media_mix`.
   static const int mediaUnjoined = 38;
 
-  /// A STUN server said where one of this end's sockets appears from,
-  /// said it has moved, or never answered (RFC 8489). Only on a stack
-  /// created with `SIPRAL_NAT_STUN`.
-  ///
-  /// `payload.nat` says which socket and what it came to. For a
-  /// signalling socket the work is already done by the time this
-  /// arrives: every account whose `Contact` named the socket names the
-  /// public address now, and each one holding a binding has sent the
-  /// REGISTER that says so. For a media socket
-  /// `sipral_stack_nat_map` named, this is the moment a call can be
-  /// placed, rung or answered on it — before it, that is
-  /// `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
-  /// for is described by its own address, as it would have been with
-  /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
-  /// a socket is neither.
+  /// A STUN server reported, moved or never answered for a socket
+  /// (RFC 8489). Only with `SIPRAL_NAT_STUN`. `payload.nat` says which.
+  /// Signalling sockets are already re-registered; a media socket from
+  /// `sipral_stack_nat_map` is now usable for calls (before, that is
+  /// `SIPRAL_STATUS_WRONG_STATE`). `account`, `call`: none.
   static const int natMapping = 39;
 
-  /// A TURN server allocated a relay for a media socket
-  /// `sipral_stack_nat_map` named, or gave none (RFC 8656). Only on a
-  /// stack created with a `turn_server`.
-  ///
-  /// `payload.relay` says which socket and what it came to. Allocated,
-  /// it is the moment a call can be placed, rung or answered on the
-  /// socket with the relay as its relayed ICE candidate — before it,
-  /// that is `SIPRAL_STATUS_WRONG_STATE`, as it is while the STUN
-  /// answer is awaited. Failed, the call goes without one. `account`
-  /// and `call` are `SIPRAL_HANDLE_NONE`: a socket is neither.
+  /// A TURN server allocated a relay for a `sipral_stack_nat_map` socket,
+  /// or gave none (RFC 8656). Only with a `turn_server`. `payload.relay`
+  /// says which; once allocated, calls may use it (before, that is
+  /// `SIPRAL_STATUS_WRONG_STATE`). `account`, `call`: none.
   static const int natRelay = 40;
 
-  /// A REFER outside any dialog asked this end to place a call (RFC
-  /// 3515): click-to-dial from a switchboard, a CRM or an operator
-  /// console. Only on a stack created with
-  /// `sipral_stack_config_t::referrals` on, and only for one the same
-  /// screening an INVITE meets let through.
-  ///
-  /// `call` is the referral's handle: a handle of the call kind that
-  /// names this request rather than a call — `sipral_call_state`
-  /// answers `SIPRAL_STATUS_WRONG_STATE` about it, and nothing but the
-  /// two calls below takes it. `account` is the line it arrived for,
-  /// which the call it asks for is placed from; `message` is the REFER.
-  /// `payload.referral` says who to call, whether that is an attended
-  /// transfer's target, and who the sender says is asking.
-  ///
-  /// Take it with `sipral_call_accept_transfer`, which answers 202,
-  /// places the call exactly as it does for a transfer inside a call and
-  /// writes the placed call's handle; refuse it with
-  /// `sipral_call_reject_transfer`. Either spends the handle. **Taking
-  /// it is the application's decision each time**: a peer that can make
-  /// a phone dial can make it dial anything, and `referred_by` is what
-  /// the sender wrote, never proof of who it is.
-  ///
-  /// Raised a second time, with `payload.referral.status_code` set and
-  /// nothing else, when the application answered neither before the
-  /// REFER's transaction ran out: the stack answered it with that status
-  /// and the handle is stale from here on.
+  /// An out-of-dialog REFER asks this end to place a call (RFC 3515),
+  /// with `sipral_stack_config_t::referrals` on. `call` is the referral's
+  /// handle, taken only by `sipral_call_accept_transfer` (202, places the
+  /// call) or `sipral_call_reject_transfer`; either spends it. `account`
+  /// is the line, `message` the REFER, `payload.referral` the target.
+  /// **The application decides each time**: `referred_by` is unverified.
+  /// If left unanswered, raised again with only `status_code` set, and
+  /// the handle is stale.
   static const int referral = 41;
 
-  /// A media socket's connection to a TURN server reached over TCP or
-  /// TLS (`turn_transport`, RFC 8656 §3.1) is to be opened, or closed.
-  /// Only on a stack created with one.
-  ///
-  /// `payload.turn_stream` says which socket, which server, over what,
-  /// and which of the two. `SIPRAL_TURN_STREAM_OPEN` follows
-  /// `sipral_stack_nat_map`: open the connection from the socket to the
-  /// server — TLS with the platform's own stack, the certificate
-  /// checked against the server's name — and say so with
-  /// `sipral_stack_turn_connected`, then hand everything it carries to
-  /// `sipral_stack_turn_receive` for as long as it is open, and its
-  /// closing to `sipral_stack_turn_closed`. What is written on it comes
-  /// out of `sipral_stack_poll_stun`, `sipral_media_poll_transmit`,
-  /// `sipral_media_capture`, `sipral_media_poll_rtcp` and
-  /// `sipral_stack_poll_farewell`, each marked with its `protocol`.
-  /// `SIPRAL_TURN_STREAM_CLOSE` says nothing more will be: write what
-  /// is still queued for it, and close it. `account` and `call` are
-  /// `SIPRAL_HANDLE_NONE`: a socket is neither.
+  /// A media socket's TCP/TLS connection to a TURN server
+  /// (`turn_transport`, RFC 8656 §3.1) is to be opened or closed.
+  /// `payload.turn_stream` says which. On `SIPRAL_TURN_STREAM_OPEN`, open
+  /// it (TLS checked against the server name), then call
+  /// `sipral_stack_turn_connected`, `sipral_stack_turn_receive` and
+  /// `sipral_stack_turn_closed`. On `SIPRAL_TURN_STREAM_CLOSE`, flush and
+  /// close. `account`, `call`: none.
   static const int turnStream = 42;
 
-  /// The audio engine's devices moved: a device arrived or left, the
-  /// system's default changed, a role was put on a device, lost the
-  /// one it was on, or was reopened on another. Only on a stack
-  /// created with `sipral_stack_config_t::audio` set to
-  /// `SIPRAL_AUDIO_DEVICE`.
-  ///
-  /// `payload.audio` says what changed and who changed it —
-  /// `SIPRAL_AUDIO_ORIGIN_SYSTEM` for the operating system,
-  /// `SIPRAL_AUDIO_ORIGIN_ENGINE` for this library doing what the
-  /// application asked or what a loss made it do — so that an
-  /// application can note the first and need not re-apply its own
-  /// choice on hearing the second. `account` and `call` are
-  /// `SIPRAL_HANDLE_NONE`: a device is neither.
+  /// The audio engine's devices moved (with `SIPRAL_AUDIO_DEVICE`).
+  /// `payload.audio` says what and whether the system or the engine did
+  /// it. `account`, `call`: none.
   static const int audioDevicesChanged = 43;
 
-  /// The network changed under this call and the address its media
-  /// was described at is gone: the far end is still sending its audio
-  /// there.
-  ///
-  /// One for every call that can still be offered a new description,
-  /// raised by `sipral_stack_network_changed` when it answers
-  /// `SIPRAL_RECOVERY_REBUILD`. Answer it by binding a media socket on
-  /// the new network and handing its address to
-  /// `sipral_call_media_readdress`, after `sipral_account_rebind`, so
-  /// that the re-INVITE carries the new `Contact` as well as the new
-  /// `c=` and port. `call` is the call; the payload is
-  /// `payload.call`, as for every other call event.
+  /// The network changed and this call's media address is gone. Raised
+  /// per call by `sipral_stack_network_changed` on
+  /// `SIPRAL_RECOVERY_REBUILD`: after `sipral_account_rebind`, pass a new
+  /// socket address to `sipral_call_media_readdress`.
   static const int callAddressWanted = 45;
 
-  /// The STUN server a stack asks changed, or every one of them failed.
-  /// Only on a stack created with `SIPRAL_NAT_STUN`, or given servers by
-  /// `sipral_stack_stun_servers`.
-  ///
-  /// `payload.stun_server` says which:
-  /// `SIPRAL_STUN_SERVER_STATE_CHANGED` when the server in use moved --
-  /// the one before it failed, one earlier in the list answered again,
-  /// or the list was replaced -- and
-  /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED` when every server in
-  /// `stun_server` and `stun_fallbacks` has failed and none is left to
-  /// turn to. A server fails when it does not answer in five and a half
-  /// seconds, or answers without an address, and is then passed over
-  /// for thirty seconds, twice as long each time it fails again, up to
-  /// ten minutes. Nothing is asked of the application: the sockets move
-  /// to the next server by themselves, and
-  /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what each one learns there.
-  /// `account` and `call` are `SIPRAL_HANDLE_NONE`: a server is
-  /// neither.
+  /// The STUN server in use changed, or all failed
+  /// (`payload.stun_server`). A server fails after 5.5 s and is skipped
+  /// for 30 s, doubling up to ten minutes. Sockets move on by themselves.
+  /// `account`, `call`: none.
   static const int stunServer = 46;
 
-  /// Who is calling, as a signature says (RFC 8224, RFC 8588): the
-  /// stack's verification service at work on an INVITE for an account
-  /// that verifies its callers. ABI 0.31.
-  ///
-  /// `payload.verification.stage` says which half.
-  /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: the certificate at
-  /// `certificate_url` is needed; fetch it and hand it to
-  /// `sipral_call_stir_certificate`, or hand over nothing if it cannot
-  /// be had. The call waits, and the application has not been told of
-  /// it yet — `call` names it all the same, for the answer.
-  /// `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict, queued just
-  /// before the `SIPRAL_EVENT_KIND_INCOMING_CALL` naming the same call,
-  /// whose call events carry it too; or, with `refused` set, before the
-  /// `SIPRAL_EVENT_KIND_CALL_ENDED` of a call its strict account
-  /// refused with `response_code`. `message` is the INVITE.
+  /// Caller verification (RFC 8224, RFC 8588); `payload.verification`.
+  /// `CERTIFICATE_WANTED`: fetch `certificate_url` and pass it (or
+  /// nothing) to `sipral_call_stir_certificate`; the call waits.
+  /// `VERIFIED`: the verdict, just before the call's
+  /// `SIPRAL_EVENT_KIND_INCOMING_CALL`, or with `refused` set before its
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED`. `message` is the INVITE.
   static const int callerVerification = 47;
 
-  /// A keypad digit heard in the far end's audio, as the two tones
-  /// themselves, on a call listening for them:
-  /// `sipral_stack_config_t::dtmf_detection` and
-  /// `sipral_call_dtmf_detection` say when. One per press, reported as
-  /// it ends; on a call that also negotiated named events, a press the
-  /// far end sent both ways is reported once, as
-  /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`, and one heard only in the audio
-  /// waits a quarter of a second before it is reported here.
-  ///
-  /// `payload.media` carries it the way it carries every digit:
-  /// `digit` is the key's character, `event_code` its RFC 4733 code,
-  /// `held_ms` how long it sounded and `source`
-  /// `SIPRAL_DIGIT_SOURCE_IN_BAND`.
+  /// A keypad digit heard as tones (with DTMF detection enabled), once
+  /// per press. A press also sent as a named event is reported once as
+  /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`; tones alone wait 250 ms.
   static const int inBandDigit = 48;
 
-  /// What was heard on a call told to listen with
-  /// `sipral_call_detect_progress`: a call-progress tone of its network
-  /// on early media, the special information tone, who answered, or
-  /// the beep an answering machine plays before it records.
-  /// `payload.progress` says which, and what was measured.
+  /// What `sipral_call_detect_progress` heard: a progress tone, the
+  /// special information tone, who answered, or a machine's beep
+  /// (`payload.progress`).
   static const int progressDetected = 49;
 
-  /// A `conference` subscription's picture of the conference changed,
-  /// or the conference ended (RFC 4575 §4.6).
-  ///
-  /// `payload.conference` says which subscription and what happened:
-  /// `SIPRAL_CONFERENCE_UPDATE_APPLIED` for a document merged into the
-  /// picture, with the version it is at and how many users it holds,
-  /// and `SIPRAL_CONFERENCE_UPDATE_ENDED` for a conference the focus
-  /// deleted, after which the subscription is being given up. The
-  /// picture itself is read with `sipral_subscription_conference` and
-  /// `sipral_subscription_conference_user_at`. A document that was late
-  /// or repeated raises nothing, and one that followed a lost one is
-  /// answered by the stack asking for full state again. `account` and
-  /// `call` are `SIPRAL_HANDLE_NONE`; the NOTIFY itself arrived just
-  /// before, as `SIPRAL_EVENT_KIND_NOTIFIED`.
+  /// A `conference` subscription's picture changed or the conference
+  /// ended (RFC 4575 §4.6); `payload.conference`. Read the picture with
+  /// `sipral_subscription_conference`. Out-of-order documents raise
+  /// nothing; after a loss the stack asks for full state.
   static const int conferenceChanged = 50;
 
-  /// The far end typed something on the call's real-time text stream
-  /// (RFC 4103), in the order it typed it.
-  ///
-  /// `call` is the call; `payload.text` holds the text, UTF-8: an
-  /// erasure of the last character as BACKSPACE (U+0008), a new line
-  /// as LINE SEPARATOR (U+2028), an alert as BELL (U+0007), and a
-  /// REPLACEMENT CHARACTER (U+FFFD) for each block of text that was
-  /// lost and no redundant copy recovered (RFC 4103 §5.3), counted in
-  /// `payload.text.missing`.
+  /// Real-time text from the far end (RFC 4103), in order, UTF-8 in
+  /// `payload.text`: BACKSPACE erases, U+2028 is a new line, BELL alerts,
+  /// U+FFFD marks each unrecovered lost block (§5.3), counted in `missing`.
   static const int textReceived = 51;
 
-  /// Presence moved: a `presence` subscription was told about the
-  /// presentity (RFC 3856), or the state this account publishes (RFC
-  /// 3903) was published, refreshed, removed, lapsed or refused.
-  ///
-  /// `payload.presence.kind` says which. For a subscription,
-  /// `payload.presence.subscription` names it and the rest is what the
-  /// PIDF document said: open or closed, the first RPID activity, the
-  /// first note and the entity; the NOTIFY itself arrived just before,
-  /// as `SIPRAL_EVENT_KIND_NOTIFIED`. For a publication, `account`
-  /// names the account and
-  /// `payload.presence.publication_state` says what became of it, with
-  /// the SIP status, the lifetime the compositor granted and when the
-  /// stack refreshes it.
+  /// Presence moved: a `presence` subscription's PIDF (RFC 3856), or this
+  /// account's publication (RFC 3903). `payload.presence.kind` says
+  /// which.
   static const int presenceChanged = 52;
 
-  /// A transport this stack signals on stopped carrying traffic: the
-  /// application said it failed (`sipral_stack_transport_failed`,
-  /// `sipral_stack_transport_failed_with`) or closed
-  /// (`sipral_stack_stream_closed`), or a stream carried bytes no
-  /// message starts with (`sipral_stack_receive_stream`), or a stream
-  /// that had answered a keep-alive ping left the next one unanswered
-  /// for ten seconds (RFC 5626 §4.4.1, `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`:
-  /// the stack has let the connection go, and the socket is the
-  /// application's to close).
-  ///
-  /// Raised by the next poll, before what the loss did to the
-  /// registrations and calls on it. `payload.transport_failed` says
-  /// which transport, what it spoke, what went wrong and — when TLS
-  /// refused the connection — why, as the application's TLS library
-  /// said it: untrusted, a name that does not match, expired, or a
-  /// handshake refused, with the library's own sentence beside it.
-  /// Nothing is sent on the transport until
-  /// `sipral_stack_transport_bind` brings it back; a request asked for
-  /// meanwhile is `SIPRAL_STATUS_TRANSPORT_DOWN`. `account` and `call`
-  /// are `SIPRAL_HANDLE_NONE`: a transport is neither.
+  /// A signalling transport stopped: reported failed or closed, bad
+  /// stream bytes, or a keep-alive unanswered for ten seconds (RFC 5626
+  /// §4.4.1). `payload.transport_failed` says why. Until
+  /// `sipral_stack_transport_bind` restores it, requests get
+  /// `SIPRAL_STATUS_TRANSPORT_DOWN`. `account`, `call`: none.
   static const int transportFailed = 53;
 
-  /// A local conference changed (ABI 0.32): a member joined or left, who
-  /// is talking changed, or its recording stopped by itself.
-  ///
-  /// `payload.local_conference` says which conference and what
-  /// happened: `member` is the call that joined or left — or the
-  /// conference's own handle for this end — `departure` why it left,
-  /// and `members`, `talkers` and `loudest` how the conference stands
-  /// now. The talkers themselves are read with
-  /// `sipral_local_conference_talker_at`. `account` and `call` are
-  /// `SIPRAL_HANDLE_NONE`: a conference is neither.
+  /// A local conference changed: membership, talkers, or recording
+  /// (`payload.local_conference`). `account`, `call`: none.
   static const int localConferenceChanged = 54;
 
-  /// A DNS lookup is wanted to locate an account's server by RFC 3263
-  /// (ABI 0.34): the account named its registrar or its outbound proxy
-  /// with `server_uri` rather than an address.
-  ///
-  /// `payload.locate` names the query: `name`, and `record`, what to
-  /// ask it for. Ask the platform's resolver and hand the answer to
-  /// `sipral_account_looked_up` — every one, a failure included, since
-  /// the procedure waits for each. Several may be outstanding at once,
-  /// one per host an SRV answer named. `account` is the account.
+  /// A DNS lookup is wanted to locate an account's server (RFC 3263).
+  /// Pass every answer, failures included, to `sipral_account_looked_up`.
   static const int lookupWanted = 55;
 
-  /// An account's server was located, or located again once the last
-  /// answer's time-to-live ran out (ABI 0.34): `payload.locate.targets`
-  /// is every address the answer named, first the one the account's
-  /// requests go to now. `account` is the account.
+  /// An account's server was located: `payload.locate.targets`, the
+  /// address in use first.
   static const int located = 56;
 
-  /// A lookup of an account's server named no address (ABI 0.34):
-  /// `payload.locate.failure` says why, and `retry_in_ms` when the name
-  /// is looked up again. A REGISTER that was waiting for it is reported
-  /// failed as well, and backs off; an address an earlier answer named
-  /// stays in use meanwhile. `account` is the account.
+  /// Locating an account's server failed; `retry_in_ms` says when it
+  /// retries. An earlier address stays in use.
   static const int locateFailed = 57;
 
-  /// A request of an account's was challenged by somebody its
-  /// password is not for, and the challenge was not answered (ABI
-  /// 0.36): RFC 3261 §22.1 gives each protection domain its own
-  /// password, and every answer is material for an offline search of
-  /// it by whoever chose the nonce.
-  ///
-  /// `payload.challenge` says why — `refusal` — and who asked:
-  /// `server`, where the challenged request went, and `realms`, what
-  /// it was challenged for. Raised before the refusal settles the way
-  /// any unanswered challenge does — a call ending with the 401 or
-  /// 407, a registration failing with `BAD_CREDENTIALS`, a request
-  /// inside a call refused — so the application knows why first. A
-  /// server that answers under a realm the account was never told of
-  /// is what `sipral_account_config_t::realms` is for. `account` is
-  /// the account.
+  /// A challenge was not answered because it came from outside the
+  /// account's protection domain (RFC 3261 §22.1): an answer would feed
+  /// an offline password guess. `payload.challenge` says who and why.
   static const int challengeDeclined = 58;
 
-  /// An account's own server takes an OAuth 2.0 access token (RFC
-  /// 8898) and the account has none it would accept: none was
-  /// supplied, or the one supplied was refused — expired or revoked,
-  /// which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
-  ///
-  /// `payload.token` says where a token comes from: `authz_server`, an
-  /// `https` URI RFC 8898 §2.1.1 says to check against the
-  /// authorization servers the application trusts before going near
-  /// it, and `scope`, what the token has to cover. Fetching it is the
-  /// application's; hand it over with `sipral_account_set_access_token`.
-  /// The refusal settles meanwhile the way an unanswered challenge does
-  /// — a registration failing with `BAD_CREDENTIALS`, a call ending
-  /// with the 401 or 407 — and `sipral_account_register` registers
-  /// again at once with the new token. `account` is the account.
+  /// The account's server wants an OAuth 2.0 token (RFC 8898) and has
+  /// none acceptable. Check `payload.token.authz_server` against trusted
+  /// servers (§2.1.1), then pass a token to
+  /// `sipral_account_set_access_token`.
   static const int tokenRequired = 59;
 
-  /// A network test `sipral_stack_network_test` started has every
-  /// answer it is going to get (ABI 1.2). `payload.network_test` holds
-  /// each part and the verdict; `account` is the account whose server
-  /// was probed and `call` the echo call, when the test had them.
+  /// A `sipral_stack_network_test` finished; `payload.network_test`.
   static const int networkTest = 60;
 }
 
@@ -1572,25 +1054,20 @@ abstract final class SipralRegistrationState {
   /// The registrar refused in a way that trying again cannot fix.
   static const int failed = 7;
 
-  /// A binding a registrar really granted, over a transport that has since
-  /// been suspended or lost, which nothing has proved since.
+  /// A binding a registrar granted, over a transport since suspended or
+  /// lost, which nothing has proved since.
   ///
-  /// Not registered, because it is no longer evidence; not failed, because
-  /// nothing refused it. A monotonic clock does not advance while a machine
-  /// sleeps, so a stack that slept eight hours comes back believing eight
-  /// milliseconds passed and every binding still valid — this is the state
-  /// that says otherwise, and an application that shows a line as ready on
-  /// the strength of it will show it ready when it is not.
+  /// A monotonic clock does not advance while a machine sleeps, so after
+  /// sleep every binding would otherwise look valid. Do not show the line
+  /// as ready in this state.
   static const int unverified = 8;
 
   /// A binding read back from a snapshot rather than granted in this
   /// process. It has not been proved either.
   static const int restored = 9;
 
-  /// The account was configured with no registrar and never registers:
-  /// a trunk that knows this end by its address. It starts here and
-  /// stays here, and `sipral_account_register` refuses it. Not idle,
-  /// which is one `sipral_account_register` away from a binding.
+  /// The account has no registrar and never registers (a trunk that
+  /// knows this end by address). `sipral_account_register` refuses it.
   static const int notRegistering = 10;
 }
 
@@ -1613,12 +1090,8 @@ abstract final class SipralRegistrationFailure {
   /// caller's to resolve.
   static const int redirected = 4;
 
-  /// The account's `Contact` names an address the registrar cannot
-  /// reach this end at — loopback, to a registrar that is not, or the
-  /// unspecified address — and nothing was sent (ABI 0.34). Trying
-  /// again cannot help until the account is given one it can:
-  /// `sipral_account_rebind`, with an address `sipral_advertised_address`
-  /// found.
+  /// The account's `Contact` is unreachable for the registrar (loopback
+  /// or unspecified); nothing was sent. Fix with `sipral_account_rebind`.
   static const int unreachableContact = 5;
 }
 
@@ -1683,9 +1156,7 @@ abstract final class SipralCallEndReason {
   static const int expired = 8;
 }
 
-/// Which of the ways this stack accepts a digit reported the one
-/// SipralEventKind.digitReceived or SipralEventKind.inBandDigit
-/// carries. Names for `sipral_media_event_t::source`.
+/// Which way a digit arrived. Names for `sipral_media_event_t::source`.
 abstract final class SipralDigitSource {
   /// RFC 4733: a named telephone event in the RTP stream.
   static const int rtp = 0;
@@ -1699,9 +1170,8 @@ abstract final class SipralDigitSource {
   static const int inBand = 2;
 }
 
-/// What a SipralEventKind.recovery reports happened, for
-/// `payload.recovery.state`: the two ways a recovery settles — a
-/// registrar answered again, or the ladder ran out of rungs.
+/// What a SipralEventKind.recovery reports, for
+/// `payload.recovery.state`.
 abstract final class SipralRecoveryOutcome {
   /// Never written by this build.
   static const int unknown = 0;
@@ -1713,12 +1183,7 @@ abstract final class SipralRecoveryOutcome {
   static const int gaveUp = 2;
 }
 
-/// The last rung a recovery ladder tried before it gave up, for
-/// SipralEventKind.recovery's `payload.recovery.rung`. Meaningful
-/// only when `payload.recovery.state` is
-/// SipralRecoveryOutcome.gaveUp. The ladder's own last step, giving
-/// up, has no name here: what is reported is the rung before it that
-/// asked for something and went unanswered.
+/// The last rung tried before giving up, for `payload.recovery.rung`.
 abstract final class SipralRecoveryRung {
   /// The ladder did not give up.
   static const int none = 0;
@@ -1754,14 +1219,11 @@ abstract final class SipralRecoveryFailure {
   static const int unresolved = 3;
 }
 
-/// What kind of link the application is on. Names for `from_link` and
-/// `to_link` on sipral_stack_network_changed.
+/// What kind of link the application is on: `from_link` and `to_link` on
+/// sipral_stack_network_changed.
 ///
-/// Coarse on purpose: nothing here changes what is sent, and the one
-/// value that changes what is *done* is SipralLink.down. The rest is
-/// carried so that a change of kind over an unchanged address — a tunnel
-/// coming up, a phone moving from Wi-Fi to a mobile network that kept the
-/// address — is visible as a change at all.
+/// Only SipralLink.down changes what is done. The rest makes a change
+/// of kind over an unchanged address (a tunnel, Wi-Fi to cellular) visible.
 abstract final class SipralLink {
   /// There is no usable interface.
   static const int down = 0;
@@ -1779,32 +1241,26 @@ abstract final class SipralLink {
   static const int tunnel = 4;
 }
 
-/// What a change of network is worth doing about. Names for
-/// sipral_stack_network_changed's `out_recovery`.
-///
-/// Returned from the call itself, so an application does not have to read
-/// an event to find out whether anything happened: a laptop that flips
-/// between two access points all day gets SipralRecovery.nothing
-/// every time and never sends a REGISTER over it.
+/// What a change of network is worth doing about:
+/// sipral_stack_network_changed's `out_recovery`. Returned directly, so
+/// a laptop flipping access points gets SipralRecovery.nothing without
+/// reading an event or sending a REGISTER.
 abstract final class SipralRecovery {
   /// Never written by this build.
   static const int unknown = 0;
 
-  /// Nothing this stack uses is different. Nothing is done and nothing
-  /// is sent.
+  /// Nothing this stack uses is different; nothing is done or sent.
   static const int nothing = 1;
 
-  /// The address still stands, so the transports do. What is upstream
-  /// of it may not.
+  /// The address stands, so the transports do; what is upstream may not.
   static const int reregister = 2;
 
-  /// A wake: the transport already there is used first, and a new one
-  /// is asked for only once it turns out to be dead. Never returned by
-  /// this entry point; it is what sipral_stack_resumed starts.
+  /// A wake: the existing transport is tried first, a new one asked for
+  /// only if it is dead. Started by sipral_stack_resumed, never
+  /// returned here.
   static const int reprove = 3;
 
-  /// The address is gone. Everything bound to it is unusable and the
-  /// application has to open a transport again.
+  /// The address is gone; the application must open a transport again.
   static const int rebuild = 4;
 
   /// Packets can leave and names cannot be turned into addresses.
@@ -1815,99 +1271,64 @@ abstract final class SipralRecovery {
 }
 
 /// What a stack does about a NAT in front of it. Names for
-/// `sipral_stack_config_t::nat`.
-///
-/// Zero is not one of them: it means this build's own built-in default,
-/// which is SipralNat.off. `docs/06-nat.md` says why that is the
-/// default and what `rport` and symmetric RTP already carry without it.
+/// `sipral_stack_config_t::nat`. Zero means the built-in default, SipralNat.off.
 abstract final class SipralNat {
-  /// Ask nobody. Every address this stack writes is the one the
-  /// application gave it.
+  /// Ask nobody: every address written is the one the application gave.
   static const int off = 1;
 
-  /// Ask the STUN server `sipral_stack_config_t::stun_server` names
-  /// where each socket appears from, and write that instead: the
-  /// signalling socket's in the `Contact`, a media socket's in `c=` and
-  /// `m=`.
-  ///
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
-  /// `SIPRAL_FEATURE_STUN`.
+  /// Ask `stun_server` where each socket appears from and write that instead.
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` without `SIPRAL_FEATURE_STUN`.
   static const int stun = 2;
 }
 
-/// What a socket's mapping came to. Names for
-/// `sipral_nat_event_t::mapping`.
+/// What a socket's mapping came to. Names for `sipral_nat_event_t::mapping`.
 abstract final class SipralNatMapping {
   /// The first answer: the socket appears at `public`.
   static const int learned = 1;
 
-  /// A later answer named another address: the NAT let the mapping go
-  /// and made a new one, or the network under the socket changed.
-  /// `previous` is what it was. About a signalling socket, or a media
-  /// socket still waiting for its call.
+  /// A later answer named another address; `previous` is the old one. Signalling socket, or a
+  /// media socket still waiting for its call.
   static const int moved = 2;
 
-  /// The server did not answer, in five and a half seconds, or refused.
-  /// The socket is described by its own address, exactly as it would
-  /// have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
-  /// its next refresh.
+  /// No answer within five and a half seconds, or refused. The socket is described by its own
+  /// address; a signalling socket asks again at its next refresh.
   static const int unanswered = 3;
 }
 
-/// What a media socket's relay came to. Names for
-/// `sipral_nat_relay_event_t::outcome`.
+/// What a media socket's relay came to. Names for `sipral_nat_relay_event_t::outcome`.
 abstract final class SipralNatRelay {
-  /// The TURN server allocated a relay for the socket: `relayed` is
-  /// the address it relays from. A call placed, rung or answered on
-  /// the socket from now on offers it as its relayed ICE candidate.
+  /// The relay exists at `relayed`; later calls on the socket offer it as an ICE candidate.
   static const int allocated = 1;
 
-  /// There is no relay for the socket: the server refused (`code` says
-  /// with what), did not answer in thirty-nine and a half seconds, or
-  /// took back an allocation it had made. A call on the socket goes
-  /// without one, and ICE finds what path it can on the rest.
+  /// No relay: refused (see `code`), no answer in 39.5 seconds, or allocation lost. Calls on
+  /// the socket go without one.
   static const int failed = 2;
 }
 
-/// What a media socket's connection to the TURN server is to do. Names
-/// for `sipral_turn_stream_event_t::state`.
+/// What to do with a media socket's TURN connection. Names for
+/// `sipral_turn_stream_event_t::state`.
 abstract final class SipralTurnStream {
-  /// Open a connection from the media socket `local` to the TURN
-  /// server at `server`, over `protocol` — TCP, or TLS with the
-  /// server's certificate checked by the platform's own stack — and
-  /// say so with `sipral_stack_turn_connected` once it is open, or
-  /// `sipral_stack_turn_closed` if it cannot be. The socket's relay is
-  /// allocated over it; a call on the socket before that answers
-  /// `SIPRAL_STATUS_WRONG_STATE`.
+  /// Open a connection from `local` to `server` over `protocol` (TLS verified by the
+  /// platform), then call `sipral_stack_turn_connected`, or `sipral_stack_turn_closed` on failure. Calls
+  /// on the socket before that answer `SIPRAL_STATUS_WRONG_STATE`.
   static const int open = 1;
 
-  /// Nothing more will be written for the connection from `local`:
-  /// its relay was given back or lost, or the call it carried has
-  /// ended. Write what the queues still hold for it —
-  /// `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` — and
-  /// close it.
+  /// Nothing more will be written for `local`: flush `sipral_stack_poll_farewell` and
+  /// `sipral_stack_poll_stun` for it, then close it.
   static const int close = 2;
 }
 
-/// What happened to the STUN servers a stack asks. Names for
-/// `sipral_stun_server_event_t::state`.
+/// What happened to the STUN servers. Names for `sipral_stun_server_event_t::state`.
 abstract final class SipralStunServerState {
-  /// The server in use is another one now: `previous` failed and
-  /// `server`, the next in the list, took over; a refresh found
-  /// `server`, earlier in the list, answering again; or
-  /// `sipral_stack_stun_servers` named another list.
+  /// Another server is in use now: failover, an earlier one answering again, or a new list.
   static const int changed = 1;
 
-  /// Every server in the list has failed and each is backing off:
-  /// `server` is the last one that did. The sockets keep what they
-  /// learned, or are described by their own address, and a
-  /// signalling socket's refresh goes on asking. Said once until a
-  /// server answers again.
+  /// Every server failed and is backing off; `server` is the last. Sockets keep what they
+  /// learned. Said once until a server answers again.
   static const int allFailed = 2;
 }
 
-/// Where a subscription is. Names for
-/// `sipral_subscription_event_t::state` and for
+/// Where a subscription is: `sipral_subscription_event_t::state` and
 /// sipral_subscription_state's `out_state`.
 abstract final class SipralSubscriptionState {
   /// The handle names nothing: never minted here, or ended and let go.
@@ -1916,46 +1337,38 @@ abstract final class SipralSubscriptionState {
   /// A SUBSCRIBE is on its way and nothing has answered it yet.
   static const int requesting = 1;
 
-  /// The notifier has it and has not decided. RFC 6665 §4.1.3's
-  /// `pending` is "insufficient policy information to grant or deny the
-  /// subscription yet", and nothing is known about the watched thing
-  /// until this becomes SipralSubscriptionState.active.
+  /// The notifier has not decided (RFC 6665 §4.1.3 `pending`); nothing
+  /// is known until SipralSubscriptionState.active.
   static const int pending = 2;
 
   /// Granted, and notifications are arriving.
   static const int active = 3;
 
-  /// Not live, and a fresh attempt is scheduled. The handle stays
-  /// valid: §4.1.2.2's new attempt is "an unrelated initial SUBSCRIBE
-  /// request with a freshly generated Call-ID and a new, unique From
-  /// tag", and this ABI keeps one name over both of them.
+  /// Not live, and a fresh attempt is scheduled (§4.1.2.2: new
+  /// `Call-ID` and `From` tag). The handle stays valid across both.
   static const int retrying = 4;
 
-  /// Over, with nothing more coming. The handle names nothing from
-  /// here on.
+  /// Over, nothing more coming. The handle names nothing from here on.
   static const int ended = 5;
 }
 
-/// Why a subscription is not live. Names for
-/// `sipral_subscription_event_t::reason`.
+/// Why a subscription is not live: `sipral_subscription_event_t::reason`.
 ///
-/// Zero unless the state is SipralSubscriptionState.retrying or
-/// SipralSubscriptionState.ended. The first nine are what a
-/// `Subscription-State: terminated` said in its `reason` parameter (RFC
-/// 6665 §4.1.3), and the rest are what happened here instead.
+/// Zero unless SipralSubscriptionState.retrying or
+/// SipralSubscriptionState.ended. The first eight are the `reason` of
+/// `Subscription-State: terminated` (RFC 6665 §4.1.3); the rest happened
+/// here.
 abstract final class SipralSubscriptionEnd {
   /// Never written by this build.
   static const int unknown = 0;
 
-  /// `deactivated`: the notifier wants this subscription started again
-  /// at once.
+  /// `deactivated`: the notifier wants it started again at once.
   static const int deactivated = 1;
 
   /// `probation`: started again, but not immediately.
   static const int probation = 2;
 
-  /// `rejected`: the notifier will not serve it, and asking again is
-  /// pointless.
+  /// `rejected`: the notifier will not serve it; do not ask again.
   static const int rejected = 3;
 
   /// `timeout`: it ran out rather than being refreshed.
@@ -1967,51 +1380,41 @@ abstract final class SipralSubscriptionEnd {
   /// `noresource`: what was being watched does not exist any more.
   static const int noResource = 6;
 
-  /// `invariant`: the watched thing cannot change, so there is nothing
-  /// to notify about.
+  /// `invariant`: the watched thing cannot change.
   static const int invariant = 7;
 
   /// `terminated` with no reason parameter at all.
   static const int unstated = 8;
 
-  /// This end gave it up: sipral_subscription_end. It wins over
-  /// whatever the notifier's closing notification said its own reason
-  /// was, because the application asked for this one to stop and that
-  /// is the answer to why it is not live.
+  /// This end gave it up with sipral_subscription_end. Wins over
+  /// the notifier's closing reason.
   static const int unsubscribed = 9;
 
   /// The notifier answered 489: it does not know this event package.
   static const int badEvent = 10;
 
-  /// The notifier refused the SUBSCRIBE with a status trying again
-  /// cannot fix.
+  /// Refused with a status a retry cannot fix.
   static const int refused = 11;
 
-  /// The SUBSCRIBE was redirected, and following a redirect for one is
-  /// not something this stack does by itself.
+  /// Redirected; this stack does not follow redirects for SUBSCRIBE.
   static const int redirected = 12;
 
   /// Nothing answered: the notifier could not be reached at all.
   static const int unreachable = 13;
 
-  /// The SUBSCRIBE was answered and the first NOTIFY never arrived
-  /// (§4.1.2.4's timer N, 64·T1).
+  /// Answered, but the first NOTIFY never came (§4.1.2.4's timer N,
+  /// 64·T1).
   static const int noNotify = 14;
 
   /// What the notifier granted ran out with no refresh answered.
   static const int expired = 15;
 }
 
-/// What one watched dialog is doing, and what a lamp is lit from. Names
-/// for `sipral_watched_dialog_t::phase` and for
-/// sipral_subscription_lamp's `out_phase`.
-///
-/// RFC 4235 §3.7.1's states, with the order they rank in for a lamp:
-/// anything ringing beats anything settled, which is §3.7.2's virtual
-/// state machine over every dialog of one resource.
+/// What one watched dialog is doing, and what a lamp shows:
+/// `sipral_watched_dialog_t::phase` and sipral_subscription_lamp's
+/// `out_phase`. RFC 4235 §3.7.1's states, ranked as §3.7.2 ranks them.
 abstract final class SipralDialogPhase {
-  /// Nothing is going on: no dialog, or every one of them terminated.
-  /// This is what an idle lamp shows.
+  /// No dialog, or all terminated: an idle lamp.
   static const int idle = 0;
 
   /// A request went out and nothing has answered.
@@ -2027,15 +1430,14 @@ abstract final class SipralDialogPhase {
   static const int confirmed = 4;
 
   /// This dialog is over. Never sipral_subscription_lamp's answer,
-  /// which is SipralDialogPhase.idle when every dialog has ended.
+  /// which is SipralDialogPhase.idle then.
   static const int terminated = 5;
 
   /// The notifier named a state this build has no number for.
   static const int unknown = 6;
 }
 
-/// Which end started a watched dialog. Names for
-/// `sipral_watched_dialog_t::direction`.
+/// Which end started a watched dialog: `sipral_watched_dialog_t::direction`.
 abstract final class SipralDialogDirection {
   /// The notifier did not say.
   static const int unknown = 0;
@@ -2047,8 +1449,8 @@ abstract final class SipralDialogDirection {
   static const int remotely = 2;
 }
 
-/// How a watched dialog ended. Names for
-/// `sipral_watched_dialog_t::ended`, and zero while it has not.
+/// How a watched dialog ended: `sipral_watched_dialog_t::ended`, zero
+/// while it has not.
 abstract final class SipralDialogEnded {
   /// It has not ended, or the notifier did not say how.
   static const int unknown = 0;
@@ -2075,18 +1477,13 @@ abstract final class SipralDialogEnded {
   static const int timeout = 7;
 }
 
-/// Which piece of text sipral_subscription_dialog_text is being asked
-/// for.
-///
-/// Every one of them is what the notifier wrote, unparsed: a display name
-/// is whatever it put there, and an identity is a URI in the form it sent
-/// it in.
+/// Which text sipral_subscription_dialog_text reads. Each is what the
+/// notifier wrote, unparsed.
 abstract final class SipralDialogText {
   /// Never asked for.
   static const int unknown = 0;
 
-  /// The notifier's own name for this dialog, which is what it will
-  /// keep using for it.
+  /// The notifier's own id for this dialog.
   static const int id = 1;
 
   /// The dialog's `Call-ID`, when the notifier sent one.
@@ -2098,8 +1495,7 @@ abstract final class SipralDialogText {
   /// And the display name beside it.
   static const int localDisplay = 4;
 
-  /// Who the other end is, as a URI. This is the one a lamp shows
-  /// beside a ringing extension.
+  /// Who the other end is, as a URI: what a lamp shows when ringing.
   static const int remoteIdentity = 5;
 
   /// And the display name beside it.
@@ -2114,35 +1510,28 @@ abstract final class SipralDialogText {
 
 /// Who pumps a stack's audio: `sipral_stack_config_t::audio`.
 ///
-/// Zero is application mode because zero is what a configuration
-/// written against any earlier header says, and a caller that pumps its
-/// own frames must go on pumping them when the library underneath it is
-/// updated. The idiomatic layers each choose their own default.
+/// Zero is application mode, so a configuration written against an
+/// earlier header keeps pumping its own frames.
 abstract final class SipralAudio {
-  /// The application opens the devices and pumps the frames through
-  /// `sipral_media_capture` and `sipral_media_playback`. What every
-  /// stack was before device mode existed.
+  /// The application opens the devices and pumps frames through
+  /// `sipral_media_capture` and `sipral_media_playback`.
   static const int application = 0;
 
-  /// The library opens the platform's devices and pumps every
-  /// managed call itself; the packets it encodes reach the
-  /// application's socket through `audio_transmit_callback`.
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` on a platform this build has no
-  /// backend for, which `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+  /// The library opens the devices and pumps every managed call; the
+  /// packets reach the application through `audio_transmit_callback`.
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` without a backend for the platform,
+  /// as `SIPRAL_FEATURE_AUDIO_DEVICE` says.
   static const int device = 1;
 }
 
 /// When the devices are opened, in device mode:
 /// `sipral_stack_config_t::audio_activation`.
 abstract final class SipralAudioActivation {
-  /// With the first managed call's media, or the first ring; closed
-  /// with the last. What a desktop softphone wants.
+  /// With the first managed call's media or ring; closed with the last.
   static const int automatic = 0;
 
-  /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`,
-  /// whatever the calls do. What CallKit and the telecom framework
-  /// want: they say when the audio session is this application's,
-  /// and a device opened before they do is a device that does not work.
+  /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`:
+  /// for CallKit and the telecom framework, which own the audio session.
   static const int manual = 1;
 }
 
@@ -2154,9 +1543,8 @@ abstract final class SipralAudioRole {
   /// The call's loudspeaker or earpiece.
   static const int speaker = 2;
 
-  /// Where an incoming call is announced, which need not be where it
-  /// is answered: the room's speaker for the ring, the headset for
-  /// the call.
+  /// Where an incoming call is announced, which may differ from where
+  /// it is answered.
   static const int ringer = 3;
 }
 
@@ -2171,21 +1559,19 @@ abstract final class SipralAudioDirection {
 
 /// What changed, on `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`.
 abstract final class SipralAudioChange {
-  /// A device arrived or left; the list has been refreshed, and
-  /// `sipral_audio_device_at` reads the new one. Every id that was
-  /// valid still is: a device that left keeps its row, marked absent.
+  /// A device arrived or left. Every valid id stays valid: a device
+  /// that left keeps its row, marked absent.
   static const int listChanged = 1;
 
-  /// The system's default for `direction` moved. A role the
-  /// application put on a device stays there; one on the system's
-  /// route follows, and says so with `SIPRAL_AUDIO_CHANGE_REOPENED`.
+  /// The system's default for `direction` moved. A role on a chosen
+  /// device stays; one on the system's route follows with
+  /// `SIPRAL_AUDIO_CHANGE_REOPENED`.
   static const int defaultChanged = 2;
 
   /// `role` is on `device` because `sipral_audio_select` said so.
   static const int selected = 3;
 
-  /// The device `role` was running on went away. The engine reopens
-  /// the role on its fallback and reports that separately.
+  /// The device `role` ran on went away; the reopen is reported apart.
   static const int lost = 4;
 
   /// `role` is running on `device` again.
@@ -2196,9 +1582,8 @@ abstract final class SipralAudioChange {
   static const int unavailable = 6;
 }
 
-/// Who made a change: the operating system, or this library doing what
-/// the application asked or what a loss made it do. An application
-/// notes the first and acts on neither by re-applying its own choice.
+/// Who made a change. An application must not answer either by
+/// re-applying its own choice.
 abstract final class SipralAudioOrigin {
   /// The operating system, or a person at a socket.
   static const int system = 1;
@@ -2295,9 +1680,8 @@ abstract final class SipralIdentityText {
   /// Every `info=` value on `Alert-Info`.
   static const int alertName = 11;
 
-  /// The calling number this stack's verification found a valid
-  /// PASSporT signed for (RFC 8224 §6.2), canonical: one entry, or none
-  /// when nothing verified. ABI 0.31.
+  /// The canonical calling number a valid PASSporT was found for
+  /// (RFC 8224 §6.2): one entry, or none. ABI 0.31.
   static const int verifiedOrig = 12;
 
   /// Its origination identifier (RFC 8588 §5), a UUID.
@@ -2324,46 +1708,41 @@ abstract final class SipralSessionTimer {
   static const int interval = 2;
 }
 
-/// How loud a log line is, for sipral_stack_log and
-/// SipralLogRecord.level. Higher is more detailed: a stack logging
-/// at `SIPRAL_LOG_LEVEL_INFO` delivers errors, warnings and information.
+/// Log verbosity, for sipral_stack_log and SipralLogRecord.level.
+/// Each level includes the ones below it.
 abstract final class SipralLogLevel {
-  /// Nothing: the log is off. What a stack starts with.
+  /// The log is off; the initial state.
   static const int off = 0;
 
-  /// Something failed and the application is likely to see the effect.
+  /// A failure the application is likely to notice.
   static const int error = 1;
 
-  /// Something went wrong that the stack worked around, or is about to
-  /// matter: a registration refused, audio that stopped arriving.
+  /// Something worked around or about to matter: a registration
+  /// refused, audio that stopped arriving.
   static const int warn = 2;
 
-  /// What an operator wants in a log file: a registration granted, a
-  /// call arriving, confirmed or ending, media starting.
+  /// Operator-level: registrations, calls arriving, confirmed or ending,
+  /// media starting.
   static const int info = 3;
 
-  /// Every event the stack raises, every decision its diagnostic record
-  /// writes down, and every call into this ABI it refused.
+  /// Every event raised, every diagnostic decision, every refused ABI call.
   static const int debug = 4;
 
   /// Every SIP message in and out, whole and redacted.
   static const int trace = 5;
 }
 
-/// How a stream's SRTP keys were exchanged. Names for
-/// `sipral_stream_encryption_t::key_exchange` and
-/// `sipral_media_event_t::key_exchange`.
+/// How a stream's SRTP keys were exchanged
+/// (`sipral_stream_encryption_t::key_exchange`, `sipral_media_event_t::key_exchange`).
 abstract final class SipralKeyExchange {
-  /// None: the stream was never meant to be encrypted, or the event is
-  /// not about one.
+  /// None: the stream is not encrypted, or the event is not about one.
   static const int none = 0;
 
-  /// In the session description (RFC 4568's `a=crypto`): as protected
-  /// as the signalling transport that carried it.
+  /// In the SDP (RFC 4568 `a=crypto`): as protected as the signalling.
   static const int sdes = 1;
 
-  /// By a DTLS handshake on the media path (RFC 5764), the far end's
-  /// certificate checked against the fingerprint its signalling named.
+  /// DTLS on the media path (RFC 5764), checked against the signalled
+  /// fingerprint.
   static const int dtls = 2;
 }
 
@@ -2376,9 +1755,8 @@ abstract final class SipralMediaKind {
   static const int audio = 1;
 }
 
-/// What an account does with the `Identity` header fields of the calls
-/// it receives (RFC 8224 §6.2). Names for
-/// `sipral_account_config_t::stir_verification`.
+/// What an account does with incoming `Identity` header fields
+/// (RFC 8224 §6.2). Values of `sipral_account_config_t::stir_verification`.
 abstract final class SipralStirVerification {
   /// This build's default, which is `REPORT`.
   static const int default$ = 0;
@@ -2386,24 +1764,19 @@ abstract final class SipralStirVerification {
   /// Verify nothing.
   static const int off = 1;
 
-  /// Verify, report the verdict on the call, and deliver every call
-  /// whatever it says. In force once the stack has trust anchors
-  /// (`sipral_stack_stir`); without any, nothing is fetched or
-  /// verified.
+  /// Verify, report the verdict, deliver every call. Active only once
+  /// the stack has trust anchors (`sipral_stack_stir`).
   static const int report = 2;
 
-  /// Verify, and refuse a call that does not verify with the response
-  /// RFC 8224 §6.2.2 prescribes: 428 with no `Identity`, 436 for a
-  /// certificate that cannot be had, 437 for one nobody trusted, 438
-  /// for a signature that does not hold, 403 "Stale Date". In force
-  /// with or without trust anchors: with none, nothing verifies.
+  /// Verify and refuse what does not verify (RFC 8224 §6.2.2): 428 no
+  /// `Identity`, 436 certificate unavailable, 437 untrusted, 438 bad
+  /// signature, 403 "Stale Date". Active even with no anchors, where
+  /// nothing verifies.
   static const int strict = 3;
 }
 
-/// The attestation level of a SHAKEN PASSporT (RFC 8588 §4). Names for
-/// `sipral_account_config_t::stir_attestation`,
-/// `sipral_verification_event_t::attestation` and
-/// `sipral_call_event_t::attestation`.
+/// SHAKEN attestation level (RFC 8588 §4), for
+/// `sipral_account_config_t::stir_attestation` and the verdict fields.
 abstract final class SipralAttestation {
   /// None said: on an account, full attestation; on a verdict, a
   /// PASSporT with no SHAKEN claims, or no valid one.
@@ -2415,34 +1788,29 @@ abstract final class SipralAttestation {
   /// Partial: the signer knows the caller, not the number.
   static const int b = 2;
 
-  /// Gateway: the signer knows only where the call entered its
-  /// network.
+  /// Gateway: the signer knows only where the call entered its network.
   static const int c = 3;
 }
 
-/// What a verification came to. Names for
-/// `sipral_verification_event_t::outcome` and
-/// `sipral_call_event_t::verification`.
+/// What a verification came to (`sipral_verification_event_t::outcome`,
+/// `sipral_call_event_t::verification`).
 abstract final class SipralVerificationOutcome {
-  /// Nothing was verified: the account does not verify, or the stack
-  /// has no trust anchors and the account only reports.
+  /// Nothing verified: the account does not verify, or no anchors.
   static const int none = 0;
 
-  /// A PASSporT signed by a certificate with authority over the calling
-  /// number, fresh, for the numbers the request names.
+  /// Signed by a certificate with authority over the calling number,
+  /// fresh, for the numbers the request names.
   static const int valid = 1;
 
   /// One was there and does not hold: `failure` says why.
   static const int invalid = 2;
 
-  /// Nothing this end could verify: no `Identity`, or only ones naming
-  /// a PASSporT extension it does not support.
+  /// Nothing to verify: no `Identity`, or only unsupported extensions.
   static const int absent = 3;
 }
 
-/// Why a verification did not hold. Names for
-/// `sipral_verification_event_t::failure` and
-/// `sipral_call_event_t::verification_failure`.
+/// Why a verification did not hold (`sipral_verification_event_t::failure`,
+/// `sipral_call_event_t::verification_failure`).
 abstract final class SipralVerificationFailure {
   /// Nothing failed.
   static const int none = 0;
@@ -2490,20 +1858,19 @@ abstract final class SipralVerificationFailure {
   static const int destMismatch = 14;
 }
 
-/// Which half of a caller's verification an event reports. Names for
-/// `sipral_verification_event_t::stage`.
+/// Which half of a verification an event reports
+/// (`sipral_verification_event_t::stage`).
 abstract final class SipralVerificationStage {
   /// Never sent.
   static const int unknown = 0;
 
-  /// The certificate at `certificate_url` is wanted: fetch it and hand
-  /// it to `sipral_call_stir_certificate`, or hand over nothing to say
-  /// it could not be had. The call waits, unannounced, until then or
-  /// until `certificate_wait_ms` runs out.
+  /// Fetch the certificate at `certificate_url` and pass it to
+  /// `sipral_call_stir_certificate` (or nothing, if unavailable). The
+  /// call waits unannounced until then or `certificate_wait_ms`.
   static const int certificateWanted = 1;
 
-  /// The verdict is in. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or,
-  /// when `refused` is set, `SIPRAL_EVENT_KIND_CALL_ENDED`.
+  /// The verdict. `SIPRAL_EVENT_KIND_INCOMING_CALL` follows, or
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED` when `refused` is set.
   static const int verified = 2;
 }
 
@@ -2513,24 +1880,19 @@ abstract final class SipralProgressKind {
   /// Never written by this build.
   static const int unknown = 0;
 
-  /// A call-progress tone of the configured network: `tone` says which
-  /// and `at_ms` when its first burst began, from the first frame
-  /// listened to.
+  /// A call-progress tone: `tone`, and `at_ms` when its first burst began.
   static const int tone = 1;
 
-  /// The special information tone: the call failed, and an
-  /// announcement usually follows. `sit_hz_1` to `sit_hz_3` and
-  /// `sit_ms_1` to `sit_ms_3` are what was measured, `at_ms` when the
-  /// first of the three began.
+  /// The special information tone (the call failed): `sit_hz_*` and
+  /// `sit_ms_*` as measured, `at_ms` when the first began.
   static const int specialInformation = 2;
 
   /// Who answered: `verdict`, `reason`, `at_ms` after answer,
   /// `initial_silence_ms`, `greeting_ms` and `words`.
   static const int answeredBy = 3;
 
-  /// The beep a machine plays before it records: `frequency_hz`,
-  /// `at_ms` when it ended after answer — when the machine starts
-  /// recording — and `length_ms`.
+  /// A machine's record beep: `frequency_hz`, `length_ms`, and `at_ms`
+  /// when it ended, after answer.
   static const int beep = 4;
 }
 
@@ -2599,9 +1961,8 @@ abstract final class SipralAmdReason {
 /// for `sipral_stack_config_t::dtmf_detection` and
 /// sipral_call_dtmf_detection's `mode`.
 abstract final class SipralDtmfDetection {
-  /// On a call whose negotiation settled on no telephone event payload
-  /// type: the far end then has no other way to send a digit. Zero, so
-  /// that a stack that says nothing gets it.
+  /// Only when no telephone event was negotiated, since the far end
+  /// then has no other way to send a digit.
   static const int auto = 0;
 
   /// Never. Digits arrive only as RFC 4733 events or by INFO.
@@ -2655,16 +2016,14 @@ abstract final class SipralConferenceUpdate {
   /// It was merged into the picture.
   static const int applied = 1;
 
-  /// The focus deleted the conference: the picture is empty, and the
-  /// subscription is being given up (RFC 4575 §4.6).
+  /// Deleted by the focus; the subscription ends (RFC 4575 §4.6).
   static const int ended = 2;
 }
 
 /// Where one endpoint of a conference is (RFC 4575 §5.7.2). Names for
 /// `sipral_conference_user_t::status`.
 abstract final class SipralEndpointStatus {
-  /// The focus did not say, or said something the schema does not
-  /// list.
+  /// Absent or not in the schema.
   static const int unknown = 0;
 
   /// `pending`: waiting for policy or for the focus.
@@ -2695,11 +2054,8 @@ abstract final class SipralEndpointStatus {
   static const int disconnected = 9;
 }
 
-/// Which piece of text sipral_subscription_conference_text is being
-/// asked for. The first three are about the conference and ignore
-/// `index`; the rest are about the user at `index`.
-///
-/// Every one of them is what the focus wrote.
+/// Which text sipral_subscription_conference_text reads, as the focus
+/// wrote it. The first three ignore `index`; the rest are about that user.
 abstract final class SipralConferenceText {
   /// Never asked for.
   static const int unknown = 0;
@@ -2736,9 +2092,8 @@ abstract final class SipralPresenceKind {
   static const int publication = 2;
 }
 
-/// Whether a presentity can be reached: PIDF's `basic` (RFC 3863
-/// §4.1.4). Names for `sipral_presence_t::basic` and
-/// `sipral_presence_event_t::basic`.
+/// PIDF's `basic` (RFC 3863 §4.1.4). Names for `sipral_presence_t::basic`
+/// and `sipral_presence_event_t::basic`.
 abstract final class SipralBasic {
   /// Not said. A document published with this is refused, since
   /// §4.1.3 wants one.
@@ -2820,31 +2175,28 @@ abstract final class SipralPublishFailure {
   static const int unreachable = 5;
 }
 
-/// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` says happened.
-/// Names for `sipral_local_conference_event_t::change`.
+/// What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` reports
+/// (`sipral_local_conference_event_t::change`).
 abstract final class SipralLocalConferenceChange {
   /// Never written by this build.
   static const int unknown = 0;
 
-  /// `member` joined: a call added, or this end when the conference was
-  /// made with it.
+  /// `member` joined (a call, or this end at creation).
   static const int joined = 1;
 
   /// `member` left, for the reason `departure` gives.
   static const int left = 2;
 
-  /// Who is talking changed: `talkers` and `loudest` say who now, and
-  /// `sipral_local_conference_talker_at` lists them, loudest first.
+  /// The talkers changed: see `talkers`, `loudest` and
+  /// `sipral_local_conference_talker_at`.
   static const int talkers = 3;
 
-  /// The conference's recording stopped by itself: the file would not
-  /// take what was written. It holds the audio up to its last
-  /// checkpoint.
+  /// The recording stopped because the file refused a write; it holds
+  /// audio up to its last checkpoint.
   static const int recordingStopped = 4;
 }
 
-/// Why a member left. Names for
-/// `sipral_local_conference_event_t::departure`.
+/// Why a member left (`sipral_local_conference_event_t::departure`).
 abstract final class SipralDeparture {
   /// Nobody left.
   static const int none = 0;
@@ -2855,8 +2207,7 @@ abstract final class SipralDeparture {
   /// Its call's media ended.
   static const int ended = 2;
 
-  /// Its call moved to a codec whose rate or frame the conference
-  /// cannot mix.
+  /// Its call moved to a codec the conference cannot mix.
   static const int incompatible = 3;
 }
 
@@ -2888,11 +2239,8 @@ abstract final class SipralDnsAnswer {
   /// `SIPRAL_DNS_ANSWER_NOTHING`.
   static const int records = 1;
 
-  /// The name has no record of that kind, or does not exist at all.
-  /// Also the right answer from a resolver that cannot ask for the
-  /// kind: a platform lookup that only knows addresses answers every
-  /// NAPTR and SRV query with this, and the host's own addresses are
-  /// asked for next.
+  /// No record of that kind, or no such name. Also the answer from a
+  /// resolver that cannot ask for that kind (NAPTR, SRV).
   static const int nothing = 2;
 
   /// The resolver could not answer: no server reachable, a timeout, a
@@ -2906,18 +2254,15 @@ abstract final class SipralLocateFailure {
   /// Nothing failed.
   static const int none = 0;
 
-  /// The DNS answered, and what it answered names no address of the
-  /// family the account's transport can reach: no record, or an SRV
-  /// target of `.`.
+  /// The DNS named no reachable address: no record, or an SRV target
+  /// of `.`.
   static const int notFound = 1;
 
-  /// The resolver failed on every lookup that could have given an
-  /// address.
+  /// The resolver failed on every lookup that could give an address.
   static const int unanswered = 2;
 
-  /// The transport has no RFC 3263 procedure: WebSocket names no SRV
-  /// service and no default port, so only a numeric host, or a host
-  /// with a port, can be located for it.
+  /// The transport has no RFC 3263 procedure (WebSocket); only a
+  /// numeric host or a host with a port works.
   static const int unsupported = 3;
 }
 
@@ -2927,24 +2272,15 @@ abstract final class SipralChallengeRefusal {
   /// Never written by this build.
   static const int unknown = 0;
 
-  /// The challenged request went somewhere other than the account's
-  /// own server — its registrar, or the outbound proxy of an account
-  /// that does not register — so whoever asked is the far end of a
-  /// call, or a peer reached directly.
+  /// The challenge came from beyond the account's own server.
   static const int notTheAccountsServer = 1;
 
-  /// The account's server asked for a realm that is not the
-  /// account's: not one of `sipral_account_config_t::realms`, or, with
-  /// none named, neither the one its server first challenged with nor
-  /// one its REGISTERs were challenged with. A proxy passing on a far
-  /// end's own challenge looks like this, and so does an SBC that
-  /// challenges calls under a realm of its own.
+  /// The account's server asked for a realm not the account's (e.g. a
+  /// proxy relaying a far end's challenge).
   static const int notTheAccountsRealm = 2;
 }
 
-/// What an account's server said was wrong with the access token it
-/// was given (RFC 6750 §3.1, RFC 8898 §4). Names for
-/// `sipral_token_event_t::error`.
+/// What the server said was wrong with the token (RFC 6750 §3.1).
 abstract final class SipralTokenError {
   /// The server named no error: no token was offered yet.
   static const int none = 0;
@@ -2976,8 +2312,7 @@ abstract final class SipralNetworkVerdict {
   /// Calls should work and sound right.
   static const int good = 1;
 
-  /// Calls should work, and may not everywhere or may not sound their
-  /// best.
+  /// Calls should work, perhaps not everywhere or at best quality.
   static const int acceptable = 2;
 
   /// Calls are likely to fail or to sound bad.
@@ -2990,8 +2325,7 @@ abstract final class SipralNetworkProbe {
   /// Not part of this test.
   static const int notTested = 0;
 
-  /// The server answered as hoped; for the echo, audio came back and
-  /// was measured.
+  /// The server answered; for the echo, audio came back and was measured.
   static const int succeeded = 1;
 
   /// It did not.
@@ -2999,9 +2333,8 @@ abstract final class SipralNetworkProbe {
 }
 
 /// What a STUN answer says about the NAT in front of this end. Names for
-/// `sipral_network_test_event_t::nat`. Approximate: one answer shows
-/// whether the address and the port were translated, and nothing about
-/// how the NAT filters what arrives (RFC 4787).
+/// `sipral_network_test_event_t::nat`. Approximate: says nothing about
+/// filtering (RFC 4787).
 abstract final class SipralNatKind {
   /// No answer to read.
   static const int unknown = 0;
@@ -3022,8 +2355,7 @@ abstract final class SipralServerReach {
   /// Not part of this test.
   static const int notTested = 0;
 
-  /// It answered: `server_status` with what, `server_round_trip_ms`
-  /// after how long. Any final answer is a server that is there.
+  /// Any final answer; see `server_status` and `server_round_trip_ms`.
   static const int answered = 1;
 
   /// No answer before the request, or the test, timed out.
@@ -3033,14 +2365,12 @@ abstract final class SipralServerReach {
   static const int transportFailed = 3;
 }
 
-/// What a party this end holds is sent:
-/// `sipral_stack_config_t::held_audio`.
+/// What a held party is sent: `sipral_stack_config_t::held_audio`.
 abstract final class SipralHeldAudio {
   /// Silence, in either mode.
   static const int default$ = 0;
 
-  /// Silence: the party on hold hears nothing of the room it was put
-  /// on hold from.
+  /// Silence.
   static const int silence = 1;
 
   /// The frames the application hands over, as they are.
@@ -3067,24 +2397,14 @@ final class SipralAbiVersion extends ffi.Struct {
   @ffi.Uint32()
   external int patch;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads to alignment so later members never land in padding.
   @ffi.Uint32()
   external int reserved;
 }
 
-/// What this build of the library can do: codecs compiled in, transports
-/// this ABI carries signalling over, and which optional features are
-/// present.
+/// What this build can do: codecs, signalling transports, optional features.
 ///
-/// Nothing here is configuration — this answers "can this build ever do X",
-/// never "is X turned on for this stack". `sipral_stack_settings` answers
-/// that once a stack exists, and `sipral_codec_count` /
-/// `sipral_stack_codec_order` already enumerate the codecs this reports only
-/// the count of, so this does not repeat what they say.
+/// Not configuration: `sipral_stack_settings` answers what a stack has on.
 ///
 /// Set `size` to `sizeof(sipral_capabilities_t)` before the call.
 final class SipralCapabilities extends ffi.Struct {
@@ -3092,28 +2412,22 @@ final class SipralCapabilities extends ffi.Struct {
   @ffi.Size()
   external int size;
 
-  /// How many codecs this build contains. `sipral_codec_count` gives the
-  /// same number; `sipral_codec_at` says which, and in what order they are
-  /// offered by default.
+  /// How many codecs this build contains (same as `sipral_codec_count`).
   @ffi.Size()
   external int codecCount;
 
-  /// Which transports this build carries signalling over, as the bits
-  /// named `SIPRAL_TRANSPORT_BIT_*`.
+  /// Transports for signalling, as `SIPRAL_TRANSPORT_BIT_*` bits.
   @ffi.Uint32()
   external int transports;
 
-  /// Which optional features this build has compiled in, as the bits named
-  /// `SIPRAL_FEATURE_*`.
+  /// Compiled-in features, as `SIPRAL_FEATURE_*` bits.
   @ffi.Uint32()
   external int features;
 }
 
 /// D3's flat set of health counters for one stack, since it was created.
-///
-/// Every member here is monotonic except `active_calls`, which is a gauge:
-/// it can be read as smaller than an earlier reading, and none of the others
-/// ever will be. Set `size` to `sizeof(sipral_counters_t)` before the call.
+/// All monotonic except the gauge `active_calls`. Set `size` to
+/// `sizeof(sipral_counters_t)` before the call.
 final class SipralCounters extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -3175,39 +2489,30 @@ final class SipralCounters extends ffi.Struct {
   @ffi.Uint64()
   external int callsEndedExpired;
 
-  /// How many times inbound audio stopped for longer than the configured
-  /// threshold while signalling stayed healthy (B5).
+  /// Inbound audio stopped past the threshold while signalling was fine (B5).
   @ffi.Uint64()
   external int mediaGaps;
 
-  /// How many times a call's jitter buffer had to shrink or stretch the
-  /// stream to keep its delay where it was aiming.
+  /// Jitter buffer shrink or stretch adjustments.
   @ffi.Uint64()
   external int jitterBufferEvents;
 
-  /// How many times a request would not fit a datagram and there was no
-  /// stream to the destination to put it on, so the stack asked for one
-  /// (RFC 3261 §18.1.1, B1).
-  ///
-  /// A request promoted onto a connection that already existed does not
-  /// raise it; those are in the diagnostic record instead.
+  /// A request too big for a datagram with no stream to its destination,
+  /// so one was requested (RFC 3261 §18.1.1, B1). Reuse of an existing
+  /// connection does not count.
   @ffi.Uint64()
   external int streamTransportWanted;
 
-  /// Calls with media running right now. The one gauge in this struct: it
-  /// moves both ways, and it is what every other member here is not.
+  /// Calls with media running now; the only gauge.
   @ffi.Uint64()
   external int activeCalls;
 
-  /// Events a poll raised and had nowhere to queue, because the
-  /// callback had not kept up and the outbox was already at its ceiling
-  /// (task 8.4.21).
+  /// Events dropped because the outbox was at its ceiling (task 8.4.21).
   @ffi.Uint64()
   external int eventsDropped;
 
-  /// RTCP goodbyes dropped, oldest first, because the application had
-  /// not called `sipral_stack_poll_farewell` and the queue behind it
-  /// was already at its ceiling.
+  /// RTCP goodbyes dropped, oldest first, because
+  /// `sipral_stack_poll_farewell` was not keeping up.
   @ffi.Uint64()
   external int farewellsDropped;
 
@@ -3215,41 +2520,31 @@ final class SipralCounters extends ffi.Struct {
   @ffi.Uint64()
   external int screenedRefusedByPolicy;
 
-  /// INVITEs refused because their source was offering them faster
-  /// than `sipral_stack_invite_limit` allows.
+  /// INVITEs refused for exceeding `sipral_stack_invite_limit`.
   @ffi.Uint64()
   external int screenedRefusedByRate;
 
-  /// INVITEs refused because every seat this stack keeps for a source
-  /// it is watching belonged to one still spending, and this source
-  /// could not be limited either — a flood from many addresses at
-  /// once rather than one calling too fast.
+  /// INVITEs refused because every tracked-source seat was taken: a
+  /// flood from many addresses.
   @ffi.Uint64()
   external int screenedRefusedByCrowding;
 
-  /// INVITEs refused 403 for naming a call they had no standing to
-  /// replace (RFC 3891 §3).
+  /// INVITEs refused 403 for an unauthorised Replaces (RFC 3891 §3).
   @ffi.Uint64()
   external int screenedRefusedByReplaces;
 
-  /// Requests this stack sent again because nothing answered in time
-  /// (RFC 3261 timers A and E), and ACKs sent again because the 2xx
-  /// they acknowledge arrived again. Only ever over UDP: nothing
-  /// retransmits over a stream. A figure that climbs while calls still
-  /// connect is a path losing packets before it loses calls.
+  /// Requests resent by RFC 3261 timers A and E, plus ACKs resent for a
+  /// repeated 2xx. UDP only; a rising value means packet loss.
   @ffi.Uint64()
   external int requestsRetransmitted;
 
-  /// Responses sent again: timer G, a reliable provisional response's
-  /// own timer, and the last answer repeated because the far end sent
-  /// its request again, which is what it does when that answer did not
-  /// reach it.
+  /// Responses resent: timer G, reliable provisional timer, and repeats
+  /// for a retransmitted request.
   @ffi.Uint64()
   external int responsesRetransmitted;
 
-  /// Transactions that ended because the far end never answered or
-  /// never acknowledged: timers B, F, H and L, and a reliable
-  /// provisional response never PRACKed.
+  /// Transactions ended by timers B, F, H and L, or an unPRACKed
+  /// reliable provisional response.
   @ffi.Uint64()
   external int transactionsTimedOut;
 
@@ -3259,20 +2554,15 @@ final class SipralCounters extends ffi.Struct {
   external int requestsRefusedAtLimit;
 }
 
-/// What a stack is created with.
-///
-/// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
-/// filling anything in. Five members have to be filled: the callback, the
-/// transport, the address this end is reachable at, the entropy, and the
-/// media seed, which must differ from the entropy. Nothing here can be
-/// guessed on the caller's behalf.
+/// What a stack is created with. Set `size` to `sizeof(sipral_stack_config_t)`
+/// and zero the rest first. Required: the callback, the transport, the reachable
+/// address, the entropy, and a media seed different from the entropy.
 final class SipralStackConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
   external int size;
 
-  /// Where events go. Required: a stack with nowhere to report to is a
-  /// stack whose failures are invisible.
+  /// Where events go. Required.
   external ffi.Pointer<ffi.NativeFunction<SipralEventCallback>> eventCallback;
 
   /// Handed back to the callback untouched. The library never reads it.
@@ -3283,41 +2573,24 @@ final class SipralStackConfig extends ffi.Struct {
   external int transport;
 
   /// The address the far end reaches this one at, as `host:port`, UTF-8 and
-  /// not NUL-terminated.
-  ///
-  /// It goes in every `Via`, so it is the address a response has to come
-  /// back to rather than whatever a wildcard socket was bound to. Nothing
-  /// here opens a socket or resolves a name.
+  /// not NUL-terminated. It goes in every `Via`.
   external ffi.Pointer<ffi.Char> bindAddress;
 
   /// How many bytes of it.
   @ffi.Size()
   external int bindAddressLen;
 
-  /// What to put in `User-Agent` on every request this stack originates —
-  /// REGISTER and INVITE — or null for none.
-  ///
-  /// Not on responses, and not on a request sent inside a dialog: those are
-  /// written a layer below this one, which has no opinion about product
-  /// names. The field is optional on every method — §20 Table 3 marks it `o`
-  /// throughout — so a message that goes out without it is still well formed.
+  /// `User-Agent` for every REGISTER and INVITE this stack originates, or null
+  /// for none (optional per §20 Table 3).
   external ffi.Pointer<ffi.Char> userAgent;
 
   /// How many bytes of it.
   @ffi.Size()
   external int userAgentLen;
 
-  /// Thirty-two bytes of entropy, from the platform's own generator.
-  ///
-  /// Every branch parameter, tag and `Call-ID` is derived from it, and
-  /// §19.3 wants a tag unguessable — cryptographically random, not a
-  /// counter or a clock. Two stacks must never be given the same bytes.
-  ///
-  /// Not the media keys: those come from `media_seed`, a separate draw,
-  /// because what is drawn from this one goes on the wire in clear. A
-  /// replay recording carries neither: it carries a seed drawn for it
-  /// from a stream derived one way from this one, which says nothing
-  /// about these bytes (`sipral_stack_recording_start`).
+  /// Thirty-two bytes from the platform's generator. Every branch, tag and
+  /// `Call-ID` derives from it, and §19.3 wants a tag unguessable. Never
+  /// shared between stacks. Media keys come from `media_seed`.
   external ffi.Pointer<ffi.Uint8> entropy;
 
   /// How many bytes of it. Thirty-two.
@@ -3325,394 +2598,209 @@ final class SipralStackConfig extends ffi.Struct {
   external int entropyLen;
 
   /// T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
-  ///
-  /// In force on every transport: 64·T1 is how long a transaction has to
-  /// finish, whether or not anything retransmits.
   @ffi.Uint64()
   external int timerT1Ms;
 
-  /// T2 in milliseconds, or zero for four seconds.
-  ///
-  /// The cap on the doubling that starts at T1, and therefore only a figure
-  /// on a transport that retransmits. Setting it on anything but UDP is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+  /// T2 in milliseconds, or zero for four seconds. UDP only; set on another
+  /// transport it is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   @ffi.Uint64()
   external int timerT2Ms;
 
-  /// T4 in milliseconds, or zero for five seconds.
-  ///
-  /// How long a message lingers in the network, which is what timers I and K
-  /// wait out. Zero on a transport that delivers for us, so it is refused
-  /// there the same way T2 is.
+  /// T4 in milliseconds, or zero for five seconds. UDP only, like T2.
   @ffi.Uint64()
   external int timerT4Ms;
 
-  /// The codecs to offer, in the order to offer them: their names, separated
-  /// by commas, as UTF-8 and not NUL-terminated. Null for everything this
-  /// build contains, quality first.
-  ///
-  /// A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
-  /// has the peer's preference decide among what both ends list — and it is
-  /// configured per site rather than fixed, because a carrier that bills by
-  /// the minute wants the narrowband codec first and a company on its own
-  /// network wants the wideband one.
-  ///
-  /// A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
-  /// here, with the names it does have in the last error. It is never taken
-  /// and ignored: a setting that is accepted and then quietly dropped is the
-  /// failure neither end can see.
+  /// The codecs to offer, in order (A4, RFC 3264 §6.1): comma-separated names,
+  /// UTF-8, not NUL-terminated; null for every codec built in. An unknown name is
+  /// `SIPRAL_STATUS_NOT_SUPPORTED`, with the known names in the last error.
   external ffi.Pointer<ffi.Char> codecs;
 
   /// How many bytes of it.
   @ffi.Size()
   external int codecsLen;
 
-  /// How long a frame is, in milliseconds, or zero for twenty.
-  ///
-  /// Twenty is what every peer expects and what every codec here cuts
-  /// cleanly. Opus has a fixed set of frame durations and encodes nothing
-  /// else, so an interval it has no size for is refused while Opus is one of
-  /// the codecs offered.
+  /// Frame length in milliseconds, or zero for twenty. Must suit Opus if offered.
   @ffi.Uint32()
   external int frameMs;
 
-  /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
-  /// default: a phone that cannot send a digit cannot navigate a menu.
+  /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by default.
   @ffi.Uint32()
   external int offerDtmf;
 
-  /// Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
-  ///
-  /// Off by default. §5.1.1 only permits it where both ends asked, and the
-  /// equipment this stack is deployed against does not; asking unasked costs
-  /// a line in every offer and buys a port on the calls where nobody answers.
+  /// Whether to ask for RFC 5761 multiplexing (§5.1.1), as a `SipralToggle`.
+  /// Off by default.
   @ffi.Uint32()
   external int offerRtcpMux;
 
-  /// Whether to stop sending during silence, as a `SipralToggle`.
-  ///
-  /// Off by default. It halves the bandwidth of a call in which one person is
-  /// listening, and it costs the far end's own stall watchdog a reason to
-  /// fire — this stack sends no comfort noise of its own to say the silence
-  /// is deliberate, so a gap looks the same from there as a stream that died.
+  /// Whether to stop sending during silence, as a `SipralToggle`. Off by
+  /// default: with no comfort noise, the gap looks like a dead stream.
   @ffi.Uint32()
   external int silenceSuppression;
 
-  /// Whether inbound audio that stops is reported, as a `SipralToggle`. On by
-  /// default; this is B5.
+  /// Whether inbound audio that stops is reported (B5), as a `SipralToggle`.
+  /// On by default.
   @ffi.Uint32()
   external int mediaStallWatchdog;
 
-  /// How long inbound audio may stop before that is reported, in
-  /// milliseconds, or zero for this build's own figure.
-  ///
-  /// Setting it with the watchdog switched off is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+  /// How long inbound audio may stop before it is reported, in milliseconds,
+  /// or zero for the default. Refused with the watchdog off.
   @ffi.Uint64()
   external int mediaStallMs;
 
-  /// What the wall clock read when the stack was created, as seconds since
-  /// 1 January 1970, or zero.
-  ///
-  /// The one number a stack that reads no clock cannot work out: RFC 3550
-  /// §6.4.1 has a sender report carry "the wall clock time when this report
-  /// was sent", and a monotonic instant is not one. Zero means the reports
-  /// take the wall clock `sipral_stack_stir` gives in `unix_seconds`, from
-  /// the moment it is given, and count from the Unix epoch until then:
-  /// the round trip the far end computes is a difference, not an
-  /// absolute, but the correlation of this call's media with anything
-  /// else's is not.
+  /// The wall clock at creation, in seconds since the Unix epoch, for RFC 3550
+  /// §6.4.1 sender reports; zero to wait for `sipral_stack_stir`'s `unix_seconds`.
   @ffi.Uint64()
   external int mediaClockUnixSeconds;
 
-  /// Thirty-two more bytes of entropy, for the media keys, and **not
-  /// the same bytes as `entropy`**.
-  ///
-  /// Every SRTP master key this stack offers or answers with is derived
-  /// from these and from nothing else. They are a second draw rather
-  /// than a slice of the first because a replay recording writes
-  /// `entropy` into the file in clear: one generator for both would put
-  /// every key the stack will ever offer into every recording it makes.
-  ///
-  /// Handing the same bytes twice is refused rather than accepted
-  /// quietly. This is the only place in the library that can see both.
+  /// Thirty-two more bytes for the media keys, **not the same bytes as
+  /// `entropy`**, which recordings write in clear. The same bytes are refused.
   external ffi.Pointer<ffi.Uint8> mediaSeed;
 
   /// How many bytes of it. Thirty-two.
   @ffi.Size()
   external int mediaSeedLen;
 
-  /// What every call on this stack does about SRTP unless
-  /// `sipral_call_config_t::srtp` says otherwise for it: a
-  /// `SipralSrtp`, or zero for this build's own built-in default, which
-  /// is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
-  /// until it is asked to. Any other value is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+  /// Default SRTP for every call: a `SipralSrtp`, or zero for
+  /// `SIPRAL_SRTP_NOT_OFFERED`. `sipral_call_config_t::srtp` overrides it.
   @ffi.Uint32()
   external int srtp;
 
-  /// What every call on this stack does about ICE unless
-  /// `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
-  /// or zero for this build's own built-in default, which is
-  /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
-  /// for the reason `docs/06-nat.md` tabulates. Any other value is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+  /// Default ICE for every call: a `SipralIce`, or zero for `SIPRAL_ICE_OFF`
+  /// (`docs/06-nat.md`). `sipral_call_config_t::ice` overrides it.
   @ffi.Uint32()
   external int ice;
 
-  /// What this stack does about a NAT in front of it: a `SipralNat`, or
-  /// zero for this build's own built-in default, which is
-  /// `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
-  /// socket appears from and writes the answer where a far end reads
-  /// it — see `docs/06-nat.md`. Any other value is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+  /// A `SipralNat`, or zero for `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks
+  /// `stun_server` where each socket appears from (`docs/06-nat.md`).
   @ffi.Uint32()
   external int nat;
 
-  /// The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
-  /// address, not a name, since resolving one is the application's.
-  /// Required with `SIPRAL_NAT_STUN` and refused without it, since a
-  /// server nothing asks is a setting nothing reads. Copied; the
-  /// caller's buffer is its own again when this returns.
+  /// The STUN server, as a `host:port` address. Required with and only with
+  /// `SIPRAL_NAT_STUN`. Copied.
   external ffi.Pointer<ffi.Char> stunServer;
 
   /// How many bytes of it.
   @ffi.Size()
   external int stunServerLen;
 
-  /// Whether G.729's Annex B — silence compression: SID frames and
-  /// nothing in a pause, and the comfort noise both ends make from
-  /// them — is allowed on this stack's calls, as a `SipralToggle`. On
-  /// by default, which is what `G729` means with no parameter (RFC
-  /// 4856 §2.1.9): an offer says `annexb=yes`, and an answer says
-  /// `yes` only where the offer allowed it. Off, both say `annexb=no`,
-  /// which RFC 3551 §4.5.6 makes the far end's cue to send no SID
-  /// frames, and this end sends none either. A per-call codec order
-  /// keeps the stack's setting. Nothing changes for a call that does
-  /// not run G.729, so the setting is taken whatever `codecs` names:
-  /// a call's own order may name G.729 when the stack's does not.
+  /// Whether G.729 Annex B is allowed, as a `SipralToggle`. On by default (RFC
+  /// 4856 §2.1.9); off, SDP says `annexb=no` (RFC 3551 §4.5.6).
   @ffi.Uint32()
   external int g729AnnexB;
 
-  /// A TURN server (RFC 8656) to allocate a relay on for every media
-  /// socket `sipral_stack_nat_map` names, as `host:port`: an address,
-  /// not a name. The relay becomes the relayed ICE candidate of the call
-  /// placed, rung or answered on that socket — the path of last resort,
-  /// used only when no cheaper pair answers — and goes back to the
-  /// server when the call ends. See `docs/06-nat.md`.
-  ///
-  /// Optional, and only with `SIPRAL_NAT_STUN`, since it rides on the
-  /// same media-socket calls; it may be the same address as
-  /// `stun_server`. `turn_username` and `turn_password` are then
-  /// required: a TURN server that hands out relays to anyone is one
-  /// somebody else is already using. `SIPRAL_STATUS_NOT_SUPPORTED` in
-  /// a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
-  /// can use a relay. Copied; the caller's buffer is its own again when
-  /// this returns.
+  /// A TURN server (RFC 8656), as `host:port`, to relay every media socket
+  /// `sipral_stack_nat_map` names (`docs/06-nat.md`). Only with `SIPRAL_NAT_STUN`,
+  /// needs `turn_username` and `turn_password`, and `SIPRAL_FEATURE_ICE`. Copied.
   external ffi.Pointer<ffi.Char> turnServer;
 
   /// How many bytes of it.
   @ffi.Size()
   external int turnServerLen;
 
-  /// The user name of the long-term credential the TURN server knows
-  /// this end by (RFC 8489 §9.2).
+  /// The TURN long-term credential's user name (RFC 8489 §9.2).
   external ffi.Pointer<ffi.Char> turnUsername;
 
   /// How many bytes of it.
   @ffi.Size()
   external int turnUsernameLen;
 
-  /// Its password. Copied into memory that is overwritten when the
-  /// stack is destroyed, and never written to a log, an event or an
-  /// error text.
+  /// Its password. Copied, wiped at destroy, never logged.
   external ffi.Pointer<ffi.Char> turnPassword;
 
   /// How many bytes of it.
   @ffi.Size()
   external int turnPasswordLen;
 
-  /// Whether a REFER outside any dialog — somebody asking this end to
-  /// place a call it is not in, which is what click-to-dial from a
-  /// switchboard or a CRM sends (RFC 3515 §4.1) — reaches the
-  /// application, as a `SipralToggle`. **Off by default**, and then
-  /// every one is refused 403 before anything reads it: a peer that can
-  /// make a phone dial is a peer that can make it dial a premium-rate
-  /// number, and this stack authenticates no peer to tell the two
-  /// apart. On, each one is screened as an INVITE is and then raised as
-  /// `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
-  /// `sipral_call_accept_transfer` or refuses it with
-  /// `sipral_call_reject_transfer`, one request at a time.
+  /// Whether an out-of-dialog REFER (RFC 3515 §4.1) reaches the application, as
+  /// a `SipralToggle`. **Off by default**: each is refused 403, since an
+  /// unauthenticated peer could make the phone dial anywhere. On, each is raised
+  /// as `SIPRAL_EVENT_KIND_REFERRAL`.
   @ffi.Uint32()
   external int referrals;
 
-  /// Whether an account behind a NAT keeps its registrar's UDP flow
-  /// open, as a `SipralToggle`. **On by default.** An account is
-  /// behind a NAT when `SIPRAL_NAT_STUN`'s answer about the signalling
-  /// socket named an address that is not the socket's own; each such
-  /// account on a UDP transport then sends a double CRLF, alone in a
-  /// datagram, to its registrar every `registrar_keepalive_ms`, while
-  /// its registration holds a binding or is getting one. A NAT that
-  /// filters by address and port (RFC 4787 §5) lets the registrar's
-  /// INVITE in only while it remembers this end sending to it, and the
-  /// STUN refresh goes to the STUN server; without this, a call that
-  /// arrives minutes after the REGISTER is dropped at the NAT.
-  /// Registrars ignore the datagram (RFC 3261 §7.5). Nothing is sent
-  /// while the stack is suspended (`sipral_stack_suspending`), for a
-  /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
-  /// own address; `docs/06-nat.md` has the reasons.
+  /// Whether an account behind a NAT sends a double CRLF to its registrar every
+  /// `registrar_keepalive_ms` over UDP, as a `SipralToggle`. **On by default.**
+  /// Without it an address-and-port filtering NAT (RFC 4787 §5) drops a later
+  /// INVITE; registrars ignore it (RFC 3261 §7.5). See `docs/06-nat.md`.
   @ffi.Uint32()
   external int registrarKeepalive;
 
-  /// How often, in milliseconds, or zero for twenty-five seconds (RFC
-  /// 5626 §4.4.2's interval for UDP). Each interval is drawn between
-  /// 80% and 100% of it. From 1 000 to 120 000 — past two minutes a
-  /// NAT that keeps to RFC 4787 REQ-5 may already have let the flow go
-  /// — and anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`, as is a
-  /// figure with `registrar_keepalive` off, a value nothing would read.
+  /// Keep-alive interval in milliseconds, or zero for 25 s (RFC 5626 §4.4.2),
+  /// jittered to 80-100%. From 1 000 to 120 000 (RFC 4787 REQ-5), and only with
+  /// `registrar_keepalive` on.
   @ffi.Uint64()
   external int registrarKeepaliveMs;
 
-  /// How every media socket reaches `turn_server`, as a
-  /// `SipralTransport`: `SIPRAL_TRANSPORT_UDP`, or zero for it;
-  /// `SIPRAL_TRANSPORT_TCP` for the network that blocks UDP outright;
-  /// `SIPRAL_TRANSPORT_TLS` for the one that lets one port out — 5349
-  /// is TURN's (RFC 8656 §4.1) — or for an application that wants the
-  /// server's certificate checked. The relay speaks UDP to the peer
-  /// whichever it is (§3.1). Over TCP or TLS the application opens a
-  /// connection per media socket when `SIPRAL_EVENT_KIND_TURN_STREAM`
-  /// asks, with the platform's own TLS as it does for SIP. Anything
-  /// else, or a value other than zero with no `turn_server`, is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// How media sockets reach `turn_server`, as a `SipralTransport`: UDP (or
+  /// zero), TCP, or TLS (RFC 8656 §4.1). Over TCP or TLS the application opens a
+  /// connection when `SIPRAL_EVENT_KIND_TURN_STREAM` asks.
   @ffi.Uint32()
   external int turnTransport;
 
-  /// Who pumps this stack's audio: a `SipralAudio`. Zero, and
-  /// `SIPRAL_AUDIO_APPLICATION`, is the application, through
-  /// `sipral_media_capture` and `sipral_media_playback`, as every
-  /// stack was before this member existed. `SIPRAL_AUDIO_DEVICE` has
-  /// the library open the platform's devices and pump every managed
-  /// call itself — see the `sipral_audio_*` entry points — and needs
-  /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
-  /// platform this build has no backend for, which
-  /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+  /// Who pumps audio, as a `SipralAudio`: zero or `SIPRAL_AUDIO_APPLICATION`
+  /// for the application; `SIPRAL_AUDIO_DEVICE` for the library, which needs
+  /// `audio_transmit_callback` and `SIPRAL_FEATURE_AUDIO_DEVICE`.
   @ffi.Uint32()
   external int audio;
 
-  /// When the devices are opened, in device mode: a
-  /// `SipralAudioActivation`, or zero for
+  /// When devices open in device mode: a `SipralAudioActivation`, or zero for
   /// `SIPRAL_AUDIO_ACTIVATION_AUTOMATIC`.
   @ffi.Uint32()
   external int audioActivation;
 
-  /// Where the packets the engine encodes go, in device mode: called
-  /// on the engine's thread with one `sipral_audio_transmit_t` per
-  /// packet, to be sent from the call's media socket. Required with
-  /// `SIPRAL_AUDIO_DEVICE`, ignored otherwise.
+  /// Device mode: receives each encoded packet on the engine's thread.
+  /// Required with `SIPRAL_AUDIO_DEVICE`.
   external ffi.Pointer<ffi.NativeFunction<SipralAudioTransmitCallback>> audioTransmitCallback;
 
   /// Handed back to `audio_transmit_callback` unread.
   external ffi.Pointer<ffi.Void> audioTransmitUserData;
 
-  /// How long a platform call about the devices may block before the
-  /// engine reports it as stuck, in milliseconds; zero for the
-  /// engine's own default of three seconds. A driver that has stopped
-  /// answering is answered `SIPRAL_STATUS_DEVICE_TIMED_OUT`, on a
-  /// thread the engine walks away from, rather than waited for.
+  /// How long a device call may block before `SIPRAL_STATUS_DEVICE_TIMED_OUT`,
+  /// in milliseconds; zero for three seconds.
   @ffi.Uint64()
   external int audioProbeMs;
 
-  /// The rate the devices are asked to run at, in device mode; zero
-  /// for 48000. Every call is resampled between its own rate and
-  /// this one, and a platform that answers with another rate is
-  /// taken at its word.
+  /// The device rate in device mode; zero for 48000.
   @ffi.Uint32()
   external int audioDeviceRateHz;
 
-  /// The most calls this stack holds at once, in either direction, or
-  /// zero for 128: a softphone's ceiling, well past what one person
-  /// can hold and well short of what a flood would make it keep. A
-  /// call counts from its INVITE on — one that arrives from the
-  /// moment it is let in, one placed here from the moment it is sent
-  /// — until it ends or is refused.
-  ///
-  /// An INVITE that arrives past it is answered `503 Service
-  /// Unavailable` before it rings, with `Retry-After: 2`: RFC 3261
-  /// §21.5.4 has a client that gets no `Retry-After` act as if it got a
-  /// 500, where this stack is full rather than broken, and room comes
-  /// back the moment any call ends, so the delay a proxy then keeps
-  /// away for is short. A call placed past it is
-  /// `SIPRAL_STATUS_LIMIT_REACHED` and nothing goes out. A media server
-  /// built on this library raises it to what its machine can carry,
-  /// with `max_server_transactions` beside it; `docs/19-numbers.md` has
-  /// what a call costs.
+  /// The most calls at once, either direction, or zero for 128. Past it an
+  /// INVITE gets `503` with `Retry-After: 2` (RFC 3261 §21.5.4), and a placed
+  /// call is `SIPRAL_STATUS_LIMIT_REACHED`. See `docs/19-numbers.md`.
   @ffi.Uint32()
   external int maxDialogs;
 
-  /// The most requests from other ends this stack works on at once —
-  /// its server transactions, RFC 3261 §17.2 — or zero for 256. Past
-  /// it a request that would start another is answered `503` at once,
-  /// statelessly and with no `Retry-After`, and every one already
-  /// under way is still answered. A request inside a call is held to
-  /// that call's own share instead, and a BYE never is.
+  /// The most server transactions (RFC 3261 §17.2) at once, or zero for 256;
+  /// past it a stateless `503`. A BYE is never refused.
   @ffi.Uint32()
   external int maxServerTransactions;
 
-  /// D1: how many decisions each call's diagnostic record keeps, or
-  /// zero for 64. Past it the oldest go and the record counts them.
+  /// D1: how many decisions each diagnostic record keeps, or zero for 64.
   @ffi.Uint32()
   external int diagnosticDecisions;
 
-  /// D1: how many calls have a diagnostic record at once, or zero for
-  /// 32; the endpoint's own record is kept besides them. Past it the
-  /// record written longest ago goes, and the stack counts it. Neither
-  /// of the two refuses anything: they bound what the records cost, a
-  /// quarter of a megabyte at the defaults. Every decision written
-  /// looks through the records for its call, so this one is best kept
-  /// in the hundreds even on a stack holding thousands of calls: the
-  /// calls a support case is about are the ones written most recently.
+  /// D1: how many calls have a diagnostic record at once, or zero for 32; the
+  /// oldest is dropped and counted.
   @ffi.Uint32()
   external int diagnosticRecords;
 
-  /// When a call listens for keypad digits in the far end's audio, as a
-  /// SipralDtmfDetection: zero
-  /// on exactly the calls that negotiated no telephone event, which is
-  /// when such a far end has no other way to send one.
-  /// `sipral_call_dtmf_detection` changes it for one call.
-  ///
-  /// Here rather than after `rtp_port_max`, where it was appended: six
-  /// four-byte members in a row keep the struct free of padding at its
-  /// end on a 64-bit target and on 32-bit ARM alike.
+  /// When a call listens for in-band keypad digits, as a
+  /// SipralDtmfDetection; zero for calls with no telephone event. Placed
+  /// here to avoid tail padding.
   @ffi.Uint32()
   external int dtmfDetection;
 
-  /// The STUN servers to turn to, in this order, when `stun_server`
-  /// fails: `host:port` addresses separated by commas, not names.
-  /// Optional, and only beside a `stun_server`. A server fails when it
-  /// does not answer in five and a half seconds, or answers without an
-  /// address; every socket asking it moves to the next one at once,
-  /// and the one that failed is passed over for thirty seconds, then
-  /// twice as long each time it fails again, up to ten minutes. Only a
-  /// signalling socket's refresh goes back to a better server once its
-  /// time is up, so a call waiting for its media socket's address is
-  /// never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
-  /// when the server in use moves, and when every one has failed.
-  /// Copied; the caller's buffer is its own again when this returns.
+  /// Fallback STUN servers, comma-separated `host:port`, tried in order when
+  /// `stun_server` fails; a failed one is skipped from 30 s up to ten minutes.
+  /// Only with `stun_server`. Copied.
   external ffi.Pointer<ffi.Char> stunFallbacks;
 
   /// How many bytes of it.
   @ffi.Size()
   external int stunFallbacksLen;
 
-  /// The lowest port of the range this stack hands RTP ports out of
-  /// (`sipral_stack_rtp_port_reserve`), or zero with `rtp_port_max`
-  /// for no range: the application picks every media port itself.
-  ///
-  /// RTP takes an even port and its RTCP the odd one above it (RFC 3550
-  /// §11), so an odd `rtp_port_min` starts at the port above it and an
-  /// even `rtp_port_max` is never handed out. A range that holds no
-  /// such pair, one given upside down, or one bound given without the
-  /// other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// The lowest RTP port handed out (`sipral_stack_rtp_port_reserve`), or zero
+  /// with `rtp_port_max` for none. Even ports only (RFC 3550 §11).
   @ffi.Uint32()
   external int rtpPortMin;
 
@@ -3720,81 +2808,36 @@ final class SipralStackConfig extends ffi.Struct {
   @ffi.Uint32()
   external int rtpPortMax;
 
-  /// The SRTP suites every call on this stack offers and accepts,
-  /// unless its account names its own
-  /// (`sipral_account_config_t::srtp_suites`): the names RFC 4568
-  /// section 6.2 and RFC 7714 section 14.2 give them, separated by
-  /// commas, most preferred first. Null for this build's own order
-  /// (ABI 0.34).
-  ///
-  /// An SDES offer names these, in this order, and an answer takes
-  /// the offerer's first that is among them; a DTLS-SRTP handshake
-  /// offers the ones with a protection profile. Every `a=crypto` line
-  /// is in the INVITE, so past two or three suites an offer over UDP
-  /// needs a stream (RFC 3261 section 18.1.1). A name this library
-  /// does not run, or one named twice, is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// The SRTP suites calls offer and accept unless the account names its own:
+  /// names from RFC 4568 section 6.2 and RFC 7714 section 14.2, comma-separated,
+  /// preferred first; null for the build's order.
   external ffi.Pointer<ffi.Char> srtpSuites;
 
   /// How many bytes of it.
   @ffi.Size()
   external int srtpSuitesLen;
 
-  /// The MTU of the path toward the server, in bytes, when the
-  /// deployment knows it; zero for unknown (ABI 0.34). RFC 3261
-  /// section 18.1.1 moves a request to a stream when it comes within
-  /// 200 bytes of the MTU, and with the MTU unknown past 1300 bytes: a
-  /// path known to carry more lets a larger request stay on UDP. Under
-  /// 576 is `SIPRAL_STATUS_INVALID_ARGUMENT` — an IPv4 host must take
-  /// that much (RFC 791).
+  /// The path MTU in bytes, or zero for unknown (RFC 3261 section 18.1.1).
+  /// At least 576 (RFC 791).
   @ffi.Uint32()
   external int pathMtu;
 
-  /// The largest request to send over UDP anyway, once no stream to
-  /// its server can be had, in bytes; zero for never (ABI 0.34).
-  ///
-  /// **A deliberate deviation from RFC 3261 section 18.1.1**, for a
-  /// server that takes SIP over UDP alone: such a PBX answers nothing
-  /// to a request it cannot receive over a stream, and takes a
-  /// 1,444-byte INVITE over UDP from every other phone on its network.
-  /// A request past the section's line asks for a stream as always
-  /// (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`); once the application says
-  /// none is coming (`sipral_stack_transport_failed` on the number it
-  /// was going to bind) or the wait runs out, what was waiting goes
-  /// over UDP up to this size, and each such request is written to the
-  /// call's diagnostic record as `transport.kept.datagram` with its
-  /// size and this limit. A stream bound later is preferred again. A
-  /// request past this size ends as it would without it. At most
-  /// 65 507, what one UDP datagram carries over IPv4; a figure not past
-  /// the section's own line changes nothing.
+  /// Largest request sent over UDP once no stream can be had, in bytes; zero
+  /// for never. **A deliberate deviation from RFC 3261 section 18.1.1**, for
+  /// UDP-only servers. At most 65 507.
   @ffi.Uint32()
   external int datagramWithoutStreamBytes;
 
-  /// A salt the application keeps for the installation, keying the
-  /// pseudonyms this stack's log and state text write for users,
-  /// numbers and addresses, so that the same value has the same
-  /// pseudonym in every run and two runs' traces compare line by line
-  /// (ABI 0.34). At least 16 bytes, drawn once from the platform's
-  /// generator; null for pseudonyms keyed from `media_seed`, which are
-  /// fresh every run. It is a secret like a key: whoever holds it can
-  /// test a guessed address against a pseudonym. Copied.
+  /// A per-installation salt (at least 16 bytes) so pseudonyms match across
+  /// runs; null keys them from `media_seed`. Secret. Copied.
   external ffi.Pointer<ffi.Uint8> pseudonymSalt;
 
   /// How many bytes of it.
   @ffi.Size()
   external int pseudonymSaltLen;
 
-  /// A `SipralToggle`: whether the log's trace writes SIP messages
-  /// whole, with the peer they went to, instead of pseudonymised; off
-  /// by default (ABI 0.34). For a diagnosis only: every user, display
-  /// name, number and address is then written as it went on the wire.
-  /// What is never written, in either mode, is a credential or a key:
-  /// every `Authorization` and `Proxy-Authorization` value, every
-  /// `a=crypto` `inline:` key, every `k=` key, every `a=key-mgmt`
-  /// payload and every `a=ice-pwd` is taken out first, a field whose
-  /// name a control byte or a bare CR line end disguises included
-  /// (ABI 0.35 for the last two). `sipral_stack_diagnostic_trace`
-  /// turns it on and off while the stack runs.
+  /// A `SipralToggle`: whether the trace writes SIP messages unpseudonymised;
+  /// off by default. Credentials and keys are always removed.
   @ffi.Uint32()
   external int diagnosticTrace;
 
@@ -3802,17 +2845,8 @@ final class SipralStackConfig extends ffi.Struct {
   @ffi.Uint32()
   external int reserved;
 
-  /// A `SipralToggle`: whether a stack in device mode opens the
-  /// devices behind the platform's own echo cancellation, where the
-  /// platform lets it be turned off; on by default (ABI 0.35). Off,
-  /// macOS and iOS run the voice-processing unit with its processing
-  /// bypassed, Windows opens a communications stream raw, past the
-  /// endpoint's processing, and Android opens the microphone with the
-  /// voice-recognition preset rather than the voice-communication one;
-  /// Linux has nothing to turn off. For a headset, which has no echo
-  /// to cancel, or an application that cancels it on each call itself.
-  /// `sipral_audio_info_t::system_echo_cancellation` says what the
-  /// platform did. Read only in device mode.
+  /// A `SipralToggle`: whether device mode uses the platform's echo
+  /// cancellation; on by default.
   @ffi.Uint32()
   external int systemEchoCancellation;
 
@@ -3820,15 +2854,8 @@ final class SipralStackConfig extends ffi.Struct {
   @ffi.Uint32()
   external int reserved35;
 
-  /// A SipralHeldAudio: what a party this end holds is sent while
-  /// the hold lasts (ABI 0.36). RFC 3264 §8.4 leaves the held stream
-  /// `sendonly`, so something goes on being sent. Zero is silence in
-  /// either mode: in application mode the frames handed
-  /// `sipral_media_capture` may be a microphone's as well, and the
-  /// room a party was put on hold from is not sent unless asked for.
-  /// `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the application
-  /// hands over as they are, for a voice agent or an application
-  /// playing its own hold music or announcement to the held party.
+  /// A SipralHeldAudio: what a held party is sent (RFC 3264 §8.4). Zero
+  /// is silence.
   @ffi.Uint32()
   external int heldAudio;
 
@@ -3837,9 +2864,7 @@ final class SipralStackConfig extends ffi.Struct {
   external int reserved36;
 }
 
-/// What one call to sipral_stack_poll did.
-///
-/// Set `size` to `sizeof(sipral_poll_result_t)` before the call.
+/// What one call to sipral_stack_poll did. Set `size` first.
 final class SipralPollResult extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -3849,44 +2874,24 @@ final class SipralPollResult extends ffi.Struct {
   @ffi.Size()
   external int eventsDelivered;
 
-  /// Events the stack raised that this ABI has no word for yet.
-  ///
-  /// Counted rather than delivered: an event carrying nothing a binding can
-  /// act on is noise, and a number that is not zero is the honest measure of
-  /// how far this vocabulary is behind the stack's.
+  /// Events this ABI has no word for yet. Counted, not delivered.
   @ffi.Size()
   external int eventsUnclaimed;
 
-  /// Bytes the stack produced and this build had nowhere to send.
-  ///
-  /// Zero since `sipral_stack_poll_transmit` gave them somewhere to go: what the stack
-  /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
-  /// poll no longer empties the queue on its way past. The member stays
-  /// because a released one always does, and because a build that has to drop
-  /// a message again would have somewhere to say so.
+  /// Bytes this build had nowhere to send; zero, kept for ABI stability.
   @ffi.Size()
   external int transmitsDiscarded;
 
-  /// Whether there is a deadline at all. Zero means nothing is scheduled and
-  /// the next poll can wait for input.
+  /// Whether there is a deadline. Zero: wait for input.
   @ffi.Uint32()
   external int hasDeadline;
 
-  /// How long from `now_ms` until the stack has something to do, when
-  /// `has_deadline` says there is one. Zero means it is already due.
+  /// Milliseconds from `now_ms` until the stack is due. Zero: due now.
   @ffi.Uint64()
   external int nextPollInMs;
 }
 
-/// What a stack is actually running with.
-///
-/// A configuration call that answers `SIPRAL_STATUS_OK` has applied what it was
-/// given, and this is where the caller reads back what that came to. It matters
-/// because a zero in the config means "the default": a caller that left the
-/// timers alone has no other way to learn which figures it is retransmitting
-/// on, and one that set them has no other way to be sure.
-///
-/// Set `size` to `sizeof(sipral_stack_settings_t)` before the call.
+/// What a stack is running with, defaults filled in. Set `size` first.
 final class SipralStackSettings extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -3896,11 +2901,7 @@ final class SipralStackSettings extends ffi.Struct {
   @ffi.Uint32()
   external int transport;
 
-  /// Whether this stack retransmits anything itself.
-  ///
-  /// Zero on a transport that delivers for us, which is every one but UDP.
-  /// The two timers that only exist to pace a retransmission read as their
-  /// defaults there, and mean nothing.
+  /// Whether this stack retransmits; zero on every transport but UDP.
   @ffi.Uint32()
   external int retransmits;
 
@@ -3916,8 +2917,7 @@ final class SipralStackSettings extends ffi.Struct {
   @ffi.Uint64()
   external int timerT4Ms;
 
-  /// How many codecs this stack offers. `sipral_stack_codec_order` says
-  /// which, and in what order.
+  /// How many codecs this stack offers (`sipral_stack_codec_order`).
   @ffi.Size()
   external int codecCount;
 
@@ -3925,8 +2925,7 @@ final class SipralStackSettings extends ffi.Struct {
   @ffi.Uint32()
   external int frameMs;
 
-  /// Whether named events are offered, as a `SipralToggle`. Never the
-  /// default value: this says what the setting came to, not what was passed.
+  /// Whether named events are offered, as a `SipralToggle`.
   @ffi.Uint32()
   external int offerDtmf;
 
@@ -3938,46 +2937,35 @@ final class SipralStackSettings extends ffi.Struct {
   @ffi.Uint32()
   external int silenceSuppression;
 
-  /// How long inbound audio may stop before it is reported, with the default
-  /// filled in. Zero when the watchdog is off, which is the one case where
-  /// there is no figure to give.
+  /// The media stall interval in milliseconds; zero when the watchdog is off.
   @ffi.Uint64()
   external int mediaStallMs;
 
-  /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
-  /// default filled in.
+  /// Whether G.729 Annex B is allowed, as a `SipralToggle`.
   @ffi.Uint32()
   external int g729AnnexB;
 
-  /// Whether a REFER outside any dialog reaches the application, as a
-  /// `SipralToggle`, with the default — off — filled in.
+  /// Whether an out-of-dialog REFER reaches the application, as a `SipralToggle`.
   @ffi.Uint32()
   external int referrals;
 
-  /// How often an account behind a NAT sends to its registrar, in
-  /// milliseconds, with the default filled in. Zero when
-  /// `registrar_keepalive` was turned off, which is the one case where
-  /// there is no figure to give.
+  /// The registrar keep-alive in milliseconds; zero when off.
   @ffi.Uint64()
   external int registrarKeepaliveMs;
 
-  /// The most calls the stack holds at once, with the default filled
-  /// in.
+  /// The most calls the stack holds at once.
   @ffi.Uint32()
   external int maxDialogs;
 
-  /// The most server transactions it works on at once, with the
-  /// default filled in.
+  /// The most server transactions at once.
   @ffi.Uint32()
   external int maxServerTransactions;
 
-  /// How many decisions a diagnostic record keeps, with the default
-  /// filled in.
+  /// How many decisions a diagnostic record keeps.
   @ffi.Uint32()
   external int diagnosticDecisions;
 
-  /// How many diagnostic records the stack keeps, with the default
-  /// filled in.
+  /// How many diagnostic records the stack keeps.
   @ffi.Uint32()
   external int diagnosticRecords;
 
@@ -3993,33 +2981,23 @@ final class SipralStackSettings extends ffi.Struct {
   @ffi.Uint32()
   external int pathMtu;
 
-  /// The largest request sent over UDP once no stream is coming, as
-  /// given; zero for never (ABI 0.34).
+  /// The largest request sent over UDP once no stream is coming; zero for never.
   @ffi.Uint32()
   external int datagramWithoutStreamBytes;
 
-  /// How many SRTP suites the stack's calls offer and accept unless
-  /// their account names its own: the ones `srtp_suites` named, or
-  /// this build's own. `sipral_stack_srtp_suite_order` says which, in
-  /// order (ABI 0.35).
+  /// How many SRTP suites calls use by default (`sipral_stack_srtp_suite_order`).
   @ffi.Uint32()
   external int srtpSuiteCount;
 
-  /// A `SipralToggle`: whether the stack was given a `pseudonym_salt`,
-  /// so that its pseudonyms are the same from run to run. The salt
-  /// itself is never read back (ABI 0.35).
+  /// A `SipralToggle`: whether a `pseudonym_salt` was given. Never the salt.
   @ffi.Uint32()
   external int pseudonymSalted;
 
-  /// A `SipralToggle`: whether the trace writes whole messages now,
-  /// as `diagnostic_trace` set it at creation or
-  /// `sipral_stack_diagnostic_trace` since (ABI 0.35).
+  /// A `SipralToggle`: whether the trace writes whole messages now.
   @ffi.Uint32()
   external int diagnosticTrace;
 
-  /// A `SipralToggle`: whether the platform's echo cancellation is
-  /// asked for, with the default filled in (ABI 0.35), as
-  /// `sipral_audio_set_system_echo_cancellation` left it (ABI 1.1).
+  /// A `SipralToggle`: whether the platform's echo cancellation is asked for.
   @ffi.Uint32()
   external int systemEchoCancellation;
 }
@@ -4027,10 +3005,7 @@ final class SipralStackSettings extends ffi.Struct {
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
-/// Always an element of an array whose length travels beside it, which is
-/// why it carries no `size`: an array is strided by the length of its
-/// element, so a member appended here would move every element after the
-/// first. A header field is a name and a value, and this never grows.
+/// No `size` member: it is an array element, so it never grows.
 final class SipralHeader extends ffi.Struct {
   /// The field name, `X-Conversation-Id`. A compact form is the field it
   /// abbreviates.
@@ -4049,10 +3024,8 @@ final class SipralHeader extends ffi.Struct {
   external int valueLen;
 }
 
-/// What an account is configured with.
-///
-/// Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
-/// filling anything in.
+/// What an account is configured with. Set `size` to
+/// `sizeof(sipral_account_config_t)` and zero the rest first.
 final class SipralAccountConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -4067,11 +3040,9 @@ final class SipralAccountConfig extends ffi.Struct {
   external int aorLen;
 
   /// Where the REGISTER is addressed, `sip:example.com`, no user part.
-  ///
-  /// A `registrar_len` of zero makes an account that never registers: a
-  /// trunk that knows this end by the address its requests come from.
-  /// Its state is `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` for as long
-  /// as it exists, and `sipral_account_register` refuses it.
+  /// A `registrar_len` of zero makes a trunk that never registers: its
+  /// state stays `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, and
+  /// `sipral_account_register` refuses it.
   external ffi.Pointer<ffi.Char> registrar;
 
   /// How many bytes of it.
@@ -4085,12 +3056,10 @@ final class SipralAccountConfig extends ffi.Struct {
   @ffi.Size()
   external int contactLen;
 
-  /// Where this account's requests go, as `host:port`: the registrar's
-  /// address for an account that registers, and the outbound proxy for
-  /// one configured with no registrar. A call that names no destination
-  /// of its own goes here either way, so it is required unless
-  /// `server_uri` names the server instead. An address, not a name: a
-  /// server known by name is `server_uri`'s.
+  /// Where this account's requests go, as `host:port`: the registrar, or
+  /// the outbound proxy for an account with no registrar. Calls without
+  /// a destination go here too. Required unless `server_uri` is given;
+  /// an address, not a name.
   external ffi.Pointer<ffi.Char> registrarAddress;
 
   /// How many bytes of it.
@@ -4104,16 +3073,14 @@ final class SipralAccountConfig extends ffi.Struct {
   @ffi.Size()
   external int displayNameLen;
 
-  /// The user name to answer a challenge with, or null for an account that
-  /// answers none.
+  /// The user name to answer a challenge with, or null for none.
   external ffi.Pointer<ffi.Char> authUser;
 
   /// How many bytes of it.
   @ffi.Size()
   external int authUserLen;
 
-  /// The password that goes with it. Copied out of the caller's memory; what
-  /// happens to the caller's copy is the caller's.
+  /// The password that goes with it, copied.
   external ffi.Pointer<ffi.Char> authPassword;
 
   /// How many bytes of it.
@@ -4129,100 +3096,77 @@ final class SipralAccountConfig extends ffi.Struct {
 
   /// How long a binding to ask for, or zero for an hour.
   ///
-  /// A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
-  /// is refused rather than sent as a number no registrar will read. What the
-  /// registrar grants wins over the request either way, and the granted
-  /// figure is what `sipral_registration_event_t::expires_ms` carries — that
-  /// is where the effective value is read back, not here.
+  /// Above 2³²−1 is refused (§20.19 `delta-seconds`). The registrar's
+  /// grant wins, and is read back in
+  /// `sipral_registration_event_t::expires_ms`.
   @ffi.Uint64()
   external int expiresSeconds;
 
-  /// Header fields to put on every REGISTER this account sends, in the
-  /// order given, or null for none.
+  /// Header fields for every REGISTER of this account, in order, or null.
   ///
-  /// Checked when the account is added, as `sipral_call_config_t::headers`
-  /// is, against what the stack writes on a REGISTER: `Expires` is the
-  /// stack's there, because it is `expires_seconds`, and `Supported` is the
-  /// application's, because a registration asking for a GRUU has to say
-  /// so. Refused for an account with no registrar, which sends no REGISTER
-  /// to put them on.
+  /// Checked on add as `sipral_call_config_t::headers` is: `Expires` is
+  /// the stack's (`expires_seconds`), `Supported` the application's (for
+  /// GRUU). Refused for an account with no registrar.
   external ffi.Pointer<SipralHeader> headers;
 
   /// How many elements `headers` has.
   @ffi.Size()
   external int headersLen;
 
-  /// Which transport this account's REGISTER and every request it
-  /// places go out on: SIPRAL_TRANSPORT_MAIN
-  /// for zero, which is what a caller that leaves this at zero already
-  /// gets, or a further number
+  /// The transport for this account's REGISTER and requests:
+  /// SIPRAL_TRANSPORT_MAIN
+  /// for zero, or a number
   /// sipral_stack_transport_bind
-  /// has bound. A number this stack has never bound is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
+  /// has bound. An unbound number is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   @ffi.Uint32()
   external int transport;
 
-  /// The push notification service to be woken through, as its
-  /// registered name: `apns`, `fcm`, `webpush` (RFC 8599 §4.1.1). Null
-  /// for an account that is not woken by push, which is every account on
-  /// a machine that does not suspend.
+  /// The push service to be woken through, by registered name: `apns`,
+  /// `fcm`, `webpush` (RFC 8599 §4.1.1). Null for no push.
   ///
-  /// These four go on the `Contact` of this account's REGISTER and on no
-  /// other request, ever: §4.1 says so because a `pn-prid` in the
-  /// `Contact` of an INVITE hands the far end a token that wakes this
-  /// device whenever it likes. The de-registration that gives the binding
-  /// up leaves the identifier out, which §4.1.2 also requires.
+  /// The push parameters go only on this account's REGISTER `Contact`
+  /// (§4.1): on an INVITE `pn-prid` would let the far end wake this
+  /// device at will. De-registration leaves the identifier out (§4.1.2).
   external ffi.Pointer<ffi.Char> pushProvider;
 
   /// How many bytes of it.
   @ffi.Size()
   external int pushProviderLen;
 
-  /// The resource identifier the service issued for this installation —
-  /// the device token. Required when `push_provider` is given, and
-  /// refused without one.
-  ///
-  /// Whatever it holds is percent-escaped where the SIP grammar needs it
-  /// (§8.7), because an APNs token carries `=` and a Web Push identifier
-  /// is a whole URL.
+  /// The device token the service issued. Required with
+  /// `push_provider`, and refused without it. Percent-escaped where SIP
+  /// needs it (§8.7): APNs tokens carry `=`, Web Push ids are URLs.
   external ffi.Pointer<ffi.Char> pushPrid;
 
   /// How many bytes of it.
   @ffi.Size()
   external int pushPridLen;
 
-  /// The extra value a service needs beside the identifier: the
-  /// application bundle for Apple, the sender for Firebase. §4.1.1 makes
-  /// it mandatory "if required for the specific PNS", so it is optional
-  /// here and the service decides.
+  /// The extra value a service needs: the bundle for Apple, the sender
+  /// for Firebase. Optional; §4.1.1 lets the service decide.
   external ffi.Pointer<ffi.Char> pushParam;
 
   /// How many bytes of it.
   @ffi.Size()
   external int pushParamLen;
 
-  /// Nonzero to say this device can send a binding refresh without being
-  /// woken by a push, which §4.1.4 makes it declare with a
-  /// `+sip.pnsreg` media feature tag.
-  ///
-  /// It is the application's fact and not this library's to guess: a
-  /// process the operating system has suspended has no timer that runs,
-  /// and one that claims otherwise gets a registrar that stops sending
-  /// the wake-ups the device is relying on.
+  /// Nonzero when this device can refresh its binding without a push,
+  /// declared with `+sip.pnsreg` (§4.1.4). Only the application knows:
+  /// a suspended process runs no timer, and a false claim stops the
+  /// registrar's wake-ups.
   @ffi.Uint32()
   external int pushWakesItself;
 
-  /// Where this account's end-of-call voice quality reports go (RFC
-  /// 6035, carried by a PUBLISH, RFC 3903), or null to send none.
+  /// Where end-of-call quality reports go (RFC 6035 over PUBLISH, RFC
+  /// 3903), or null for none.
   external ffi.Pointer<ffi.Char> qualityReportUri;
 
   /// How many bytes of it.
   @ffi.Size()
   external int qualityReportUriLen;
 
-  /// A SipralSessionTimer: how
-  /// this account's calls ask for a session timer (RFC 4028). Zero is
-  /// the stack's default, thirty minutes.
+  /// A SipralSessionTimer: how this account's calls ask for a
+  /// session timer (RFC 4028). Zero is the default, thirty minutes.
   @ffi.Uint32()
   external int sessionTimer;
 
@@ -4231,179 +3175,144 @@ final class SipralAccountConfig extends ffi.Struct {
   @ffi.Uint64()
   external int sessionIntervalSeconds;
 
-  /// `SIPRAL_PRIVACY_*` bits: place every call from this account
-  /// anonymously (RFC 3323), asking for these. `SIPRAL_PRIVACY_ID` is
-  /// "withhold my number". `From` becomes `"Anonymous"
-  /// <sip:anonymous@anonymous.invalid>`, `Privacy` carries the bits,
-  /// and the account's own identity goes in `P-Asserted-Identity` only
-  /// toward a peer in `trusted_peers`. Zero asks for none.
+  /// `SIPRAL_PRIVACY_*` bits: place every call anonymously (RFC 3323).
+  /// `From` becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`,
+  /// `Privacy` carries the bits, and `P-Asserted-Identity` goes only to
+  /// a peer in `trusted_peers`. Zero asks for none.
   @ffi.Uint32()
   external int privacy;
 
-  /// The peers this account trusts (RFC 3325's trust domain), as IP
-  /// addresses separated by commas: usually the registrar or the trunk.
-  /// A call arriving from one of them has its asserted identity read
-  /// (`sipral_call_event_t::asserted_uri`); from anywhere else it is
-  /// left out. And once any are named, a call placed toward any other
-  /// peer carries no `P-Asserted-Identity` or `P-Preferred-Identity`,
-  /// whoever wrote it. Null and zero trusts nobody.
+  /// Trusted peers (RFC 3325's trust domain), comma-separated IP
+  /// addresses. Only their asserted identity is read
+  /// (`sipral_call_event_t::asserted_uri`). Once any are named, calls to
+  /// other peers carry no `P-Asserted-Identity` or `P-Preferred-Identity`.
+  /// Null trusts nobody.
   external ffi.Pointer<ffi.Char> trustedPeers;
 
   /// How many bytes of it.
   @ffi.Size()
   external int trustedPeersLen;
 
-  /// A `SipralSrtp`: what this account's calls do about SRTP, over the
-  /// stack's own `srtp` — offered, required, DTLS-SRTP, or DTLS-SRTP
-  /// falling back to SDES — or zero for the stack's. A call placed from
-  /// it may name a stricter policy of its own and never a looser one
-  /// (`SIPRAL_STATUS_SECURITY_POLICY`), and an INVITE it cannot answer
-  /// under it is refused with 488. ABI 0.31, like every member below.
+  /// A `SipralSrtp` over the stack's `srtp`, or zero for the stack's.
+  /// A call may be stricter, never looser
+  /// (`SIPRAL_STATUS_SECURITY_POLICY`); an INVITE it cannot meet gets
+  /// 488.
   @ffi.Uint32()
   external int srtp;
 
-  /// The SRTP suites this account's calls run, most preferred first,
-  /// as RFC 4568 §6.2 and RFC 7714 §14.2 name them and separated by
-  /// commas: `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. The `a=crypto`
-  /// lines an SDES offer carries, the lines an SDES answer takes, and
-  /// the DTLS-SRTP profiles a handshake offers and accepts — GCM among
-  /// them only if named. Null for this build's own. Every line is in
-  /// the INVITE: past two or three over UDP it needs a stream.
+  /// The SRTP suites, most preferred first, comma-separated, as RFC 4568
+  /// §6.2 and RFC 7714 §14.2 name them:
+  /// `AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80`. Used for SDES and the
+  /// DTLS-SRTP profiles; GCM only if named. Null for this build's own.
+  /// Each line goes in the INVITE: more than two or three need a stream
+  /// transport.
   external ffi.Pointer<ffi.Char> srtpSuites;
 
   /// How many bytes of it.
   @ffi.Size()
   external int srtpSuitesLen;
 
-  /// A `SipralStirVerification`: what this account does with the
-  /// `Identity` header fields of the calls it receives (RFC 8224 §6.2).
-  /// Zero reports, once `sipral_stack_stir` has given the stack trust
-  /// anchors.
+  /// A `SipralStirVerification`: what to do with received `Identity`
+  /// fields (RFC 8224 §6.2). Zero reports, once `sipral_stack_stir` gave
+  /// trust anchors.
   @ffi.Uint32()
   external int stirVerification;
 
-  /// The P-256 private key this account signs its calls with (RFC 8224
-  /// §6.1): the bare 32-octet scalar, or an `EC PRIVATE KEY` or
-  /// `PRIVATE KEY` in DER or PEM. Null and zero signs nothing. Needs the
-  /// wall clock `sipral_stack_stir` gives the stack in `unix_seconds`;
-  /// `SIPRAL_STATUS_WRONG_STATE` without it.
+  /// The P-256 key this account signs calls with (RFC 8224 §6.1): the
+  /// bare 32-octet scalar, or `EC PRIVATE KEY` / `PRIVATE KEY` in DER or
+  /// PEM. Null signs nothing. Needs the wall clock from
+  /// `sipral_stack_stir`, else `SIPRAL_STATUS_WRONG_STATE`.
   external ffi.Pointer<ffi.Uint8> stirKey;
 
   /// How many bytes of it.
   @ffi.Size()
   external int stirKeyLen;
 
-  /// Where the certificate chain for `stir_key` is published: the
-  /// `x5u` and `info` of every PASSporT this account signs. Required
-  /// with `stir_key`, and only with it.
+  /// Where the chain for `stir_key` is published (`x5u` and `info`).
+  /// Required with `stir_key`, and only with it.
   external ffi.Pointer<ffi.Char> stirCertificateUrl;
 
   /// How many bytes of it.
   @ffi.Size()
   external int stirCertificateUrlLen;
 
-  /// The telephone number this account signs as, canonicalised by
-  /// RFC 8224 §8.3's first step, or null for the number in `aor`'s user
-  /// part.
+  /// The number this account signs as, canonicalised by RFC 8224 §8.3's
+  /// first step, or null for `aor`'s user part.
   external ffi.Pointer<ffi.Char> stirOrig;
 
   /// How many bytes of it.
   @ffi.Size()
   external int stirOrigLen;
 
-  /// The origination identifier every call it signs claims (RFC 8588
-  /// §5), a UUID, or null for one the stack draws for the account.
+  /// The origination id every signed call claims (RFC 8588 §5), a UUID,
+  /// or null for one the stack draws.
   external ffi.Pointer<ffi.Char> stirOrigid;
 
   /// How many bytes of it.
   @ffi.Size()
   external int stirOrigidLen;
 
-  /// A `SipralAttestation`: the level it claims (RFC 8588 §4), zero for
-  /// full attestation, `A`.
+  /// A `SipralAttestation` (RFC 8588 §4); zero is full, `A`.
   @ffi.Uint32()
   external int stirAttestation;
 
-  /// A `SipralToggle`: whether an encrypted call of this account may be
-  /// recorded to a recording server (`sipral_call_record_to`) in the
-  /// clear. Off by default: the copies of an encrypted call are offered
-  /// to the server as SRTP, with SDES keys in the recording session's
-  /// offer (RFC 4568), and a stream the server will not take that way
-  /// gets nothing (RFC 7866 §12.2). On, they go as plain RTP, as an
-  /// unencrypted call's always do. ABI 0.32.
+  /// A `SipralToggle`: whether an encrypted call may be recorded
+  /// (`sipral_call_record_to`) in the clear. Off by default: copies go as
+  /// SRTP with SDES keys (RFC 4568), and a stream the server refuses
+  /// that way gets nothing (RFC 7866 §12.2).
   ///
-  /// Sixty-four bits wide, where every other toggle takes thirty-two,
-  /// so that it starts past the 384 bytes of ABI 0.31: the last four
-  /// of those were padding, which a caller built against that header
-  /// may have left unwritten, and are never read.
+  /// Sixty-four bits wide so it starts past an older layout's trailing
+  /// padding, which old callers may leave unwritten.
   @ffi.Uint64()
   external int recordingInClear;
 
-  /// How often, in milliseconds, this account keeps its flow to its
-  /// registrar — to its outbound proxy, for one that never registers —
-  /// open, whatever STUN found; zero for never, which leaves it to
-  /// `sipral_stack_config_t::registrar_keepalive` (ABI 0.34).
+  /// How often, in milliseconds, to keep the flow to the registrar (or
+  /// outbound proxy) open regardless of STUN; zero defers to
+  /// `sipral_stack_config_t::registrar_keepalive`.
   ///
-  /// For a network whose NAT forgets a UDP flow sooner than the
-  /// REGISTER refresh comes round, with STUN off. On UDP a double CRLF
-  /// goes out alone in a datagram, which a registrar ignores (RFC 3261
-  /// §7.5); on TCP or TLS the connection is pinged at this interval
-  /// instead of the stack's own (RFC 5626 §4.4.1). Each interval is
-  /// drawn between 80% and 100% of it. From 1 000 to 120 000, and
-  /// anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// For a NAT that forgets UDP flows before the REGISTER refresh. UDP
+  /// sends a lone double CRLF (RFC 3261 §7.5); TCP and TLS ping at this
+  /// interval (RFC 5626 §4.4.1). Jittered to 80-100%. From 1 000 to
+  /// 120 000, else `SIPRAL_STATUS_INVALID_ARGUMENT`.
   @ffi.Uint64()
   external int keepaliveMs;
 
-  /// The server this account's requests go to, as a URI whose host RFC
-  /// 3263 locates — `sip:pbx.example.com`, `sips:example.com:5061` —
-  /// in place of `registrar_address`: exactly one of the two is given
-  /// (ABI 0.34). The registrar for an account that registers (usually
-  /// the same URI as `registrar`), the outbound proxy for one that
-  /// does not.
+  /// The server as a URI whose host RFC 3263 locates
+  /// (`sip:pbx.example.com`, `sips:example.com:5061`), in place of
+  /// `registrar_address`: exactly one is given. The registrar, or the
+  /// outbound proxy for an account that does not register.
   ///
-  /// The lookups are the application's resolver's, asked for with
-  /// `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with
-  /// `sipral_account_looked_up`; the order they go in, the SRV ranking
-  /// and the fallback to the host's own addresses are the stack's.
-  /// The first REGISTER waits for the first answer, and a call placed
-  /// before it with no `destination` of its own is
-  /// `SIPRAL_STATUS_WRONG_STATE`. A request outside a dialog — REGISTER,
-  /// INVITE, MESSAGE, SUBSCRIBE, PUBLISH — that times out, whose
-  /// transport fails or that is answered 503 moves to the next address
-  /// found at once (§4.3; every request but REGISTER from ABI 0.35);
-  /// the name is looked up again when the
-  /// answer's time-to-live runs out, and when the stack's recovery
-  /// asks for an address. A host with a port skips SRV, and a numeric
-  /// host asks nothing.
+  /// Lookups go to the application's resolver via
+  /// `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and `sipral_account_looked_up`;
+  /// ordering, SRV ranking and fallback are the stack's. The first
+  /// REGISTER waits for the first answer; a call before it with no
+  /// destination is `SIPRAL_STATUS_WRONG_STATE`. An out-of-dialog
+  /// request that times out, fails its transport or gets 503 moves to
+  /// the next address (§4.3). The name is looked up again when the TTL
+  /// runs out or recovery asks. A port skips SRV; a numeric host asks
+  /// nothing.
   external ffi.Pointer<ffi.Char> serverUri;
 
   /// How many bytes of it.
   @ffi.Size()
   external int serverUriLen;
 
-  /// The SHA-256 fingerprint of the one TLS server certificate this
-  /// account trusts, in place of a trust anchor, for a PBX that serves
-  /// a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
-  /// either case, colons and spaces among them ignored, bare or after
-  /// `sha256 Fingerprint=` (what `openssl x509 -fingerprint -sha256`
-  /// prints, 3.x and 1.1), `sha-256 ` (RFC 8122) or `SHA256=`, each
-  /// prefix in any case (ABI 0.35 for the first and the spaces).
-  /// Anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
+  /// The SHA-256 fingerprint of the one TLS certificate this account
+  /// trusts, for a self-signed PBX: 64 hex digits, any case, colons and
+  /// spaces ignored, bare or after `sha256 Fingerprint=` (openssl),
+  /// `sha-256 ` (RFC 8122) or `SHA256=`, any case. Anything else is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
   ///
-  /// TLS is the application's, so this is what its certificate
-  /// verifier asks, with `sipral_account_check_certificate`: with a
-  /// pin, the fingerprint is the whole verdict, and no chain, trust
-  /// anchor or host name is consulted (`docs/22-tls.md`).
+  /// The application's verifier asks `sipral_account_check_certificate`;
+  /// with a pin the fingerprint is the whole verdict (`docs/22-tls.md`).
   external ffi.Pointer<ffi.Char> tlsPinSha256;
 
   /// How many bytes of it.
   @ffi.Size()
   external int tlsPinSha256Len;
 
-  /// A `SipralToggle`: whether `server_uri`'s domain is asked for NAPTR
-  /// records before SRV (RFC 3263 §4.1). Off by default: most domains
-  /// publish none, and the account's transport is already chosen.
-  /// Refused without a `server_uri` (ABI 0.34).
+  /// A `SipralToggle`: ask NAPTR before SRV for `server_uri`'s domain
+  /// (RFC 3263 §4.1). Off by default; refused without `server_uri`.
   @ffi.Uint32()
   external int serverNaptr;
 
@@ -4411,32 +3320,22 @@ final class SipralAccountConfig extends ffi.Struct {
   @ffi.Uint32()
   external int reserved;
 
-  /// A SipralTransport: the protocol
-  /// of a connection of this account's own to its server, which the
-  /// stack asks the application to open, or zero for none (ABI 0.35).
+  /// A SipralTransport: the protocol of a connection of this
+  /// account's own to its server, which the application opens, or zero.
   ///
-  /// For an account on TCP or TLS to one server beside an account on
-  /// the stack's UDP transport to another, in one stack with one audio
-  /// engine. With `SIPRAL_TRANSPORT_TCP`, `_TLS`, `_WS` or `_WSS` the
-  /// stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming the
-  /// protocol and the server's address — `request_bytes` and
-  /// `limit_bytes` zero, since no request outgrew anything — and the
-  /// account's requests go over whichever transport of that protocol
-  /// the application binds to that address with
-  /// `sipral_stack_transport_bind`, under any number; one bound before
-  /// the account is added is used as it stands. Until then its
-  /// REGISTER waits; ten seconds after the question it fails as
-  /// unreachable and its retry, after the usual back-off, asks again.
-  /// An account that never registers asks when it is added, and any
-  /// account asks again at once when its connection fails or closes —
-  /// a registered one by registering again. A call placed before the
-  /// connection is bound is `SIPRAL_STATUS_TRANSPORT_DOWN`. Every
-  /// request inside the account's calls keeps the connection their
-  /// INVITE went over, and a request arriving over it is matched to
-  /// this account before any other with the same user. `transport` is
-  /// then where the account starts, and is replaced by the connection
-  /// once there is one. `SIPRAL_TRANSPORT_UDP` only says what
-  /// `transport` speaks.
+  /// For an account on TCP or TLS beside one on the stack's UDP, in one
+  /// stack. With TCP, TLS, WS or WSS the stack raises
+  /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` with the protocol and address
+  /// (`request_bytes` and `limit_bytes` zero); the account then uses
+  /// whatever transport of that protocol the application binds there with
+  /// `sipral_stack_transport_bind`, including one bound before. Until
+  /// then the REGISTER waits; after ten seconds it fails as unreachable
+  /// and the retry asks again. A non-registering account asks on add;
+  /// any account asks again when the connection fails or closes. A call
+  /// before the bind is `SIPRAL_STATUS_TRANSPORT_DOWN`. In-call requests
+  /// keep their INVITE's connection, and requests arriving on it match
+  /// this account first. `SIPRAL_TRANSPORT_UDP` only describes
+  /// `transport`.
   @ffi.Uint32()
   external int streamProtocol;
 
@@ -4444,22 +3343,16 @@ final class SipralAccountConfig extends ffi.Struct {
   @ffi.Uint32()
   external int reserved35;
 
-  /// The realms the password answers, each on a line of its own,
-  /// separated by line feeds (a realm may hold a comma, and never a
-  /// line break), or null for the default (ABI 0.36).
+  /// The realms the password answers, one per line (a realm may hold a
+  /// comma, never a line break), or null for the default.
   ///
-  /// The password answers the account's own server and nobody else
-  /// (RFC 3261 §22.1). With none named the account takes the realms
-  /// its server first challenges it with, and every realm its
-  /// registrar challenges a REGISTER with, and answers those and no
-  /// others: a proxy passing on a far end's own 401 under a realm of
-  /// its choosing gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
-  /// says so. A server whose calls are challenged under a realm its
-  /// REGISTERs never meet — an SBC or an outbound proxy at the
-  /// registrar's address with a realm of its own — needs both named
-  /// here; named, these and no others are answered, REGISTERs
-  /// included. An empty line is skipped; a realm is compared exactly,
-  /// case included, as RFC 3261 §22.1 compares it.
+  /// The password answers only the account's own server (RFC 3261
+  /// §22.1). By default that is the realms of the server's first
+  /// challenge and of every REGISTER challenge; a proxy relaying a far
+  /// end's 401 gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
+  /// says so. When calls are challenged under a realm REGISTERs never
+  /// see (an SBC or proxy with its own realm), name all of them here.
+  /// Empty lines are skipped; realms compare exactly (§22.1).
   external ffi.Pointer<ffi.Char> realms;
 
   /// How many bytes of it.
@@ -4469,8 +3362,7 @@ final class SipralAccountConfig extends ffi.Struct {
 
 /// What a call is placed with.
 ///
-/// Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before
-/// filling anything in.
+/// Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before filling it in.
 final class SipralCallConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -4483,148 +3375,100 @@ final class SipralCallConfig extends ffi.Struct {
   @ffi.Size()
   external int targetLen;
 
-  /// The session description to offer, for a call this stack manages no
-  /// audio for.
-  ///
-  /// Exactly one of this and `media_address` is set. Two descriptions of one
-  /// session is one too many, and neither is a call whose answer would have
-  /// to be written into the ACK.
+  /// The session description to offer, for a call whose audio the application runs.
+  /// Exactly one of this and `media_address` is set.
   external ffi.Pointer<ffi.Uint8> sdp;
 
   /// How many bytes of it.
   @ffi.Size()
   external int sdpLen;
 
-  /// Where to send the INVITE, as `host:port`, or null to send it where the
-  /// account registers — which is the outbound proxy for a registered line,
-  /// and the reason a phone behind a NAT works at all.
+  /// Where to send the INVITE, as `host:port`, or null for where the account registers
+  /// (the outbound proxy of a registered line).
   external ffi.Pointer<ffi.Char> destination;
 
   /// How many bytes of it.
   @ffi.Size()
   external int destinationLen;
 
-  /// Whether to keep every branch a proxy forks the INVITE into. Zero keeps
-  /// the first that answers and hangs up the rest, which is what a telephone
-  /// does.
+  /// Nonzero keeps every branch a proxy forks the INVITE into. Zero keeps the first that
+  /// answers and hangs up the rest.
   @ffi.Uint32()
   external int keepAllForks;
 
-  /// Where this end will receive media, as `host:port`, for a call this
-  /// stack describes and runs the audio of.
+  /// Where this end receives media, as `host:port`, for a call whose audio this stack runs.
   ///
-  /// The application owns the socket, so it is the only one that can say. Set
-  /// it and the offer is written from this stack's codec order, the answer is
-  /// read, and the call gets a media session that the `sipral_media_*`
-  /// entry points reach. Leave it null and set `sdp` instead for a call
-  /// where the application describes its own session and runs its own RTP.
+  /// Set, the offer is written from this stack's codec order and the call gets a media
+  /// session the `sipral_media_*` entry points reach. Null: set `sdp` instead.
   external ffi.Pointer<ffi.Char> mediaAddress;
 
   /// How many bytes of it.
   @ffi.Size()
   external int mediaAddressLen;
 
-  /// Header fields to put on the INVITE, in the order given, or null for
-  /// none.
+  /// Header fields to put on the INVITE, in order, or null for none.
   ///
-  /// Each is checked before anything is built: the name a token, the value
-  /// one line of text, and not a field the stack writes on a call itself.
-  /// Those are listed in `docs/04-ua.md` with the reason for each, and
-  /// `User-Agent` joins them when `sipral_stack_config_t::user_agent` is
-  /// set. A refusal is `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element,
-  /// and no call.
+  /// Each is checked first: the name a token, the value one line, and not a field the
+  /// stack writes itself (`docs/04-ua.md`; `User-Agent` too when
+  /// `sipral_stack_config_t::user_agent` is set). A refusal is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element, and no call.
   external ffi.Pointer<SipralHeader> headers;
 
   /// How many elements `headers` has.
   @ffi.Size()
   external int headersLen;
 
-  /// What this call does about SRTP, overriding
-  /// `sipral_stack_config_t::srtp` for it: a `SipralSrtp`, or zero to
-  /// take the stack's own setting. Any other value is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-  ///
-  /// Read only for a call this stack describes the media of —
-  /// `media_address` set — and otherwise not this ABI's to act on: a
-  /// call placed with `sdp` is a session the application wrote, and
-  /// SRTP in it is the application's own line to write or not.
+  /// What this call does about SRTP, overriding `sipral_stack_config_t::srtp`: a
+  /// `SipralSrtp`, or zero for the stack's setting. Any other value is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Read only with `media_address` set.
   @ffi.Uint32()
   external int srtp;
 
-  /// Which transport the INVITE goes out on, read only together with
-  /// `destination`: SIPRAL_TRANSPORT_MAIN
-  /// for zero, or a further number
-  /// sipral_stack_transport_bind
-  /// has bound. Nonzero with `destination` null is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
-  /// override already goes out on its account's own transport, and
-  /// there is nothing to combine this with.
+  /// Which transport the INVITE goes out on, read only with `destination`:
+  /// SIPRAL_TRANSPORT_MAIN for zero, or a
+  /// number sipral_stack_transport_bind
+  /// has bound. Nonzero with `destination` null is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   @ffi.Uint32()
   external int transport;
 
-  /// What this call offers and in what order, overriding
-  /// `sipral_stack_config_t::codecs` for it: codec names separated by
-  /// commas, as `sipral_codec_info_t::name` spells them, UTF-8 and not
-  /// NUL-terminated. Null for the stack's own order.
+  /// What this call offers and in what order, overriding `sipral_stack_config_t::codecs`:
+  /// codec names separated by commas, as `sipral_codec_info_t::name` spells them, UTF-8,
+  /// not NUL-terminated. Null for the stack's order.
   ///
-  /// Everything else the stack's catalogue carries — frame length,
-  /// named events, multiplexing, and SRTP where `srtp` here does not
-  /// override it — is kept, because a call that names its codecs has
-  /// said nothing about any of those. A name this build has no encoder
-  /// for, a name given twice, and a stray comma are each
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming what was wrong, and no
-  /// call.
-  ///
-  /// Read only for a call this stack describes the media of —
-  /// `media_address` set — for the reason `srtp` gives: a call placed
-  /// with `sdp` is a session the application wrote, and the order in it
-  /// is already the application's own. The names are still checked, so
-  /// that a caller who has one wrong learns it here either way.
+  /// The rest of the stack's catalogue (frame length, events, multiplexing, SRTP) is kept.
+  /// An unknown name, a repeated name or a stray comma is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// Applied only with `media_address` set, but the names are checked either way.
   external ffi.Pointer<ffi.Char> codecs;
 
   /// How many bytes of it.
   @ffi.Size()
   external int codecsLen;
 
-  /// What this call does about ICE, overriding
-  /// `sipral_stack_config_t::ice` for it: a `SipralIce`, or zero to
-  /// take the stack's own setting. Any other value is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-  ///
-  /// Read only for a call this stack describes the media of —
-  /// `media_address` set — for the reason `srtp` gives: a call placed
-  /// with `sdp` is a session the application wrote, and the candidates
-  /// in it are already the application's own to write or not.
+  /// What this call does about ICE, overriding `sipral_stack_config_t::ice`: a `SipralIce`,
+  /// or zero for the stack's setting. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// Read only with `media_address` set.
   @ffi.Uint32()
   external int ice;
 
-  /// Where this call's real-time text arrives (RFC 4103): a second
-  /// socket the application bound, as an address and a port. Set, the
-  /// offer or answer carries an `m=text` stream for T.140 with its
-  /// redundancy, and once both ends agree it `sipral_media_send_text`,
-  /// `sipral_media_poll_text` and `sipral_media_receive_text` carry
-  /// it. Null for a call with no text. Not NUL-terminated.
+  /// Where this call's real-time text arrives (RFC 4103), as `host:port` of a second
+  /// socket the application bound, not NUL-terminated; null for no text. Set, the
+  /// description carries an `m=text` stream for T.140 with redundancy, carried by
+  /// `sipral_media_send_text`, `sipral_media_poll_text` and `sipral_media_receive_text`.
   ///
-  /// Read only with `media_address`, and not offered on a call keyed
-  /// by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
-  /// and no candidates of its own, and typed text sent in the clear
-  /// beside encrypted audio is worse than none.
+  /// Read only with `media_address`. Not offered with SRTP, DTLS-SRTP or ICE: the text
+  /// stream has no key or candidates of its own, and clear text beside encrypted audio is
+  /// worse.
   external ffi.Pointer<ffi.Char> textAddress;
 
   /// How many bytes of it.
   @ffi.Size()
   external int textAddressLen;
 
-  /// Whether this call asks for RTCP feedback: a `SipralToggle`. On
-  /// offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
-  /// RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
-  /// it; zero leaves it off, as it is by default, because a far end
-  /// that knows only RTP/AVP refuses a profile it does not know. Read
-  /// only with `media_address`. An offer on a feedback profile is
-  /// answered on that profile whatever this says, since RFC 4585 §4.1
-  /// leaves an answerer no other way to take the stream; the Generic
-  /// NACKs and reduced-size RTCP it asks for are agreed only when this
-  /// is on, on the answer too.
+  /// Whether this call asks for RTCP feedback: a `SipralToggle`. On offers RTP/AVPF
+  /// (RFC 4585) with Generic NACKs and reduced-size RTCP (RFC 5506). Off by default,
+  /// because a far end that knows only RTP/AVP refuses the profile. Read only with
+  /// `media_address`. An offer on a feedback profile is answered on it regardless
+  /// (RFC 4585 §4.1); the NACKs and reduced-size RTCP are agreed only when this is on.
   @ffi.Uint32()
   external int feedback;
 
@@ -4634,22 +3478,16 @@ final class SipralCallConfig extends ffi.Struct {
   @ffi.Uint32()
   external int focus;
 
-  /// Nonzero to follow a 3xx to the targets its `Contact` names (RFC
-  /// 3261 §8.1.3.4): each as a new INVITE of the same call, most
-  /// preferred first, the next tried when one refuses, and a target
-  /// already tried, a 380, a 6xx, a forked call and anything past eight
-  /// redirected INVITEs not followed. Zero, as it is by default, ends
-  /// the call with `SIPRAL_EVENT_KIND_CALL_ENDED` carrying the 3xx's
-  /// status and its `Contact` addresses readable, for an application
-  /// that redirects by itself. Added in ABI 1.2.
+  /// Nonzero to follow a 3xx to its `Contact` targets (RFC 3261 §8.1.3.4), most preferred
+  /// first, as new INVITEs of the same call. Not followed: a target already tried, a 380, a
+  /// 6xx, a forked call, past eight redirections. Zero (default) ends the call with
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED` carrying the 3xx status and readable `Contact` addresses.
+  /// Added in ABI 1.2.
   @ffi.Uint32()
   external int followRedirects;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. Set it to zero; the library reads nothing from
-  /// it.
+  /// Zero. Pads the struct to a multiple of its alignment, so a member a later version
+  /// appends never lands in padding. The library reads nothing from it.
   @ffi.Uint32()
   external int reserved;
 }
@@ -4671,8 +3509,8 @@ final class SipralCodecInfo extends ffi.Struct {
   @ffi.Uint32()
   external int clockRate;
 
-  /// The rate the codec actually hears at, which is what the samples crossing
-  /// this ABI are in. G.722's two differ, and RFC 3551 §4.5.2 says so.
+  /// The codec's own rate, which the samples crossing this ABI use. G.722's
+  /// differs from its clock (RFC 3551 §4.5.2).
   @ffi.Uint32()
   external int sampleRate;
 
@@ -4680,16 +3518,12 @@ final class SipralCodecInfo extends ffi.Struct {
   @ffi.Uint32()
   external int staticPayloadType;
 
-  /// Whether it has one. Opus does not: it is newer than the table and
-  /// always travels as a dynamic type.
+  /// Whether it has one. Opus does not.
   @ffi.Uint32()
   external int hasStaticPayloadType;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads to the alignment so later members start past this
+  /// header's length. Written zero, never read.
   @ffi.Uint32()
   external int reserved;
 }
@@ -4698,11 +3532,7 @@ final class SipralCodecInfo extends ffi.Struct {
 ///
 /// Set `size` to `sizeof(sipral_codec_candidate_t)` before the call.
 ///
-/// The list is what the negotiation itself decided, kept from the moment
-/// it decided it. It is not worked out again when it is asked for, because
-/// a second run against a description that has since been renegotiated
-/// would disagree with the first in exactly the case somebody is
-/// debugging.
+/// Recorded when the negotiation decided, never recomputed.
 final class SipralCodecCandidate extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -4717,17 +3547,12 @@ final class SipralCodecCandidate extends ffi.Struct {
   external int outcome;
 
   /// A SipralCodec: what beat it, when `outcome` is
-  /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
-  /// otherwise, because nothing beat a codec that was never named and
-  /// nothing beat the one that won.
+  /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`; `SIPRAL_CODEC_UNKNOWN` otherwise.
   @ffi.Uint32()
   external int outrankedBy;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads to the alignment so later members start past this
+  /// header's length. Written zero, never read.
   @ffi.Uint32()
   external int reserved;
 }
@@ -4737,11 +3562,9 @@ final class SipralCodecCandidate extends ffi.Struct {
 /// into the caller's own buffers.
 ///
 /// The caller fills in `size`, the two pointers and the two capacities;
-/// the library fills in the rest. A pointer left null with a capacity of
-/// zero is an address the caller does not want. Written down by the
-/// agent as each outcome happened, never worked out again when it is
-/// asked for: RFC 8445 §8.1.2 takes the losing pairs off the checklist
-/// the moment one is selected.
+/// the library fills in the rest. Null with capacity zero skips an address.
+/// Recorded as each outcome happened, since RFC 8445 §8.1.2 drops losing
+/// pairs from the checklist on selection.
 final class SipralPathCandidate extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -4776,17 +3599,14 @@ final class SipralPathCandidate extends ffi.Struct {
   @ffi.Uint32()
   external int remoteKind;
 
-  /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
-  /// both put them without padding at the end of the struct, so that a
-  /// member a later version appends starts past the length a caller built
-  /// against this header declares. The library writes zero here and reads
-  /// nothing from it.
+  /// Zero. Keeps the layout identical on 32- and 64-bit targets. Written
+  /// zero, never read.
   @ffi.Uint32()
   external int reserved;
 
-  /// Where to write the local address, `host:port` with a trailing
-  /// NUL: for a pair, the candidate its checks left from — the host
-  /// candidate, or the relayed one; for a relay, the relayed address.
+  /// Where to write the local address, `host:port` with a trailing NUL:
+  /// for a pair, the candidate its checks left from; for a relay, the
+  /// relayed address.
   external ffi.Pointer<ffi.Char> local;
 
   /// How much room `local` has. At least SIPRAL_ADDRESS_BYTES when
@@ -4816,12 +3636,6 @@ final class SipralPathCandidate extends ffi.Struct {
 
 /// What one call's media settled on, and what it is doing now.
 ///
-/// A4's reporting half and as much of D5 as this stack knows: the codec that
-/// was agreed, the number it travels under, and the shape of the stream around
-/// it. What is deliberately not here is why each other candidate lost —
-/// RFC 3264 §6.1 leaves that decision with the peer, and a reason invented on
-/// this side would be a reason nobody can act on.
-///
 /// Set `size` to `sizeof(sipral_media_info_t)` before the call.
 final class SipralMediaInfo extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
@@ -4832,10 +3646,8 @@ final class SipralMediaInfo extends ffi.Struct {
   @ffi.Uint32()
   external int codec;
 
-  /// The payload type on the wire. It is the offer's own number and not
-  /// necessarily ours: the two ends pick their own numbers for a format
-  /// with no static one, so a peer that numbers it 111 has said what we
-  /// say with 96.
+  /// The payload type on the wire: the offer's number, not necessarily
+  /// ours.
   @ffi.Uint32()
   external int payloadType;
 
@@ -4918,25 +3730,17 @@ final class SipralMediaInfo extends ffi.Struct {
   @ffi.Uint32()
   external int reducedSize;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads to the alignment so later members start past this
+  /// header's length. Written zero, never read.
   @ffi.Uint32()
   external int reserved;
 }
 
 /// What one call's media has cost, and what it is costing now.
 ///
-/// A6. Cheap enough to read at the frame rate of a user interface — everything
-/// in it is already counted and nothing walks a history — and complete enough
-/// to keep as the record of a call, which is the same struct delivered with
-/// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends.
-///
-/// The three delays are in microseconds and not milliseconds. Jitter on a
-/// healthy call is a fraction of a millisecond, and a figure that reads zero
-/// whenever things are going well is a figure nobody looks at twice.
+/// Cheap enough to read at UI frame rate. The same struct arrives with
+/// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends. Delays are in
+/// microseconds, since healthy jitter is below a millisecond.
 ///
 /// Set `size` to `sizeof(sipral_stream_stats_t)` before the call.
 final class SipralStreamStats extends ffi.Struct {
@@ -4944,15 +3748,12 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Size()
   external int size;
 
-  /// A SipralCodec: what the call settled on, which is the first thing
-  /// anybody looking at a bad call wants to know.
+  /// A SipralCodec: what the call settled on.
   @ffi.Uint32()
   external int codec;
 
-  /// Whether a round-trip time is known. Zero until a report has come back,
-  /// which on a short call may be never: the first one is deliberately
-  /// delayed (RFC 3550 §6.2) and a peer that sends no RTCP never provides
-  /// one.
+  /// Whether a round-trip time is known. Zero until a report comes back,
+  /// which may be never (RFC 3550 §6.2 delays the first one).
   @ffi.Uint32()
   external int hasRoundTrip;
 
@@ -4992,18 +3793,15 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int packetsReordered;
 
-  /// Frames dropped in a pause to bring the delay down. Deliberate, and
-  /// inaudible when the pause is real.
+  /// Frames dropped in a pause to bring the delay down.
   @ffi.Uint64()
   external int framesShrunk;
 
-  /// Frames the concealment was asked to invent in a pause to push the delay
-  /// up.
+  /// Frames concealment invented in a pause to push the delay up.
   @ffi.Uint64()
   external int framesStretched;
 
-  /// How far behind the newest packet the playout point is: the delay the
-  /// far end's voice is actually suffering.
+  /// How far behind the newest packet the playout point is.
   @ffi.Uint64()
   external int delayUs;
 
@@ -5016,15 +3814,12 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int jitterUs;
 
-  /// Frames concealed as a fraction of frames played, over the last ten
-  /// seconds or so. The counters above say what the call has cost; this says
-  /// whether it is bad right now.
+  /// Frames concealed as a fraction of frames played, over about the last
+  /// ten seconds.
   @ffi.Float()
   external double lossRate;
 
-  /// One number for a bar on a screen: a hundred for a call with nothing
-  /// wrong with it, zero for one nobody can hold. Not a mean opinion score,
-  /// and deliberately not shaped like one.
+  /// 100 for a flawless call, 0 for an unusable one. Not a MOS.
   @ffi.Float()
   external double score;
 
@@ -5036,9 +3831,8 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int silentForMs;
 
-  /// Whether an RFC 3611 VoIP Metrics report is available at all —
-  /// zero until this stream has identified a source to report on.
-  /// Every `voip_*` member below is meaningless while this is zero.
+  /// Whether an RFC 3611 VoIP Metrics report is available. Every `voip_*`
+  /// member is meaningless while this is zero.
   @ffi.Uint32()
   external int hasVoipMetrics;
 
@@ -5067,16 +3861,12 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int voipGapDurationUs;
 
-  /// RFC 3611 SS4.7.2's `Gmin`: the burst/gap classification
-  /// threshold this stream's jitter buffer used, fixed for the
-  /// stream's whole life.
+  /// RFC 3611 SS4.7.2's `Gmin`, the burst/gap threshold, fixed per stream.
   @ffi.Uint32()
   external int voipGmin;
 
-  /// RFC 3611 SS4.7.3's end-system delay. Zero for every build of
-  /// this stack today: SS4.7.3 defines it as the sending side's own
-  /// accumulation and encoding delay added to the receiving side's,
-  /// and nothing here has visibility into the sending side's half.
+  /// RFC 3611 SS4.7.3's end-system delay. Always zero: it needs the
+  /// sending side's delay, which this end cannot see.
   @ffi.Uint64()
   external int voipEndSystemDelayUs;
 
@@ -5092,9 +3882,8 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int voipJitterBufferAbsMaxUs;
 
-  /// Whether `voip_r_factor` is available: zero when the active
-  /// codec is one ITU-T G.113 tabulates no `Ie`/`Bpl` for (RFC 3611
-  /// SS4.7.5's own `127` "unavailable" sentinel).
+  /// Whether `voip_r_factor` is available: zero when ITU-T G.113 has no
+  /// `Ie`/`Bpl` for the codec (RFC 3611 SS4.7.5's `127` sentinel).
   @ffi.Uint32()
   external int hasVoipRFactor;
 
@@ -5121,19 +3910,15 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint32()
   external int voipMosCqX10;
 
-  /// Frames played as nothing because the jitter buffer had run dry
-  /// while the far end was still sending: the earpiece asked for audio
-  /// before it had arrived, and heard silence or comfort noise in its
-  /// place, wherever that fell. A frame the far end never sent, in its
-  /// own pause, is not one, and nor is a packet lost on the way, which
-  /// is `packets_lost`. No packet is lost or discarded by it, so none of
-  /// the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
-  /// `loss_rate`, `score` and `suffering` do.
+  /// Frames played empty because the jitter buffer ran dry while the far
+  /// end was still sending. Not lost packets (`packets_lost`), so the
+  /// `voip_*` rates miss it (RFC 3611 SS4.7.1 counts packets);
+  /// `loss_rate`, `score` and `suffering` include it.
   @ffi.Uint64()
   external int framesUnderrun;
 
-  /// Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
-  /// zero while it does not.
+  /// Whether the stream runs RTP/AVPF (RFC 4585). The counts below stay
+  /// zero otherwise.
   @ffi.Uint32()
   external int feedback;
 
@@ -5158,8 +3943,7 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int packetsAskedFor;
 
-  /// Early RTCP packets this end sent: feedback that could not wait for
-  /// the next regular report.
+  /// Early RTCP packets this end sent.
   @ffi.Uint64()
   external int earlyPackets;
 
@@ -5167,8 +3951,7 @@ final class SipralStreamStats extends ffi.Struct {
   @ffi.Uint64()
   external int reducedSizePackets;
 
-  /// Feedback this end had to hold back, because the stream's RTCP
-  /// bandwidth had none to spare.
+  /// Feedback held back for lack of RTCP bandwidth.
   @ffi.Uint64()
   external int feedbackSuppressed;
 }
@@ -5176,13 +3959,9 @@ final class SipralStreamStats extends ffi.Struct {
 /// One datagram on its way out, written into the caller's own buffers.
 ///
 /// The caller fills in `size`, the two pointers and the two capacities; the
-/// library fills in the two lengths and the bytes. A `len` of zero means there
-/// was nothing to send, which on a capture is an ordinary answer: this end may
-/// be held by the far end, or silence suppression may have swallowed the frame.
-///
-/// Both buffers are checked before anything is produced. A packet that was
-/// built and then had nowhere to go would be a packet missing from a stream
-/// whose timestamps had already moved past it.
+/// library fills in the two lengths and the bytes. A `len` of zero means
+/// nothing to send (held, or silence suppression). Both buffers are checked
+/// before anything is produced.
 final class SipralMediaPacket extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -5212,21 +3991,16 @@ final class SipralMediaPacket extends ffi.Struct {
   @ffi.Size()
   external int destinationLen;
 
-  /// What to send it over, as a `SipralTransport`.
-  /// `SIPRAL_TRANSPORT_UDP` is a datagram from the call's media socket,
-  /// which is everything unless the stack reaches its TURN server over
-  /// TCP or TLS (`turn_transport`); then what goes through the relay
-  /// says that instead, `destination` is the server, and the bytes are
-  /// written, as they are and in order, on the media socket's
-  /// connection to it — never sent as a datagram.
+  /// What to send it over, as a `SipralTransport`. `SIPRAL_TRANSPORT_UDP`
+  /// is a datagram from the media socket. With a TURN server over TCP or
+  /// TLS (`turn_transport`), relayed traffic says so, `destination` is the
+  /// server, and the bytes go in order on that connection, never as a
+  /// datagram.
   @ffi.Uint32()
   external int protocol;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. Set it to zero when the struct is handed in;
-  /// the library writes zero here and reads nothing from it.
+  /// Zero. Pads to the alignment so later members start past this
+  /// header's length. Set zero on input; written zero, never read.
   @ffi.Uint32()
   external int reserved;
 }
@@ -5234,107 +4008,80 @@ final class SipralMediaPacket extends ffi.Struct {
 /// What SipralProcessorCallback is handed for one call: an ordinary
 /// frame to process, or a request to forget what has been learned.
 ///
-/// Filled by the library and handed to the callback as a `const`
-/// pointer, the same shape SipralScreenRequest is:
-/// read `size` before anything past it, and read nothing once the
-/// callback has returned — `near_end`, `far_end` and `out` borrow from
-/// buffers that belong to this one call and are not this ABI's to keep
-/// alive a moment longer.
+/// Library-owned, passed as a `const` pointer. Read `size` first; read
+/// nothing after the callback returns, since the buffers are borrowed.
 final class SipralProcessorFrame extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
   external int size;
 
-  /// 0 for an ordinary frame; 1 for a request to forget whatever state
-  /// the processor holds — a device change or a codec change mid-call
-  /// asks for this, and `near_end`, `far_end` and `out`, with the three
-  /// lengths beside them, are all null and zero when it is set.
+  /// 0 for an ordinary frame; 1 to forget learned state (device or codec
+  /// change). When 1, all three buffers are null and lengths zero.
   @ffi.Uint32()
   external int reset;
 
-  /// The frame just captured from the microphone. Null when `reset` is
-  /// set.
+  /// The frame just captured from the microphone. Null on reset.
   external ffi.Pointer<ffi.Int16> nearEnd;
 
-  /// How many samples `near_end` is. Always the same number as
-  /// `far_end_len` and `out_len` — carried three times, once beside
-  /// each buffer, because that is the one buffer each binding marshals
-  /// on its own. 0 when `reset` is set.
+  /// Samples in `near_end`; always equal to `far_end_len` and `out_len`.
+  /// 0 on reset.
   @ffi.Size()
   external int nearEndLen;
 
-  /// The far-end audio rendered to the loudspeaker over the same span
-  /// of time as `near_end`, the same length. Null when `reset` is set.
+  /// The far-end audio played over the same span as `near_end`. Null on
+  /// reset.
   external ffi.Pointer<ffi.Int16> farEnd;
 
-  /// How many samples `far_end` is. See `near_end_len`. 0 when `reset`
-  /// is set.
+  /// Samples in `far_end`. 0 on reset.
   @ffi.Size()
   external int farEndLen;
 
-  /// Where the callback writes the frame that replaces `near_end` —
-  /// every sample of it, since what is not written is read back as
-  /// whatever was there before. Null when `reset` is set, since there
-  /// is nothing to write.
+  /// Where the callback writes the replacement for `near_end`; every
+  /// sample must be written. Null on reset.
   external ffi.Pointer<ffi.Int16> out;
 
-  /// How many samples `out` has room for, which is also how many the
-  /// callback has to write. See `near_end_len`. 0 when `reset` is set.
+  /// Samples `out` holds, all of which must be written. 0 on reset.
   @ffi.Size()
   external int outLen;
 }
 
 /// One message on its way out, written into the caller's own buffers.
 ///
-/// The caller fills in `size`, the three pointers and the three capacities; the
-/// library fills in everything else. A `len` of zero means the stack had nothing
-/// to send, which is how the draining loop ends.
-///
-/// The two address buffers are checked before a message is taken, so the address
-/// side is never the reason one is held. The payload buffer is not: a message
-/// too long for it is kept and offered again, because a message the stack has
-/// already committed to is not one this ABI may drop.
+/// The caller fills `size`, the three pointers and the three capacities; the library fills
+/// the rest. A `len` of zero means nothing to send, which ends the draining loop. Address
+/// buffers are checked before a message is taken. A payload buffer too small leaves the
+/// message queued and offered again: a committed message is never dropped.
 final class SipralTransmit extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
   external int size;
 
-  /// Which transport to write to: SIPRAL_TRANSPORT_MAIN for a stack
-  /// that never bound another, or the number
-  /// sipral_stack_transport_bind gave whichever account or call
-  /// this message belongs to.
+  /// Which transport to write to: SIPRAL_TRANSPORT_MAIN, or a number
+  /// sipral_stack_transport_bind bound for the owning account or call.
   @ffi.Uint32()
   external int transport;
 
-  /// What that transport speaks, as a `SipralTransport`.
-  ///
-  /// Carried because it is the message's and not the socket's: §18.1.1 lets a
-  /// request that outgrew a datagram go out on a stream instead, and the
-  /// transport it ends up on is the one this says. Zero for a protocol this
-  /// ABI has no number for.
+  /// What that transport speaks, as a `SipralTransport`. Per message, since §18.1.1
+  /// can move a request onto a stream. Zero for a protocol with no ABI number.
   @ffi.Uint32()
   external int protocol;
 
-  /// Where to write the message. Nothing is written unless the whole of it
-  /// fits.
+  /// Where to write the message. Nothing is written unless all of it fits.
   external ffi.Pointer<ffi.Uint8> data;
 
   /// How much room `data` has.
   @ffi.Size()
   external int capacity;
 
-  /// How much was written — or, when the call answered
-  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much room the message needs.
+  /// How much was written, or after `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much is needed.
   @ffi.Size()
   external int len;
 
-  /// Where to write the destination, as `host:port` with a trailing NUL. Null
-  /// with a capacity of zero for a caller whose socket is connected and
-  /// already knows.
+  /// Where to write the destination, `host:port` with a trailing NUL. Null with capacity zero
+  /// for a connected socket.
   external ffi.Pointer<ffi.Char> destination;
 
-  /// How much room `destination` has. At least SIPRAL_ADDRESS_BYTES when
-  /// it is not null.
+  /// Room in `destination`: at least SIPRAL_ADDRESS_BYTES when not null.
   @ffi.Size()
   external int destinationCapacity;
 
@@ -5342,17 +4089,12 @@ final class SipralTransmit extends ffi.Struct {
   @ffi.Size()
   external int destinationLen;
 
-  /// Where to write the address to send *from*, in the same shape.
-  ///
-  /// RFC 3581 §4: "The response MUST be sent from the same address and port
-  /// that the corresponding request was received on", which a caller listening
-  /// on a wildcard address cannot work out for itself. Empty — a `source_len`
-  /// of zero — means the transport's own address, which is the answer for
-  /// every request this stack originates.
+  /// Where to write the address to send *from*, in the same shape. RFC 3581 §4: a response
+  /// leaves from the address its request arrived on, which a wildcard listener cannot tell.
+  /// `source_len` zero means the transport's own address.
   external ffi.Pointer<ffi.Char> source;
 
-  /// How much room `source` has. At least SIPRAL_ADDRESS_BYTES when it is
-  /// not null.
+  /// Room in `source`: at least SIPRAL_ADDRESS_BYTES when not null.
   @ffi.Size()
   external int sourceCapacity;
 
@@ -5361,20 +4103,14 @@ final class SipralTransmit extends ffi.Struct {
   external int sourceLen;
 }
 
-/// A transport that failed, and why, for
-/// sipral_stack_transport_failed_with.
-///
-/// The caller fills in all of it. `detail` is the platform's own sentence
-/// — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
-/// is optional; it travels to the event unread and unparsed, so a user's
-/// report can quote it.
+/// A failed transport and why, for sipral_stack_transport_failed_with. All caller-filled;
+/// `detail` is the platform's own optional sentence, passed through unparsed.
 final class SipralTransportFailure extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
   external int size;
 
-  /// Which transport: SIPRAL_TRANSPORT_MAIN, or a number
-  /// sipral_stack_transport_bind added.
+  /// Which transport: SIPRAL_TRANSPORT_MAIN or a bound number.
   @ffi.Uint32()
   external int transport;
 
@@ -5382,14 +4118,11 @@ final class SipralTransportFailure extends ffi.Struct {
   @ffi.Uint32()
   external int error;
 
-  /// A SipralTlsFailure; `SIPRAL_TLS_FAILURE_NONE` for anything
-  /// that was not TLS refusing, and only that on a transport that does
-  /// not speak TLS.
+  /// A SipralTlsFailure; `SIPRAL_TLS_FAILURE_NONE` unless TLS refused.
   @ffi.Uint32()
   external int tls;
 
-  /// The platform's own words for it, not NUL-terminated. Null with a
-  /// length of zero for none.
+  /// The platform's words, not NUL-terminated. Null with length zero for none.
   external ffi.Pointer<ffi.Char> detail;
 
   /// How many bytes of it; at most SIPRAL_TRANSPORT_DETAIL_BYTES.
@@ -5419,16 +4152,13 @@ final class SipralRegistrationEvent extends ffi.Struct {
   @ffi.Uint64()
   external int refreshInMs;
 
-  /// How long until the next attempt. Only meaningful while the state is
-  /// retrying, which is exactly when the stack is going to try again.
+  /// How long until the next attempt; meaningful only while retrying.
   @ffi.Uint64()
   external int retryInMs;
 }
 
-/// What every call event carries.
-///
-/// Not every member means something in every kind, and the ones that do not
-/// are zero. A zero here always reads as absent rather than as a value.
+/// What every call event carries. Members that do not apply are zero,
+/// and zero always means absent.
 final class SipralCallEvent extends ffi.Struct {
   /// A SipralCallState.
   @ffi.Uint32()
@@ -5474,10 +4204,8 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Uint64()
   external int retryInMs;
 
-  /// The `From` URI of the request that created this call: as written in
-  /// the header, without the angle brackets and without header
-  /// parameters such as `tag`. The same on every event of this call.
-  /// Null and zero when this build has none to report.
+  /// The creating request's `From` URI, as written, without brackets or
+  /// header parameters. Null and zero when unavailable.
   external ffi.Pointer<ffi.Uint8> fromUri;
 
   /// How many bytes of it.
@@ -5512,17 +4240,12 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Uint32()
   external int digit;
 
-  /// For SipralEventKind.callEnded: the SIP status the far end's
-  /// `Reason` (RFC 3326) named — on the BYE or the CANCEL that ended
-  /// the call, or on the refusal. 200 on a CANCEL is a forking proxy
-  /// saying another phone answered: not a missed call. Zero when no
-  /// SIP reason was given. ABI 0.29.
+  /// For SipralEventKind.callEnded: the SIP cause in the far end's
+  /// `Reason` (RFC 3326). 200 on a CANCEL means answered elsewhere.
   @ffi.Uint32()
   external int causeSip;
 
-  /// The same for a Q.850 cause, which a gateway to the telephone
-  /// network writes: 16 a normal clearing, 17 a busy line. Zero when
-  /// none was given.
+  /// The Q.850 cause from `Reason` (16 normal, 17 busy), or zero.
   @ffi.Uint32()
   external int causeQ850;
 
@@ -5534,17 +4257,13 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Size()
   external int causeTextLen;
 
-  /// Whether the INVITE of a call that came in arrived from a peer its
-  /// account trusts (`trusted_peers` on `sipral_account_config_t`).
-  /// When it did not, `asserted_uri`, `asserted_display` and
-  /// `verstat` say nothing, whatever it carried (RFC 3325 §8). The same
-  /// on every event of the call; zero for a call this end placed.
+  /// Whether an incoming INVITE came from a `trusted_peers` peer. If not,
+  /// the asserted identity and `verstat` are empty (RFC 3325 §8).
   @ffi.Uint32()
   external int identityTrusted;
 
-  /// Who the network says is calling: the first `P-Asserted-Identity`,
-  /// or a calling `Remote-Party-ID` when there is none, as written.
-  /// Null and zero when a trusted peer said nothing.
+  /// The first `P-Asserted-Identity`, else a `Remote-Party-ID`, as
+  /// written. Null and zero when none.
   external ffi.Pointer<ffi.Uint8> assertedUri;
 
   /// How many bytes of it.
@@ -5567,9 +4286,8 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Uint32()
   external int privacy;
 
-  /// Who the call was last diverted from: the top-most `Diversion`
-  /// (RFC 5806), as written. Null and zero when none.
-  /// `sipral_call_identity_text` reads the rest.
+  /// The top-most `Diversion` (RFC 5806), as written. Null and zero
+  /// when none.
   external ffi.Pointer<ffi.Uint8> divertedFrom;
 
   /// How many bytes of it.
@@ -5610,10 +4328,8 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Uint32()
   external int privAnswerModeRequired;
 
-  /// Whether the call asked to be answered without the user —
-  /// `Answer-Mode: Auto`, `answer-after` on `Call-Info` or
-  /// `Alert-Info`, or `info=alert-autoanswer` — after
-  /// `answer_after_ms`. Whether to is the application's policy.
+  /// Whether the call asked to be auto-answered after `answer_after_ms`
+  /// (`Answer-Mode: Auto`, `answer-after`, `info=alert-autoanswer`).
   @ffi.Uint32()
   external int hasAnswerAfter;
 
@@ -5634,11 +4350,8 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Size()
   external int alertInfoLen;
 
-  /// A SipralVerificationOutcome:
-  /// this stack's own verdict on the caller (RFC 8224 §6.2), for an
-  /// account that verifies; zero when nothing was verified. Unlike
-  /// `verstat`, which is what a network before this end concluded,
-  /// this is what this end checked itself. ABI 0.31.
+  /// A SipralVerificationOutcome: this stack's own verdict (RFC 8224
+  /// §6.2), unlike the network's `verstat`. Zero when not verified.
   @ffi.Uint32()
   external int verification;
 
@@ -5647,9 +4360,7 @@ final class SipralCallEvent extends ffi.Struct {
   @ffi.Uint32()
   external int attestation;
 
-  /// A SipralVerificationFailure:
-  /// why the verdict did not hold. `sipral_call_identity_text` reads
-  /// the number it was signed for, its `origid` and its certificate URL.
+  /// A SipralVerificationFailure: why the verdict did not hold.
   @ffi.Uint32()
   external int verificationFailure;
 }
@@ -5673,10 +4384,7 @@ final class SipralTransferEvent extends ffi.Struct {
   external int targetLen;
 }
 
-/// What a media event carries.
-///
-/// As with a call event, not every member means something in every kind, and
-/// the ones that do not are zero or null.
+/// What a media event carries. Members that do not apply are zero or null.
 final class SipralMediaEvent extends ffi.Struct {
   /// A SipralCodec: what the negotiation
   /// settled on, zero where the event is not about a codec.
@@ -5724,16 +4432,12 @@ final class SipralMediaEvent extends ffi.Struct {
   @ffi.Uint32()
   external int eventCode;
 
-  /// How long the far end held it. Zero either for an `application/dtmf`
-  /// INFO, which carries no duration at all, or for the other form's
-  /// own `Duration=0` — a peer that held the key for no time at all.
-  /// The Rust facade keeps the two apart; this ABI does not.
+  /// How long the key was held. Zero for no duration or `Duration=0`.
   @ffi.Uint64()
   external int heldMs;
 
-  /// A SipralSrtpSuite: the transform
-  /// this call's media is protected with, for
-  /// SipralEventKind.mediaSecured and zero on every other kind.
+  /// A SipralSrtpSuite, for SipralEventKind.mediaSecured and the
+  /// encryption report.
   @ffi.Uint32()
   external int suite;
 
@@ -5743,35 +4447,26 @@ final class SipralMediaEvent extends ffi.Struct {
   external int source;
 
   /// Whether the RFC 6035 PUBLISH left this end, for
-  /// SipralEventKind.qualityReportSent and zero on every other
-  /// kind. Not whether a collector accepted it.
+  /// SipralEventKind.qualityReportSent.
   @ffi.Uint32()
   external int qualityReportSent;
 
-  /// A SipralKeyExchange: how
-  /// the call's keys were exchanged, for
-  /// SipralEventKind.mediaStarted, SipralEventKind.mediaChanged
-  /// and SipralEventKind.mediaSecured, which carry the encryption
-  /// report of the call's stream: this, `encrypted`, `authenticated`,
-  /// and `suite` from then on. ABI 0.31.
+  /// A SipralKeyExchange, on the start, change and secure kinds.
   @ffi.Uint32()
   external int keyExchange;
 
-  /// Whether the stream is encrypted, now. Zero at the start of a
-  /// DTLS-SRTP call, whose keys arrive with
-  /// SipralEventKind.mediaSecured.
+  /// Whether the stream is encrypted now; zero until a DTLS-SRTP
+  /// handshake ends.
   @ffi.Uint32()
   external int encrypted;
 
-  /// Whether the key exchange authenticated the far end: a DTLS-SRTP
-  /// handshake that checked its certificate against the signalled
+  /// Whether DTLS-SRTP checked the far end's certificate against the
   /// fingerprint. Never for SDES.
   @ffi.Uint32()
   external int authenticated;
 }
 
-/// What a SipralEventKind.recovery carries: the lifecycle machine
-/// settling, either by proving the path again or by giving the ladder up.
+/// What a SipralEventKind.recovery carries.
 final class SipralRecoveryEvent extends ffi.Struct {
   /// A SipralRecoveryOutcome.
   @ffi.Uint32()
@@ -5794,16 +4489,9 @@ final class SipralRecoveryEvent extends ffi.Struct {
 }
 
 /// What a SipralEventKind.transportWanted carries: a request RFC
-/// 3261 §18.1.1 would not let out over a datagram, and nowhere open to
-/// send it instead.
+/// 3261 §18.1.1 kept off a datagram, with no stream open for it.
 final class SipralTransportWantedEvent extends ffi.Struct {
-  /// What to open, as a
-  /// SipralTransport. Zero for a
-  /// protocol this build has no number for, which
-  /// `sipral_stack_transport_bind` then cannot be asked to open
-  /// either — nothing this build originates ever measures against a
-  /// protocol like that, so this is the layer below having grown one
-  /// rather than a caller mistake.
+  /// What to open, as a SipralTransport; zero for an unknown one.
   @ffi.Uint32()
   external int protocol;
 
@@ -5814,29 +4502,21 @@ final class SipralTransportWantedEvent extends ffi.Struct {
   @ffi.Size()
   external int destinationLen;
 
-  /// How large the request came out, in bytes as they would have gone
-  /// on the wire.
+  /// The request's size in bytes, as it would go on the wire.
   @ffi.Size()
   external int requestBytes;
 
-  /// The largest it could have been and still fitted a datagram: the
-  /// path MTU less the §18.1.1 headroom where the MTU is known, 1300
-  /// where it is not.
+  /// The largest size that fits a datagram: path MTU less the §18.1.1
+  /// headroom, or 1300 when the MTU is unknown.
   @ffi.Uint32()
   external int limitBytes;
 }
 
 /// What a SipralEventKind.subscriptionChanged and a
 /// SipralEventKind.notified carry.
-///
-/// The subscription names itself here rather than in `sipral_event_t`,
-/// which has room for an account and a call and not for every kind of
-/// handle this ABI mints. The account is not carried at all: a caller
-/// asked for the subscription on one, and a sibling from a fork belongs
-/// to the same one as the subscription it forked from.
 final class SipralSubscriptionEvent extends ffi.Struct {
-  /// Which subscription. Minted by `sipral_account_subscribe`, or by
-  /// this ABI when a fork made one nobody asked for.
+  /// Which subscription, minted by `sipral_account_subscribe` or by this
+  /// ABI for a fork sibling.
   @ffi.Uint64()
   external int subscription;
 
@@ -5854,9 +4534,8 @@ final class SipralSubscriptionEvent extends ffi.Struct {
   @ffi.Uint32()
   external int statusCode;
 
-  /// Whether the notification carried dialog state this build could
-  /// read. Zero on every kind but SipralEventKind.notified, and
-  /// zero there for a body in any other form or none at all.
+  /// Whether the notification carried readable dialog state. Zero on
+  /// every kind but SipralEventKind.notified.
   @ffi.Uint32()
   external int hasDialogInfo;
 
@@ -5869,19 +4548,13 @@ final class SipralSubscriptionEvent extends ffi.Struct {
   external int refreshInMs;
 
   /// How long until the next attempt, in milliseconds, when the state
-  /// is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise, which
-  /// includes every subscription that has ended for good.
+  /// is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise.
   @ffi.Uint64()
   external int retryInMs;
 
-  /// The subscription this one forked from
-  /// ([RFC 6665 §4.1.4]), or `SIPRAL_HANDLE_NONE`. A sibling is a
-  /// subscription of its own from here on, with its own dialog, its own
-  /// refresh and its own state; RFC 4235 §3.9 makes this the normal case
-  /// for dialog state, one per device the watched address is registered
-  /// on.
-  ///
-  /// [RFC 6665 §4.1.4]: https://www.rfc-editor.org/rfc/rfc6665#section-4.1.4
+  /// The subscription this one forked from (RFC 6665 §4.1.4), or
+  /// `SIPRAL_HANDLE_NONE`. A sibling is a full subscription (RFC 4235
+  /// §3.9: one per device).
   @ffi.Uint64()
   external int forkedFrom;
 }
@@ -5889,9 +4562,8 @@ final class SipralSubscriptionEvent extends ffi.Struct {
 /// What a SipralEventKind.callAnnounced and a
 /// SipralEventKind.announcedCallMissing carry.
 final class SipralAnnounceEvent extends ffi.Struct {
-  /// Which announcement. Minted by `sipral_account_announce`, and it
-  /// names nothing once either of these two events has been raised
-  /// about it.
+  /// Which announcement, minted by `sipral_account_announce`. Stale once
+  /// either of these two events has been raised about it.
   @ffi.Uint64()
   external int announcement;
 
@@ -5904,58 +4576,40 @@ final class SipralAnnounceEvent extends ffi.Struct {
 /// What a SipralEventKind.resolveNeeded carries: the name a dialog's
 /// next hop is written as, and the handle an answer takes.
 final class SipralResolveEvent extends ffi.Struct {
-  /// The dialog this is about, and what
+  /// The handle
   /// sipral_stack_resolved
-  /// is answered with. Minted by the library and valid while the dialog
-  /// is; answering for one that has ended is
-  /// `SIPRAL_STATUS_STALE_HANDLE` and changes nothing.
+  /// takes; stale once the dialog ends.
   @ffi.Uint64()
   external int dialog;
 
-  /// The host to resolve, as the URI spells it — a name, or a literal
-  /// address, which is still reported because the flow the dialog is on
-  /// may legitimately differ from it. An IPv6 literal carries its
-  /// brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+  /// The host as the URI spells it; IPv6 literals keep brackets (RFC
+  /// 3261 §19.1.1). Not NUL-terminated.
   external ffi.Pointer<ffi.Char> host;
 
   /// How many bytes of it.
   @ffi.Size()
   external int hostLen;
 
-  /// The port the URI gave, or zero for none. Zero is not 5060: RFC
-  /// 3263 §4.2 leaves the choice to whoever does the lookup, because
-  /// an SRV answer carries a port of its own.
+  /// The URI's port, or zero for none. Zero is not 5060: an SRV answer
+  /// carries its own port (RFC 3263 §4.2).
   @ffi.Uint32()
   external int port;
 
-  /// The transport the URI or the scheme named, as a
-  /// SipralTransport, or zero for
-  /// neither — which leaves §4.1's NAPTR step to the caller, and is
-  /// also what a protocol this build has no number for reads as.
+  /// The transport named, as a SipralTransport, or zero, leaving
+  /// §4.1's NAPTR step to the caller.
   @ffi.Uint32()
   external int protocol;
 }
 
-/// What a SipralEventKind.messageReceived, a
-/// SipralEventKind.messageSent and a
-/// SipralEventKind.messagesWaiting carry.
-///
-/// One struct for all three, the way SipralSubscriptionEvent answers
-/// for two kinds: a member meaningless on one kind is zero or null there.
-/// The whole request or response, when there is one, rides in
-/// `sipral_event_t::message` instead — `attach` points it at the same
-/// bytes `content_type` and `body` are read out of, so both are valid for
-/// exactly as long as the callback is.
+/// What the three message kinds carry; inapplicable members are zero.
+/// `content_type` and `body` point into `sipral_event_t::message`.
 final class SipralMessageEvent extends ffi.Struct {
-  /// SipralEventKind.messageSent: which send, minted by
-  /// `sipral_account_message`. SIPRAL_HANDLE_NONE on the other two
-  /// kinds, and names nothing once this event has been raised about it.
+  /// SipralEventKind.messageSent: which send; stale after this.
   @ffi.Uint64()
   external int message;
 
   /// SipralEventKind.messagesWaiting: which subscription reported
-  /// it. SIPRAL_HANDLE_NONE on the other two kinds, which are not
-  /// subscriptions.
+  /// it. SIPRAL_HANDLE_NONE on the other kinds.
   @ffi.Uint64()
   external int subscription;
 
@@ -5964,9 +4618,8 @@ final class SipralMessageEvent extends ffi.Struct {
   @ffi.Uint32()
   external int statusCode;
 
-  /// SipralEventKind.messageReceived: the `Content-Type` of the
-  /// body, as written. Null on the other two kinds, and on a MESSAGE
-  /// with no body at all.
+  /// SipralEventKind.messageReceived: the body's `Content-Type`, as
+  /// written. Null on the other kinds and for an empty MESSAGE.
   external ffi.Pointer<ffi.Char> contentType;
 
   /// How many bytes of it.
@@ -5982,15 +4635,12 @@ final class SipralMessageEvent extends ffi.Struct {
   external int bodyLen;
 
   /// SipralEventKind.messagesWaiting: RFC 3842 §3.5's status
-  /// line, 1 for `yes` and 0 for `no`. Meaningless on the other two
-  /// kinds.
+  /// line, 1 for `yes` and 0 for `no`.
   @ffi.Uint32()
   external int waiting;
 
-  /// SipralEventKind.messagesWaiting: new messages of the
-  /// `voice-message` class (RFC 3458 §6.2), the one a phone's
-  /// message-waiting light is about. Zero when the body named no
-  /// `voice-message` line, which a boolean-only notification does.
+  /// SipralEventKind.messagesWaiting: new `voice-message` messages
+  /// (RFC 3458 §6.2). Zero when the body had no such line.
   @ffi.Uint32()
   external int newMessages;
 
@@ -6006,10 +4656,8 @@ final class SipralMessageEvent extends ffi.Struct {
   @ffi.Uint32()
   external int urgentOldMessages;
 
-  /// SipralEventKind.messagesWaiting: `Message-Account`, when the
-  /// notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
-  /// subscription to a group or collection of accounts). Null on the
-  /// other two kinds, and on a body that named none.
+  /// SipralEventKind.messagesWaiting: `Message-Account`, when sent
+  /// (RFC 3842 §3.5). Null otherwise.
   external ffi.Pointer<ffi.Char> messageAccount;
 
   /// How many bytes of it.
@@ -6017,31 +4665,22 @@ final class SipralMessageEvent extends ffi.Struct {
   external int messageAccountLen;
 }
 
-/// What a SipralEventKind.natMapping
-/// carries.
-///
-/// The three addresses are `host:port`, not NUL-terminated, and the
-/// library's: valid for as long as the callback runs.
+/// What a SipralEventKind.natMapping carries.
+/// The addresses are `host:port`, not NUL-terminated, valid only during the callback.
 final class SipralNatEvent extends ffi.Struct {
   /// A SipralNatMapping.
   @ffi.Uint32()
   external int mapping;
 
-  /// Nonzero for a signalling socket — a transport of this stack's —
-  /// and zero for a media socket sipral_stack_nat_map named.
+  /// Nonzero for a signalling socket, zero for a media socket.
   @ffi.Uint32()
   external int signalling;
 
-  /// The transport, when `signalling` is nonzero: `SIPRAL_TRANSPORT_MAIN`
-  /// or a number `sipral_stack_transport_bind` bound. Zero otherwise,
-  /// which is not a transport here.
+  /// The transport, when `signalling` is nonzero; zero otherwise.
   @ffi.Uint32()
   external int transport;
 
-  /// How many accounts' `Contact` moved to `public` because of this —
-  /// each one that holds a binding, or is getting one, has registered it
-  /// already. Zero for a media socket, and for an answer no account's
-  /// `Contact` named the socket in.
+  /// How many accounts' `Contact` moved to `public`; bound ones have registered it already.
   @ffi.Uint32()
   external int accounts;
 
@@ -6052,16 +4691,14 @@ final class SipralNatEvent extends ffi.Struct {
   @ffi.Size()
   external int localLen;
 
-  /// Where the server saw it: the public address. Empty for
-  /// `SIPRAL_NAT_MAPPING_UNANSWERED`.
+  /// The public address. Empty for `SIPRAL_NAT_MAPPING_UNANSWERED`.
   external ffi.Pointer<ffi.Char> mapped;
 
   /// How many bytes of it.
   @ffi.Size()
   external int mappedLen;
 
-  /// What it was before, for `SIPRAL_NAT_MAPPING_MOVED`. Empty
-  /// otherwise.
+  /// The old address, for `SIPRAL_NAT_MAPPING_MOVED`. Empty otherwise.
   external ffi.Pointer<ffi.Char> previous;
 
   /// How many bytes of it.
@@ -6069,22 +4706,15 @@ final class SipralNatEvent extends ffi.Struct {
   external int previousLen;
 }
 
-/// What a SipralEventKind.natRelay
-/// carries.
-///
-/// The addresses and the reason are text, not NUL-terminated, and the
-/// library's: valid for as long as the callback runs. Nothing of the
-/// credential is in any of them.
+/// What a SipralEventKind.natRelay carries.
+/// Text is not NUL-terminated, valid only during the callback, and holds no credential.
 final class SipralNatRelayEvent extends ffi.Struct {
   /// A SipralNatRelay.
   @ffi.Uint32()
   external int outcome;
 
-  /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code the server
-  /// refused with — 401 for a credential it does not accept, 486 for a
-  /// user at its allocation quota, 508 for a server with nothing left —
-  /// and zero when there was none: no answer at all, or an answer this
-  /// end could not accept. Zero for `SIPRAL_NAT_RELAY_ALLOCATED`.
+  /// For `SIPRAL_NAT_RELAY_FAILED`, the STUN error code (401 bad credential, 486 quota, 508
+  /// no capacity), or zero when there was no usable answer. Zero for `ALLOCATED`.
   @ffi.Uint32()
   external int code;
 
@@ -6095,24 +4725,21 @@ final class SipralNatRelayEvent extends ffi.Struct {
   @ffi.Size()
   external int localLen;
 
-  /// The relayed address, `host:port`. Empty for
-  /// `SIPRAL_NAT_RELAY_FAILED`.
+  /// The relayed `host:port`. Empty for `SIPRAL_NAT_RELAY_FAILED`.
   external ffi.Pointer<ffi.Char> relayed;
 
   /// How many bytes of it.
   @ffi.Size()
   external int relayedLen;
 
-  /// Where the server saw the socket from, when it said. Empty
-  /// otherwise.
+  /// Where the server saw the socket from, when it said. Empty otherwise.
   external ffi.Pointer<ffi.Char> mapped;
 
   /// How many bytes of it.
   @ffi.Size()
   external int mappedLen;
 
-  /// Why there is no relay, in English, for a log. Empty for
-  /// `SIPRAL_NAT_RELAY_ALLOCATED`.
+  /// Why there is no relay, in English. Empty for `SIPRAL_NAT_RELAY_ALLOCATED`.
   external ffi.Pointer<ffi.Char> reason;
 
   /// How many bytes of it.
@@ -6123,16 +4750,13 @@ final class SipralNatRelayEvent extends ffi.Struct {
 /// What a SipralEventKind.referral carries: a REFER outside any
 /// dialog, or the word that one lapsed.
 final class SipralReferralEvent extends ffi.Struct {
-  /// Zero while the referral waits for the application. Set on the
-  /// event that says it lapsed, to what the stack answered it with —
-  /// 408, once its transaction ran out unanswered — and then every
-  /// other member is zero or null.
+  /// Zero while the referral waits. On the lapse event, the status the
+  /// stack answered (408), and every other member is zero or null.
   @ffi.Uint32()
   external int statusCode;
 
-  /// Whether its `Refer-To` named a dialog to replace (RFC 3891), which
-  /// makes it an attended transfer's second half rather than a plain
-  /// request to dial.
+  /// Whether `Refer-To` named a dialog to replace (RFC 3891): an
+  /// attended transfer.
   @ffi.Uint32()
   external int attended;
 
@@ -6143,10 +4767,8 @@ final class SipralReferralEvent extends ffi.Struct {
   @ffi.Size()
   external int targetLen;
 
-  /// Its `Referred-By` (RFC 3892), as UTF-8 and as the sender wrote it:
-  /// who it says is asking. Context for the decision, never proof of
-  /// anything. Null when the REFER carried none, or more than the one
-  /// §2.1 allows. Not NUL-terminated.
+  /// Its `Referred-By` (RFC 3892), UTF-8, unverified. Null when absent or
+  /// repeated (§2.1). Not NUL-terminated.
   external ffi.Pointer<ffi.Char> referredBy;
 
   /// How many bytes of it.
@@ -6154,23 +4776,18 @@ final class SipralReferralEvent extends ffi.Struct {
   external int referredByLen;
 }
 
-/// What a SipralEventKind.turnStream
-/// carries.
-///
-/// The addresses are text, not NUL-terminated, and the library's: valid
-/// for as long as the callback runs.
+/// What a SipralEventKind.turnStream carries.
+/// Addresses are not NUL-terminated, valid only during the callback.
 final class SipralTurnStreamEvent extends ffi.Struct {
   /// A SipralTurnStream.
   @ffi.Uint32()
   external int state;
 
-  /// What to open, as a `SipralTransport`: `SIPRAL_TRANSPORT_TCP` or
-  /// `SIPRAL_TRANSPORT_TLS`, what `turn_transport` named.
+  /// `SIPRAL_TRANSPORT_TCP` or `SIPRAL_TRANSPORT_TLS`, as `turn_transport` named.
   @ffi.Uint32()
   external int protocol;
 
-  /// The media socket, as `sipral_stack_nat_map` named it: the
-  /// connection's own name in the three calls that take one.
+  /// The media socket; the connection's name in the calls that take one.
   external ffi.Pointer<ffi.Char> local;
 
   /// How many bytes of it.
@@ -6204,32 +4821,26 @@ final class SipralAudioEvent extends ffi.Struct {
   @ffi.Uint32()
   external int direction;
 
-  /// The device the change is about — the one a role landed on, or
-  /// the one that went — or zero.
+  /// The device the change is about, or zero.
   @ffi.Uint32()
   external int device;
 }
 
-/// What a SipralEventKind.stunServer
-/// carries.
-///
-/// The addresses are `host:port`, not NUL-terminated, and the library's:
-/// valid for as long as the callback runs.
+/// What a SipralEventKind.stunServer carries.
+/// Addresses are not NUL-terminated, valid only during the callback.
 final class SipralStunServerEvent extends ffi.Struct {
   /// A SipralStunServerState.
   @ffi.Uint32()
   external int state;
 
-  /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server in use now; for
-  /// `SIPRAL_STUN_SERVER_STATE_ALL_FAILED`, the last one that failed.
+  /// The server in use now (`CHANGED`) or the last that failed (`ALL_FAILED`).
   external ffi.Pointer<ffi.Char> server;
 
   /// How many bytes of it.
   @ffi.Size()
   external int serverLen;
 
-  /// For `SIPRAL_STUN_SERVER_STATE_CHANGED`, the server that was in use.
-  /// Empty otherwise.
+  /// For `CHANGED`, the previous server. Empty otherwise.
   external ffi.Pointer<ffi.Char> previous;
 
   /// How many bytes of it.
@@ -6275,9 +4886,8 @@ final class SipralVerificationEvent extends ffi.Struct {
   @ffi.Uint32()
   external int refused;
 
-  /// The URL of the certificate: the one to fetch, or the one that was
-  /// verified. UTF-8, not NUL-terminated; null and zero when there is
-  /// none.
+  /// The certificate URL: to fetch, or that was verified. UTF-8, not
+  /// NUL-terminated; null and zero when none.
   external ffi.Pointer<ffi.Char> certificateUrl;
 
   /// How many bytes of it.
@@ -6326,9 +4936,7 @@ final class SipralProgressEvent extends ffi.Struct {
   @ffi.Uint32()
   external int reason;
 
-  /// When, in milliseconds: a tone's first burst from the first frame
-  /// listened to; the decision after answer; the beep's end after
-  /// answer.
+  /// When, in milliseconds: the tone's first burst, or after answer.
   @ffi.Uint64()
   external int atMs;
 
@@ -6388,8 +4996,7 @@ final class SipralConferenceEvent extends ffi.Struct {
   @ffi.Uint32()
   external int update;
 
-  /// The version of the document the picture is at now; zero once the
-  /// conference ended.
+  /// The current document version; zero once ended.
   @ffi.Uint32()
   external int version;
 
@@ -6398,10 +5005,8 @@ final class SipralConferenceEvent extends ffi.Struct {
   external int users;
 }
 
-/// What a SipralEventKind.textReceived carries.
-///
-/// The text points into the event and is valid for as long as the
-/// callback is.
+/// What a SipralEventKind.textReceived carries; the
+/// text is valid during the callback.
 final class SipralTextEvent extends ffi.Struct {
   /// What the far end typed, UTF-8, not NUL-terminated.
   external ffi.Pointer<ffi.Char> text;
@@ -6410,25 +5015,20 @@ final class SipralTextEvent extends ffi.Struct {
   @ffi.Size()
   external int textLen;
 
-  /// How many blocks of text were lost with no redundant copy to
-  /// recover them, each marked in `text` by a REPLACEMENT CHARACTER
-  /// (U+FFFD) where it fell.
+  /// Unrecoverable lost blocks, each marked in `text` by U+FFFD.
   @ffi.Uint32()
   external int missing;
 }
 
-/// What a SipralEventKind.presenceChanged carries.
-///
-/// The text points into the event and is valid for as long as the
-/// callback is.
+/// What a SipralEventKind.presenceChanged carries. The
+/// text is valid only during the callback.
 final class SipralPresenceEvent extends ffi.Struct {
   /// A SipralPresenceKind.
   @ffi.Uint32()
   external int kind;
 
-  /// SipralPresenceKind.watched: which subscription.
-  /// `SIPRAL_HANDLE_NONE` for a publication, whose account is the
-  /// event's `account`.
+  /// SipralPresenceKind.watched: which subscription;
+  /// `SIPRAL_HANDLE_NONE` for a publication.
   @ffi.Uint64()
   external int subscription;
 
@@ -6483,13 +5083,10 @@ final class SipralPresenceEvent extends ffi.Struct {
   external int refreshInMs;
 }
 
-/// The payload of `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a transport this
-/// stack signals on stopped carrying traffic.
-///
-/// The text is the library's, valid for as long as the callback runs.
+/// `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: a signalling transport stopped carrying traffic.
+/// The text is the library's, valid during the callback.
 final class SipralTransportFailedEvent extends ffi.Struct {
-  /// Which transport: SIPRAL_TRANSPORT_MAIN, or a number
-  /// sipral_stack_transport_bind added.
+  /// Which transport: SIPRAL_TRANSPORT_MAIN or a bound number.
   @ffi.Uint32()
   external int transport;
 
@@ -6497,17 +5094,15 @@ final class SipralTransportFailedEvent extends ffi.Struct {
   @ffi.Uint32()
   external int protocol;
 
-  /// A SipralTransportError: what the application said went wrong,
-  /// `SIPRAL_TRANSPORT_ERROR_CLOSED` for a connection that closed.
+  /// A SipralTransportError; `SIPRAL_TRANSPORT_ERROR_CLOSED` for a closed connection.
   @ffi.Uint32()
   external int error;
 
-  /// A SipralTlsFailure: why TLS refused, when that is what it was.
+  /// A SipralTlsFailure, when TLS refused.
   @ffi.Uint32()
   external int tls;
 
-  /// The platform's own sentence, as the application handed it over.
-  /// Null with a length of zero when it gave none.
+  /// The platform's sentence as handed over. Null with length zero for none.
   external ffi.Pointer<ffi.Char> detail;
 
   /// How many bytes of it.
@@ -6529,8 +5124,8 @@ final class SipralLocalConferenceEvent extends ffi.Struct {
   @ffi.Uint32()
   external int departure;
 
-  /// Who joined or left: a call, or the conference's own handle for
-  /// this end. `SIPRAL_HANDLE_NONE` for the other changes.
+  /// Who joined or left (a call, or the conference handle for this end);
+  /// `SIPRAL_HANDLE_NONE` otherwise.
   @ffi.Uint64()
   external int member;
 
@@ -6552,10 +5147,8 @@ final class SipralLocalConferenceEvent extends ffi.Struct {
 /// and a SipralEventKind.locateFailed
 /// carry, the account being `sipral_event_t::account`.
 ///
-/// One struct for the three, the way `sipral_subscription_event_t`
-/// answers for two kinds: a member meaningless on one kind is zero or
-/// null there. Every pointer is the library's, valid for the duration of
-/// the callback.
+/// A member meaningless on a kind is zero or null. Every pointer is the
+/// library's, valid for the duration of the callback.
 final class SipralLocateEvent extends ffi.Struct {
   /// A SipralDnsRecordType: what to ask `name` for, on a lookup.
   @ffi.Uint32()
@@ -6574,41 +5167,37 @@ final class SipralLocateEvent extends ffi.Struct {
   @ffi.Size()
   external int nameLen;
 
-  /// Where the account's server was located: every address the answer
-  /// named, as `host:port` separated by commas, in RFC 3263 section
-  /// 4.3's order from the one the account's requests go to now. UTF-8,
-  /// not NUL-terminated.
+  /// Every located address, comma-separated `host:port`, in RFC 3263
+  /// section 4.3 order, the one in use first. UTF-8, not NUL-terminated.
   external ffi.Pointer<ffi.Char> targets;
 
   /// How many bytes of it.
   @ffi.Size()
   external int targetsLen;
 
-  /// When the name is looked up again after a failure, in
-  /// milliseconds. An address an earlier answer named stays in use
-  /// meanwhile.
+  /// Milliseconds until the retry after a failure; an earlier address
+  /// stays in use meanwhile.
   @ffi.Uint64()
   external int retryInMs;
 }
 
 /// What a SipralEventKind.challengeDeclined carries: who asked for
-/// the account's password, and why it was not given (ABI 0.36).
+/// the account's password, and why it was not given.
 final class SipralChallengeEvent extends ffi.Struct {
   /// A SipralChallengeRefusal.
   @ffi.Uint32()
   external int refusal;
 
-  /// Where the challenged request went, and the refusal came from, as
-  /// `host:port`. Not NUL-terminated.
+  /// Where the challenged request went, as `host:port`. Not
+  /// NUL-terminated.
   external ffi.Pointer<ffi.Char> server;
 
   /// How many bytes of it.
   @ffi.Size()
   external int serverLen;
 
-  /// The realms it was challenged for, each on a line of its own,
-  /// separated by line feeds: a realm may hold a comma, and never a
-  /// line break. UTF-8, not NUL-terminated.
+  /// The challenged realms, separated by line feeds (a realm may hold a
+  /// comma, never a line break). UTF-8, not NUL-terminated.
   external ffi.Pointer<ffi.Char> realms;
 
   /// How many bytes of it.
@@ -6616,23 +5205,18 @@ final class SipralChallengeEvent extends ffi.Struct {
   external int realmsLen;
 }
 
-/// What a SipralEventKind.tokenRequired carries: the `Bearer`
-/// challenge of an account's server (RFC 8898 §4), and where it came
-/// from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
-/// server left out is empty.
+/// What a SipralEventKind.tokenRequired carries (RFC 8898 §4).
+/// Texts are UTF-8, not NUL-terminated, empty when absent.
 final class SipralTokenEvent extends ffi.Struct {
   /// A SipralTokenError.
   @ffi.Uint32()
   external int error;
 
-  /// A `SipralToggle`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
-  /// answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
-  /// registrar or the far end did (401).
+  /// A `SipralToggle`: on for a proxy's 407, off for a 401.
   @ffi.Uint32()
   external int proxy;
 
-  /// Where the challenged request went, and the challenge came from,
-  /// as `host:port`.
+  /// Where the challenged request went, as `host:port`.
   external ffi.Pointer<ffi.Char> server;
 
   /// How many bytes of it.
@@ -6654,8 +5238,7 @@ final class SipralTokenEvent extends ffi.Struct {
   @ffi.Size()
   external int scopeLen;
 
-  /// The authorization server: an `https` URI. A value that was not
-  /// one is left out.
+  /// The authorization server: an `https` URI, or empty if it was not one.
   external ffi.Pointer<ffi.Char> authzServer;
 
   /// How many bytes of it.
@@ -6671,11 +5254,9 @@ final class SipralTokenEvent extends ffi.Struct {
 }
 
 /// What a SipralEventKind.networkTest
-/// carries: every part of one test, and the verdict (ABI 1.2). The
-/// event's `account` is the account probed and its `call` the echo call,
-/// when there were any. The two addresses are `host:port`, not
-/// NUL-terminated, and the library's: valid for as long as the callback
-/// runs.
+/// carries (ABI 1.2). The event's `account` and `call` are the probed
+/// account and the echo call. The addresses are `host:port`, not
+/// NUL-terminated, owned by the library, valid during the callback.
 final class SipralNetworkTestEvent extends ffi.Struct {
   /// The number sipral_stack_network_test gave the test.
   @ffi.Uint32()
@@ -6693,13 +5274,11 @@ final class SipralNetworkTestEvent extends ffi.Struct {
   @ffi.Uint32()
   external int nat;
 
-  /// A SipralNetworkProbe: whether the TURN server allocated a
-  /// relay for the probe socket.
+  /// A SipralNetworkProbe: whether a TURN relay was allocated.
   @ffi.Uint32()
   external int turn;
 
-  /// A `SipralTransport`: what the TURN server was reached over, or
-  /// zero when it was not tested.
+  /// A `SipralTransport` the TURN server was reached over, or zero.
   @ffi.Uint32()
   external int turnProtocol;
 
@@ -6715,9 +5294,7 @@ final class SipralNetworkTestEvent extends ffi.Struct {
   @ffi.Uint32()
   external int serverRoundTripMs;
 
-  /// A SipralNetworkProbe: whether audio came back on the echo call
-  /// and was measured. Failed for a call whose media never started, or
-  /// that brought nothing back.
+  /// A SipralNetworkProbe: whether echo audio came back.
   @ffi.Uint32()
   external int echo;
 
@@ -6741,8 +5318,7 @@ final class SipralNetworkTestEvent extends ffi.Struct {
   @ffi.Uint32()
   external int roundTripMs;
 
-  /// The one-way delay the rating assumed: half the round trip and the
-  /// jitter buffer's delay, in milliseconds.
+  /// Half the round trip plus jitter buffer delay, in milliseconds.
   @ffi.Uint32()
   external int oneWayDelayMs;
 
@@ -6750,13 +5326,11 @@ final class SipralNetworkTestEvent extends ffi.Struct {
   @ffi.Uint32()
   external int rFactor;
 
-  /// The conversational mean opinion score estimated from it, 1.0 to
-  /// 4.5.
+  /// Conversational MOS estimated from R, 1.0 to 4.5.
   @ffi.Float()
   external double mos;
 
-  /// The socket the STUN answer was about: the probe socket, or the
-  /// signalling socket.
+  /// The socket the STUN answer was about.
   external ffi.Pointer<ffi.Char> local;
 
   /// How many bytes of it.
@@ -6771,13 +5345,8 @@ final class SipralNetworkTestEvent extends ffi.Struct {
   external int mappedLen;
 }
 
-/// The arm of an event that its kind names.
-///
-/// The whole union is zeroed before that one arm is written, so every
-/// byte past the arm, and every byte of another arm, reads as zero —
-/// which is what a member appended to an arm later reads as from a
-/// library built before it. Another arm still means nothing for this
-/// kind.
+/// The arm of an event that its kind names. The rest of the union is
+/// zeroed, so members appended later read as zero.
 final class SipralEventPayload extends ffi.Union {
   /// For SipralEventKind.registrationChanged.
   external SipralRegistrationEvent registration;
@@ -6785,13 +5354,10 @@ final class SipralEventPayload extends ffi.Union {
   /// For every call kind.
   external SipralCallEvent call;
 
-  /// For SipralEventKind.transferRequested,
-  /// SipralEventKind.transferProgress and
-  /// SipralEventKind.transferDone.
+  /// For the three transfer kinds.
   external SipralTransferEvent transfer;
 
-  /// For every media kind: started, changed, stalled, resumed, failed, the
-  /// end-of-call statistics, and a recording that stopped by itself.
+  /// For every media kind.
   external SipralMediaEvent media;
 
   /// For SipralEventKind.recovery.
@@ -6811,9 +5377,7 @@ final class SipralEventPayload extends ffi.Union {
   /// For SipralEventKind.resolveNeeded.
   external SipralResolveEvent resolve;
 
-  /// For SipralEventKind.messageReceived,
-  /// SipralEventKind.messageSent and
-  /// SipralEventKind.messagesWaiting.
+  /// For the three message kinds.
   external SipralMessageEvent message;
 
   /// For SipralEventKind.natMapping.
@@ -6871,11 +5435,8 @@ final class SipralEventPayload extends ffi.Union {
 
 /// Something the library has to tell the application.
 ///
-/// The pointer handed to the callback is the library's, and it is valid for
-/// the duration of that call and no longer. `size` says how much of the
-/// struct this build filled in, and a binding reads no further than that. The
-/// union stays the last member for the same reason: an arm that grows grows
-/// the tail, which is the one place a released struct may change.
+/// Library-owned, valid for the callback only. Read no further than
+/// `size`; the union stays last so growth only extends the tail.
 final class SipralEvent extends ffi.Struct {
   /// How many bytes of this struct are meaningful.
   @ffi.Size()
@@ -6897,11 +5458,7 @@ final class SipralEvent extends ffi.Struct {
   @ffi.Uint64()
   external int call;
 
-  /// The SIP message behind it, whole and unparsed, when there is one.
-  ///
-  /// A reason phrase, a `Retry-After`, the `Contact` of a redirect and the
-  /// caller's display name all live here and none of them is worth a member
-  /// of its own. Null when the event came from no single message.
+  /// The SIP message behind it, whole and unparsed, or null.
   external ffi.Pointer<ffi.Uint8> message;
 
   /// How many bytes of it.
@@ -6912,16 +5469,11 @@ final class SipralEvent extends ffi.Struct {
   external SipralEventPayload payload;
 }
 
-/// What was standing when the process was told it is about to stop
-/// (sipral_stack_suspending's `out_report`).
+/// What was standing when sipral_stack_suspending was called. Set
+/// `size` to `sizeof(sipral_suspending_t)` first.
 ///
-/// Set `size` to `sizeof(sipral_suspending_t)` before the call. Counts
-/// and nothing else, because the window this is produced in is one where
-/// an allocation that grows with the number of accounts is a cost with no
-/// upper bound worth paying. Everything in it is already past tense by
-/// the time it is read: the bindings have stopped being evidence, the
-/// subscriptions have stopped being evidence, and nothing was sent about
-/// either.
+/// Counts only: no allocation in the suspend window. All of it is past
+/// tense when read, and nothing was sent about any of it.
 final class SipralSuspending extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -6935,24 +5487,18 @@ final class SipralSuspending extends ffi.Struct {
   @ffi.Size()
   external int subscriptions;
 
-  /// Calls that were up. Nothing was sent about them and nothing was
-  /// changed: a lid closing and opening again is seconds, and hanging
-  /// up a live call because the machine blinked is worse than finding
-  /// out a few seconds later that it is gone.
+  /// Calls that were up, left untouched: hanging up because the machine
+  /// blinked is worse than learning later that a call is gone.
   @ffi.Size()
   external int calls;
 }
 
 /// What SipralScreenCallback reads about one INVITE, before it has
-/// had any effect at all.
+/// had any effect.
 ///
-/// Filled by the library and handed to the callback as a `const`
-/// pointer, the same shape SipralEvent is: read `size`
-/// before anything past it, and read nothing once the callback has
-/// returned, since `message` — and `source`, when it is not null —
-/// borrow from a request that is still in the middle of being processed
-/// and are not this ABI's to keep alive a moment longer. The answer does
-/// not travel in here: the callback returns it.
+/// Read `size` first, like SipralEvent. `message` and
+/// `source` borrow from a request still being processed: read nothing after
+/// the callback returns.
 final class SipralScreenRequest extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -6962,18 +5508,16 @@ final class SipralScreenRequest extends ffi.Struct {
   @ffi.Uint64()
   external int stack;
 
-  /// The far end of the bytes it arrived in, as `host:port` — the same
-  /// text form every address in this ABI takes. Null and zero for a
-  /// byte stream the application bound without naming its far end.
+  /// The far end of the bytes, as `host:port`. Null and zero for a byte
+  /// stream bound without naming its far end.
   external ffi.Pointer<ffi.Char> source;
 
   /// How many bytes of it.
   @ffi.Size()
   external int sourceLen;
 
-  /// The INVITE, whole and unparsed. `sipral_message_header` and its
-  /// three companions read any header out of these bytes the way they
-  /// read any other message this ABI hands over.
+  /// The INVITE, whole and unparsed; `sipral_message_header` and its
+  /// companions read headers out of it.
   external ffi.Pointer<ffi.Uint8> message;
 
   /// How many bytes of it.
@@ -6981,10 +5525,9 @@ final class SipralScreenRequest extends ffi.Struct {
   external int messageLen;
 }
 
-/// What to watch, and how. Handed to sipral_account_subscribe.
-///
-/// Set `size` to `sizeof(sipral_subscribe_config_t)` before the call.
-/// Everything but `target` and `package` may be left zero.
+/// What to watch, and how. Handed to sipral_account_subscribe. Set
+/// `size` to `sizeof(sipral_subscribe_config_t)`; all but `target` and
+/// `package` may be zero.
 final class SipralSubscribeConfig extends ffi.Struct {
   /// How long this struct is, as the caller's header declares it.
   @ffi.Size()
@@ -6997,12 +5540,9 @@ final class SipralSubscribeConfig extends ffi.Struct {
   @ffi.Size()
   external int targetLen;
 
-  /// The event package, as the token that names it: `dialog` for a busy
-  /// lamp field (RFC 4235 §3.1), `message-summary` for message waiting
-  /// (RFC 3842 §3), `presence` (RFC 3856 §6.1).
-  ///
-  /// It goes out exactly as written here, because §8.2.1 compares it
-  /// byte for byte.
+  /// The event package token: `dialog` for a busy lamp field (RFC 4235
+  /// §3.1), `message-summary` (RFC 3842 §3), `presence` (RFC 3856 §6.1).
+  /// Sent exactly as written, since §8.2.1 compares it byte for byte.
   external ffi.Pointer<ffi.Char> package;
 
   /// How many bytes of it.
@@ -7010,59 +5550,41 @@ final class SipralSubscribeConfig extends ffi.Struct {
   external int packageLen;
 
   /// The `Accept` value, when the package's default body type is not
-  /// the one wanted. Null sends no `Accept` at all, which §3.1.3 makes
-  /// the package's default — `application/dialog-info+xml` for
-  /// `dialog`.
-  ///
-  /// Sending the wrong one is worse than sending none: §4.1.2.1 has the
-  /// notifier answer 406 for a type it cannot generate, so nothing is
-  /// guessed on a caller's behalf.
+  /// wanted. Null sends none, which means the default (§3.1.3); a wrong
+  /// one gets 406 (§4.1.2.1), so nothing is guessed.
   external ffi.Pointer<ffi.Char> accept;
 
   /// How many bytes of it.
   @ffi.Size()
   external int acceptLen;
 
-  /// How long to ask for, in seconds, or zero for this build's default
-  /// of one hour.
-  ///
-  /// What the notifier grants wins (§3.1.1: "The period of time in the
-  /// response is the one that defines the duration of the
-  /// subscription"), and the refresh is scheduled against that rather
-  /// than against this.
+  /// Seconds to ask for, or zero for one hour. The notifier's grant wins
+  /// (§3.1.1), and the refresh follows the grant.
   @ffi.Uint32()
   external int expiresSeconds;
 
-  /// Where to send the SUBSCRIBE, as `host:port`, or null to send it
-  /// where the account registers — which is the outbound proxy for a
-  /// registered line, and the reason a phone behind a NAT is reachable
-  /// at all.
+  /// Where to send the SUBSCRIBE, as `host:port`, or null for where the
+  /// account registers (the outbound proxy, which keeps NAT working).
   external ffi.Pointer<ffi.Char> destination;
 
   /// How many bytes of it.
   @ffi.Size()
   external int destinationLen;
 
-  /// Which transport it goes out on, read only together with
-  /// `destination`, exactly as `sipral_call_config_t::transport` is.
-  /// Nonzero with `destination` null is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+  /// The transport, read only with `destination`, as
+  /// `sipral_call_config_t::transport` is. Nonzero without `destination`
+  /// is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   @ffi.Uint32()
   external int transport;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. Set it to zero; the library reads nothing from
-  /// it.
+  /// Zero. Pads the struct to a multiple of its alignment, so a member
+  /// appended later never lands in padding. Never read.
   @ffi.Uint32()
   external int reserved;
 }
 
-/// One dialog a `dialog` subscription has been told about, with the text
-/// left behind: sipral_subscription_dialog_text reads that, because a
-/// pointer into this library's own memory would be a pointer a caller
-/// could outlive.
+/// One dialog a `dialog` subscription was told about. Its text is read
+/// with sipral_subscription_dialog_text, so no pointer can dangle.
 final class SipralWatchedDialog extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7080,13 +5602,11 @@ final class SipralWatchedDialog extends ffi.Struct {
   @ffi.Uint32()
   external int ended;
 
-  /// The SIP status behind how it ended, when the notifier sent one.
-  /// Zero otherwise.
+  /// The SIP status behind how it ended, or zero.
   @ffi.Uint32()
   external int statusCode;
 
-  /// How long it has been up, in milliseconds, when the notifier sent a
-  /// duration. Zero otherwise.
+  /// How long it has been up, in milliseconds, or zero.
   @ffi.Uint64()
   external int durationMs;
 }
@@ -7098,11 +5618,8 @@ final class SipralPushEcho extends ffi.Struct {
   @ffi.Size()
   external int size;
 
-  /// Whether the network said it will ask for notifications of the type
-  /// this account asked for. Zero means it did not say so, which §4.1.1
-  /// makes "MUST NOT assume they are coming" rather than "they are not":
-  /// an application that suspends itself on the strength of a push it
-  /// was never promised stops ringing.
+  /// Whether the network promised pushes of the requested type. Zero
+  /// means not promised (§4.1.1): do not suspend relying on a push.
   @ffi.Uint32()
   external int accepted;
 
@@ -7110,18 +5627,14 @@ final class SipralPushEcho extends ffi.Struct {
   @ffi.Uint32()
   external int hasRefreshLead;
 
-  /// How long before the binding lapses the network insists on seeing a
-  /// refresh, from a `sip.pnsreg` indicator (§4.1.4), in milliseconds.
-  /// Zero when the network sent none, which `has_refresh_lead` is how to
-  /// tell from a lead of zero.
+  /// How long before expiry the network wants a refresh, from
+  /// `sip.pnsreg` (§4.1.4), in milliseconds; zero when not sent.
   @ffi.Uint64()
   external int refreshLeadMs;
 }
 
-/// One device, as `sipral_audio_device_at` fills it in. The name is
-/// written beside it, into the caller's buffer.
-///
-/// Set `size` to `sizeof(sipral_audio_device_t)` before the call.
+/// One device, as `sipral_audio_device_at` fills it in. Set `size` to
+/// `sizeof(sipral_audio_device_t)` before the call.
 final class SipralAudioDevice extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7132,8 +5645,7 @@ final class SipralAudioDevice extends ffi.Struct {
   @ffi.Uint32()
   external int id;
 
-  /// How many channels it captures; zero for a device that is no
-  /// microphone.
+  /// Channels it captures; zero for a device that is no microphone.
   @ffi.Uint32()
   external int inputChannels;
 
@@ -7149,16 +5661,14 @@ final class SipralAudioDevice extends ffi.Struct {
   @ffi.Uint32()
   external int defaultOutput;
 
-  /// One when the last refresh still found it. A device that went
-  /// keeps its row and its id, so that a selection saved against it
-  /// still names something.
+  /// One when the last refresh found it. An absent device keeps its row
+  /// and id, so a saved selection still names something.
   @ffi.Uint32()
   external int present;
 }
 
-/// What the engine is doing, as `sipral_audio_info` fills it in.
-///
-/// Set `size` to `sizeof(sipral_audio_info_t)` before the call.
+/// What the engine is doing, as `sipral_audio_info` fills it in. Set
+/// `size` to `sizeof(sipral_audio_info_t)` before the call.
 final class SipralAudioInfo extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7168,16 +5678,11 @@ final class SipralAudioInfo extends ffi.Struct {
   @ffi.Uint32()
   external int active;
 
-  /// One when the platform's own processing sits behind the
-  /// microphone: the voice-processing unit on macOS and iOS, which
-  /// cancels the loudspeaker's echo itself; on Windows, a stream
-  /// accepted as a communications stream, which puts the endpoint's
-  /// own processing behind it where the endpoint has any — a virtual
-  /// cable has none, and cancels nothing. An application that wants
-  /// the echo gone regardless attaches a processor to each call with
-  /// `sipral_media_attach_processor`; the delay it needs is
-  /// `render_delay_ms`, and the engine tells each managed call that
-  /// number itself, again after every device change.
+  /// One when the platform's own processing sits behind the microphone:
+  /// the voice-processing unit on macOS and iOS, a communications stream
+  /// on Windows (a virtual cable cancels nothing). For echo removal
+  /// regardless, attach a processor per call; the engine tells each
+  /// managed call `render_delay_ms` itself, after every device change.
   @ffi.Uint32()
   external int systemEchoCancellation;
 
@@ -7207,25 +5712,19 @@ final class SipralAudioInfo extends ffi.Struct {
   @ffi.Uint32()
   external int ringer;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads the struct to a multiple of its alignment, so a member
+  /// appended later never lands in padding. Written zero, never read.
   @ffi.Uint32()
   external int reserved;
 }
 
-/// One packet the engine encoded from the microphone, handed to
+/// One packet the engine encoded, handed to
 /// `sipral_stack_config_t::audio_transmit_callback`: send it from the
 /// call's media socket and return.
 ///
-/// Filled by the library and handed to the callback as a `const`
-/// pointer, the shape `sipral_processor_frame_t` is: read `size` before
-/// anything past it, and read nothing once the callback has returned.
-/// The callback runs on the engine's own thread, once per frame per
-/// call; it may call `sipral_media_receive` and the other media entry
-/// points, and must not destroy the stack.
+/// Read `size` before anything past it, and nothing once the callback
+/// returns. The callback runs on the engine's thread, once per frame per
+/// call; it may call the media entry points and must not destroy the stack.
 final class SipralAudioTransmit extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7235,19 +5734,13 @@ final class SipralAudioTransmit extends ffi.Struct {
   @ffi.Uint64()
   external int call;
 
-  /// How it leaves, as a `SipralTransport`: `SIPRAL_TRANSPORT_UDP` is
-  /// a datagram from the media socket; `SIPRAL_TRANSPORT_TCP` and
-  /// `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
-  /// socket's connection to its TURN server, as `sipral_media_capture`
-  /// marks them.
+  /// A `SipralTransport`: UDP is a datagram from the media socket; TCP
+  /// and TLS are bytes to write in order on the socket's TURN connection.
   @ffi.Uint32()
   external int protocol;
 
-  /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
-  /// both put them without padding at the end of the struct, so that a
-  /// member a later version appends starts past the length a caller built
-  /// against this header declares. The library writes zero here and reads
-  /// nothing from it.
+  /// Zero. Keeps later members at the same offsets on 32- and 64-bit
+  /// targets. Written zero, never read.
   @ffi.Uint32()
   external int reserved;
 
@@ -7268,10 +5761,8 @@ final class SipralAudioTransmit extends ffi.Struct {
 
 /// One log line, as SipralLogCallback reads it.
 ///
-/// Filled by the library and handed over as a `const` pointer: read
-/// `size` before anything past it, and nothing once the callback has
-/// returned — the two strings are the library's and live for the call
-/// alone.
+/// Read `size` first, and nothing after the callback returns: the strings
+/// live for the call only.
 final class SipralLogRecord extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7302,74 +5793,58 @@ final class SipralLogRecord extends ffi.Struct {
   @ffi.Size()
   external int messageLen;
 
-  /// How many lines the rate limit or the queue ceiling turned away
-  /// since the line before this one. Zero almost always.
+  /// Lines dropped by the rate limit or queue since the previous line.
   @ffi.Uint64()
   external int suppressed;
 }
 
 /// How a stack verifies the callers of the calls its accounts receive.
 ///
-/// Set `size` to `sizeof(sipral_stir_config_t)` and zero the rest before
-/// filling anything in.
+/// Set `size` to `sizeof(sipral_stir_config_t)` and zero the rest first.
 final class SipralStirConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
   external int size;
 
-  /// The trust anchors — the STI-PA's approved roots in a SHAKEN
-  /// deployment — as PEM or DER certificates, one after another. Null
-  /// and zero for none, which turns verification off for every account
-  /// that only reports.
+  /// Trust anchors (in SHAKEN, the STI-PA roots), PEM or DER,
+  /// concatenated. Null and zero for none: reporting accounts then verify
+  /// nothing.
   external ffi.Pointer<ffi.Uint8> anchors;
 
   /// How many bytes of them.
   @ffi.Size()
   external int anchorsLen;
 
-  /// How far a PASSporT's `iat` may be from now, either way, in
-  /// seconds; zero for RFC 8224 §6.2's sixty.
+  /// Allowed `iat` skew either way, in seconds; zero for 60 (RFC 8224 §6.2).
   @ffi.Uint64()
   external int freshnessSeconds;
 
-  /// How long a call waits for `sipral_call_stir_certificate` before
-  /// its certificate counts as one that could not be had, in
-  /// milliseconds; zero for four seconds.
+  /// How long a call waits for `sipral_call_stir_certificate`, in ms,
+  /// before the certificate counts as unavailable; zero for 4000.
   @ffi.Uint64()
   external int certificateWaitMs;
 
-  /// The wall clock at `now_ms`, in seconds since 1970, or zero to keep
-  /// the one an earlier call gave. A PASSporT is signed and judged by
-  /// the time, and only the caller can say which `now_ms` a time goes
-  /// with, so the first call must give it.
-  /// (`sipral_stack_config_t::media_clock_unix_seconds` goes with no
-  /// `now_ms` at all, and is not taken for it.) A stack created with no
-  /// media clock dates its RTCP sender reports by this one too.
+  /// The wall clock at `now_ms`, in Unix seconds, or zero to keep the
+  /// previous one. The first call must set it. Not taken from
+  /// `sipral_stack_config_t::media_clock_unix_seconds`, which has no
+  /// `now_ms`. A stack with no media clock also dates RTCP sender reports
+  /// by it.
   @ffi.Uint64()
   external int unixSeconds;
 
-  /// A `SipralToggle`: whether a certificate whose TNAuthList names a
-  /// service provider code (RFC 8226 §9) has authority over every
-  /// calling number. Off by default, when only the numbers and ranges a
-  /// certificate names are its own: a code names a provider, not
-  /// numbers, and taking it as covering any number is a decision about
-  /// the providers the anchors certify — the one a SHAKEN deployment,
-  /// whose certificates carry codes and no numbers, makes by turning
-  /// this on. ABI 0.32.
+  /// A `SipralToggle`: whether a TNAuthList service provider code
+  /// (RFC 8226 §9) covers every calling number. Off by default; a SHAKEN
+  /// deployment, whose certificates carry codes, turns it on. ABI 0.32.
   @ffi.Uint32()
   external int acceptServiceProviderCodes;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. Set it to zero; the library reads nothing from
-  /// it.
+  /// Zero. Pads the struct to its alignment so an appended member starts
+  /// past the declared length. Never read.
   @ffi.Uint32()
   external int reserved;
 }
 
-/// How one stream of a call is protected: one entry of the encryption
-/// report.
+/// How one stream of a call is protected.
 ///
 /// Set `size` to `sizeof(sipral_stream_encryption_t)` before the call.
 final class SipralStreamEncryption extends ffi.Struct {
@@ -7381,9 +5856,7 @@ final class SipralStreamEncryption extends ffi.Struct {
   @ffi.Uint32()
   external int media;
 
-  /// Whether what it sends is encrypted and what it takes
-  /// authenticated, now. Zero while it waits for the handshake that
-  /// keys it.
+  /// Whether it is encrypted now. Zero while waiting for its keys.
   @ffi.Uint32()
   external int encrypted;
 
@@ -7395,24 +5868,19 @@ final class SipralStreamEncryption extends ffi.Struct {
   @ffi.Uint32()
   external int suite;
 
-  /// Whether the key exchange authenticated the far end: set for a
-  /// DTLS-SRTP stream once its handshake finished, the far end's
-  /// certificate having matched its signalled fingerprint; never for
-  /// SDES, whose key is exactly as authentic as the signalling
-  /// transport, which this library cannot see.
+  /// Whether the key exchange authenticated the far end: set for
+  /// DTLS-SRTP after a handshake matching the fingerprint; never for
+  /// SDES, which is only as authentic as the signalling.
   @ffi.Uint32()
   external int authenticated;
 
-  /// Whether it agreed to be encrypted and is still waiting for its
-  /// keys.
+  /// Agreed to be encrypted and still waiting for keys.
   @ffi.Uint32()
   external int awaitingKeys;
 }
 
-/// How sipral_call_detect_progress listens. Zero in any member but
-/// `size` is that member's default.
-///
-/// Set `size` to `sizeof(sipral_progress_config_t)` before the call.
+/// How sipral_call_detect_progress listens. A zero member is its
+/// default. Set `size` to `sizeof(sipral_progress_config_t)`.
 final class SipralProgressConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -7491,10 +5959,8 @@ final class SipralProgressConfig extends ffi.Struct {
   external int toneCycles;
 }
 
-/// The beep sipral_call_consent_tone plays while a call is recorded.
-/// Zero in any member but `size` is that member's default.
-///
-/// Set `size` to `sizeof(sipral_consent_tone_t)` before the call.
+/// The beep sipral_call_consent_tone plays. A zero member is its
+/// default. Set `size` to `sizeof(sipral_consent_tone_t)`.
 final class SipralConsentTone extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -7562,11 +6028,8 @@ final class SipralRecordingOptions extends ffi.Struct {
   @ffi.Uint32()
   external int checkpointMs;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. Set it to zero; the library reads nothing from
-  /// it.
+  /// Zero; never read. Pads the struct to its alignment so a member added
+  /// later never lands in padding of an older caller's struct.
   @ffi.Uint32()
   external int reserved;
 }
@@ -7582,14 +6045,11 @@ final class SipralConference extends ffi.Struct {
   @ffi.Uint32()
   external int version;
 
-  /// How many users the picture holds, which is what
-  /// sipral_subscription_conference_user_at reads by index.
+  /// Users held, indexed by sipral_subscription_conference_user_at.
   @ffi.Uint32()
   external int users;
 
-  /// Whether the focus said how many users it counts
-  /// (`conference-state`'s `user-count`), which may differ from
-  /// `users`: a focus need not list every one.
+  /// Whether `user-count` was sent; it may differ from `users`.
   @ffi.Uint32()
   external int hasUserCount;
 
@@ -7597,8 +6057,7 @@ final class SipralConference extends ffi.Struct {
   @ffi.Uint32()
   external int userCount;
 
-  /// `conference-state`'s `active`: one when the focus said it is, two
-  /// when it said it is not, zero when it said nothing.
+  /// `active`: 1 true, 2 false, 0 not said.
   @ffi.Uint32()
   external int active;
 
@@ -7615,33 +6074,25 @@ final class SipralConferenceUser extends ffi.Struct {
   @ffi.Size()
   external int size;
 
-  /// How many endpoints — devices — the user is in the conference
-  /// from.
+  /// How many endpoints (devices) the user joined from.
   @ffi.Uint32()
   external int endpoints;
 
-  /// A SipralEndpointStatus: where the first of them is.
+  /// A SipralEndpointStatus of the first endpoint.
   @ffi.Uint32()
   external int status;
 
-  /// How many media streams the first of them has.
+  /// Media streams of the first endpoint.
   @ffi.Uint32()
   external int media;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads to alignment so later members never land in padding.
   @ffi.Uint32()
   external int reserved;
 }
 
-/// This account's presence, as sipral_account_publish_presence takes
-/// it.
-///
-/// Set `size` to `sizeof(sipral_presence_t)` and zero the rest before
-/// filling anything in.
+/// This account's presence for sipral_account_publish_presence. Set
+/// `size` to `sizeof(sipral_presence_t)` and zero the rest first.
 final class SipralPresence extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -7675,39 +6126,33 @@ final class SipralRecordConfig extends ffi.Struct {
   @ffi.Size()
   external int size;
 
-  /// The recording server's URI, the INVITE's target. Required. Not
-  /// NUL-terminated.
+  /// The recording server's URI. Required, not NUL-terminated.
   external ffi.Pointer<ffi.Char> server;
 
   /// How many bytes of it.
   @ffi.Size()
   external int serverLen;
 
-  /// Where to send the INVITE, as an address and a port, when not
-  /// where the recorded call's account sends. Null for there.
+  /// `host:port` to send the INVITE to; null for the account's route.
   external ffi.Pointer<ffi.Char> destination;
 
   /// How many bytes of it.
   @ffi.Size()
   external int destinationLen;
 
-  /// The transport `destination` is reached over, as
-  /// `sipral_call_config_t::transport` names one. Read only with
-  /// `destination`.
+  /// The transport for `destination`, as in
+  /// `sipral_call_config_t::transport`; read only with `destination`.
   @ffi.Uint32()
   external int transport;
 
-  /// The socket the copy of this end's audio goes from, as an address
-  /// and a port, and what the offer names for the stream labelled `1`.
-  /// Required: a socket the application bound.
+  /// Required bound socket, `host:port`, for this end's audio (label `1`).
   external ffi.Pointer<ffi.Char> thisEnd;
 
   /// How many bytes of it.
   @ffi.Size()
   external int thisEndLen;
 
-  /// The same for the far end's audio, labelled `2`. Required, and a
-  /// socket of its own.
+  /// Required distinct socket for the far end's audio (label `2`).
   external ffi.Pointer<ffi.Char> farEnd;
 
   /// How many bytes of it.
@@ -7715,48 +6160,39 @@ final class SipralRecordConfig extends ffi.Struct {
   external int farEndLen;
 }
 
-/// How `sipral_local_conference_create` makes a conference. Zero in
-/// every member but `size` is a conference of sixteen with this end in
-/// it at 16 kHz.
+/// How `sipral_local_conference_create` makes a conference. All zero but
+/// `size`: sixteen members, this end in, 16 kHz.
 ///
-/// Set `size` to `sizeof(sipral_local_conference_config_t)` before the
-/// call.
+/// Set `size` to `sizeof(sipral_local_conference_config_t)` first.
 final class SipralLocalConferenceConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
   external int size;
 
-  /// The most members it holds at once, this end included, or zero
-  /// for sixteen. At most 1024.
+  /// Most members at once, this end included; zero for 16, at most 1024.
   @ffi.Uint32()
   external int maxMembers;
 
-  /// A `SipralToggle`: whether this end takes part. On unless it is
-  /// `SIPRAL_TOGGLE_OFF`; a conference without this end only bridges
-  /// its calls.
+  /// A `SipralToggle`: whether this end takes part. On unless
+  /// `SIPRAL_TOGGLE_OFF`; without it the conference only bridges calls.
   @ffi.Uint32()
   external int local;
 
-  /// The rate of this end's frames in application mode, in hertz —
-  /// 8000, 16000, 32000 or 48000 — or zero for 16000. A tick's frame is
-  /// twenty milliseconds of it. In device mode the audio engine
-  /// converts the devices to it.
+  /// This end's frame rate in application mode, in Hz: 8000, 16000,
+  /// 32000 or 48000, zero for 16000. A tick is 20 ms of it. In device
+  /// mode the engine converts the devices to it.
   @ffi.Uint32()
   external int sampleRate;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. Set it to zero; the library reads nothing from
-  /// it.
+  /// Zero. Pads the struct to its alignment so an appended member starts
+  /// past the declared length. Never read.
   @ffi.Uint32()
   external int reserved;
 }
 
 /// A conference as it stands: `sipral_local_conference_info`.
 ///
-/// Set `size` to `sizeof(sipral_local_conference_info_t)` before the
-/// call.
+/// Set `size` to `sizeof(sipral_local_conference_info_t)` first.
 final class SipralLocalConferenceInfo extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7790,7 +6226,7 @@ final class SipralLocalConferenceInfo extends ffi.Struct {
   @ffi.Uint32()
   external int recording;
 
-  /// How much has been recorded, while it is.
+  /// Recorded so far, while recording.
   @ffi.Uint64()
   external int recordedMs;
 
@@ -7801,8 +6237,7 @@ final class SipralLocalConferenceInfo extends ffi.Struct {
 
 /// One member of a conference: `sipral_local_conference_member_at`.
 ///
-/// Set `size` to `sizeof(sipral_local_conference_member_t)` before the
-/// call.
+/// Set `size` to `sizeof(sipral_local_conference_member_t)` first.
 final class SipralLocalConferenceMember extends ffi.Struct {
   /// How many bytes of this struct the library filled in.
   @ffi.Size()
@@ -7824,8 +6259,7 @@ final class SipralLocalConferenceMember extends ffi.Struct {
   @ffi.Uint32()
   external int mutedOutput;
 
-  /// The level of what it says, in the steps `sipral_audio_set_gain`
-  /// takes: 256 is unity.
+  /// Level of what it says, in `sipral_audio_set_gain` steps (256 = unity).
   @ffi.Uint32()
   external int gainInput;
 
@@ -7833,11 +6267,8 @@ final class SipralLocalConferenceMember extends ffi.Struct {
   @ffi.Uint32()
   external int gainOutput;
 
-  /// Zero. Rounds the struct up to a whole multiple of its alignment on
-  /// every target, so that a member a later version appends starts at or
-  /// past the length a caller built against this header declares, never
-  /// in padding inside it. The library writes zero here and reads nothing
-  /// from it.
+  /// Zero. Pads the struct to its alignment so an appended member starts
+  /// past the declared length. Written as zero, never read.
   @ffi.Uint32()
   external int reserved;
 }
@@ -7860,22 +6291,16 @@ final class SipralPinnedCertificate extends ffi.Struct {
   @ffi.Uint64()
   external int notAfter;
 
-  /// One when the account pins a certificate and this is it: accept
-  /// the handshake, whoever signed it. Zero when the account pins
-  /// none: the platform's own checks apply, as they would without
-  /// this call.
+  /// One: pinned and matching, accept. Zero: no pin, platform checks apply.
   @ffi.Uint32()
   external int pinned;
 
-  /// One when `unix_seconds` is past `not_after`. Accepted all the
-  /// same: its dates were written by the holder of the pinned key, and
-  /// a PBX whose self-signed certificate lapsed would otherwise go
-  /// silent. Worth a warning.
+  /// One when past `not_after`. Still accepted (a lapsed self-signed PBX
+  /// would go silent); worth a warning.
   @ffi.Uint32()
   external int expired;
 
-  /// One when `unix_seconds` is before `not_before`: a clock set wrong,
-  /// or a certificate minted with a future date. Accepted too.
+  /// One when before `not_before`. Still accepted.
   @ffi.Uint32()
   external int notYetValid;
 
@@ -7893,23 +6318,19 @@ final class SipralNetworkTestConfig extends ffi.Struct {
   @ffi.Size()
   external int size;
 
-  /// The account whose server to probe, on the account's own
-  /// transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+  /// The account whose server to probe, or `SIPRAL_HANDLE_NONE`.
   @ffi.Uint64()
   external int account;
 
-  /// A UDP socket the application bound for the test, `host:port`,
-  /// asked about as `sipral_stack_nat_map` asks about a media socket;
-  /// null to ask about the signalling socket only, and to test no
-  /// relay. Not NUL-terminated.
+  /// A UDP socket the application bound for the test, `host:port`, not
+  /// NUL-terminated; null for the signalling socket only and no relay.
   external ffi.Pointer<ffi.Char> probeSocket;
 
   /// How many bytes of it.
   @ffi.Size()
   external int probeSocketLen;
 
-  /// A call the application placed to an echo service, measured once
-  /// its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+  /// A call to an echo service, hung up by the test, or `SIPRAL_HANDLE_NONE`.
   @ffi.Uint64()
   external int echoCall;
 
@@ -7917,8 +6338,7 @@ final class SipralNetworkTestConfig extends ffi.Struct {
   @ffi.Uint32()
   external int echoMs;
 
-  /// How long the whole test may take. 30000 by default; a part that
-  /// has not answered by then counts as failed.
+  /// Test deadline, 30000 by default; a part silent by then failed.
   @ffi.Uint32()
   external int timeoutMs;
 }
@@ -8002,26 +6422,18 @@ final class Sipral {
   /// against a library at that minor or any later one.
   static const int abiVersionMajor = 1;
 
-  /// The ABI's minor version, raised by anything the header gains —
-  /// everything the generator prints, and not only a function or a struct
-  /// member. `sipral_abi_check` compares the major and this one; the patch it
-  /// does not ask about. The
-  /// rule for all three numbers is the Versioning section of
-  /// `docs/08-ffi.md`, which is where the ABI contract is written down.
+  /// The ABI's minor version, raised by anything the header gains. Rules:
+  /// Versioning section of `docs/08-ffi.md`.
   static const int abiVersionMinor = 2;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
 
-  /// Bits of SipralCapabilities.transports. A caller checks
-  /// `capabilities.transports & SIPRAL_TRANSPORT_BIT_TLS != 0` rather than a
-  /// growing list of booleans, so a transport this ABI has not learned a bit
-  /// for yet reads as absent rather than refusing to compile against an
-  /// older header.
+  /// Bits of SipralCapabilities.transports. A transport this ABI has no
+  /// bit for yet reads as absent.
   ///
-  /// Named after SipralTransport's own numbers (`1 << (value - 1)`), so
-  /// a transport added there in the future gets a bit here without the two
-  /// numbering schemes ever being asked to agree by hand.
+  /// Derived from SipralTransport's numbers (`1 << (value - 1)`), so the
+  /// two numberings never have to be kept in step by hand.
   static const int transportBitUdp = 1;
 
   /// See SIPRAL_TRANSPORT_BIT_UDP.
@@ -8056,204 +6468,129 @@ final class Sipral {
   /// sipral_account_subscribe.
   static const int featureSubscriptions = 32;
 
-  /// See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature,
-  /// because libopus is the one part of the audio path that is licensed
-  /// rather than written, so a build meant for hardware can leave it out.
-  /// The bit is how an application finds out without having to enumerate
-  /// the codecs, and it is set from the catalogue this build offers rather
-  /// than from any crate's feature flag; `SIPRAL_CODEC_OPUS` keeps its
-  /// number either way, since a value that has left this header is spent
-  /// for good.
+  /// See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature
+  /// (libopus is licensed, not written here). Set from the codec catalogue,
+  /// not from a crate feature flag. `SIPRAL_CODEC_OPUS` keeps its number either way.
   static const int featureOpus = 64;
 
-  /// DTLS-SRTP (RFC 5764): the keys for a call's media come from a
-  /// handshake on the media path rather than from the body of a message.
+  /// DTLS-SRTP (RFC 5764): media keys come from a handshake on the media path.
   ///
-  /// Behind a compile-time feature for the reason Opus is: a build that
-  /// will only ever place SDES calls over a protected SIP transport has no
-  /// use for an elliptic curve, and a desk phone counts its flash. Both
-  /// `SIPRAL_SRTP_DTLS` and `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers
-  /// in a build without it — a value that has left this header is spent —
-  /// and naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED` rather than
-  /// quietly placing an unencrypted call.
+  /// Behind a compile-time feature. `SIPRAL_SRTP_DTLS` and
+  /// `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers in a build without it and
+  /// answer `SIPRAL_STATUS_NOT_SUPPORTED` there, never an unencrypted call.
   ///
   /// An application that sets one of those policies must also drain
   /// `sipral_media_poll_transmit`; see there.
   static const int featureDtlsSrtp = 128;
 
   /// See SIPRAL_FEATURE_DTMF. ICE in the full role (RFC 8445), with
-  /// consent freshness (RFC 7675) and the SDP attributes of RFC 8839: a
-  /// call's media path is chosen by checking it rather than taken from what
-  /// the signalling said.
+  /// consent freshness (RFC 7675) and the SDP attributes of RFC 8839.
   ///
-  /// Behind a compile-time feature for the reason DTLS-SRTP is, and off by
-  /// policy even where it is compiled in — `docs/06-nat.md` tabulates what
-  /// it costs on the wire and why it buys nothing against a PBX that learns
-  /// the caller's address from the media it receives. Both `SIPRAL_ICE_OFFERED`
-  /// and `SIPRAL_ICE_REQUIRED` keep their numbers in a build without it, and
-  /// naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+  /// Behind a compile-time feature and off by policy (`docs/06-nat.md`).
+  /// `SIPRAL_ICE_OFFERED` and `SIPRAL_ICE_REQUIRED` keep their numbers in a
+  /// build without it and answer `SIPRAL_STATUS_NOT_SUPPORTED` there.
   ///
   /// An application that sets one of those policies must also drain
   /// `sipral_media_poll_transmit`; see there.
   static const int featureIce = 256;
 
   /// See SIPRAL_FEATURE_DTMF. STUN (RFC 8489): a stack created with
-  /// `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
-  /// writes the answer in the `Contact` and in `c=` and `m=`.
-  ///
-  /// Behind a compile-time feature of its own, which brings nothing ICE
-  /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
-  /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+  /// `SIPRAL_NAT_STUN` learns its public address and writes it in `Contact`,
+  /// `c=` and `m=`. Without the feature, `SIPRAL_NAT_STUN` answers
+  /// `SIPRAL_STATUS_NOT_SUPPORTED`.
   static const int featureStun = 512;
 
-  /// See SIPRAL_FEATURE_DTMF. A TURN server reached over TCP or TLS
-  /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport`, and the
-  /// connection the application opens for each media socket when
-  /// `SIPRAL_EVENT_KIND_TURN_STREAM` asks — for the network that lets no
-  /// UDP out.
-  ///
-  /// It comes with `SIPRAL_FEATURE_ICE`, since a relay is only ever a
-  /// call's relayed ICE candidate, and without it `turn_transport` other
-  /// than UDP answers `SIPRAL_STATUS_NOT_SUPPORTED` as a `turn_server`
-  /// does.
+  /// See SIPRAL_FEATURE_DTMF. A TURN server over TCP or TLS
+  /// (RFC 8656 §3.1): `sipral_stack_config_t::turn_transport` and
+  /// `SIPRAL_EVENT_KIND_TURN_STREAM`. Comes with `SIPRAL_FEATURE_ICE`;
+  /// without it a non-UDP `turn_transport` answers `SIPRAL_STATUS_NOT_SUPPORTED`.
   static const int featureTurnStream = 1024;
 
-  /// See SIPRAL_FEATURE_DTMF. The built-in audio engine: a stack
-  /// created with `sipral_stack_config_t::audio` set to
-  /// `SIPRAL_AUDIO_DEVICE` opens the platform's devices and pumps every
-  /// managed call itself, with the `sipral_audio_*` entry points to list,
-  /// choose and control them. Clear where there is no backend — on Linux,
-  /// and on an Android phone below API level 28, where AAudio cannot open
-  /// a voice-communication stream — and `SIPRAL_AUDIO_DEVICE` then
-  /// answers `SIPRAL_STATUS_NOT_SUPPORTED` and the application pumps the
-  /// frames as it always has. On Android the answer is the phone's, read
-  /// when asked, not the build's.
-  ///
-  /// This crate's own answer rather than the facade's: the engine sits
-  /// beside the facade, not under it, so the facade has nothing to say.
+  /// See SIPRAL_FEATURE_DTMF. The built-in audio engine
+  /// (`sipral_stack_config_t::audio` = `SIPRAL_AUDIO_DEVICE`, and the
+  /// `sipral_audio_*` entry points). Clear where there is no backend (Linux,
+  /// Android below API 28); `SIPRAL_AUDIO_DEVICE` then answers
+  /// `SIPRAL_STATUS_NOT_SUPPORTED`. On Android it is the phone's answer, read
+  /// at call time. This crate's own answer: the engine is not under the facade.
   static const int featureAudioDevice = 2048;
 
-  /// See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
-  /// be answered, on every call event: the asserted identity behind the
-  /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
-  /// `Diversion` and `History-Info`, `Answer-Mode` and `Alert-Info`;
-  /// why a call ended (`cause_sip`, `cause_q850`, RFC 3326) and
-  /// `sipral_call_hangup_for` to say why this end is ending one;
-  /// `sipral_call_redirect`; and an account's `privacy` and
-  /// `session_timer`.
+  /// See SIPRAL_FEATURE_DTMF. Caller identity on every call event:
+  /// asserted identity behind `trusted_peers` (RFC 3325), `verstat`,
+  /// `Privacy`, `Diversion`, `History-Info`, `Answer-Mode`, `Alert-Info`;
+  /// end causes (RFC 3326) and `sipral_call_hangup_for`;
+  /// `sipral_call_redirect`; an account's `privacy` and `session_timer`.
   static const int featureCallerIdentity = 4096;
 
-  /// See SIPRAL_FEATURE_DTMF. A call in progress moves with the
-  /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
-  /// call whose media address is gone, and `sipral_call_media_readdress`
-  /// offers it at the socket the application bound on the new network.
+  /// See SIPRAL_FEATURE_DTMF. A call follows a network change:
+  /// `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` and `sipral_call_media_readdress`.
   static const int featureCallReaddress = 8192;
 
-  /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
-  /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
-  /// snapshot of a stack's state for a crash report
-  /// (`sipral_stack_state_text`). Set in every build of this library, which
-  /// always carries the redaction both depend on; a bit so that a binding
-  /// asks before it shows a "send diagnostics" control.
+  /// See SIPRAL_FEATURE_DTMF. The redacted, rate-limited log callback
+  /// (`sipral_stack_log`) and the state snapshot (`sipral_stack_state_text`).
+  /// Set in every build.
   static const int featureLogging = 16384;
 
-  /// See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
-  /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
-  /// `diagnostic_records` in `sipral_stack_config_t`, read back through
-  /// `sipral_stack_settings_t`), `SIPRAL_STATUS_LIMIT_REACHED` for a call
-  /// placed past `max_dialogs`, and the counters of what went out again,
-  /// what timed out and what was refused at a limit in
-  /// `sipral_counters_t`.
+  /// See SIPRAL_FEATURE_DTMF. Stack ceilings (`max_dialogs`,
+  /// `max_server_transactions`, `diagnostic_decisions`, `diagnostic_records`),
+  /// `SIPRAL_STATUS_LIMIT_REACHED`, and the counters in `sipral_counters_t`.
   static const int featureLimits = 32768;
 
-  /// See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
-  /// account given a key and a certificate URL signs every call it places
-  /// (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
-  /// a stack given trust anchors (`sipral_stack_stir`) verifies who is
-  /// calling before the phone rings — `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
-  /// `sipral_call_stir_certificate`, and the verdict on every call event.
-  /// Behind a compile-time feature, on by default. ABI 0.31.
+  /// See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): signing
+  /// (`stir_key`, `stir_certificate_url`) and verification
+  /// (`sipral_stack_stir`, `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
+  /// `sipral_call_stir_certificate`). Behind a compile-time feature, on by default.
   static const int featureStir = 65536;
 
-  /// See SIPRAL_FEATURE_DTMF. An SRTP policy and suites per account
-  /// (`srtp`, `srtp_suites` in `sipral_account_config_t`), the policy that
-  /// falls back from DTLS-SRTP to SDES (`SIPRAL_SRTP_DTLS_OR_SDES`), calls
-  /// refused by it with `SIPRAL_STATUS_SECURITY_POLICY`, and the
-  /// encryption report of every call (`sipral_media_encryption_at`). ABI
-  /// 0.31.
+  /// See SIPRAL_FEATURE_DTMF. SRTP policy and suites per account,
+  /// `SIPRAL_SRTP_DTLS_OR_SDES`, `SIPRAL_STATUS_SECURITY_POLICY`, and
+  /// `sipral_media_encryption_at`.
   static const int featureSrtpPolicy = 131072;
 
-  /// See SIPRAL_FEATURE_DTMF. What a call carries inside its audio:
-  /// keypad digits heard in the far end's audio
-  /// (`sipral_stack_config_t::dtmf_detection`,
-  /// `sipral_call_dtmf_detection`, `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and
-  /// written into this end's (`SIPRAL_DTMF_IN_BAND`, and `SIPRAL_DTMF_RTP`
-  /// on a call with no telephone event), call-progress tones, who answered
-  /// and the machine's beep (`sipral_call_detect_progress`,
-  /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and the beep that says a call
-  /// is recorded (`sipral_call_consent_tone`).
+  /// See SIPRAL_FEATURE_DTMF. In-band signals: DTMF detection
+  /// (`sipral_stack_config_t::dtmf_detection`, `sipral_call_dtmf_detection`,
+  /// `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`) and generation (`SIPRAL_DTMF_IN_BAND`),
+  /// progress and answering-machine detection (`sipral_call_detect_progress`,
+  /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`), and `sipral_call_consent_tone`.
   static const int featureInBandSignals = 262144;
 
-  /// See SIPRAL_FEATURE_DTMF. A recording written as
-  /// `sipral_recording_options_t` says (`sipral_media_record_start_with`):
-  /// mixed or stereo, WAV growing into RF64, at a rate of its own and
-  /// checkpointed against a crash, and Ogg Opus where
-  /// SIPRAL_FEATURE_OPUS is set too. And L16 as a codec, at 8 and 16
-  /// kHz, which `sipral_codec_at` lists.
+  /// See SIPRAL_FEATURE_DTMF. Recording formats
+  /// (`sipral_media_record_start_with`): mixed or stereo, WAV/RF64,
+  /// checkpointed, Ogg Opus with SIPRAL_FEATURE_OPUS; and L16 at 8 and 16 kHz.
   static const int featureRecordingFormats = 524288;
 
-  /// See SIPRAL_FEATURE_DTMF. A call recorded to a recording server
-  /// (SIPREC, RFC 7866): `sipral_call_record_to` places the recording
-  /// session, and `sipral_media_poll_recording` hands out the copies of
-  /// the call's audio.
+  /// See SIPRAL_FEATURE_DTMF. SIPREC (RFC 7866): `sipral_call_record_to`
+  /// and `sipral_media_poll_recording`.
   static const int featureSiprec = 1048576;
 
-  /// See SIPRAL_FEATURE_DTMF. The conference package kept for the
-  /// application (RFC 4575, `sipral_subscription_conference`), a focus
-  /// known by its `isfocus` (RFC 4579, `sipral_call_conference_uri`), and
-  /// presence published (RFC 3903, `sipral_account_publish_presence`) and
-  /// watched (RFC 3856, `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`).
+  /// See SIPRAL_FEATURE_DTMF. Conference package (RFC 4575,
+  /// `sipral_subscription_conference`), focus `isfocus` (RFC 4579,
+  /// `sipral_call_conference_uri`), presence publish (RFC 3903) and watch (RFC 3856).
   static const int featureConference = 2097152;
 
-  /// See SIPRAL_FEATURE_DTMF. Real-time text in a call (RFC 4103):
-  /// `text_address` on the call's configuration, `sipral_media_send_text`
-  /// and `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+  /// See SIPRAL_FEATURE_DTMF. Real-time text (RFC 4103): `text_address`,
+  /// `sipral_media_send_text`, `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
   static const int featureRealtimeText = 4194304;
 
-  /// See SIPRAL_FEATURE_DTMF. RTP/AVPF with Generic NACKs and
-  /// reduced-size RTCP (RFC 4585, RFC 5506): `feedback` on the call's
-  /// configuration, and what it agreed in `sipral_media_info_t`.
+  /// See SIPRAL_FEATURE_DTMF. RTP/AVPF with Generic NACK and reduced-size
+  /// RTCP (RFC 4585, RFC 5506): `feedback`, reported in `sipral_media_info_t`.
   static const int featureRtcpFeedback = 8388608;
 
-  /// See SIPRAL_FEATURE_DTMF. A local conference of any number of
-  /// calls, each on its own codec and rate, with or without this end
-  /// (ABI 0.32): `sipral_local_conference_create` and
+  /// See SIPRAL_FEATURE_DTMF. A local conference of calls on any codec
+  /// and rate: `sipral_local_conference_create`,
   /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
   static const int featureLocalConference = 16777216;
 
   /// The buffer a caller has to bring for one outgoing packet.
   ///
-  /// Not a path MTU — RTP does not discover one — but the bound the session
-  /// itself builds against, so a payload larger than this is a payload no
-  /// codec in this build produces. It is checked before anything is encoded,
-  /// because a frame that was encoded and then had nowhere to go is a frame
-  /// lost from a stream whose timestamps have already moved past it.
+  /// The bound the session builds against, not a path MTU. Checked before
+  /// anything is encoded, so a frame is never encoded and then lost.
   static const int mediaPacketBytes = 1500;
 
-  /// The bound a datagram of control gets instead, on the way in.
+  /// The bound for an incoming datagram that RFC 5761 §4 classifies as control.
   ///
-  /// RTCP is compound: one report packet carries a sender or receiver report
-  /// for every source being heard, then the source description, then whatever
-  /// extended reports the session agreed on. A call between two ends stays
-  /// far inside the media bound, but nothing in RFC 3550 says it has to, and
-  /// what arrives is the peer's arithmetic rather than ours. So the media
-  /// bound stops being the reason a report is refused: an arriving datagram
-  /// that RFC 5761 §4 says is control gets this one, and everything else
-  /// still gets SIPRAL_MEDIA_PACKET_BYTES. It bounds the read, so it is
-  /// still a bound: a caller that says a megabyte is still refused.
-  ///
-  /// Sending is unchanged — what this stack builds is its own arithmetic, and
-  /// it fits in the media bound.
+  /// Compound RTCP from a peer may exceed the media bound (RFC 3550 sets no
+  /// limit). Everything else still gets SIPRAL_MEDIA_PACKET_BYTES; outgoing
+  /// RTCP always fits the media bound.
   static const int mediaRtcpBytes = 8192;
 
   /// Room enough for any address this ABI writes, the NUL included:
@@ -8262,65 +6599,45 @@ final class Sipral {
 
   /// The transport a stack is created with.
   ///
-  /// Never retired: sipral_stack_transport_failed and
-  /// sipral_stack_stream_closed can still stop it carrying traffic, and
-  /// sipral_stack_transport_bind is still what brings it back, exactly
-  /// as when this was the only number a stack had. Zero on
-  /// `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
-  /// means this one, so a caller that never binds a second transport fills
-  /// neither in and gets exactly what it always got.
+  /// Never removed from the table; failure stops it, sipral_stack_transport_bind restores
+  /// it. Zero in `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
+  /// means this one.
   static const int transportMain = 0;
 
   /// The largest message that crosses in either direction.
   ///
-  /// The bound the layer below parses to, which is what stops a hostile peer
-  /// from making the parser do unbounded work. A caller's read buffer wants
-  /// to be this big on a stream, where one read can hold the end of one
-  /// message and the start of another, and 1500 bytes or so on a datagram
-  /// socket, where anything larger was fragmented on the way.
+  /// Bounds the parser's work against a hostile peer. Size stream read buffers to this; about
+  /// 1500 bytes suffices on a datagram socket.
   static const int messageBytes = 65535;
 
-  /// The longest `sipral_transport_failure_t::detail` this library takes.
-  ///
-  /// A platform's sentence about a refused certificate is a line, not a
-  /// document; one longer than this is refused rather than cut, since a
-  /// sentence cut short can say something else.
+  /// The longest `sipral_transport_failure_t::detail` accepted. Longer is refused, not cut.
   static const int transportDetailBytes = 1024;
 
-  /// The answer that lets an INVITE through, and the reason it is a status
-  /// code rather than a flag.
+  /// The answer that lets an INVITE through.
   ///
-  /// A policy answers with what it wants said: 200 to let the call arrive,
-  /// or the status to refuse it with. Making acceptance 200 rather than
-  /// zero is the whole safety property of this mechanism — zero is what a
-  /// binding hands back when the application's listener threw, and what a
-  /// caller who filled nothing in leaves behind, and neither of those may
-  /// mean "let the stranger in".
+  /// Any other answer refuses. Acceptance is 200, not zero, because zero is
+  /// what a binding returns when the listener threw, or what an unfilled
+  /// answer leaves; neither may admit a call.
   static const int screenAccept = 200;
 
-  /// The burst a stack starts with: ten INVITEs from one address at once.
+  /// The default burst: ten INVITEs from one address at once.
   ///
-  /// With SIPRAL_INVITE_LIMIT_EVERY_MS, the floor every stack has from
-  /// `sipral_stack_create` on. An INVITE past it is answered 480 and
-  /// counted in `sipral_counters_t::screened_refused_by_rate`; nothing is
-  /// raised for it.
+  /// With SIPRAL_INVITE_LIMIT_EVERY_MS, the floor every stack starts with.
+  /// An INVITE past it is answered 480 and counted in
+  /// `sipral_counters_t::screened_refused_by_rate`; no event is raised.
   static const int inviteLimitBurst = 10;
 
-  /// The interval a stack starts with: one more INVITE every two seconds.
+  /// The default interval: one more INVITE every two seconds.
   static const int inviteLimitEveryMs = 2000;
 
-  /// The voice-agent preset's burst: a hundred and twenty-eight at once.
+  /// The voice-agent preset's burst: 128 at once.
   ///
-  /// For a headless service that takes every call from one trunk or proxy,
-  /// where the default's ten-then-one-every-two-seconds answers a
-  /// campaign's twelfth caller 480. Handed to `sipral_stack_invite_limit`
-  /// with SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS. The burst is the
-  /// default `max_dialogs`, so that a rush is turned away by the ceiling on
-  /// calls held, with a 503, before it is by the rate.
+  /// For a headless service taking every call from one trunk or proxy. Use
+  /// with SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS. Equal to the default
+  /// `max_dialogs`, so a rush hits that ceiling (503) before the rate.
   static const int inviteLimitVoiceAgentBurst = 128;
 
-  /// The voice-agent preset's interval: one more INVITE every fifty
-  /// milliseconds, twenty a second.
+  /// The voice-agent preset's interval: one more INVITE every 50 ms.
   static const int inviteLimitVoiceAgentEveryMs = 50;
 
   /// Bits of `sipral_call_event_t::privacy` and of
@@ -8346,8 +6663,8 @@ final class Sipral {
   /// leaving every bit clear.
   static const int privacyNone = 32;
 
-  /// The longest text sipral_stack_state_text writes, its NUL included: a
-  /// buffer of this many bytes always has room.
+  /// The longest text sipral_stack_state_text writes, NUL included; a
+  /// buffer this size always fits.
   static const int stateTextMax = 16384;
 
   /// Every struct and union the header declares, with how long tools/abi-gen
@@ -8434,19 +6751,13 @@ final class Sipral {
 
   /// Copy the calling thread's last error message into `buffer`.
   ///
-  /// The message is UTF-8 and is written with a trailing NUL, which is not
-  /// counted in the length. `out_needed`, when it is not null, always receives
-  /// the number of bytes the message needs including that NUL, so a caller
-  /// that passes a capacity of zero and a null buffer gets the length back
-  /// and `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer
-  /// too small to hold the whole message: a truncated one would cut a
-  /// multi-byte character in half.
+  /// UTF-8 with a trailing NUL. `out_needed`, when not null, always receives
+  /// the size including the NUL; a null buffer with capacity zero returns
+  /// it with `SIPRAL_STATUS_BUFFER_TOO_SMALL`. A buffer too small gets
+  /// nothing, never a truncated message.
   ///
-  /// The message describes the last call this thread made and nothing else.
-  /// The next call on this thread replaces it, a call that succeeds empties
-  /// it — including one that succeeded around a nested call that did not —
-  /// and this call leaves it alone, so it can be read twice. It is never
-  /// shared with another thread.
+  /// It describes this thread's last call: the next call replaces it, a
+  /// success empties it, and this call leaves it alone.
   ///
   /// Safety
   ///
@@ -8480,21 +6791,11 @@ final class Sipral {
       int Function(ffi.Pointer<SipralAbiVersion> outVersion)>('sipral_abi_version');
 
   /// Whether this library can serve a binding generated against
-  /// `major`.`minor`. Called once, at load, before anything else: by the
-  /// binding itself where its language gives it somewhere to call from, and
-  /// by the application where it does not. The Versioning section of
-  /// `docs/08-ffi.md` says which binding is which.
+  /// `major`.`minor`: same major and a minor no later than this library's.
+  /// Called once at load, before anything else.
   ///
-  /// It can when `major` is this library's major and `minor` is no later
-  /// than this library's minor: a later minor only appends to an earlier
-  /// one, so a binding built against 1.0 loads against a library at 1.4,
-  /// and one built against 1.4 is turned away by a library at 1.0, which
-  /// lacks what 1.4 added.
-  ///
-  /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
-  /// naming both versions, which is what the binding should put in the
-  /// exception it throws. The patch number is not asked for: it never
-  /// changes a declaration, so it cannot make two builds disagree.
+  /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` otherwise, with a last error naming
+  /// both versions. The patch never changes a declaration, so it is not asked.
   ///
   /// Safety
   ///
@@ -8505,17 +6806,9 @@ final class Sipral {
 
   /// How many bytes this build compiled one of the ABI's structs to.
   ///
-  /// `name` is what the header calls the type — `sipral_stack_config_t` —
-  /// as bytes and a length, the way every string crosses here. A name this
-  /// build has no struct for is `SIPRAL_STATUS_INVALID_ARGUMENT`, which is
-  /// the answer a caller holding somebody else's header gets.
-  ///
-  /// Nothing in the library needs asking: the `size` member a struct
-  /// carries settles a disagreement in the ordinary course of a call. This
-  /// is for finding out there is one before making it. A package built
-  /// against one header and loaded over a native library from another
-  /// shows up here as a `sizeof` that differs, in one call at load, rather
-  /// than in whichever member happened to move.
+  /// `name` is the header's type name, e.g. `sipral_stack_config_t`. An
+  /// unknown name is `SIPRAL_STATUS_INVALID_ARGUMENT`. Lets a binding detect
+  /// a header mismatch at load.
   ///
   /// Safety
   ///
@@ -8526,14 +6819,8 @@ final class Sipral {
       int Function(ffi.Pointer<ffi.Char> name, int nameLen, ffi.Pointer<ffi.Size> outSize)>('sipral_abi_struct_size');
 
   /// How many of the ABI's structs carry a `size` member.
-  ///
-  /// The companion to `sipral_abi_struct_size`, and the part of the check a
-  /// caller cannot write for itself. A caller that compares lengths holds
-  /// a list of the structs it knows about, and the list is what goes
-  /// stale: a struct this ABI gained is one nobody thought to ask about,
-  /// and a length check that covers all but the newest still passes. Ask
-  /// for this number, compare it with the length of that list, and the day
-  /// the ABI grows another the caller is told.
+  /// Compare it with the caller's own list of structs, so a struct added to
+  /// the ABI is not missed by `sipral_abi_struct_size` checks.
   ///
   /// Safety
   ///
@@ -8544,10 +6831,8 @@ final class Sipral {
 
   /// What this build of the library can do, in one call.
   ///
-  /// Names no stack, and answers the same way before any stack is created
-  /// as after: a build's capabilities do not change while it runs. Safe to
-  /// call from any thread, at any time, including from inside the event
-  /// callback.
+  /// Answers the same before and after any stack exists. Safe from any
+  /// thread, including the event callback.
   ///
   /// Safety
   ///
@@ -8559,12 +6844,9 @@ final class Sipral {
 
   /// Create a stack, and write its handle to `out_stack`.
   ///
-  /// The handle is written only if this returns `SIPRAL_STATUS_OK`. A stack
-  /// that is created must be destroyed with sipral_stack_destroy.
-  ///
-  /// A process holds 256 stacks at once. The next is
-  /// `SIPRAL_STATUS_EXHAUSTED` until one of them is destroyed and no poll is
-  /// still running on it.
+  /// The handle is written only on `SIPRAL_STATUS_OK` and must be freed with
+  /// sipral_stack_destroy. A process holds 256 stacks; the next is
+  /// `SIPRAL_STATUS_EXHAUSTED` until one is destroyed and no poll still runs on it.
   ///
   /// Safety
   ///
@@ -8575,13 +6857,7 @@ final class Sipral {
       ffi.Int32 Function(ffi.Pointer<SipralStackConfig> config, ffi.Pointer<SipralHandle> outStack),
       int Function(ffi.Pointer<SipralStackConfig> config, ffi.Pointer<SipralHandle> outStack)>('sipral_stack_create');
 
-  /// Read back what a stack is running with.
-  ///
-  /// Every value here was either given at creation or defaulted there, and
-  /// none of it changes afterwards but the two a running stack switches,
-  /// `diagnostic_trace` and `system_echo_cancellation`. It is the other
-  /// half of a configuration call that answered `SIPRAL_STATUS_OK`: the
-  /// call says the value was taken, this says what it came to.
+  /// Read back what a stack is running with, defaults filled in.
   ///
   /// Safety
   ///
@@ -8591,25 +6867,11 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralStackSettings> outSettings),
       int Function(int stack, ffi.Pointer<SipralStackSettings> outSettings)>('sipral_stack_settings');
 
-  /// Destroy a stack.
-  ///
-  /// The handle is dead the moment this returns, and a second destroy is
-  /// `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
-  /// inside the callback it is still safe: what the poll is holding stays
-  /// alive until that poll returns. Called from inside a frame of one of its
-  /// calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
-  /// because freeing the stack ends that call's media and the frame is
-  /// holding it. No account is de-registered and no call is hung up; a stack
-  /// that has to leave politely does that first.
-  ///
-  /// Nothing is sent, either: the stack owns no socket. A relay on a TURN
-  /// server is given back only by a Refresh this end sends, so one still
-  /// held at this point stays allocated on the server until its lifetime
-  /// runs out, up to ten minutes later. To leave none behind, hang up every
-  /// call, poll until each has ended and send what
-  /// `sipral_stack_poll_farewell` hands out, call
-  /// `sipral_stack_nat_unmap` for every media socket still named and send
-  /// what `sipral_stack_poll_stun` hands out, and destroy after that.
+  /// Destroy a stack. The handle is dead on return; a second destroy is
+  /// `SIPRAL_STATUS_STALE_HANDLE`. Safe inside the callback. Inside a frame of one
+  /// of its calls it is `SIPRAL_STATUS_BUSY`. Nothing is sent: hang up, unmap and
+  /// send what `sipral_stack_poll_farewell` and `sipral_stack_poll_stun` give
+  /// first, or TURN relays linger up to ten minutes.
   ///
   /// Safety
   ///
@@ -8620,28 +6882,10 @@ final class Sipral {
 
   /// Let the stack do its work, and deliver what it has to say.
   ///
-  /// `now_ms` is the caller's monotonic clock in milliseconds. It must not
-  /// fall more than fifty milliseconds behind the last one this stack saw —
-  /// signalling may be called from any thread, and two of them reading the
-  /// same clock a moment apart is not a caller mistake — and a jump further
-  /// back than that is `SIPRAL_STATUS_CLOCK_BEHIND` with nothing delivered.
-  ///
-  /// The event callback is called from inside this function, on this
-  /// thread, and with nothing held: the stack's work is done and its lock
-  /// let go before the first event is handed over, so the callback may call
-  /// back into the library, this stack included. A poll that finds another
-  /// poll of the same stack already delivering — which is what a poll from
-  /// inside the callback always finds — does the stack's work and leaves its
-  /// events to that one, so they arrive in the order they were raised and
-  /// never on two threads at once.
-  ///
-  /// `result` may be null for a caller that does not want the counts.
-  ///
-  /// A poll is also where the stack writes: a retransmission falls due, a
-  /// registration is refreshed, a transaction gives up and says so. What it
-  /// wrote is taken with `sipral_stack_poll_transmit`, which is drained after
-  /// every poll and left alone by the next one — see `docs/08-ffi.md`,
-  /// "Signalling across the boundary", for the loop in full.
+  /// `now_ms` is the caller's monotonic clock in milliseconds; more than fifty
+  /// behind is `SIPRAL_STATUS_CLOCK_BEHIND`. The callback runs inside this call,
+  /// on this thread, with nothing held. `result` may be null. Drain
+  /// `sipral_stack_poll_transmit` after every poll (`docs/08-ffi.md`).
   ///
   /// Safety
   ///
@@ -8652,11 +6896,7 @@ final class Sipral {
       int Function(int stack, int nowMs, ffi.Pointer<SipralPollResult> result)>('sipral_stack_poll');
 
   /// D3's health counters for one stack, since it was created.
-  ///
-  /// Cheap enough to sample on a timer and ship as telemetry: reading this
-  /// is one struct copy on top of the call itself, the same as
-  /// `sipral_media_statistics` and for the same reason — nothing here walks
-  /// the call table or a session to answer.
+  /// One struct copy, cheap enough to sample on a timer.
   ///
   /// Safety
   ///
@@ -8668,78 +6908,50 @@ final class Sipral {
 
   /// Install, replace, or remove the screening policy for one stack.
   ///
-  /// Every INVITE that survives sipral_stack_invite_limit reaches this
-  /// callback before anything else does: before ringing, before
-  /// `SIPRAL_EVENT_KIND_INCOMING_CALL`, before a call handle exists for
-  /// anybody to answer or reject. What the callback refuses is answered
-  /// with the SIP status it named — when that status refuses, and with 500
-  /// when it does not — and forgotten — no event, no handle,
-  /// nothing for the application to clean up — and what it takes, by
-  /// answering `SIPRAL_SCREEN_ACCEPT`, arrives exactly as it would with no
-  /// policy installed at all.
+  /// Every INVITE that passes sipral_stack_invite_limit reaches this
+  /// callback before ringing, before `SIPRAL_EVENT_KIND_INCOMING_CALL` and
+  /// before a call handle exists. A refused INVITE gets the named status
+  /// (500 if it does not refuse) and is forgotten: no event, no handle. One
+  /// answered `SIPRAL_SCREEN_ACCEPT` arrives as with no policy.
   ///
-  /// `callback` given as `NULL` removes the policy: every INVITE reaches
-  /// the application again, the way it did before this was ever called.
-  /// Calling this a second time with a callback replaces the first outright,
-  /// on this stack alone — a different stack's policy, if it has one, is
-  /// untouched.
+  /// `NULL` removes the policy. A second call replaces the first, on this
+  /// stack only.
   ///
-  /// The rule that the callback must not call back into this stack, and
-  /// must not unwind, is on SipralScreenCallback and is the reason
-  /// this module's own documentation exists; read it there before wiring
-  /// one up.
+  /// The no re-entry and no unwind rules are on SipralScreenCallback.
   ///
   /// Safety
   ///
-  /// `callback`, when not null, is called on whichever thread is inside an
-  /// entry point that is feeding this stack bytes, for as long as the
-  /// policy stays installed. `user_data` is handed back to it untouched on
-  /// every call and read by nothing here.
+  /// `callback`, when not null, is called on whichever thread is feeding
+  /// this stack bytes, while the policy is installed. `user_data` is handed
+  /// back untouched and never read here.
   ///
-  /// **Whatever `user_data` points at has to outlive the last call, and the
-  /// last call is not `sipral_stack_destroy` returning.** A destroy takes
-  /// this thread's share of the stack away; a receive already running on
-  /// another thread holds one of its own until it is done, and the policy
-  /// it is in the middle of asking is still asked. So the moment to free
-  /// what the pointer names is once no thread is inside this stack any
-  /// more, which is the application's own knowledge and not something this
-  /// ABI can answer. Replacing the policy, or removing it with `NULL`, has
-  /// the same shape: it takes the stack's lock, so it cannot run while a
-  /// policy is being asked, and once it returns the callback that was
-  /// there is not asked again.
+  /// **`user_data` must outlive the last call, which may come after
+  /// `sipral_stack_destroy` returns:** a receive already running on another
+  /// thread holds its own share of the stack and still asks the policy. Free
+  /// it once no thread is inside this stack. Replacing or removing the
+  /// policy takes the lock, so once it returns the old callback is not asked
+  /// again.
   late final int Function(int stack, ffi.Pointer<ffi.NativeFunction<SipralScreenCallback>> callback, ffi.Pointer<ffi.Void> userData) stackScreen = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.NativeFunction<SipralScreenCallback>> callback, ffi.Pointer<ffi.Void> userData),
       int Function(int stack, ffi.Pointer<ffi.NativeFunction<SipralScreenCallback>> callback, ffi.Pointer<ffi.Void> userData)>('sipral_stack_screen');
 
   /// How fast one source address may offer this stack an INVITE (A8).
   ///
-  /// `burst` calls from one address are let through at once; one more is
-  /// earned every `every_ms` after that. What either number means is
-  /// exactly what Rate already means by it — `sipral_stack_create`'s
-  /// default is ten at once and one every two thousand milliseconds,
-  /// loose on purpose, because in most deployments every legitimate call
-  /// arrives from the one address a phone registered with.
+  /// `burst` calls from one address pass at once; one more is earned every
+  /// `every_ms` (see Rate). The default is ten, then one every 2000 ms;
+  /// loose because most legitimate calls come from the registrar's address.
   ///
-  /// A `burst` of zero, or an `every_ms` of zero, is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
-  /// no call ever, the first or the one after a week of quiet, and the
-  /// second earns a token in no time, which is a limit that never limits.
-  /// There is deliberately no way to ask for that from C, since a
-  /// deployment that wants no floor at all can simply never call this.
+  /// A zero `burst` or zero `every_ms` is `SIPRAL_STATUS_INVALID_ARGUMENT`
+  /// and changes nothing: one admits no call, the other never limits.
   ///
-  /// The floor is asked before sipral_stack_screen's own policy is: a
-  /// source that has exhausted it never reaches the callback at all, and is
-  /// counted in `sipral_counters_t::screened_refused_by_rate` or
-  /// `screened_refused_by_crowding`, never in `screened_refused_by_policy`.
+  /// The floor is checked before sipral_stack_screen's policy: a source
+  /// past it never reaches the callback and is counted in
+  /// `screened_refused_by_rate` or `screened_refused_by_crowding`.
   ///
-  /// **It counts by source address, so it counts nothing it cannot name.**
-  /// An INVITE that arrived on a byte stream the application bound without
-  /// saying where the far end is has no address on it, and this floor lets
-  /// every one of those through to the policy — which is where a caller who
-  /// cannot identify a stream's far end has to decide, the same way
-  /// SipralScreenRequest.source being null is what it has to decide
-  /// on. Naming the far end in `sipral_stack_transport_bind`'s `remote` is
-  /// what puts a stream under this floor at all.
+  /// **It counts by source address.** An INVITE on a byte stream bound
+  /// without a far end has no address and always passes to the policy (where
+  /// SipralScreenRequest.source is null). Naming `remote` in
+  /// `sipral_stack_transport_bind` puts a stream under this floor.
   ///
   /// Safety
   ///
@@ -8748,20 +6960,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint64 everyMs, ffi.Uint32 burst),
       int Function(int stack, int everyMs, int burst)>('sipral_stack_invite_limit');
 
-  /// Watch something at the far end (A1).
+  /// Watch something at the far end.
   ///
-  /// One SUBSCRIBE goes out on `account`'s transport, to `account`'s
-  /// address, and the handle written back names the subscription from now
-  /// until it ends. Nothing has happened yet when this returns: the request
-  /// is in the transmit queue, and
-  /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` reports each step of what
-  /// becomes of it.
-  ///
-  /// A subscription refreshes itself for as long as it is live, at a
-  /// fraction of what the notifier granted, and starts a fresh one by itself
-  /// after something recoverable — both under this same handle. What ends
-  /// it for good is sipral_subscription_end, or an event saying it
-  /// ended with no retry, and the handle names nothing after that.
+  /// One SUBSCRIBE is queued on `account`'s transport and address, and the
+  /// handle names the subscription until it ends.
+  /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` reports each step. It
+  /// refreshes and retries recoverable failures under the same handle;
+  /// sipral_subscription_end or an end with no retry finishes it.
   ///
   /// Safety
   ///
@@ -8773,18 +6978,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<SipralSubscribeConfig> config, ffi.Pointer<SipralHandle> outSubscription, ffi.Uint64 nowMs),
       int Function(int stack, int account, ffi.Pointer<SipralSubscribeConfig> config, ffi.Pointer<SipralHandle> outSubscription, int nowMs)>('sipral_account_subscribe');
 
-  /// Give a subscription up.
+  /// Give a subscription up with `Expires: 0` (§4.1.2.3).
   ///
-  /// A SUBSCRIBE with `Expires: 0` (§4.1.2.3), and the subscription is not
-  /// over when this returns: §4.4.1 makes it live "until the NOTIFY
-  /// transaction with a `Subscription-State` of `terminated` completes", so
-  /// the closing notification is still answered and
+  /// It stays live until the closing NOTIFY completes (§4.4.1);
   /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` with
-  /// `SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED` says when it has. One that has
-  /// no dialog yet has nothing to send this in and ends at once.
-  ///
-  /// The handle stays usable until that event arrives, and names nothing
-  /// after it.
+  /// `SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED` says when. Without a dialog yet
+  /// it ends at once. The handle is usable until that event.
   ///
   /// Safety
   ///
@@ -8794,11 +6993,8 @@ final class Sipral {
       int Function(int stack, int subscription, int nowMs)>('sipral_subscription_end');
 
   /// Where a subscription is, without waiting for its next event.
-  ///
-  /// SipralSubscriptionState.unknown for a handle that names nothing,
-  /// which is what a subscription that has ended leaves behind — and a
-  /// status of `SIPRAL_STATUS_OK` all the same, because "it is over" is an
-  /// answer to this question rather than a failure of it.
+  /// SipralSubscriptionState.unknown, with `SIPRAL_STATUS_OK`, for a
+  /// handle that names nothing, as an ended one does.
   ///
   /// Safety
   ///
@@ -8807,19 +7003,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle subscription, ffi.Pointer<ffi.Uint32> outState),
       int Function(int stack, int subscription, ffi.Pointer<ffi.Uint32> outState)>('sipral_subscription_state');
 
-  /// What a lamp for this subscription should show (A1).
+  /// What a lamp for this subscription should show: RFC 4235 §3.7.2's
+  /// virtual state machine over every known dialog, ringing beating
+  /// settled, SipralDialogPhase.idle once all ended. The dialog
+  /// functions below give the detail.
   ///
-  /// RFC 4235 §3.7.2's virtual state machine over every dialog the notifier
-  /// has told this subscription about: anything ringing beats anything
-  /// settled, and SipralDialogPhase.idle is what is left once they
-  /// have all ended. One call and one number, which is what a busy lamp
-  /// field is; sipral_subscription_dialog_count and the two after it
-  /// are for an application that wants to show who is on the call as well.
-  ///
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that has no dialog
-  /// state at all — one to another package, or one that is not live, whose
-  /// last notification stopped being evidence the moment it stopped being
-  /// refreshed.
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription with no dialog state:
+  /// another package, or not live (its last notification is stale).
   ///
   /// Safety
   ///
@@ -8828,13 +7018,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle subscription, ffi.Pointer<ffi.Uint32> outPhase),
       int Function(int stack, int subscription, ffi.Pointer<ffi.Uint32> outPhase)>('sipral_subscription_lamp');
 
-  /// How many dialogs this subscription has been told about.
-  ///
-  /// They are in the order they were first heard of, and the index one has
-  /// here is stable only until the next notification arrives: a dialog that
-  /// ended is dropped from the table, and the numbering closes up behind
-  /// it. Read a dialog out in the same breath as the count, and read them
-  /// both again on the next
+  /// How many dialogs this subscription has been told about, in order first
+  /// heard. Indexes hold only until the next notification, which drops
+  /// ended dialogs; read again on each
   /// SIPRAL_EVENT_KIND_NOTIFIED.
   ///
   /// Safety
@@ -8856,15 +7042,10 @@ final class Sipral {
 
   /// A piece of text about one of them, copied into the caller's buffer.
   ///
-  /// The same shape `sipral_last_error_message` has, and for the same
-  /// reason: the text belongs to the library and a pointer to it would be
-  /// one a caller could outlive. `out_needed` always receives the number of
-  /// bytes the text needs including the trailing NUL, so a caller that
-  /// brought nothing can ask with `capacity` zero and then ask again with
-  /// room. A buffer too small for the whole of it is
-  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written to it.
-  ///
-  /// A piece the notifier did not send is one byte: the NUL.
+  /// `out_needed` always receives the size with the trailing NUL; ask with
+  /// `capacity` zero, then with room. Too small a buffer is
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, nothing written. A piece the notifier
+  /// did not send is just the NUL.
   ///
   /// Safety
   ///
@@ -8877,14 +7058,9 @@ final class Sipral {
 
   /// Send an instant message outside any dialog (RFC 3428 §3).
   ///
-  /// One MESSAGE goes out on `account`'s transport, to `target`. The
-  /// handle written back names the send until its outcome arrives as
-  /// `SIPRAL_EVENT_KIND_MESSAGE_SENT`, whether or not the request reached a
-  /// transport at all.
-  ///
-  /// `body` is taken whole, including any byte a header field would
-  /// refuse — it is a body, not a header — and `content_type` is checked
-  /// the way any text argument at this boundary is.
+  /// The handle written back names the send until
+  /// `SIPRAL_EVENT_KIND_MESSAGE_SENT` reports its outcome, even a transport
+  /// failure. `body` is taken as raw bytes.
   ///
   /// Safety
   ///
@@ -8897,29 +7073,18 @@ final class Sipral {
 
   /// A call is expected on this account, announced by a push (C2).
   ///
-  /// `caller` is whoever the notification said is calling, as a SIP URI.
-  /// The binding is refreshed at once on whatever path exists — §4.1.3
-  /// makes that a MUST for a woken agent, and a transport the application
-  /// has not opened yet is the ordinary shape of a wake-up, so the REGISTER
-  /// is owed and goes the moment one is bound.
+  /// `caller` is the SIP URI the push named. The binding is refreshed at
+  /// once (§4.1.3); with no transport bound yet, the REGISTER goes when one
+  /// is. Without a registrar, only the matching happens.
   ///
-  /// Exactly one of the two values written back names something, and which
-  /// one is a race the caller cannot control:
+  /// Exactly one of the two outputs names something:
   ///
-  /// - `out_announcement` when nothing has arrived yet. The INVITE that
-  ///   matches will be reported as `SIPRAL_EVENT_KIND_CALL_ANNOUNCED`
-  ///   naming this announcement, immediately before the
-  ///   `SIPRAL_EVENT_KIND_INCOMING_CALL` for the same call; and
-  ///   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` when none does.
-  /// - `out_call` when the INVITE beat the push. The screen just raised
-  ///   belongs to that call handle, and no announcement was recorded for it
-  ///   to answer. A `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` still arrives for it
-  ///   when the incoming-call event has not been delivered yet, because the
-  ///   two are queued together and in that order; once it has, this return
-  ///   value is the only word about the match there will be.
-  ///
-  /// An account with no registrar has no binding to refresh, and for one of
-  /// those only the matching happens.
+  /// - `out_announcement` when nothing arrived yet. The matching INVITE
+  ///   raises `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` right before its
+  ///   `SIPRAL_EVENT_KIND_INCOMING_CALL`, or
+  ///   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` if none comes.
+  /// - `out_call` when the INVITE beat the push. If the incoming-call event
+  ///   was already delivered, this is the only report of the match.
   ///
   /// Safety
   ///
@@ -8931,23 +7096,14 @@ final class Sipral {
 
   /// Refresh the binding now, without announcing anything (C3).
   ///
-  /// For the periodic wake-up a proxy sends to keep a suspended device's
-  /// binding alive (RFC 8599 §5.5). A push is evidence that the path to the
-  /// proxy is working, so a back-off earned by an earlier outage is not
-  /// what to wait for now and is dropped.
+  /// For a proxy's periodic wake-up (RFC 8599 §5.5). A push proves the path
+  /// works, so any back-off from an earlier outage is dropped.
   ///
-  /// Nothing is sent when a REGISTER is already in flight, which is already
-  /// the fastest path, or when the registration has failed in a way trying
-  /// again cannot fix — repeating a password that was refused is how an
-  /// account gets locked out, and a push does not change that. Both of those
-  /// are `SIPRAL_STATUS_OK`: the refresh was asked for and the answer is
-  /// that nothing needed sending.
-  ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers,
-  /// which has no binding to refresh: it is the account that is wrong for
-  /// this call, not the build that is missing the feature. A send that could
-  /// not happen because no transport is bound yet is reported too, and is
-  /// not fatal: the refresh is remembered and goes out the moment one is.
+  /// `SIPRAL_STATUS_OK` without sending when a REGISTER is in flight or the
+  /// failure is permanent (retrying a refused password locks accounts out).
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers.
+  /// With no transport bound yet the failure is reported, and the refresh
+  /// goes out once one is.
   ///
   /// Safety
   ///
@@ -8956,12 +7112,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Uint64 nowMs),
       int Function(int stack, int account, int nowMs)>('sipral_account_refresh_binding');
 
-  /// Stop expecting an announced call.
-  ///
-  /// The user dismissed the screen, or the application decided the wake-up
-  /// was stale. `SIPRAL_STATUS_WRONG_STATE` when it had already been
-  /// fulfilled or had already expired, which is not a mistake: the event
-  /// that said so and this call can cross.
+  /// Stop expecting an announced call. `SIPRAL_STATUS_WRONG_STATE` when it
+  /// was already fulfilled or expired; the event and this call can cross.
   ///
   /// Safety
   ///
@@ -8970,12 +7122,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle announcement),
       int Function(int stack, int announcement)>('sipral_announcement_forget');
 
-  /// What the registrar said about push, in the 2xx to the REGISTER that
-  /// asked for it.
-  ///
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` when this account did not ask for push,
-  /// or when no binding it could have been said about is standing — none
-  /// granted yet, one given up, or one that has lapsed.
+  /// What the registrar said about push in its 2xx to REGISTER.
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` when the account did not ask for push or
+  /// has no standing binding.
   ///
   /// Safety
   ///
@@ -8985,10 +7134,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<SipralPushEcho> outEcho),
       int Function(int stack, int account, ffi.Pointer<SipralPushEcho> outEcho)>('sipral_account_push_echo');
 
-  /// Configure an account, and write its handle to `out_account`.
-  ///
-  /// Nothing is sent. The account exists until sipral_account_remove or
-  /// until the stack is destroyed.
+  /// Configure an account and write its handle to `out_account`. Nothing is
+  /// sent. It lives until sipral_account_remove or the stack's end.
   ///
   /// Safety
   ///
@@ -8999,12 +7146,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralAccountConfig> config, ffi.Pointer<SipralHandle> outAccount),
       int Function(int stack, ffi.Pointer<SipralAccountConfig> config, ffi.Pointer<SipralHandle> outAccount)>('sipral_account_add');
 
-  /// Forget an account, and everything scheduled for it.
-  ///
-  /// Nothing is sent: an account being removed may be one whose registrar is
-  /// unreachable, and waiting on that is not this call's job. Give the
-  /// binding up politely with sipral_account_unregister first when it
-  /// matters.
+  /// Forget an account and everything scheduled for it. Nothing is sent: its
+  /// registrar may be unreachable. Call sipral_account_unregister first
+  /// to give the binding up.
   ///
   /// Safety
   ///
@@ -9015,13 +7159,10 @@ final class Sipral {
 
   /// Register, and keep the binding alive until told otherwise.
   ///
-  /// Refreshes, credential retries and the back-off after an outage all
-  /// happen without another call. What stops them is
-  /// sipral_account_unregister, or a refusal that trying again cannot
-  /// fix. Every step of it arrives as a `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`.
-  ///
-  /// An account configured with no registrar never registers, and this
-  /// answers `SIPRAL_STATUS_INVALID_ARGUMENT` for it with nothing sent.
+  /// Refreshes, credential retries and back-off happen on their own until
+  /// sipral_account_unregister or a refusal retrying cannot fix. Each
+  /// step arrives as `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`. An account
+  /// with no registrar gets `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent.
   ///
   /// Safety
   ///
@@ -9032,12 +7173,9 @@ final class Sipral {
 
   /// Give the binding up: a REGISTER with `Expires: 0` (§10.2.2).
   ///
-  /// Only this device's binding. A `Contact: *` would remove every binding
-  /// the address of record has, including the one belonging to the desk
-  /// phone somebody else is holding.
-  ///
-  /// An account configured with no registrar has no binding to give up, and
-  /// is refused the way `sipral_account_register` refuses it.
+  /// Only this device's binding: `Contact: *` would remove every binding of
+  /// the address of record. An account with no registrar is refused as
+  /// `sipral_account_register` refuses it.
   ///
   /// Safety
   ///
@@ -9046,10 +7184,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Uint64 nowMs),
       int Function(int stack, int account, int nowMs)>('sipral_account_unregister');
 
-  /// Where an account's registration is, as a `SipralRegistrationState`.
-  ///
-  /// An account configured with no registrar answers
-  /// `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, always.
+  /// Where an account's registration is, as a `SipralRegistrationState`;
+  /// always `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` with no registrar.
   ///
   /// Safety
   ///
@@ -9059,28 +7195,21 @@ final class Sipral {
       int Function(int stack, int account, ffi.Pointer<ffi.Uint32> outState)>('sipral_account_registration_state');
 
   /// Give an account the OAuth 2.0 access token its server asked for
-  /// (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
-  /// takes the token away. The password, if the account has one, stays.
+  /// (RFC 8898), replacing any it had. A `token_len` of zero removes it; a
+  /// password stays.
   ///
-  /// The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
-  /// renewed ahead of its expiry goes in: from the next request on, a
-  /// `Bearer` challenge from the account's own server is answered with
-  /// `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
-  /// request its cached challenge covers. Offered a `Digest` and a
-  /// `Bearer` challenge for one realm, the token answers. A token the
-  /// server refused is never sent to it again. The token answers the
-  /// account's own server and nobody else, the rule the password is held
-  /// to. Nothing is sent by this call; a registration that failed for
-  /// want of a token starts again with `sipral_account_register`.
+  /// Answers `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, or renews ahead of expiry.
+  /// From the next request, a `Bearer` challenge from the account's own
+  /// server (and every request its cached challenge covers) gets
+  /// `Authorization: Bearer <token>` (RFC 6750 §2.1); with `Digest` and
+  /// `Bearer` offered for one realm, the token answers. A refused token is
+  /// never resent. Nothing is sent now; a registration that failed for want
+  /// of a token restarts with `sipral_account_register`.
   ///
-  /// The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
-  /// names the authorization server and the scope, and the exchange with
-  /// it is the application's. The token is copied, kept out of every log
-  /// and diagnostic, and wiped when replaced.
-  ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
-  /// §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
-  /// nothing changed and the error not describing it.
+  /// The application fetches tokens. The token is copied, kept out of logs
+  /// and diagnostics, and wiped when replaced. A token that is not RFC 6750
+  /// §2.1's `b64token` is `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing changed,
+  /// the error not describing it.
   ///
   /// Safety
   ///
@@ -9091,17 +7220,14 @@ final class Sipral {
       int Function(int stack, int account, ffi.Pointer<ffi.Char> token, int tokenLen)>('sipral_account_set_access_token');
 
   /// Test the network before a call: STUN, TURN, the account's server and,
-  /// with an echo call, the audio path, as `config` says (ABI 1.2). The
-  /// answer arrives from a later `sipral_stack_poll` as one
-  /// `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
-  /// has answered or `timeout_ms` has passed. Tests may run side by side.
+  /// with an echo call, the audio path (ABI 1.2). The result arrives from a
+  /// later `sipral_stack_poll` as `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying
+  /// `*out_test`. Tests may run side by side.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
-  /// no STUN server, and for an account whose server has not been located
-  /// yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
-  /// an address or is a signalling socket of the stack's own; a handle
-  /// that names no account or call of this stack is refused as handles are.
-  /// Nothing is started when anything is refused.
+  /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` without a STUN server
+  /// or an account not located yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+  /// `probe_socket` that is not an address or is a signalling socket.
+  /// Nothing starts when anything is refused.
   ///
   /// Safety
   ///
@@ -9114,32 +7240,24 @@ final class Sipral {
 
   /// Place a call, and write its handle to `out_call`.
   ///
-  /// The handle exists from here on, before any dialog does, because there
-  /// has to be something to hang up with while the INVITE is still in
-  /// flight. A proxy that forks the INVITE gives the branches handles of
-  /// their own, reported as `SIPRAL_EVENT_KIND_CALL_FORKED`.
+  /// The handle exists before any dialog, so the INVITE can be hung up while in flight.
+  /// Branches a proxy forks get their own handles (`SIPRAL_EVENT_KIND_CALL_FORKED`).
   ///
-  /// With `media_address` set, the offer is this stack's to write and the
-  /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-  /// and the `sipral_media_*` entry points carry the packets from then on.
-  /// `config.srtp`
-  /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
-  /// no other kind.
+  /// With `media_address` set the stack writes the offer and runs the audio:
+  /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when, and `sipral_media_*` carry the packets.
   ///
   /// Safety
   ///
-  /// `config` must point at a `sipral_call_config_t` whose `size` member
-  /// says how long it is, with every pointer in it readable for the length
-  /// beside it, and `out_call` at one `sipral_handle_t`.
+  /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+  /// with every pointer in it readable for the length beside it, and `out_call` at one
+  /// `sipral_handle_t`.
   late final int Function(int stack, int account, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outCall, int nowMs) callPlace = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outCall, ffi.Uint64 nowMs),
       int Function(int stack, int account, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outCall, int nowMs)>('sipral_call_place');
 
   /// Say a call that came in is ringing.
   ///
-  /// A description makes it a 183 Session Progress rather than a 180
-  /// Ringing, because 180 with a body is a contradiction the far end has to
-  /// guess at. Pass none for the ordinary case.
+  /// A description makes it a 183 rather than a 180, since a 180 with a body is ambiguous.
   ///
   /// Safety
   ///
@@ -9148,63 +7266,34 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Uint8> sdp, ffi.Size sdpLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Uint8> sdp, int sdpLen, int nowMs)>('sipral_call_ring');
 
-  /// Say a call that came in is ringing, with this stack running the audio
-  /// before anybody answers.
+  /// Say a call that came in is ringing, with this stack running the audio before anybody
+  /// answers.
   ///
-  /// The answer to the offer the INVITE carried is written from this
-  /// stack's codec order, against `config.media_address` — where this end
-  /// will receive media, which only the application can say because it owns
-  /// the socket — and the session opens on it there and then: the far end
-  /// hears whatever the application plays before anybody picks up.
-  /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows.
+  /// The answer to the INVITE's offer is written from this stack's codec order against
+  /// `config.media_address`, and the session opens at once: the far end hears what the
+  /// application plays. `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows. `config.srtp` and
+  /// `config.codecs` override the stack's for this call, and `sipral_call_answer_media` keeps
+  /// what was settled here; it is the only way an incoming call chooses its own SRTP policy.
   ///
-  /// `config.srtp` overrides the stack's own SRTP policy for this call, the
-  /// same way it does on `sipral_call_place`; it is the one way an incoming
-  /// call can choose its own SRTP policy at all, since
-  /// `sipral_call_answer_media` reads no configuration of its own. Once
-  /// this has set it, `sipral_call_answer_media` keeps it: it is answering
-  /// a call that already has a catalogue, not choosing one.
+  /// `sipral_call_answer_media` then reuses this session and description. What its 200 OK
+  /// carries follows RFC 3262 §5 and RFC 6337 §3.1.1, by whether the 183 went out reliably
+  /// (`docs/05-media.md`, "Ringing with media").
   ///
-  /// `config.codecs` overrides the stack's codec order for this call in the
-  /// same way and for the same window: the answer written here is written
-  /// from it, and `sipral_call_answer_media` keeps what it settled.
-  ///
-  /// `sipral_call_answer_media` after this reuses the session and the
-  /// description written here rather than negotiating a second one. What
-  /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
-  /// §3.1.1 exactly, from whether this call's 183 went out reliably — see
-  /// `docs/05-media.md`, "Ringing with media".
-  ///
-  /// Every other member of `config` — `target`, `sdp`, `destination`,
-  /// `transport`, `keep_all_forks`, `headers` — names something a call to
-  /// place would need, and this call already exists; setting one of them
-  /// is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
-  ///
-  /// An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
-  /// nothing sent: the offer this end would make instead belongs in no
-  /// provisional response this stack can follow up (RFC 3261 §13.2.1,
-  /// RFC 6337 §3.1.2).
-  ///
-  /// Calling this twice on one call is `SIPRAL_STATUS_WRONG_STATE`, and so is
-  /// calling it after a `sipral_call_ring` that sent a description of the
-  /// application's own: every description in the responses to one INVITE
-  /// has to be that same one (RFC 3261 §13.2.1, RFC 6337 §3.1.1). After a
-  /// `sipral_call_ring` that sent none, it is not.
+  /// Setting `target`, `sdp`, `destination`, `transport`, `keep_all_forks` or `headers` is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it. `SIPRAL_STATUS_WRONG_STATE`, with nothing
+  /// sent: an INVITE with no offer (RFC 3261 §13.2.1, RFC 6337 §3.1.2); a second call of this;
+  /// a call after a `sipral_call_ring` that sent the application's own description
+  /// (RFC 3261 §13.2.1, RFC 6337 §3.1.1).
   ///
   /// Safety
   ///
-  /// `config` must point at a `sipral_call_config_t` whose `size` member
-  /// says how long it is, with `media_address` readable for
-  /// `media_address_len` bytes.
+  /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+  /// with `media_address` readable for `media_address_len` bytes.
   late final int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, int nowMs) callRingMedia = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralCallConfig> config, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, int nowMs)>('sipral_call_ring_media');
 
-  /// Answer a call that came in.
-  ///
-  /// `sdp` is the answer to the offer the INVITE carried, and is required:
-  /// answering with nothing puts the offer on this end and the answer in the
-  /// far end's ACK, which this ABI has no way to hand back.
+  /// Answer a call that came in with `sdp`, the answer to the INVITE's offer (required).
   ///
   /// Safety
   ///
@@ -9215,21 +7304,12 @@ final class Sipral {
 
   /// Answer a call that came in, and let this stack run its audio.
   ///
-  /// The answer to the offer the INVITE carried is written from this stack's
-  /// codec order, against `media_address` — where this end will receive
-  /// media, which only the application can say because it owns the socket.
+  /// The answer is written from this stack's codec order against `media_address`.
   /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows once the stream is open.
   ///
-  /// The other half of `sipral_call_place` with `media_address` set, and the
-  /// alternative to `sipral_call_answer`, which answers with a description
-  /// the application wrote and leaves the audio to it.
-  ///
-  /// On a call `sipral_call_ring_media` already rang, nothing is written and
-  /// no second session opens: the 183's description and session stand,
-  /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` has already been reported, and
-  /// `media_address` must still be an address and a port but is not used.
-  /// The 200 OK repeats that description when the 183 went out unreliably and
-  /// carries none when it went out reliably (RFC 6337 §3.1.1).
+  /// On a call `sipral_call_ring_media` already rang, the 183's description and session
+  /// stand and `media_address` must still parse but is unused. The 200 OK repeats that
+  /// description if the 183 went unreliably and carries none if reliably (RFC 6337 §3.1.1).
   ///
   /// Safety
   ///
@@ -9238,31 +7318,21 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> mediaAddress, ffi.Size mediaAddressLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Char> mediaAddress, int mediaAddressLen, int nowMs)>('sipral_call_answer_media');
 
-  /// Answer a call that came in with media this stack describes, from
-  /// `config`: `sipral_call_answer_media` with the choices
-  /// `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
-  /// `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
-  /// and `focus` for a conference focus. Every other member names
-  /// something only a call to place needs, and setting one is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
-  ///
-  /// On a call `sipral_call_ring_media` already rang, the 183's
-  /// description and session stand exactly as `sipral_call_answer_media`
-  /// says, and nothing in `config` but `focus` changes them.
+  /// Answer a call that came in with media this stack describes, from `config`:
+  /// `sipral_call_answer_media` with the members `sipral_call_ring_media` reads. Any other
+  /// member set is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it. On a call already rung with
+  /// media, only `focus` changes anything.
   ///
   /// Safety
   ///
-  /// `config` must point at a `sipral_call_config_t` whose `size` member
-  /// says how long it is, with every pointer in it readable for the length
-  /// beside it.
+  /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+  /// with every pointer in it readable for the length beside it.
   late final int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, int nowMs) callAnswerWith = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralCallConfig> config, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, int nowMs)>('sipral_call_answer_with');
 
-  /// Refuse a call that came in, with a response code of your choosing.
-  ///
-  /// 486 Busy Here for a line that is in use, 603 Decline for a person who
-  /// does not want to talk. The difference is what a proxy does next.
+  /// Refuse a call that came in with a response code of your choosing: 486 for a line in use,
+  /// 603 for a person who declines. A proxy acts differently on each.
   ///
   /// Safety
   ///
@@ -9271,11 +7341,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 code, ffi.Uint64 nowMs),
       int Function(int stack, int call, int code, int nowMs)>('sipral_call_reject');
 
-  /// Hang up, whatever the call is doing.
-  ///
-  /// A CANCEL before it is answered, a BYE after, a refusal for one that
-  /// came in and has not been answered. A call that is already ending is
-  /// left alone rather than refused.
+  /// Hang up, whatever the call is doing: CANCEL before an answer, BYE after, a refusal for
+  /// an unanswered incoming call. A call already ending is left alone.
   ///
   /// Safety
   ///
@@ -9284,48 +7351,36 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint64 nowMs),
       int Function(int stack, int call, int nowMs)>('sipral_call_hangup');
 
-  /// Set the header fields that go on what this call sends at the
-  /// application's request, from now until they are set again.
+  /// Set the header fields that go on what this call sends at the application's request,
+  /// until set again.
   ///
-  /// They go on the 180 or 183 from `sipral_call_ring`, the 200 from
-  /// `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
-  /// `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
-  /// turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
-  /// `sipral_call_resume` send. Kept rather than spent on the first of those,
-  /// so that a field set before ringing is on the 200 as well. Never on a
-  /// CANCEL, which a proxy answers and replaces with its own, and never on
-  /// what the stack sends by itself: a session refresh, or the BYE for a 2xx
-  /// that was never acknowledged or for a fork that lost.
+  /// They go on the responses of `sipral_call_ring`, `sipral_call_answer`,
+  /// `sipral_call_answer_media` and `sipral_call_reject`, the refusal or BYE of
+  /// `sipral_call_hangup`, and the re-INVITE or UPDATE of `sipral_call_hold` and
+  /// `sipral_call_resume`. Kept across them. Never on a CANCEL (a proxy replaces it) or on
+  /// what the stack sends by itself.
   ///
-  /// Replaces what was set before, whole, and a `headers_len` of zero takes
-  /// every field off. Each field is checked first, as it is on
-  /// `sipral_call_config_t::headers`, and a refusal names the element, keeps
-  /// none of the new fields and leaves the old ones in place. Nothing is
-  /// sent.
+  /// Replaces the previous set whole; `headers_len` zero clears it. Each field is checked as
+  /// on `sipral_call_config_t::headers`; a refusal names the element and keeps the old set.
   ///
   /// Safety
   ///
-  /// `headers` must be null with `headers_len` zero, or readable for
-  /// `headers_len` elements, each with a name and a value readable for the
-  /// lengths beside them.
+  /// `headers` must be null with `headers_len` zero, or readable for `headers_len` elements,
+  /// each with a name and a value readable for the lengths beside them.
   late final int Function(int stack, int call, ffi.Pointer<SipralHeader> headers, int headersLen) callSetHeaders = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralHeader> headers, ffi.Size headersLen),
       int Function(int stack, int call, ffi.Pointer<SipralHeader> headers, int headersLen)>('sipral_call_set_headers');
 
   /// Put a call on hold (RFC 3264 §8.4).
   ///
-  /// The description is the stack's to write: the one already negotiated
-  /// with every stream's direction changed. Asking for a hold that is
-  /// already in place, or already on its way, sends nothing and succeeds.
+  /// The stack writes the description: the negotiated one with every direction changed. A
+  /// hold already in place or on its way sends nothing and succeeds.
   ///
-  /// Asked for while another session change is running in the call, in
-  /// either direction, it succeeds and waits: its request goes once that
-  /// change is over (RFC 3261 §14.1), and the outcome arrives as
-  /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
-  /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` like any other. What waits
-  /// is the state asked for last, so a resume asked for behind a hold still
-  /// on its way goes after it. One still waiting when the call ends is
-  /// never sent, and `SIPRAL_EVENT_KIND_CALL_ENDED` is the last word on it.
+  /// While another session change runs, it succeeds and waits until that is over
+  /// (RFC 3261 §14.1); the outcome arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
+  /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`. Only the last state asked for waits, so a
+  /// resume asked for while a hold is still on its way goes after it. One still waiting
+  /// when the call ends is never sent.
   ///
   /// Safety
   ///
@@ -9334,12 +7389,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint64 nowMs),
       int Function(int stack, int call, int nowMs)>('sipral_call_hold');
 
-  /// Take it off hold again.
-  ///
-  /// Every stream goes back to the direction it had before, which is not
-  /// always both ways: one that was offered receive-only is resumed
-  /// receive-only. It waits for a change already running exactly as
-  /// `sipral_call_hold` does.
+  /// Take it off hold. Each stream returns to its previous direction (a receive-only one stays
+  /// receive-only), and waits for a running change as `sipral_call_hold` does.
   ///
   /// Safety
   ///
@@ -9350,30 +7401,18 @@ final class Sipral {
 
   /// Offer a call again on another list of codecs (RFC 3264 §8.3.2).
   ///
-  /// `codecs` names them the way `sipral_call_config_t::codecs` does:
-  /// separated by commas, in the order to offer them. Only the codecs
-  /// change. Everything else the call has agreed is offered again as it
-  /// is — its media address, its SRTP key or DTLS fingerprint, its ICE
-  /// credentials — so nothing is re-keyed and nothing restarts, and a call
-  /// on hold stays on hold: `sipral_call_resume` takes it off, on the new
-  /// list. A dynamic payload type keeps the codec it has named on this
-  /// call, and a codec new to it gets a number nothing has had.
+  /// `codecs` is as `sipral_call_config_t::codecs`. Only the codecs change: address, keys,
+  /// fingerprint and ICE credentials are offered as they are, and a held call stays held. A
+  /// dynamic payload type keeps its codec; a new codec gets an unused number.
   ///
-  /// The list becomes the call's own once the far end accepts it, and
-  /// `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the codec its answer settled
-  /// on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and
-  /// leaves the call on the list it had.
+  /// The list becomes the call's once accepted; `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the
+  /// codec settled on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
   ///
-  /// For a call whose media the stack describes: one placed or answered
-  /// with `media_address` set. `SIPRAL_STATUS_NOT_SUPPORTED` for a name
-  /// this build has no codec behind; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
-  /// list that is empty, names a codec twice or has a stray comma;
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call the stack writes no description
-  /// for, one with none agreed yet, one whose stream was refused (a change
-  /// of codecs does not bring it back), one still early with a far end that
-  /// never listed UPDATE, or while another change is on its way;
-  /// `SIPRAL_STATUS_EXHAUSTED` when a codec new to the call finds every
-  /// dynamic payload type number already taken.
+  /// For a call placed or answered with `media_address`. `SIPRAL_STATUS_NOT_SUPPORTED`: a name
+  /// with no codec in this build. `SIPRAL_STATUS_INVALID_ARGUMENT`: an empty list, a repeated
+  /// name or a stray comma. `SIPRAL_STATUS_WRONG_STATE`: no stack-written description, none
+  /// agreed yet, a refused stream, an early call whose far end never listed UPDATE, or
+  /// another change on its way. `SIPRAL_STATUS_EXHAUSTED`: no dynamic payload type left.
   ///
   /// Safety
   ///
@@ -9382,31 +7421,19 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> codecs, ffi.Size codecsLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Char> codecs, int codecsLen, int nowMs)>('sipral_call_change_codecs');
 
-  /// Restart ICE on a call (RFC 8445 §9): offer the call again with new
-  /// credentials of this end's own, and check every pair again once the
-  /// far end has answered.
+  /// Restart ICE on a call (RFC 8445 §9): offer it again with new credentials and check every
+  /// pair again once the far end answers.
   ///
-  /// The call's last description is offered again with its ICE lines
-  /// written as for a first offer — both `ice-ufrag` and `ice-pwd` changed,
-  /// which is how RFC 8839 §4.4.1.1.1 signals a restart — the candidates
-  /// its agent still holds, and the role it had. Nothing else moves, and
-  /// nothing reaches the running agent until the far end accepts: "Should
-  /// a subsequent offer fail, ICE processing continues as if the
-  /// subsequent offer had never been made" (§4.4). Then the agent checks
-  /// again under both ends' new credentials while the pair it had goes on
-  /// carrying the audio, and the new selection arrives as another
-  /// `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`; the far end's checks that
-  /// arrive before its answer are kept and answered then. A refusal
-  /// arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as
-  /// it was.
+  /// The last description is offered again with new `ice-ufrag` and `ice-pwd`
+  /// (RFC 8839 §4.4.1.1.1), the candidates still held, and the same role. Nothing reaches the
+  /// agent until the far end accepts (§4.4). The old pair carries audio meanwhile, and the new
+  /// selection arrives as `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`. A refusal arrives as
+  /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as it was.
   ///
-  /// The remedy for a path whose consent was lost
-  /// (`SIPRAL_MEDIA_FAULT_ICE`), and for a network change this end sees
-  /// first. For a call whose media the stack describes: one placed or
-  /// answered with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a
-  /// call the stack writes no description for, one running no ICE agent,
-  /// one with no description yet, or while another change is on its way;
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
+  /// The remedy for lost consent (`SIPRAL_MEDIA_FAULT_ICE`) and a local network change. For a
+  /// call placed or answered with `media_address`. `SIPRAL_STATUS_WRONG_STATE`: no
+  /// stack-written description, no ICE agent, no description yet, or another change on its
+  /// way. `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
   ///
   /// Safety
   ///
@@ -9415,34 +7442,23 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint64 nowMs),
       int Function(int stack, int call, int nowMs)>('sipral_call_restart_ice');
 
-  /// Describe a call's media at the socket the application bound for it on
-  /// a new network, and offer that to the far end (RFC 3264 §8.3.1): what
-  /// `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for.
+  /// Describe a call's media at a socket the application bound on a new network and offer it
+  /// to the far end (RFC 3264 §8.3.1), as `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks.
   ///
-  /// `media_address` is where the new socket is bound, as `host:port`;
-  /// `public_address` is where it appears from outside when the
-  /// application has learned that for it, or null with a length of zero
-  /// to describe the call by `media_address` itself. The re-INVITE carries
-  /// the call's last description with only `c=` and the port on `m=`
-  /// moved — codecs, direction, keys and fingerprint stay as they were —
-  /// and the account's `Contact` as it is when this is called, so
-  /// `sipral_account_rebind` goes first. The new socket is the call's from
-  /// here on whatever the far end answers; the answer arrives as
-  /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` and `SIPRAL_EVENT_KIND_MEDIA_CHANGED`,
-  /// a refusal as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
+  /// `media_address` is the new socket, `host:port`; `public_address` is where it appears
+  /// from outside, or null with length zero. The re-INVITE moves only `c=` and the `m=` port,
+  /// and carries the account's current `Contact`, so `sipral_account_rebind` goes first. The
+  /// new socket is the call's whatever the answer: `SIPRAL_EVENT_KIND_SESSION_CHANGED` and
+  /// `SIPRAL_EVENT_KIND_MEDIA_CHANGED`, or `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
   ///
-  /// For a call whose media the stack describes: one placed or answered
-  /// with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a call the
-  /// stack writes no description for, one whose session runs ICE (which
-  /// moves by a restart gathered on the new socket, not by this), one with
-  /// no description yet, or while another change is on its way — asking
-  /// again once that change is answered moves it then.
+  /// For a call placed or answered with `media_address`. `SIPRAL_STATUS_WRONG_STATE`: no
+  /// stack-written description, a session running ICE (moved by a restart instead), no
+  /// description yet, or another change on its way.
   ///
   /// Safety
   ///
-  /// `media_address` must be readable for `media_address_len` bytes, and
-  /// `public_address` for `public_address_len` bytes or null with a length
-  /// of zero.
+  /// `media_address` must be readable for `media_address_len` bytes, and `public_address` for
+  /// `public_address_len` bytes or null with a length of zero.
   late final int Function(int stack, int call, ffi.Pointer<ffi.Char> mediaAddress, int mediaAddressLen, ffi.Pointer<ffi.Char> publicAddress, int publicAddressLen, int nowMs) callMediaReaddress = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> mediaAddress, ffi.Size mediaAddressLen, ffi.Pointer<ffi.Char> publicAddress, ffi.Size publicAddressLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Char> mediaAddress, int mediaAddressLen, ffi.Pointer<ffi.Char> publicAddress, int publicAddressLen, int nowMs)>('sipral_call_media_readdress');
@@ -9450,12 +7466,10 @@ final class Sipral {
   /// End a call and say why (RFC 3326): what `sipral_call_hangup` does, with
   /// a `Reason` on the BYE or the CANCEL it turns into.
   ///
-  /// `sip_cause` is a SIP status and `q850_cause` a Q.850 cause, each zero
-  /// for none; both may be given, and neither is a plain hangup. `text`, when
-  /// given, goes on the first value written: the SIP one, or the Q.850 one
-  /// when there is no SIP one. On the refusal of a call that came in and was
-  /// never answered only the Q.850 value goes (RFC 6432): a SIP one would
-  /// repeat the status the refusal carries.
+  /// `sip_cause` (SIP status) and `q850_cause` (Q.850) are each zero for none;
+  /// neither is a plain hangup. `text` goes on the first value written. On
+  /// refusing an unanswered incoming call only the Q.850 value goes
+  /// (RFC 6432).
   ///
   /// Safety
   ///
@@ -9468,16 +7482,11 @@ final class Sipral {
   /// Answer a call that came in with a 3xx: somewhere else to try
   /// (RFC 3261 §21.3), and why (RFC 5806).
   ///
-  /// `status_code` is 300 to 399, 302 for call forwarding. `targets` is where to
-  /// try, as URIs separated by commas, in the order of preference; one is
-  /// required for every status but 380. `reason`, when given, is the
-  /// `Diversion` reason — `no-answer`, `user-busy`, `unconditional`,
-  /// `deflection`, `do-not-disturb` or any other token — and puts a
-  /// `Diversion` naming the address that was called on the answer, above
-  /// the ones the INVITE already carried.
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for another status, a target that is
-  /// not a URI, or none where one is needed; `SIPRAL_STATUS_WRONG_STATE` for
-  /// a call that is not waiting to be answered.
+  /// `status_code` is 300 to 399. `targets` is comma-separated URIs in
+  /// preference order, required except for 380. `reason`, when given, adds a
+  /// `Diversion` with that reason token naming the called address.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a bad status or target;
+  /// `SIPRAL_STATUS_WRONG_STATE` for a call not waiting to be answered.
   ///
   /// Safety
   ///
@@ -9487,13 +7496,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 statusCode, ffi.Pointer<ffi.Char> targets, ffi.Size targetsLen, ffi.Pointer<ffi.Char> reason, ffi.Size reasonLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, int statusCode, ffi.Pointer<ffi.Char> targets, int targetsLen, ffi.Pointer<ffi.Char> reason, int reasonLen, int nowMs)>('sipral_call_redirect');
 
-  /// How many entries one of a call's identity lists has:
-  /// `SIPRAL_IDENTITY_TEXT_DIVERSION` for the `Diversion` values,
-  /// `SIPRAL_IDENTITY_TEXT_HISTORY` for the `History-Info` entries, and so
-  /// on — each piece of an entry answers the same count as the entry.
-  ///
-  /// Read once, as the INVITE arrived, and the same for the rest of the
-  /// call. A call this end placed has none of them: zero.
+  /// How many entries one of a call's identity lists has. Every piece of an
+  /// entry gives the same count. Read once from the INVITE; zero for a call
+  /// this end placed.
   ///
   /// Safety
   ///
@@ -9503,20 +7508,12 @@ final class Sipral {
       int Function(int stack, int call, int which, ffi.Pointer<ffi.Size> outCount)>('sipral_call_identity_count');
 
   /// One piece of one entry of a call's identity lists, copied into the
-  /// caller's buffer with a trailing NUL: the shape
-  /// `sipral_subscription_dialog_text` has, for the same reason — the text
-  /// is the library's, and a pointer to it is one a caller could outlive.
+  /// caller's buffer with a trailing NUL.
   ///
-  /// `out_needed` always receives the bytes needed including the NUL, so a
-  /// caller that brought nothing can ask with `capacity` zero and ask again
-  /// with room; a buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
-  /// nothing written. A piece the entry does not have — a display name
-  /// the field did not write — is one byte, the NUL. An index past the
-  /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
-  ///
-  /// `index` comes before `which`, as it does in every other entry point
-  /// that reads a piece of text about one of several things: the entry
-  /// first, then the piece of it.
+  /// `out_needed` always receives the bytes needed including the NUL; ask
+  /// with `capacity` zero, then again with room. Too small is
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written. A missing piece
+  /// is just the NUL. An index past the end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   ///
   /// Safety
   ///
@@ -9526,22 +7523,15 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Size index, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(int stack, int call, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_call_identity_text');
 
-  /// Join two active calls into a local conference of three: from here on,
-  /// each call's far end hears the other's far end and this end's own
-  /// microphone, mixed. sipral_media_mix
-  /// drives one frame of it at a time, on the two calls' own media
-  /// handles; this only records the pairing.
+  /// Join two active calls into a local three-way conference: each far end hears the other
+  /// and this end's microphone, mixed. sipral_media_mix
+  /// drives it one frame at a time; this only records the pairing.
   ///
-  /// Nothing like a SIP conference server: neither far end's own signalling
-  /// ever names the other, and this stack sends no `Refer-To`. Both calls
-  /// must already have media running — placed or answered with
-  /// `media_address` set, and negotiated — and must agree on a sample rate
-  /// and a frame length, since nothing here resamples.
+  /// No SIP conference: neither far end is told. Both calls need running media and the same
+  /// sample rate and frame length, since nothing resamples.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`;
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call with no running session, a call
-  /// already joined to another, or two calls whose sessions would decode
-  /// at different rates or cut audio into frames of different lengths.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`; `SIPRAL_STATUS_WRONG_STATE` for a
+  /// call with no running session, one already joined, or mismatched rate or frame length.
   ///
   /// Safety
   ///
@@ -9550,14 +7540,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle callA, SipralHandle callB),
       int Function(int stack, int callA, int callB)>('sipral_call_join');
 
-  /// Take `call` back out of the pair it is in.
-  ///
-  /// Neither call's session is touched: each one goes back to carrying its
-  /// own audio directly, through `sipral_media_playback` and
-  /// `sipral_media_capture`, exactly as an unjoined call always has.
-  ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not currently joined to
-  /// another.
+  /// Take `call` back out of its pair. Neither session is touched; each call carries its own
+  /// audio again. `SIPRAL_STATUS_WRONG_STATE` for a call not joined.
   ///
   /// Safety
   ///
@@ -9566,22 +7550,15 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call),
       int Function(int stack, int call)>('sipral_call_leave');
 
-  /// Accept a change the far end offered, reported as
-  /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
+  /// Accept a change the far end offered (`SIPRAL_EVENT_KIND_SESSION_OFFERED`).
   ///
-  /// `sdp` is the answer to the offer it carried, and is required: every
-  /// such event carries an offer, and RFC 3264 §5 has an offer answered,
-  /// so a null or empty `sdp` is `SIPRAL_STATUS_INVALID_ARGUMENT` and the
-  /// request is still waiting for this or its refusal. A re-INVITE nobody
-  /// answers is retransmitted and then ends the call, so this or
-  /// sipral_call_reject_session has to follow that event. An offer that
-  /// arrived in a PRACK (RFC 3262 §5) is answered the same way, in the
-  /// PRACK's 2xx.
+  /// `sdp`, the answer, is required (RFC 3264 §5): null or empty is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` and the request still waits. An unanswered re-INVITE
+  /// ends the call, so this or sipral_call_reject_session must follow the event. An offer
+  /// in a PRACK (RFC 3262 §5) is answered the same way, in the PRACK's 2xx.
   ///
-  /// Only for a call the application describes. One this stack describes
-  /// answers its own re-offers, from the same codec order, before the poll
-  /// that saw the request returns — so the event never arrives and this is
-  /// `SIPRAL_STATUS_WRONG_STATE`.
+  /// Only for a call the application describes; a stack-described call answers its own
+  /// re-offers, so this is `SIPRAL_STATUS_WRONG_STATE` there.
   ///
   /// Safety
   ///
@@ -9590,13 +7567,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Uint8> sdp, ffi.Size sdpLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Uint8> sdp, int sdpLen, int nowMs)>('sipral_call_accept_session');
 
-  /// Refuse one instead. The session stands exactly as it was (§14.1).
-  ///
-  /// 488 Not Acceptable Here is the code that says the description was the
-  /// problem rather than the request.
-  ///
-  /// As with sipral_call_accept_session, only for a call the application
-  /// describes.
+  /// Refuse one instead; the session stands as it was (§14.1). 488 Not Acceptable Here says
+  /// the description was the problem. Only for a call the application describes.
   ///
   /// Safety
   ///
@@ -9605,44 +7577,23 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 code, ffi.Uint64 nowMs),
       int Function(int stack, int call, int code, int nowMs)>('sipral_call_reject_session');
 
-  /// Send DTMF on a call that is up, in whichever of the three forms the far
-  /// end takes.
+  /// Send DTMF on a call that is up, in the form the far end takes.
   ///
-  /// `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
-  /// RFC 4733 §3.2, in the order they were pressed, checked as a whole
-  /// before anything goes out: one character no keypad has, anywhere in the
-  /// string, sends nothing, not even the keys ahead of it. `duration_ms` is
-  /// how long each one lasts, or zero for the hundred milliseconds every
-  /// one of the three forms defaults to.
+  /// `digits` are `0`-`9`, `*`, `#` and `A`-`D`, the sixteen events of
+  /// RFC 4733 §3.2, in the order they were pressed. The whole string is checked first: one
+  /// bad character sends nothing. `duration_ms` is each tone's length, or zero for 100 ms.
   ///
-  /// `via` is a SipralDtmf, and it is chosen per send rather than per
-  /// call: which form a peer accepts is a fact about the peer, and an
-  /// application that has just learned the answer for this one must not have
-  /// to tear the call down to act on it. `SIPRAL_DTMF_RTP` puts the digits in
-  /// the media, where they replace the audio for as long as they last and
-  /// queue behind each other. The two INFO forms put one request per digit
-  /// in the dialog, but not all at once: over UDP, overlapping non-INVITE
-  /// transactions can arrive in any order, so the next digit's INFO waits
-  /// for the one before it to reach a final answer. A 2xx sends it; a
-  /// refusal, a timeout or a transport failure ends the sequence there
-  /// instead, and the digits still waiting are discarded rather than sent
-  /// out of order — the digit that ended it is what
-  /// `SIPRAL_EVENT_KIND_DTMF_SENT` names, and nothing is reported for the
-  /// ones it took down with it. Digits handed over while an INFO of this
-  /// call is still unanswered queue behind the ones already waiting, as the
-  /// media's do, rather than go out at once. A call holds at most sixty-four
-  /// INFO digits at once, the one in flight included; a string that would
-  /// take it past that is refused whole with `SIPRAL_STATUS_INVALID_ARGUMENT`,
-  /// the same as one with a character no keypad has, and nothing of it is
-  /// sent.
+  /// `via` is a SipralDtmf. `SIPRAL_DTMF_RTP` puts the digits in the media, replacing the
+  /// audio while they last, queued. The INFO forms send one request per digit, each after the
+  /// previous one's final answer, since UDP may reorder overlapping transactions. A refusal,
+  /// timeout or transport failure ends the sequence: `SIPRAL_EVENT_KIND_DTMF_SENT` names that
+  /// digit, and the rest are discarded unreported. Digits handed over meanwhile queue behind.
+  /// A call holds at most sixty-four INFO digits, the one in flight included; a string past
+  /// that is refused whole with `SIPRAL_STATUS_INVALID_ARGUMENT`.
   ///
-  /// `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
-  /// event payload type writes the digits into the audio instead, as
-  /// `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
-  /// hear a key. Both need the call's media, and answer
-  /// `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
-  /// dialog rather than a negotiation, and answer
-  /// `SIPRAL_STATUS_WRONG_STATE` before there is one.
+  /// `SIPRAL_DTMF_RTP` without a negotiated telephone event writes the tones into the audio,
+  /// as `SIPRAL_DTMF_IN_BAND` always does. The media forms are `SIPRAL_STATUS_WRONG_STATE`
+  /// before there is media, the INFO forms before there is a dialog.
   ///
   /// Safety
   ///
@@ -9651,14 +7602,11 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> digits, ffi.Size digitsLen, ffi.Uint32 via, ffi.Uint32 durationMs, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Char> digits, int digitsLen, int via, int durationMs, int nowMs)>('sipral_call_send_dtmf');
 
-  /// Ask the far end to call somebody else, and hang up when it has
-  /// (RFC 3515).
+  /// Ask the far end to call somebody else, and hang up when it has (RFC 3515).
   ///
-  /// A blind transfer: nobody consults the destination first. This end stays
-  /// in the call until the transfer has succeeded, because hanging up first
-  /// turns a transfer that failed into a call that vanished. Progress
-  /// arrives as `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS` and then
-  /// `SIPRAL_EVENT_KIND_TRANSFER_DONE`.
+  /// A blind transfer. This end stays in the call until the transfer succeeds, so a failed
+  /// transfer does not lose the call. Progress arrives as `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS`,
+  /// then `SIPRAL_EVENT_KIND_TRANSFER_DONE`.
   ///
   /// Safety
   ///
@@ -9667,19 +7615,11 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> target, ffi.Size targetLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Char> target, int targetLen, int nowMs)>('sipral_call_transfer');
 
-  /// Call the transfer target, so that there is somebody to hand the call
-  /// to, and write the new call's handle to `out_consultation`.
+  /// Call the transfer target, and write the new call's handle to `out_consultation`.
   ///
-  /// The consultation leg of an attended transfer. It is answered like any
-  /// other call, and sipral_call_transfer_to is what follows. Putting
-  /// `call` on hold first is the application's: it is a session change, and
-  /// this stack does not make those uninvited.
-  ///
-  /// `media_address` is `SIPRAL_STATUS_NOT_SUPPORTED` here. The media engine
-  /// places and answers calls; it does not consult, and a consultation leg
-  /// registered with it by hand would be one it has described nothing for.
-  /// A consultation with audio is placed with `sdp` and run by the
-  /// application, as every call was before this stack carried media.
+  /// The consultation leg of an attended transfer; sipral_call_transfer_to follows.
+  /// Holding `call` first is the application's choice. `media_address` is
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` here: place the consultation with `sdp` and run its audio.
   ///
   /// Safety
   ///
@@ -9688,11 +7628,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outConsultation, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outConsultation, int nowMs)>('sipral_call_consult');
 
-  /// Hand `call` to the far end of `other` (RFC 3891).
-  ///
-  /// The attended half of a transfer: `other` is normally the consultation
-  /// call, and the party at its far end replaces the call it already has
-  /// rather than answering a second one. Any call that is up may be named.
+  /// Hand `call` to the far end of `other` (RFC 3891): the attended half of a transfer, where
+  /// `other` is normally the consultation call. Any call that is up may be named.
   ///
   /// Safety
   ///
@@ -9701,43 +7638,27 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, SipralHandle other, ffi.Uint64 nowMs),
       int Function(int stack, int call, int other, int nowMs)>('sipral_call_transfer_to');
 
-  /// Take a transfer that was asked for, place the call it names the way
-  /// sipral_call_place places one, and write its handle to
-  /// `out_placed`.
+  /// Take a transfer that was asked for, place the call it names as sipral_call_place
+  /// does, and write its handle to `out_placed`.
   ///
-  /// `config.target` is not read: the far end already said where this goes
-  /// when it asked for the transfer, and a target of the caller's own would
-  /// be a second one contradicting it — `SIPRAL_STATUS_INVALID_ARGUMENT`
-  /// naming it. Everything else in `config` means what it means on
-  /// `sipral_call_place`: `sdp` for a description the application wrote and
-  /// runs the audio of, `media_address` for one this stack writes and runs
-  /// (`config.srtp` overriding the stack's own policy for it, the same
-  /// way), `headers`, `destination`, `transport` and `keep_all_forks` for
-  /// the INVITE this places. `Replaces` and `Referred-By` among `headers`
-  /// are `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
-  /// there to take: that INVITE takes both from the REFER. Giving neither
-  /// `sdp` nor `media_address` is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
-  /// `sipral_call_place`: the answer to an offerless INVITE has nowhere to
-  /// go but the ACK, and this ABI hands nothing back from there.
+  /// `config.target` set is `SIPRAL_STATUS_INVALID_ARGUMENT`: the REFER names the target.
+  /// Every other member means what it means on `sipral_call_place`. `Replaces` or
+  /// `Referred-By` among `headers` is `SIPRAL_STATUS_INVALID_ARGUMENT` with the transfer still
+  /// waiting: the INVITE takes both from the REFER. Neither `sdp` nor `media_address` is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, as on `sipral_call_place`.
   ///
-  /// `call` may be a referral's handle instead — the `call` of a
-  /// `SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any dialog — and it is
-  /// taken exactly the same way, the call placed from the account the
-  /// event names. The 202 opens the dialog its NOTIFYs travel in, and the
-  /// handle is spent once this has answered the REFER: it is stale
-  /// afterwards, whether the call then went or not. One refused before
-  /// anything was sent — a header, a target — is still there to take.
+  /// `call` may be a referral's handle (`SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any
+  /// dialog), placed from the account the event names. Its handle is stale once the REFER is
+  /// answered; one refused before anything was sent is still there to take.
   ///
-  /// A call that cannot be sent once the 202 has gone ends the REFER's
-  /// subscription with RFC 3515 §2.4.5's 503, so the far end is told, and
-  /// this answers `SIPRAL_STATUS_NOT_SENT` as it would for any call.
+  /// A call that cannot be sent after the 202 ends the subscription with RFC 3515 §2.4.5's
+  /// 503, and this answers `SIPRAL_STATUS_NOT_SENT`.
   ///
   /// Safety
   ///
-  /// `config` must point at a `sipral_call_config_t` whose `size` member
-  /// says how long it is, with every pointer in it readable for the length
-  /// beside it, and `out_placed` at one `sipral_handle_t`.
+  /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+  /// with every pointer in it readable for the length beside it, and `out_placed` at one
+  /// `sipral_handle_t`.
   late final int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outPlaced, int nowMs) callAcceptTransfer = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outPlaced, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<SipralCallConfig> config, ffi.Pointer<SipralHandle> outPlaced, int nowMs)>('sipral_call_accept_transfer');
@@ -9751,25 +7672,18 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 code, ffi.Uint64 nowMs),
       int Function(int stack, int call, int code, int nowMs)>('sipral_call_reject_transfer');
 
-  /// Take a transfer that was asked for inside `call` with a call the
-  /// application placed itself, `placed`, and report that call's progress
-  /// to the far end as though the REFER had placed it (ABI 1.2).
+  /// Take a transfer asked for inside `call` with a call the application placed itself,
+  /// `placed`, and report that call's progress to the far end as if the REFER had placed it
+  /// (ABI 1.2).
   ///
-  /// For an application that reaches the target its own way — a bridge
-  /// that calls it on a line of its own and joins the two calls — rather
-  /// than having `sipral_call_accept_transfer` send an INVITE with the
-  /// REFER's `Replaces` and `Referred-By`. The REFER is answered 202 (RFC
-  /// 3515 §2.4.2), and from then on `placed` reports to it as a call the
-  /// stack placed for it would: a NOTIFY carrying each provisional status
-  /// (§2.4.5), and its final status ending the subscription (§2.4.7). A
-  /// `placed` already up is reported with a 200 at once. `call` stays as
-  /// it is: ending it once the transfer has worked is the application's.
+  /// For an application that reaches the target its own way, such as a bridge. The REFER is
+  /// answered 202 (RFC 3515 §2.4.2); `placed` then reports each provisional status in a
+  /// NOTIFY (§2.4.5), and its final status ends the subscription (§2.4.7). A `placed` already
+  /// up is reported with a 200 at once. Ending `call` stays the application's.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` when nothing is waiting to be taken on
-  /// `call` — a referral's handle (`SIPRAL_EVENT_KIND_REFERRAL`) among
-  /// them, which `sipral_call_accept_transfer` takes — or when `placed` is
-  /// `call`, is over, or already reports to another REFER. Everything is
-  /// checked before the REFER is answered, so a refusal leaves it waiting.
+  /// `SIPRAL_STATUS_WRONG_STATE` when nothing waits on `call` (a referral's handle included),
+  /// or `placed` is `call`, is over, or already reports to another REFER. A refusal leaves the
+  /// REFER waiting.
   ///
   /// Safety
   ///
@@ -9780,11 +7694,9 @@ final class Sipral {
 
   /// Where a call is, as a `SipralCallState`.
   ///
-  /// A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
-  /// poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
-  /// `SIPRAL_STATUS_STALE_HANDLE` after that. A referral's handle
-  /// (`SIPRAL_EVENT_KIND_REFERRAL`) is `SIPRAL_STATUS_WRONG_STATE`: it
-  /// names a request, and there is no call yet to be anywhere.
+  /// A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the poll delivering
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, then `SIPRAL_STATUS_STALE_HANDLE`. A
+  /// referral's handle is `SIPRAL_STATUS_WRONG_STATE`: there is no call yet.
   ///
   /// Safety
   ///
@@ -9793,14 +7705,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Uint32> outState),
       int Function(int stack, int call, ffi.Pointer<ffi.Uint32> outState)>('sipral_call_state');
 
-  /// Which way a call is held: `out_here` is set when this end asked the far
-  /// end to stop sending, `out_there` when the far end asked this one.
-  /// Either may be null.
+  /// Which way a call is held: `out_here` when this end asked the far end to stop sending,
+  /// `out_there` when the far end asked. Either may be null.
   ///
   /// Safety
   ///
-  /// `out_here` and `out_there` must each be null or point at one
-  /// `uint32_t`.
+  /// `out_here` and `out_there` must each be null or point at one `uint32_t`.
   late final int Function(int stack, int call, ffi.Pointer<ffi.Uint32> outHere, ffi.Pointer<ffi.Uint32> outThere) callHoldState = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Uint32> outHere, ffi.Pointer<ffi.Uint32> outThere),
       int Function(int stack, int call, ffi.Pointer<ffi.Uint32> outHere, ffi.Pointer<ffi.Uint32> outThere)>('sipral_call_hold_state');
@@ -9808,11 +7718,9 @@ final class Sipral {
   /// The name of a codec, as a static NUL-terminated string, or null for a
   /// number this build has no codec for.
   ///
-  /// It is spelled as IANA registered it, which is also how it goes on an
-  /// `a=rtpmap` line — with the rate after it for L16, `L16/8000` and
-  /// `L16/16000`, which is one encoding name at two rates and is named that
-  /// way in a codec order. The string belongs to the library and lives as
-  /// long as it is loaded.
+  /// Spelled as IANA registered it; L16 carries its rate (`L16/8000`,
+  /// `L16/16000`), as in a codec order. Owned by the library, valid while
+  /// it is loaded.
   ///
   /// Safety
   ///
@@ -9821,10 +7729,7 @@ final class Sipral {
       ffi.Pointer<ffi.Char> Function(ffi.Uint32 codec),
       ffi.Pointer<ffi.Char> Function(int codec)>('sipral_codec_name');
 
-  /// How many codecs this build contains.
-  ///
-  /// A compile-time fact, and the reason A4 starts here rather than at a
-  /// configuration: no setting can add a codec that was not linked.
+  /// How many codecs this build contains, fixed at compile time.
   ///
   /// Safety
   ///
@@ -9835,9 +7740,8 @@ final class Sipral {
 
   /// One of them, by index, from zero to what `sipral_codec_count` said.
   ///
-  /// The order is this build's own preference, quality first, which is what
-  /// is offered when nobody has said otherwise — all of it but G.729, which
-  /// is listed last and offered only where a codec order names it.
+  /// In this build's preference order, the default offer; G.729 comes last
+  /// and is offered only when a codec order names it.
   ///
   /// Safety
   ///
@@ -9849,11 +7753,9 @@ final class Sipral {
 
   /// The codecs this stack offers, in the order it offers them.
   ///
-  /// The other half of the configuration: `codecs` in
-  /// `sipral_stack_config_t` says what to offer, and this says what that came
-  /// to. `out_count` always receives the number there are, so a caller that
-  /// passes a capacity of zero and a null buffer learns how much room to
-  /// bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
+  /// What `sipral_stack_config_t::codecs` came to. `out_count` always gets
+  /// the total; a short buffer (or null with zero capacity) gets
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
   ///
   /// Safety
   ///
@@ -9865,23 +7767,17 @@ final class Sipral {
 
   /// A handle on one call's media, written to `out_media`.
   ///
-  /// Mint it once the call's negotiation has settled —
-  /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
-  /// that event's callback is allowed — and hand it to every `sipral_media_`
-  /// entry point in place of the stack and the call. None of those takes the
-  /// stack's lock, which is the point: the thread that carries a call's audio
-  /// is never refused a frame because signalling, the event callback or
-  /// another call is busy.
+  /// Mint it once negotiation settles (`SIPRAL_EVENT_KIND_MEDIA_STARTED`,
+  /// callback included) and pass it to every `sipral_media_` entry point.
+  /// None of those takes the stack's lock.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
-  /// description of the caller's own, or one whose negotiation has not
-  /// settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+  /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media. Written only on
+  /// `SIPRAL_STATUS_OK`.
   ///
-  /// The handle outlives the call. Once the call ends, or its stack is
-  /// destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
-  /// on it; a hold, a resume or a change of codec keeps it working. Each
-  /// handle minted is released once with `sipral_media_release`, and asking
-  /// twice for the same call gives two.
+  /// The handle outlives the call: after the call ends or the stack is
+  /// destroyed, media entry points answer `SIPRAL_STATUS_WRONG_STATE`. Hold,
+  /// resume and codec changes keep it valid. Each handle is released once with
+  /// `sipral_media_release`; asking twice gives two.
   ///
   /// Safety
   ///
@@ -9892,11 +7788,9 @@ final class Sipral {
 
   /// Let a media handle go.
   ///
-  /// Its one matching free, whether or not its call is still up and whether
-  /// or not its stack still exists. The session is not touched: it belongs to
-  /// the call and ends when the call does, so releasing a handle mid-call
-  /// stops nothing but the handle. A handle released twice is
-  /// `SIPRAL_STATUS_STALE_HANDLE` the second time.
+  /// Valid whether or not the call or stack still exists. The session is not
+  /// touched; releasing mid-call stops nothing. A second release is
+  /// `SIPRAL_STATUS_STALE_HANDLE`.
   ///
   /// Safety
   ///
@@ -9917,10 +7811,8 @@ final class Sipral {
 
   /// How many codecs were in the running on this call.
   ///
-  /// This call's own catalogue, which is the stack's order unless
-  /// `sipral_call_config_t::codecs` named another. Zero is an answer, not a
-  /// failure: a call negotiated from a description with no media line in it
-  /// had nothing in the running at all.
+  /// This call's catalogue: the stack's order unless
+  /// `sipral_call_config_t::codecs` named another. Zero is a valid answer.
   ///
   /// Safety
   ///
@@ -9932,9 +7824,7 @@ final class Sipral {
   /// One of them, by index, from zero to what
   /// `sipral_media_codec_candidate_count` said, in this call's own order.
   ///
-  /// D5 in one place: what this end offered, what the far end named, and
-  /// which of the two ran out first. An index past the end is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+  /// An index past the end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   ///
   /// Safety
   ///
@@ -9947,9 +7837,8 @@ final class Sipral {
   /// How many paths this call's ICE agent tried: every candidate pair its
   /// checklist held, then every relay it held.
   ///
-  /// Zero is an answer, not a failure: a call not using ICE has one path,
-  /// the address its description named, and nothing here to explain. A
-  /// restart (RFC 8445 §9) starts the list again with the new session.
+  /// Zero for a call not using ICE. A restart (RFC 8445 §9) starts the list
+  /// again.
   ///
   /// Safety
   ///
@@ -9962,12 +7851,7 @@ final class Sipral {
   /// `sipral_media_path_candidate_count` said: the pairs in the order the
   /// checklist took them in, then the relays.
   ///
-  /// D5's transport and NAT half, beside `sipral_media_codec_candidate_at`:
-  /// which path the media took, and for every other one whether its check
-  /// went unanswered, the far end refused it, the answer came back from
-  /// elsewhere, the relay would not let the far end through, or it worked
-  /// and lost to a better one. An index past the end is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are; an address
+  /// An index past the end is `SIPRAL_STATUS_INVALID_ARGUMENT`; an address
   /// buffer smaller than `SIPRAL_ADDRESS_BYTES` is
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, before anything is written.
   ///
@@ -9982,16 +7866,10 @@ final class Sipral {
 
   /// What one call's media has cost, and what it is costing now.
   ///
-  /// A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
-  /// else, because "how long since a packet arrived" is a question about the
-  /// present and nothing here reads a clock to answer it. Like every media
-  /// entry point, this does not move the stack's own clock: it is read at the
-  /// frame rate of a user interface, often from the thread that draws one,
-  /// and a reading a millisecond behind the last poll is not a caller bug.
-  ///
-  /// The end-of-call record arrives instead as
-  /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
-  /// gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
+  /// `now_ms` is the caller's monotonic clock; it does not move the stack's
+  /// clock. The end-of-call record arrives as
+  /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`; by then this answers
+  /// `SIPRAL_STATUS_WRONG_STATE`.
   ///
   /// Safety
   ///
@@ -10003,20 +7881,12 @@ final class Sipral {
 
   /// Take a datagram off the media socket.
   ///
-  /// One entry point for both sockets: RTP and RTCP are told apart by
-  /// RFC 5761 §4's rule on the payload type field, so a caller that put both
-  /// on one socket does not have to sort them, and one that did not can hand
-  /// over whichever arrived.
+  /// RTP and RTCP are told apart by RFC 5761 §4, so either socket's traffic
+  /// goes here.
   ///
-  /// `data` is written through. A secured stream is opened in place, and a
-  /// caller that needs the ciphertext afterwards keeps its own copy.
-  ///
-  /// `out_arrival` may be null for a caller that does not want to know what
-  /// the datagram turned out to be.
-  ///
-  /// `now_ms` is when it arrived, on the stack's clock. Reading it here moves
-  /// nothing: the network thread and the poll thread read that clock apart,
-  /// and a datagram a millisecond behind the last poll is not refused.
+  /// `data` is decrypted in place; keep a copy if the ciphertext is needed.
+  /// `out_arrival` may be null. `now_ms` is the arrival time on the stack's
+  /// clock and moves nothing.
   ///
   /// Safety
   ///
@@ -10031,10 +7901,8 @@ final class Sipral {
   ///
   /// Exactly `sipral_media_info_t::frame_samples` samples are written, and a
   /// smaller buffer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the number
-  /// needed in `out_written`. Every source fills the frame, concealment and
-  /// silence included: a device handed nothing for one frame plays whatever
-  /// was in its buffer last, and that is a far worse sound than the one being
-  /// concealed.
+  /// needed in `out_written`. Every source fills the whole frame, silence
+  /// included.
   ///
   /// Safety
   ///
@@ -10047,24 +7915,16 @@ final class Sipral {
 
   /// Put one frame from the microphone on the wire.
   ///
-  /// `sample_count` is `sipral_media_info_t::frame_samples` and nothing else:
-  /// a codec cuts one frame at one length, and half a frame encoded as a
-  /// whole one is what a peer hears as a stutter.
+  /// `sample_count` must equal `sipral_media_info_t::frame_samples`.
   ///
-  /// A `len` of zero in the packet means the frame was deliberately not sent:
-  /// the far end is holding this end, silence suppression swallowed it, or
-  /// ICE has not chosen a path for this call yet. The RTP timestamp moves by
-  /// a frame in the first two cases, because RFC 3550 §5.1 makes it a
-  /// measure of time rather than of packets; in the third nothing is
-  /// encoded at all, since there is no packet for the timestamp to belong
-  /// to and a codec that carries state would have moved it for nothing.
-  /// While this end holds the far end the frame goes out as silence, never
-  /// as the microphone.
+  /// A packet `len` of zero means the frame was deliberately not sent: held
+  /// by the far end, suppressed as silence, or ICE has no path yet. The RTP
+  /// timestamp still advances in the first two cases (RFC 3550 §5.1); in the
+  /// third nothing is encoded. While this end holds the far end, silence
+  /// goes out instead of the microphone.
   ///
-  /// `now_ms` is read as the stack reads it and moves nothing, as with every
-  /// media entry point. It is what tells ICE that traffic went out on the
-  /// pair it chose, which is what RFC 8445 §11 lets it stop sending
-  /// keepalives for.
+  /// `now_ms` moves nothing; it tells ICE traffic went out on the chosen pair
+  /// (RFC 8445 §11 keepalives).
   ///
   /// Safety
   ///
@@ -10080,21 +7940,15 @@ final class Sipral {
   /// application mode: what `sipral_media_playback` fills and what
   /// `sipral_media_capture` takes, whatever rate the codec runs at.
   ///
-  /// `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
-  /// which is where every call starts. The frame keeps the call's
-  /// duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
-  /// `sipral_media_info_t::sample_rate` and `frame_samples` report the
-  /// rate chosen as soon as it is set. The conversion is the library's
-  /// own resampler, both ways, and follows a re-negotiation onto another
-  /// codec by itself; the codec, an attached processor, a recording and the
-  /// in-band detectors keep working at the codec's rate. Asking again for
-  /// the rate already set changes nothing.
+  /// `hz` is 8000, 16000, 24000 or 48000; 0 (the start) is the codec's rate.
+  /// The frame keeps its duration (20 ms at 24 kHz is 480 samples), and
+  /// `sipral_media_info_t::sample_rate`/`frame_samples` follow at once. The
+  /// library resamples both ways and follows codec renegotiation; processors,
+  /// recordings and detectors stay at the codec's rate.
   ///
-  /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
-  /// left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
-  /// where the audio engine pumps the frames at the devices' rate, and
-  /// `sipral_media_mix` refuses a pair while either call has a rate of its
-  /// own: a local conference takes calls at any rate.
+  /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, setting unchanged.
+  /// `SIPRAL_STATUS_WRONG_STATE` in device mode. `sipral_media_mix` refuses
+  /// a pair while either call has its own rate.
   ///
   /// Safety
   ///
@@ -10103,39 +7957,24 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Uint32 hz),
       int Function(int media, int hz)>('sipral_media_set_app_rate');
 
-  /// Run `callback` over every frame captured on this call, against the
-  /// far-end audio this call played a render delay earlier — echo
-  /// cancellation, gain control and noise suppression are all this one
-  /// seam, and `docs/05-media.md` says why.
+  /// Run `callback` over every captured frame, against the far-end audio
+  /// played a render delay earlier: the seam for echo cancellation, gain
+  /// control and noise suppression (`docs/05-media.md`).
   ///
-  /// What was attached before is dropped, along with the echo path it had
-  /// learned. Attaching mid-call is allowed and costs the first few hundred
-  /// milliseconds of a fresh adaptation, the same price a call pays at its
-  /// start.
+  /// Replaces any previous processor and its learned state. Attaching
+  /// mid-call costs a fresh adaptation.
   ///
-  /// **`callback` runs with this call's media locked**, the same as the
-  /// screening callback and unlike the event callback: it is called from
-  /// inside sipral_media_playback (to learn what the loudspeaker was
-  /// just given) and inside sipral_media_capture (to run the frame just
-  /// captured), and — with SipralProcessorFrame's `reset` set — whenever
-  /// this call's media forgets what it has learned, a device change or a
-  /// codec change mid-call. All three run on whichever thread called the
-  /// entry point that triggered them. **From inside `callback`, call
-  /// nothing on any media handle and nothing on this call's stack**: every
-  /// such call answers `SIPRAL_STATUS_BUSY` and does nothing. Another
-  /// thread that calls into this call's media meanwhile waits for the
-  /// frame to finish, so a processor that reached into a second call's
-  /// media while that call's processor reached into this one would wait on
-  /// the other for ever; refusing every media handle from inside a frame
-  /// is what rules that out. It must not unwind: a panic that reached C
-  /// across this boundary would take the host process with it, the same
-  /// rule every callback in this ABI is held to.
+  /// **`callback` runs with this call's media locked**, unlike the event
+  /// callback: inside sipral_media_playback, inside
+  /// sipral_media_capture, and with SipralProcessorFrame's `reset`
+  /// set on a device or codec change, on the thread that called in. **From
+  /// inside it, call nothing on any media handle or this call's stack**:
+  /// such calls answer `SIPRAL_STATUS_BUSY`. This rules out two processors
+  /// deadlocking across calls. It must not unwind.
   ///
-  /// `user_data` is handed back to `callback` untouched on every call, read
-  /// by nothing here, and has to outlive the last one — which the caller
-  /// who installed it is the one to know is over:
-  /// `sipral_media_detach_processor` returning, or `sipral_media_release`
-  /// of this handle, are the two ways.
+  /// `user_data` is handed back untouched and must outlive the last call,
+  /// which ends when `sipral_media_detach_processor` or
+  /// `sipral_media_release` returns.
   ///
   /// Safety
   ///
@@ -10150,12 +7989,9 @@ final class Sipral {
   /// Stop running the processor sipral_media_attach_processor attached,
   /// if there was one.
   ///
-  /// `out_was_attached`, when not null, says whether there was one to stop:
-  /// 1 if a processor was attached and is now detached, 0 if there was
-  /// none. The frames the application hands over reach the encoder
-  /// untouched again from the next one, and the loudspeaker history kept
-  /// for it is released. Once this returns, `callback` is not called again
-  /// for this attachment — the moment `user_data` may be freed.
+  /// `out_was_attached`, when not null, gets 1 if one was detached, else 0.
+  /// Once this returns, `callback` is not called again and `user_data` may
+  /// be freed.
   ///
   /// Safety
   ///
@@ -10167,14 +8003,10 @@ final class Sipral {
   /// Forget the echo path, the noise floor and the gain the attached
   /// processor has learned, keeping the processor itself attached.
   ///
-  /// What a device change asks for: the estimate was built for a different
-  /// loudspeaker and a different microphone, and carrying it forward makes
-  /// the processor fight it for a while instead of adapting cleanly. Calls
-  /// the `callback` given to sipral_media_attach_processor with
-  /// SipralProcessorFrame's `reset` set.
+  /// For a device change. Calls the sipral_media_attach_processor
+  /// callback with SipralProcessorFrame's `reset` set.
   ///
-  /// `out_was_attached`, when not null, says whether there was a processor
-  /// to reset: 1 if there was, 0 if there was none.
+  /// `out_was_attached`, when not null, gets 1 if a processor exists, else 0.
   ///
   /// Safety
   ///
@@ -10183,34 +8015,21 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.Uint32> outWasAttached),
       int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached)>('sipral_media_reset_processor');
 
-  /// One frame of a local conference of two calls: decode what `media_a`'s
-  /// and `media_b`'s far ends each sent, mix what each of the three
-  /// parties — the two far ends and this end — is owed, and send the two
-  /// frames the far ends are owed.
+  /// One frame of a two-call local conference: decode both far ends, mix
+  /// what each of the three parties is owed, and send the two far-end frames.
   ///
-  /// `sipral_call_join` must already have paired the two calls these two
-  /// handles belong to. Nothing here checks that itself: checking it would
-  /// mean taking the stack's lock on every frame, which is exactly what a
-  /// media handle exists to avoid, so this mixes whatever two handles it is
-  /// given — the same trust every other `sipral_media_` entry point places
-  /// in the caller having minted the handle from a call worth acting on.
+  /// `sipral_call_join` must already have paired the calls. Not checked here,
+  /// since that would take the stack's lock every frame.
   ///
-  /// `mic` is this end's own frame, `mic_count` long; `local` is filled
-  /// with what this end's own loudspeaker is owed, `local_count` long. Both
-  /// are `sipral_media_info_t::frame_samples` on a call this pair actually
-  /// agreed on — `sipral_call_join` already made that the same on both.
-  /// `packet_a` and `packet_b` are filled the way `sipral_media_capture`
-  /// fills one, each with what its own call's far end is now owed: `mic`
-  /// mixed with the *other* far end's frame rather than `mic` alone, which
-  /// is also what each call's own recording keeps if one is running.
+  /// `mic` (`mic_count`) is this end's frame; `local` (`local_count`) gets
+  /// what this end's speaker is owed. Both are
+  /// `sipral_media_info_t::frame_samples`. `packet_a`/`packet_b` are filled
+  /// as by `sipral_media_capture`, each with `mic` mixed with the other far
+  /// end; recordings keep the same.
   ///
-  /// Drive a joined pair from one thread, one frame at a time. The two
-  /// sessions are locked together for the length of the call, in a fixed
-  /// order that does not depend on which handle is named first, so a
-  /// second `sipral_media_mix` on the same pair waits for this one rather
-  /// than deadlocking against it — but a thread still calling
-  /// `sipral_media_playback`/`sipral_media_capture` on either call alone at
-  /// the same time is a second driver this mix does not know about.
+  /// Drive a joined pair from one thread. Concurrent mixes of the same pair
+  /// serialize without deadlock, but calling `sipral_media_playback` or
+  /// `sipral_media_capture` on either call meanwhile is a second driver.
   ///
   /// Safety
   ///
@@ -10224,18 +8043,12 @@ final class Sipral {
 
   /// The control traffic this call has due.
   ///
-  /// A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
-  /// decides when, and at most one report is due at a time, so one call per
-  /// frame is enough.
+  /// A `len` of zero means nothing is due. RFC 3550 §6.3 decides when; at
+  /// most one report is due at a time.
   ///
-  /// It asks one call rather than the whole stack, so the thread that sends
-  /// a call's audio sends its reports too, on the same socket and without
-  /// reaching the stack: call it after every frame that goes out, and
-  /// whenever `sipral_stack_poll` reports a deadline while a call is not
-  /// capturing. On a call that negotiated no RTCP it answers zero for ever.
-  ///
-  /// `now_ms` is read as the stack reads it and moves nothing, as with every
-  /// media entry point.
+  /// Call it after every outgoing frame, and at each `sipral_stack_poll`
+  /// deadline while not capturing. Always zero without negotiated RTCP.
+  /// `now_ms` moves nothing.
   ///
   /// Safety
   ///
@@ -10246,23 +8059,15 @@ final class Sipral {
       int Function(int media, int nowMs, ffi.Pointer<SipralMediaPacket> packet)>('sipral_media_poll_rtcp');
 
   /// A datagram this call owes the far end that is neither audio nor a
-  /// report: today, a record of the DTLS-SRTP handshake that keys it.
+  /// report: DTLS-SRTP handshake records and ICE checks.
   ///
-  /// A `len` of zero means nothing is due. On a call that is not keyed by a
-  /// handshake — every call in a build without `SIPRAL_FEATURE_DTLS_SRTP`,
-  /// and every SDES or plain call in a build with it — that is the answer
-  /// for ever, and calling this costs one comparison.
+  /// A `len` of zero means nothing is due; always so on a call without a
+  /// handshake or ICE, at the cost of one comparison.
   ///
-  /// **Drain it to empty**, in a loop, after every `sipral_media_receive`
-  /// that answered `SIPRAL_ARRIVAL_HANDSHAKE` and at every deadline
-  /// `sipral_stack_poll` names. A handshake whose records never leave is a
-  /// ClientHello that never goes out: the call rings, answers, carries no
-  /// audio in either direction, and reports nothing wrong for the two
-  /// minutes it takes to give up. That is the one failure this entry point
-  /// exists to prevent, and there is no way to notice it from the outside.
-  ///
-  /// `now_ms` is read as the stack reads it and moves nothing, as with every
-  /// media entry point.
+  /// **Drain it to empty** after every `sipral_media_receive` that answered
+  /// `SIPRAL_ARRIVAL_HANDSHAKE` and at every `sipral_stack_poll` deadline.
+  /// Otherwise the call connects, carries no audio, and reports nothing for
+  /// the two minutes until it gives up. `now_ms` moves nothing.
   ///
   /// Safety
   ///
@@ -10272,38 +8077,22 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Uint64 nowMs, ffi.Pointer<SipralMediaPacket> packet),
       int Function(int media, int nowMs, ffi.Pointer<SipralMediaPacket> packet)>('sipral_media_poll_transmit');
 
-  /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
+  /// The RTCP goodbye of a call whose media has ended.
   ///
-  /// The library builds the BYE RFC 3550 §6.3.7 owes the far end
-  /// the moment a call's session stops, but by then the call's media
-  /// handle is already gone — every `sipral_media_` entry point on it
-  /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
-  /// instead, the one place left that still knows the goodbye belonged to
-  /// that call.
+  /// The RFC 3550 §6.3.7 BYE is built when the session stops, after the
+  /// media handle stops working, so it is polled from the stack.
   ///
-  /// `out_call` is written with the handle of the call the goodbye
-  /// belonged to — `SIPRAL_HANDLE_NONE` when nothing was waiting. The
-  /// call itself is already over; the handle is there only so the
-  /// application knows which media socket to send the datagram from, since
-  /// it owns that socket and this ABI never did. Passing it to any other
-  /// entry point answers whatever a stale handle of its kind already
-  /// answers.
+  /// `out_call` gets the call it belonged to, or `SIPRAL_HANDLE_NONE` when
+  /// nothing was waiting. The call is over; the handle only says which media
+  /// socket to send from.
   ///
-  /// One at a time, like every other poll in this crate: call it after
-  /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
-  /// for a call this stack was running media on, and keep calling until
-  /// `packet` comes back with a `len` of zero. A call whose media never
-  /// ran leaves nothing here, but for one thing.
+  /// One at a time: after each `sipral_stack_poll` that delivered
+  /// `SIPRAL_EVENT_KIND_CALL_ENDED`, call until `packet` has `len` zero.
   ///
-  /// A call given a relay on a TURN server (`turn_server` on the stack's
-  /// configuration) gives it back through here too: the Refresh with a
-  /// lifetime of zero that RFC 8656 §8 deletes an allocation with,
-  /// addressed to the TURN server, from the same socket. It is queued when
-  /// the call ends, whether or not its media ever ran, and earlier when the
-  /// call turns out not to use the relay at all — its ICE policy is off, or
-  /// the far end answered without ICE — so polling here after every
-  /// `sipral_stack_poll`, not only the ones that ended a call, gives the
-  /// relay back sooner.
+  /// A TURN relay (`turn_server`) is given back here too: the zero-lifetime
+  /// Refresh of RFC 8656 §8, to the TURN server, from the same socket. It is
+  /// queued at call end, or earlier when the call does not use the relay, so
+  /// polling after every `sipral_stack_poll` releases it sooner.
   ///
   /// Safety
   ///
@@ -10316,9 +8105,7 @@ final class Sipral {
   /// Whether a digit is going out or waiting to, and how many have not
   /// started yet.
   ///
-  /// Either out parameter may be null. A user interface that greys out the
-  /// keypad while a number is being sent wants the first; one that shows how
-  /// much of a pasted number is left wants the second.
+  /// Either out parameter may be null.
   ///
   /// Safety
   ///
@@ -10330,8 +8117,7 @@ final class Sipral {
 
   /// Drop everything queued and stop the digit going out.
   ///
-  /// The digit in flight gets no closing packet, which is right for a call
-  /// whose media is being taken away: there is nowhere left to send one.
+  /// The digit in flight gets no closing packet.
   ///
   /// Safety
   ///
@@ -10340,19 +8126,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media),
       int Function(int media)>('sipral_media_stop_dialling');
 
-  /// Start recording this call to `path`.
+  /// Start recording this call to `path`: both directions mixed, as WAVE.
+  /// Each start makes a new file.
   ///
-  /// Both directions, mixed, as WAVE. It can be started and stopped as often
-  /// as the person on the phone presses the button, and each recording is a
-  /// file of its own: a path written to twice would have two headers in it.
-  ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
-  /// already being recorded — two writers on one stream would interleave
-  /// frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
-  /// system refuses the path, with what it said in the last error.
-  ///
-  /// The file is made with this call's media held, so this call's audio
-  /// waits for the file system to answer and no other call's does.
+  /// `SIPRAL_STATUS_WRONG_STATE` when the media has ended or a recording is
+  /// already running. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
+  /// refuses the path, with its reason in the last error. The file is created
+  /// with this call's media held, so only this call's audio waits on it.
   ///
   /// Safety
   ///
@@ -10361,11 +8141,10 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.Char> path, ffi.Size pathLen),
       int Function(int media, ffi.Pointer<ffi.Char> path, int pathLen)>('sipral_media_record_start');
 
-  /// Stop it, and close the file.
+  /// Stop the recording and close the file.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded. A failure
-  /// here leaves a file with all of the audio in it and zeroes in the two
-  /// header fields, which is recoverable and is said rather than hidden.
+  /// `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded. On failure
+  /// the file holds all the audio but zero header lengths.
   ///
   /// Safety
   ///
@@ -10375,10 +8154,7 @@ final class Sipral {
       int Function(int media)>('sipral_media_record_stop');
 
   /// Whether a recording is running on this call, and how much audio it has
-  /// taken. Either out parameter may be null.
-  ///
-  /// The length is of the audio written, not of the file: the header in front
-  /// of it is not a recording of anything.
+  /// taken (audio only, not the header). Either out parameter may be null.
   ///
   /// Safety
   ///
@@ -10390,67 +8166,41 @@ final class Sipral {
 
   /// Take the next message the stack wants written.
   ///
-  /// One at a time, like every other poll here: a caller loops until the
-  /// message comes back with a `len` of zero. Call it after every
-  /// `sipral_stack_poll` and after every call that hands bytes in, since both
-  /// are moments the stack writes at.
-  ///
-  /// A message longer than `capacity` is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
-  /// the length it needs in `len`, and it is *kept*: the next call with room
-  /// for it hands over that same message, before anything queued behind it. So
-  /// a caller that brought no buffer at all — a null `data` with a capacity of
-  /// zero — learns what to bring without losing the message it asked about.
+  /// Loop until `len` is zero, after every `sipral_stack_poll` and every call that hands bytes
+  /// in. A message longer than `capacity` is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the needed
+  /// length in `len` and is kept for the next call, ahead of the queue; a null `data` with
+  /// capacity zero thus asks for the length.
   ///
   /// Safety
   ///
-  /// `transmit` must point at a `sipral_transmit_t` whose `size` member says
-  /// how long it is and whose buffers are writable for the capacities beside
-  /// them.
+  /// `transmit` must point at a `sipral_transmit_t` whose `size` member says how long it is and
+  /// whose buffers are writable for the capacities beside them.
   late final int Function(int stack, ffi.Pointer<SipralTransmit> transmit) stackPollTransmit = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralTransmit> transmit),
       int Function(int stack, ffi.Pointer<SipralTransmit> transmit)>('sipral_stack_poll_transmit');
 
-  /// Hand over one datagram, whole, and say where it came from.
+  /// Hand over one datagram, whole, with its source.
   ///
-  /// `from` is the far end, as `host:port`. `to` is the address the datagram
-  /// arrived on, which RFC 3581 §4 makes the address the response has to go
-  /// out from; a length of zero, whatever the pointer, means the address
-  /// this stack was created with, which is the answer for a socket bound to
-  /// one address.
+  /// `from` is the far end as `host:port`. `to` is the receiving address, which the response
+  /// leaves from (RFC 3581 §4); length zero means the stack's creation address. Frames from a
+  /// WebSocket the application runs come here too (RFC 7118 §4.2).
   ///
-  /// A WebSocket frame comes in here too, on one the application runs
-  /// itself (bound without `remote`): RFC 7118 §4.2 puts one SIP message in
-  /// each, so it arrives whole the way a datagram does. A WebSocket the
-  /// stack runs takes its reads through sipral_stack_receive_stream.
-  ///
-  /// Bytes that are not a message are `SIPRAL_STATUS_INVALID_ARGUMENT` with
-  /// the parse error in the last error. That is an ordinary morning on a
-  /// public SIP port and costs exactly this one packet: log it and carry on.
+  /// Non-SIP bytes are `SIPRAL_STATUS_INVALID_ARGUMENT` with the parse error as last error;
+  /// only that packet is lost.
   ///
   /// Safety
   ///
-  /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to`
-  /// for `to_len`.
+  /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to` for `to_len`.
   late final int Function(int stack, int transport, ffi.Pointer<ffi.Uint8> data, int len, ffi.Pointer<ffi.Char> from, int fromLen, ffi.Pointer<ffi.Char> to, int toLen, int nowMs) stackReceiveDatagram = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 transport, ffi.Pointer<ffi.Uint8> data, ffi.Size len, ffi.Pointer<ffi.Char> from, ffi.Size fromLen, ffi.Pointer<ffi.Char> to, ffi.Size toLen, ffi.Uint64 nowMs),
       int Function(int stack, int transport, ffi.Pointer<ffi.Uint8> data, int len, ffi.Pointer<ffi.Char> from, int fromLen, ffi.Pointer<ffi.Char> to, int toLen, int nowMs)>('sipral_stack_receive_datagram');
 
-  /// Hand over bytes off a connection, in whatever sizes the reads came in.
+  /// Hand over bytes read off a connection, in whatever sizes the reads came in.
   ///
-  /// On a WebSocket the stack runs (bound with `remote`), the bytes are the
-  /// server's handshake answer and frames, read the same way; what is
-  /// inside them reaches the parser one message at a time.
-  ///
-  /// Not a message: a fragment of a framing the layer below reassembles on
-  /// `Content-Length` (§18.3), and one call may hold several messages, half of
-  /// one, or none at all. No addresses travel with it, because a connection
-  /// has one far end and it was named when the transport was bound.
-  ///
-  /// Framing that cannot be read is fatal to the connection, and unlike a
-  /// datagram it cannot be resynchronised: the transport is already retired by
-  /// the time this answers `SIPRAL_STATUS_INVALID_ARGUMENT`, and the socket
-  /// should be closed. A read of zero bytes is the far end closing, which is
-  /// sipral_stack_stream_closed and not this.
+  /// A fragment of the `Content-Length` framing (§18.3): may hold several messages or none. A
+  /// stack-run WebSocket's handshake and frames come here too. Unreadable framing cannot be
+  /// resynchronised: the transport is retired before `SIPRAL_STATUS_INVALID_ARGUMENT` returns;
+  /// close the socket. A zero-byte read is sipral_stack_stream_closed, not this.
   ///
   /// Safety
   ///
@@ -10459,83 +8209,47 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 transport, ffi.Pointer<ffi.Uint8> data, ffi.Size len, ffi.Uint64 nowMs),
       int Function(int stack, int transport, ffi.Pointer<ffi.Uint8> data, int len, int nowMs)>('sipral_stack_receive_stream');
 
-  /// Say that a transport is open and may be written to — the main one
-  /// again, or a further one this stack has not had before.
+  /// Say that a transport is open: the main one again, or a new one.
   ///
-  /// The one way back from sipral_stack_transport_failed, the way a
-  /// stream stack names its far end, and the way a further transport enters
-  /// the table at all. `transport` is SIPRAL_TRANSPORT_MAIN to (re)bind
-  /// the main one, or any other number: one this stack already has rebinds
-  /// it, and one it does not opens it — the number is the caller's own
-  /// choice, the same as `sipral_account_config_t::transport` and
-  /// `sipral_call_config_t::transport` read it. `out_transport_id` may be
-  /// null; when it is not, it receives that same number, which is where a
-  /// caller answering
-  /// SipralEventKind.transportWanted
-  /// reads back the id it just gave one of those two configs.
+  /// The way back after sipral_stack_transport_failed and the way new transports enter the
+  /// table. `transport` is SIPRAL_TRANSPORT_MAIN or any caller-chosen number; a known one
+  /// is rebound, an unknown one opened. `out_transport_id`, if not null, receives the same
+  /// number.
   ///
-  /// `protocol` is a SipralTransport.
-  /// Rebinding an existing transport takes zero to mean "whatever it
-  /// already speaks" and anything else has to agree with that or this is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
-  /// according to what a transport was opened speaking, and changing that
-  /// underneath the timers would be a transport configured out of RFC 3261
-  /// §17 halfway through a call. Opening a new one needs a protocol to
-  /// speak, so zero there is the same refusal for the opposite reason:
-  /// nothing to fall back on.
+  /// `protocol` is a SipralTransport. On rebind, zero keeps the current
+  /// protocol and anything different is `SIPRAL_STATUS_INVALID_ARGUMENT`: switching it under
+  /// running RFC 3261 §17 timers is not allowed. Opening a new transport requires a protocol.
   ///
-  /// `local` is the address the far end reaches this one at, as `host:port`.
-  /// `remote` is the far end of a connection, and is refused on a datagram
-  /// transport, which has many; a length of zero, whatever the pointer,
-  /// leaves it out. On `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` it
-  /// says the stack is to make the connection a WebSocket itself: the
-  /// handshake is the next thing sipral_stack_poll_transmit hands over,
-  /// and the reads go to sipral_stack_receive_stream.
+  /// `local` is the address the far end reaches, `host:port`. `remote` names a connection's far
+  /// end, is refused on a datagram transport, and length zero omits it. On WS/WSS, `remote`
+  /// makes the stack run the WebSocket: the handshake comes out of
+  /// sipral_stack_poll_transmit and reads go to sipral_stack_receive_stream.
   ///
-  /// This is also how a request
-  /// SipralEventKind.transportWanted
-  /// named gets to leave: the call that asked for it was refused with
-  /// `SIPRAL_STATUS_NOT_SENT` and nothing went on the wire, and once this
-  /// returns `SIPRAL_STATUS_OK` for the protocol and destination the event
-  /// gave, asking again — placing the call, registering — sends it on the
-  /// stream just bound. There is no further event about that one request.
+  /// After a
+  /// SipralEventKind.transportWanted,
+  /// binding what it named and asking again sends the request on the new stream.
   ///
   /// Safety
   ///
-  /// `local` must be readable for `local_len` bytes, `remote` for
-  /// `remote_len`, and `out_transport_id`, when it is not null, must point
-  /// at one `uint32_t`.
+  /// `local` must be readable for `local_len` bytes, `remote` for `remote_len`, and
+  /// `out_transport_id`, when it is not null, must point at one `uint32_t`.
   late final int Function(int stack, int transport, int protocol, ffi.Pointer<ffi.Char> local, int localLen, ffi.Pointer<ffi.Char> remote, int remoteLen, int nowMs, ffi.Pointer<ffi.Uint32> outTransportId) stackTransportBind = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 transport, ffi.Uint32 protocol, ffi.Pointer<ffi.Char> local, ffi.Size localLen, ffi.Pointer<ffi.Char> remote, ffi.Size remoteLen, ffi.Uint64 nowMs, ffi.Pointer<ffi.Uint32> outTransportId),
       int Function(int stack, int transport, int protocol, ffi.Pointer<ffi.Char> local, int localLen, ffi.Pointer<ffi.Char> remote, int remoteLen, int nowMs, ffi.Pointer<ffi.Uint32> outTransportId)>('sipral_stack_transport_bind');
 
-  /// Say that a transport failed, and that whatever was written to it did not
-  /// arrive.
+  /// Say that a transport failed and what was written to it did not arrive.
   ///
-  /// The transport is retired: every transaction waiting on it fails now, and
-  /// the calls and registrations behind them are reported on the next
-  /// `sipral_stack_poll` — nothing is delivered from inside this call, here as
-  /// everywhere else. Nothing can be sent until
-  /// sipral_stack_transport_bind brings one back.
+  /// The transport is retired: its transactions fail now, effects are reported on the next
+  /// `sipral_stack_poll`, and nothing is sent until sipral_stack_transport_bind. Not for one
+  /// refused `sendto`: retiring the socket over an ICMP unreachable drops healthy calls.
   ///
-  /// So this is not the call for one `sendto` that was refused. An ICMP
-  /// unreachable is one destination saying no, and a stack that retired its
-  /// socket over it would drop the calls that were fine. This is for the
-  /// socket that is over.
+  /// Also answers a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the application could not honour:
+  /// on the number it would have bound, waiting requests stop waiting (RFC 3261 §18.1.1:
+  /// trimmed into a datagram if it fits, else ended with 513). A never-bound number is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` when nothing waits.
   ///
-  /// It is also the answer to a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the
-  /// application could not honour: a failure told of a transport that is
-  /// not up — the number it would have bound the stream at, never bound or
-  /// retired — while the stack waits for that stream is a connection that
-  /// could not be opened, and every request waiting for it stops waiting
-  /// now (RFC 3261 §18.1.1: trimmed into a datagram when it then fits,
-  /// ended with a 513 naming the limit otherwise). A number never bound is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` while nothing is waiting.
-  ///
-  /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
-  /// of what the failure did to the registrations and calls on it.
-  /// sipral_stack_transport_failed_with is the same call with the TLS
-  /// library's reason carried along.
+  /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before the effects.
+  /// sipral_stack_transport_failed_with adds the TLS reason.
   ///
   /// Safety
   ///
@@ -10544,45 +8258,28 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 transport, ffi.Uint32 error, ffi.Uint64 nowMs),
       int Function(int stack, int transport, int error, int nowMs)>('sipral_stack_transport_failed');
 
-  /// Say that a transport failed, and why, in the words of the TLS library
-  /// that refused it.
+  /// Say that a transport failed, with the TLS library's reason.
   ///
-  /// Everything sipral_stack_transport_failed does — the transport is
-  /// retired, the transactions on it fail, nothing is sent on it until
-  /// sipral_stack_transport_bind brings it back — and the reason is
-  /// carried to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: `failure->tls` for a
-  /// machine to switch on, `failure->detail` for a person to read. A
-  /// connection that never got as far as a handshake is told here too, so
-  /// that the application hears about it in the one place it hears about
-  /// every other loss; retiring a transport that carried nothing yet costs
-  /// nothing, and the bind that follows the reconnect undoes it. A
-  /// transport already down is not retired twice, and the failure is still
-  /// raised: that is how each attempt to connect again that fails is told.
-  /// A stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for and that
-  /// could not be opened is told here as well, as
-  /// sipral_stack_transport_failed says.
+  /// Does what sipral_stack_transport_failed does, and carries `failure->tls` and
+  /// `failure->detail` to `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`. A connection that failed before
+  /// any handshake belongs here too. A transport already down is not retired again but the
+  /// event is still raised, so each failed reconnect is reported.
   ///
-  /// A TLS reason on a transport that does not speak TLS or WSS is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
-  /// SIPRAL_TRANSPORT_DETAIL_BYTES or not UTF-8; nothing is retired.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, retiring nothing, for a TLS reason on a non-TLS/WSS
+  /// transport, or a detail over SIPRAL_TRANSPORT_DETAIL_BYTES or not UTF-8.
   ///
   /// Safety
   ///
-  /// `failure` must point at a `sipral_transport_failure_t` whose `size`
-  /// member says how long it is, and its `detail` must be readable for
-  /// `detail_len` bytes.
+  /// `failure` must point at a `sipral_transport_failure_t` whose `size` member says how long
+  /// it is, and its `detail` must be readable for `detail_len` bytes.
   late final int Function(int stack, ffi.Pointer<SipralTransportFailure> failure, int nowMs) stackTransportFailedWith = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralTransportFailure> failure, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<SipralTransportFailure> failure, int nowMs)>('sipral_stack_transport_failed_with');
 
-  /// Say that a connection closed: the far end went away, or a read returned
-  /// zero.
+  /// Say that a connection closed: the far end left, or a read returned zero.
   ///
-  /// The same retirement as sipral_stack_transport_failed, and a separate
-  /// call because it is a separate thing to have happened. An orderly close is
-  /// not an error the caller has to invent a kind for, and a stack that made it
-  /// one would have the two indistinguishable in a log for ever after. The
-  /// event the next poll raises says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
+  /// Retires like sipral_stack_transport_failed, but kept separate so an orderly close is
+  /// distinguishable in logs. The event says `SIPRAL_TRANSPORT_ERROR_CLOSED`.
   ///
   /// Safety
   ///
@@ -10591,29 +8288,17 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 transport, ffi.Uint64 nowMs),
       int Function(int stack, int transport, int nowMs)>('sipral_stack_stream_closed');
 
-  /// Ask these STUN servers from now on, without creating the stack again.
+  /// Replace the STUN server list without recreating the stack.
   ///
-  /// `servers` is `host:port` addresses separated by commas, in order of
-  /// preference: the first is what `stun_server` would have named, the
-  /// rest what `stun_fallbacks` would. On a stack that asks already, every
-  /// socket it keeps mapped is asked again of the new list at once, and
-  /// what each one learned stands until the new server answers —
-  /// `SIPRAL_EVENT_KIND_STUN_SERVER` says the server in use moved, and
-  /// `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. A server
-  /// kept from the old list keeps its back-off. On a stack created with
-  /// `SIPRAL_NAT_OFF` the main transport starts being kept mapped, as it
-  /// would have been with `SIPRAL_NAT_STUN`; a further datagram transport
-  /// joins it the next time it is bound with
-  /// `sipral_stack_transport_bind`.
+  /// `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
+  /// asked again at once and keeps its answer until the new server replies; servers kept from
+  /// the old list keep their back-off. On a `SIPRAL_NAT_OFF` stack the main transport starts
+  /// being mapped; further datagram transports join at their next `sipral_stack_transport_bind`.
   ///
-  /// An empty list — `servers_len` zero — asks nobody any more: every
-  /// account whose `Contact` a STUN answer moved goes back to the socket's
-  /// own address and registers it, every media socket named is forgotten,
-  /// and a call is described by its socket's own address from then on.
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for that on a stack with a TURN
-  /// server, whose relays ride on the media sockets STUN names, and for an
-  /// entry that is not an address and a port. `SIPRAL_STATUS_NOT_SUPPORTED`
-  /// for a list in a build without `SIPRAL_FEATURE_STUN`.
+  /// An empty list stops asking: `Contact`s move back to socket addresses and re-register, and
+  /// named media sockets are forgotten. `SIPRAL_STATUS_INVALID_ARGUMENT` for that with a TURN
+  /// server configured, or for a bad entry. `SIPRAL_STATUS_NOT_SUPPORTED` for a list without
+  /// `SIPRAL_FEATURE_STUN`.
   ///
   /// Safety
   ///
@@ -10622,34 +8307,20 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> servers, ffi.Size serversLen, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<ffi.Char> servers, int serversLen, int nowMs)>('sipral_stack_stun_servers');
 
-  /// Ask where a media socket appears from, before a call is described
-  /// on it.
+  /// Ask where a media socket appears from, before a call is described on it.
   ///
-  /// `local` is the address the socket is bound to, as `host:port` — the
-  /// same text the call's `media_address` will be. The request is waiting
-  /// in sipral_stack_poll_stun when this returns, the answer goes in
-  /// through sipral_stack_receive_stun, and
-  /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what it came to, within five and
-  /// a half seconds whatever the server does. From then on a call placed,
-  /// rung or answered with that `media_address` is described by the public
-  /// address, and asks for `a=rtcp-mux`, since one mapping describes one
-  /// port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+  /// `local` is the bound `host:port`, the same text as the call's `media_address`. The request
+  /// waits in sipral_stack_poll_stun; hand the answer to sipral_stack_receive_stun.
+  /// `SIPRAL_EVENT_KIND_NAT_MAPPING` reports within 5.5 seconds. A call on that
+  /// `media_address` is then described by the public address and asks for `a=rtcp-mux`.
+  /// Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
   ///
-  /// Until that call, the socket is asked again every twenty-five seconds,
-  /// as the signalling socket is: nothing else crosses its NAT binding
-  /// while it waits, and an answer minutes old names a mapping the NAT may
-  /// have let go. Keep sending what `sipral_stack_poll_stun` hands out for
-  /// it and handing in what arrives; an answer that differs is
-  /// `SIPRAL_NAT_MAPPING_MOVED`, and the call is described by it. At most
-  /// one request per socket waits in the queue.
+  /// Until the call, the socket is asked again every twenty-five seconds to keep the NAT
+  /// binding alive; keep draining the queue. At most one request per socket waits there. The
+  /// call spends the mapping: name the socket again for a second call.
   ///
-  /// The mapping is spent by the call it describes. A socket used for a
-  /// second call is named here again — nothing kept the first answer true
-  /// in between.
-  ///
-  /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
-  /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
-  /// signalling socket of the stack's own, which is kept mapped already.
+  /// `SIPRAL_STATUS_WRONG_STATE` without `SIPRAL_NAT_STUN`; `SIPRAL_STATUS_INVALID_ARGUMENT`
+  /// for one of the stack's own signalling sockets.
   ///
   /// Safety
   ///
@@ -10658,36 +8329,20 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> local, ffi.Size localLen, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<ffi.Char> local, int localLen, int nowMs)>('sipral_stack_nat_map');
 
-  /// Say that a media socket sipral_stack_nat_map named will carry no
-  /// call after all, and give back what the stack keeps for it.
+  /// Say that a media socket sipral_stack_nat_map named will carry no call, and release it.
   ///
-  /// Its mapping is no longer asked again every twenty-five seconds, and a
-  /// request for it still waiting in sipral_stack_poll_stun is
-  /// dropped. With a TURN server configured, its relay goes back to the
-  /// server: a Refresh with a lifetime of zero (RFC 8656 §8), waiting in
-  /// sipral_stack_poll_stun when this returns, to be sent from the
-  /// socket like everything else there. A socket whose Allocate was sent
-  /// and not answered yet asks nothing more, but the server may have
-  /// allocated all the same: the answer, handed in through
-  /// sipral_stack_receive_stun as before, is taken for up to the forty
-  /// seconds the request would have waited, and an allocation it reports
-  /// is given back the same way. Without this the stack keeps the
-  /// allocation refreshed for as long as it lives, and after
-  /// `sipral_stack_destroy`, which sends nothing, the server holds it — a
-  /// port and a share of the account's quota — until its lifetime runs
-  /// out, up to ten minutes later.
+  /// Its refreshes stop and a waiting request is dropped. A TURN relay is released with a
+  /// Refresh of lifetime zero (RFC 8656 §8), waiting in sipral_stack_poll_stun. If its
+  /// Allocate is still unanswered, a late answer is accepted through
+  /// sipral_stack_receive_stun for up to forty seconds and released the same way. Without
+  /// this call the server holds the allocation until its lifetime expires, up to ten minutes
+  /// after `sipral_stack_destroy`.
   ///
-  /// For a socket the application closes, a call it decides not to place,
-  /// and every socket still named before the stack is destroyed. A socket
-  /// a call was placed, rung or answered on has already been spent by that
-  /// call, whose relay goes back when the call ends; naming it here, or a
-  /// socket never named, does nothing. To be named again the socket goes
-  /// through sipral_stack_nat_map from the start.
+  /// Use it for a closed socket, a call not placed, and every named socket before destroy. A
+  /// socket already used by a call, or never named, is a no-op.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
-  /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
-  /// signalling socket of the stack's own, which is kept mapped for as long
-  /// as it is bound.
+  /// `SIPRAL_STATUS_WRONG_STATE` without `SIPRAL_NAT_STUN`; `SIPRAL_STATUS_INVALID_ARGUMENT`
+  /// for one of the stack's own signalling sockets.
   ///
   /// Safety
   ///
@@ -10698,98 +8353,59 @@ final class Sipral {
 
   /// Take the next STUN request a media socket has to send.
   ///
-  /// The same record and the same rules as `sipral_stack_poll_transmit`,
-  /// on a queue of its own: loop until `len` comes back zero, after every
-  /// sipral_stack_nat_map, every sipral_stack_receive_stun and
-  /// every `sipral_stack_poll`, since the stack retransmits a request
-  /// nobody answered. `source` is always written, and it is the socket to
-  /// send from — the whole point is the address the server sees it come
-  /// from, so sending it from any other socket learns the wrong one.
-  /// `transport` is zero and names nothing here. `protocol` is UDP for a
-  /// datagram; on a stack whose `turn_transport` is TCP or TLS, what is for
-  /// the TURN server says that instead, and is written, as it is, on the
-  /// connection from `source` that `SIPRAL_EVENT_KIND_TURN_STREAM` asked
-  /// for — never sent as a datagram.
+  /// Same record and rules as `sipral_stack_poll_transmit`, on its own queue: loop until `len`
+  /// is zero after every sipral_stack_nat_map, sipral_stack_receive_stun and
+  /// `sipral_stack_poll`. Send from `source` exactly: the server reports the address it sees.
+  /// `transport` is zero. `protocol` is UDP for a datagram, or TCP/TLS for bytes to write on
+  /// the TURN connection from `source`.
   ///
-  /// A call placed, rung or answered on a socket with its relay sends
-  /// through here too, for as long as it has no media handle: the Binding
-  /// indications that keep the NAT binding towards the TURN server open
-  /// while the phone rings, and the refresh that keeps the allocation past
-  /// its lifetime less a minute — nine minutes with coturn's default. From
-  /// the media handle on they leave through `sipral_media_poll_transmit`
-  /// with the rest of the call's media path.
+  /// A call on a relayed socket also sends here until it has a media handle: Binding
+  /// indications keeping the NAT open and the allocation refresh. After that they leave via
+  /// `sipral_media_poll_transmit`.
   ///
   /// Safety
   ///
-  /// `transmit` must point at a `sipral_transmit_t` whose `size` member says
-  /// how long it is and whose buffers are writable for the capacities beside
-  /// them.
+  /// `transmit` must point at a `sipral_transmit_t` whose `size` member says how long it is
+  /// and whose buffers are writable for the capacities beside them.
   late final int Function(int stack, ffi.Pointer<SipralTransmit> transmit) stackPollStun = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralTransmit> transmit),
       int Function(int stack, ffi.Pointer<SipralTransmit> transmit)>('sipral_stack_poll_stun');
 
-  /// Hand over a datagram that arrived on a media socket
-  /// sipral_stack_nat_map named, before a call has media on it.
+  /// Hand over a datagram that arrived on a media socket sipral_stack_nat_map named,
+  /// before a call has media on it.
   ///
-  /// That includes a call already placed, rung or answered on the socket,
-  /// until its media handle exists: everything arriving on the socket
-  /// still comes in here, and the call takes what is its own. The TURN
-  /// server's answers to what a call with a relay sent through
-  /// sipral_stack_poll_stun — a refresh left unanswered loses the
-  /// relay. The far end's first connectivity checks on a call using ICE,
-  /// which start with its answer and can arrive before the 200 is read:
-  /// one signed with the password the call's description gave out is kept,
-  /// the newest sixteen for the socket, and answered by the call's agent
-  /// when its session opens (RFC 8445 §7.3) — unless it waited longer than
-  /// 39.5 seconds, the far end's transaction for it, or its call ended
-  /// first, when it is dropped. And once the session is open, in
-  /// the poll between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and
-  /// `sipral_call_media`, anything at all, which goes to the session as
-  /// through `sipral_media_receive`. From the media handle on, the socket's
-  /// datagrams go to `sipral_media_receive` instead — except on a socket
-  /// the branches of a forked call share (`keep_all_forks`), whose
-  /// datagrams keep coming here for as long as the branches last: one
-  /// offer described them all on the one socket, and each datagram goes to
-  /// the branch that claims it, by the ICE fragment a check names, the
-  /// check an answer answers, or the address its media comes from (RFC
-  /// 8839 §7.3). That much a stack that asks no server takes too; anything
-  /// else it refuses with `SIPRAL_STATUS_WRONG_STATE`.
+  /// Everything arriving on the socket comes here until the call's media handle exists:
+  /// - TURN answers to what the call's relay sent (an unanswered refresh loses the relay);
+  /// - the far end's early ICE checks: those signed with this call's password are kept, the
+  ///   newest sixteen, and answered when the session opens (RFC 8445 §7.3), unless older than
+  ///   39.5 seconds or the call ended;
+  /// - between `SIPRAL_EVENT_KIND_MEDIA_STARTED` and `sipral_call_media`, anything, as through
+  ///   `sipral_media_receive`.
   ///
-  /// `to` is the socket it arrived on, as `local` was given there; `from`
-  /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
-  /// server's answer, which is then the stack's and nobody else's, or the
-  /// call's as above; `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else —
-  /// early media before the session opens, a datagram from a stranger, a
-  /// check nobody can authenticate, an answer from any address but the
-  /// server's, a datagram the session dropped — which costs that one
-  /// datagram and nothing more. Only the server's own address is believed,
-  /// and only an answer to a request this stack sent: that is the whole
-  /// defence against a forged answer naming an address of the attacker's
-  /// choosing as this end's own.
+  /// A socket shared by forked branches (`keep_all_forks`) keeps coming here; each datagram goes
+  /// to the branch matching its ICE fragment, transaction or source (RFC 8839 §7.3). A stack
+  /// without STUN accepts only that and returns `SIPRAL_STATUS_WRONG_STATE` otherwise.
+  ///
+  /// `to` is the receiving socket as named, `from` the sender. `SIPRAL_STATUS_OK` when taken;
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else, dropping only that datagram. Only
+  /// answers from the server's own address to this stack's own requests are believed: that is
+  /// the defence against a forged mapping.
   ///
   /// Safety
   ///
-  /// `data` must be readable for `len` bytes, `from` for `from_len`, and
-  /// `to` for `to_len`.
+  /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to` for `to_len`.
   late final int Function(int stack, ffi.Pointer<ffi.Uint8> data, int len, ffi.Pointer<ffi.Char> from, int fromLen, ffi.Pointer<ffi.Char> to, int toLen, int nowMs) stackReceiveStun = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Uint8> data, ffi.Size len, ffi.Pointer<ffi.Char> from, ffi.Size fromLen, ffi.Pointer<ffi.Char> to, ffi.Size toLen, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<ffi.Uint8> data, int len, ffi.Pointer<ffi.Char> from, int fromLen, ffi.Pointer<ffi.Char> to, int toLen, int nowMs)>('sipral_stack_receive_stun');
 
-  /// Say that the TCP or TLS connection a
-  /// `SIPRAL_EVENT_KIND_TURN_STREAM` of state `SIPRAL_TURN_STREAM_OPEN`
-  /// asked for is open — for TLS, that the handshake has finished and the
-  /// server's certificate was checked against the name the application
-  /// configured, by the platform's own TLS stack, as for SIP over TLS.
+  /// Say that the connection a `SIPRAL_TURN_STREAM_OPEN` asked for is open (for TLS, with the
+  /// handshake done and the certificate checked by the platform).
   ///
-  /// The socket's Allocate is waiting in sipral_stack_poll_stun when
-  /// this returns, marked with the connection's `protocol`, to be written
-  /// on it; the answer comes back through sipral_stack_turn_receive,
-  /// and `SIPRAL_EVENT_KIND_NAT_RELAY` says what the server gave, exactly
-  /// as over UDP.
+  /// The socket's Allocate then waits in sipral_stack_poll_stun marked with `protocol`;
+  /// the answer comes back through sipral_stack_turn_receive.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket no connection was asked
-  /// for, and `SIPRAL_STATUS_WRONG_STATE` on a stack created without
-  /// `SIPRAL_NAT_STUN`.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket with no requested connection,
+  /// `SIPRAL_STATUS_WRONG_STATE` without `SIPRAL_NAT_STUN`.
   ///
   /// Safety
   ///
@@ -10798,24 +8414,15 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> local, ffi.Size localLen, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<ffi.Char> local, int localLen, int nowMs)>('sipral_stack_turn_connected');
 
-  /// Hand over bytes read off a media socket's TCP or TLS connection to
-  /// the TURN server, in whatever pieces the connection delivered them.
+  /// Hand over bytes read from a media socket's TURN connection, in any chunking.
   ///
-  /// The messages in them are put back together here (RFC 8656 §12.5)
-  /// and each goes where a datagram from the server would: to the relay
-  /// being made or kept for the socket, or, once a call has taken it, to
-  /// that call — its agent while it waits for its session, and then its
-  /// media, as through `sipral_media_receive`, audio included. So the
-  /// connection is read here for as long as it is open, media handle or
-  /// not, and what the call owes the far end in reply comes out of
-  /// `sipral_media_poll_transmit` as it always does.
+  /// Messages are reassembled (RFC 8656 §12.5) and routed like a datagram from the server: to
+  /// the socket's relay, or to the call holding it (agent or media, audio included). Read the
+  /// connection for as long as it is open; replies leave through `sipral_media_poll_transmit`.
   ///
-  /// `SIPRAL_STATUS_STREAM_BROKEN` when the connection carried something
-  /// no TURN message starts with, which nothing in a stream can recover
-  /// from: close it. The socket's relay is lost with it —
-  /// `SIPRAL_NAT_RELAY_FAILED` for one still waiting for its call — and no
-  /// `SIPRAL_TURN_STREAM_CLOSE` follows. `SIPRAL_STATUS_INVALID_ARGUMENT`
-  /// for a socket with no open connection.
+  /// `SIPRAL_STATUS_STREAM_BROKEN` when the bytes are not TURN framing: close the connection.
+  /// The relay is lost with it and no `SIPRAL_TURN_STREAM_CLOSE` follows.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a socket with no open connection.
   ///
   /// Safety
   ///
@@ -10824,17 +8431,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> local, ffi.Size localLen, ffi.Pointer<ffi.Uint8> data, ffi.Size len, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<ffi.Char> local, int localLen, ffi.Pointer<ffi.Uint8> data, int len, int nowMs)>('sipral_stack_turn_receive');
 
-  /// Say that a media socket's connection to the TURN server closed, or
-  /// could not be opened at all.
+  /// Say that a media socket's TURN connection closed, or could not be opened.
   ///
-  /// The server knew the socket's allocation by that connection (RFC 8656
-  /// §3.2), so the relay went with it: one still being made is
-  /// `SIPRAL_NAT_RELAY_FAILED` at the next poll, and a call on the socket
-  /// goes without it; a call that had taken it keeps the paths ICE found
-  /// that need none, and loses the one through it when its consent runs
-  /// out (RFC 7675). Naming the socket again with `sipral_stack_nat_map`
-  /// asks for a new connection. `SIPRAL_STATUS_OK` for a connection the
-  /// stack had already let go.
+  /// The allocation was tied to the connection (RFC 8656 §3.2), so the relay is gone: one in
+  /// progress becomes `SIPRAL_NAT_RELAY_FAILED`; a call using it loses that path when consent
+  /// expires (RFC 7675). Name the socket again to get a new connection. `SIPRAL_STATUS_OK` for
+  /// a connection already released.
   ///
   /// Safety
   ///
@@ -10844,31 +8446,23 @@ final class Sipral {
       int Function(int stack, ffi.Pointer<ffi.Char> local, int localLen, int nowMs)>('sipral_stack_turn_closed');
 
   /// The short name of an event kind, as a static NUL-terminated
-  /// string, or null for a number this build has no kind for.
+  /// string, or null for a number this build has no kind for
+  /// (reserved numbers included).
   ///
   /// The string belongs to the library and lives as long as it is
-  /// loaded. A number that is reserved for a feature this build does
-  /// not have answers null, the same as one that was never spent: a
-  /// name for something that cannot arrive would be a name for
-  /// nothing.
+  /// loaded.
   ///
   /// Safety
   ///
-  /// Reads no memory the caller owns, and is safe to call from any
-  /// thread.
+  /// Reads no caller memory; safe from any thread.
   late final ffi.Pointer<ffi.Char> Function(int kind) eventKindName = library.lookupFunction<
       ffi.Pointer<ffi.Char> Function(ffi.Uint32 kind),
       ffi.Pointer<ffi.Char> Function(int kind)>('sipral_event_kind_name');
 
   /// How many lines a header field is on, in a whole SIP message.
   ///
-  /// The message is any SIP message in bytes: the one an event carries in
-  /// `sipral_event_t::message`, or one the application came by some other
-  /// way. The name is matched the way the parser matches it, without regard to
-  /// case, and a compact form and its long form are one field (RFC 3261
-  /// §7.3.3): `i` counts the `Call-ID` lines, and `Call-ID` counts a line
-  /// written `i:`. A field that is not there is a count of zero, not a
-  /// failure.
+  /// The name is case-insensitive and a compact form equals its long form
+  /// (RFC 3261 §7.3.3). An absent field counts zero, not a failure.
   ///
   /// Safety
   ///
@@ -10880,16 +8474,10 @@ final class Sipral {
 
   /// Where one line of a header field is, in a whole SIP message.
   ///
-  /// `index` counts from zero in the order the lines arrived, and has to be
-  /// below what `sipral_message_header_count` says for the same name: past it
-  /// is `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` then say
-  /// where the value sits inside `message`, trimmed at both ends and otherwise
-  /// as it arrived, a line fold included. An offset rather than a pointer,
-  /// because the bytes are the caller's, and a binding that copied them across
-  /// the boundary holds its own copy.
-  ///
-  /// One line of a field whose value is a comma-separated list may hold
-  /// several values; `sipral_message_header_element` reaches those.
+  /// `index` is in arrival order, below `sipral_message_header_count`, else
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` locate the
+  /// value inside `message`, trimmed, line folds kept. For single list values
+  /// use `sipral_message_header_element`.
   ///
   /// Safety
   ///
@@ -10902,16 +8490,9 @@ final class Sipral {
   /// How many values a field whose value is a comma-separated list holds,
   /// across every line it is on.
   ///
-  /// RFC 3261 §7.3.1 makes two values on one line, with a comma between them,
-  /// and the same two values on two lines one and the same message, and a
-  /// proxy is free to turn either into the other. So this counts values
-  /// rather than lines, split at every comma that is not inside quotes or
-  /// angle brackets. Otherwise as `sipral_message_header_count`.
-  ///
-  /// Only for a field defined as a list: `P-Asserted-Identity`, `Diversion`,
-  /// `Contact`, `Supported`. Any other is split at a comma its value holds as
-  /// text, like the one in a `Date` or the ones between the parameters of a
-  /// challenge, and `sipral_message_header_count` is the call for it.
+  /// Per RFC 3261 §7.3.1 one line with commas equals several lines, so this
+  /// splits at commas outside quotes and angle brackets. Only for list
+  /// fields (`Diversion`, `Contact`...); a `Date` would split wrongly.
   ///
   /// Safety
   ///
@@ -10922,9 +8503,8 @@ final class Sipral {
 
   /// Where one value of a list field is, across every line the field is on.
   ///
-  /// `index` counts values in the order they arrived, and has to be below what
-  /// `sipral_message_header_element_count` says for the same name. Otherwise
-  /// as `sipral_message_header`.
+  /// `index` is below `sipral_message_header_element_count`. Otherwise as
+  /// `sipral_message_header`.
   ///
   /// Safety
   ///
@@ -10935,21 +8515,10 @@ final class Sipral {
 
   /// The operating system says this process stops shortly.
   ///
-  /// Everything reached from here is synchronous, bounded by the number of
-  /// accounts and subscriptions, and cannot fail. Nothing is sent — see
-  /// `docs/16-lifecycle.md` for why a graceful de-registration is the wrong
-  /// thing to attempt in this window rather than the obvious one — and
-  /// nothing stays scheduled: a stack that is suspended and never resumed
-  /// has no deadline to fire and no work left behind.
-  ///
-  /// Calls that are up are left exactly as they are. A lid closing and
-  /// opening again is seconds, and hanging up a live call because the
-  /// machine blinked is worse than finding out a few seconds later that it
-  /// is gone.
-  ///
-  /// `out_report` receives what was found: bindings that stopped being
-  /// evidence, subscriptions whose last notification stopped being
-  /// evidence, and calls left untouched.
+  /// Synchronous, bounded by accounts and subscriptions, infallible. Nothing
+  /// is sent (`docs/16-lifecycle.md` says why de-registering here is wrong)
+  /// and nothing stays scheduled. Calls are left as they are. `out_report`
+  /// receives the counts.
   ///
   /// Safety
   ///
@@ -10961,16 +8530,11 @@ final class Sipral {
 
   /// The process is awake again.
   ///
-  /// Arbitrary time has passed — arbitrary, not measurable, because the
-  /// clock this stack is driven by did not run while the machine was
-  /// suspended — and every transport may be dead. What was believed is
-  /// dropped and proved again: the transport already there is used first,
-  /// because most wakes are short and it still works, and
-  /// sipral_account_rebind is how the application hands over a new one
-  /// once this stack says it needs one.
-  ///
-  /// Safe to call without a matching sipral_stack_suspending. Some
-  /// platforms only notify on the way back.
+  /// An unmeasurable time passed and any transport may be dead. Beliefs are
+  /// dropped and proved again, on the existing transport first (most wakes
+  /// are short); sipral_account_rebind supplies a new one when asked.
+  /// Safe without a matching sipral_stack_suspending: some platforms
+  /// only notify on the way back.
   ///
   /// Safety
   ///
@@ -10979,26 +8543,19 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint64 nowMs),
       int Function(int stack, int nowMs)>('sipral_stack_resumed');
 
-  /// The network is a different one, described before and after in as much
-  /// detail as the decision needs.
+  /// The network changed; before and after are described.
   ///
-  /// `from_link`/`to_link` is a SipralLink. `*_address` is the local
-  /// address this stack's transports are bound to, as an IPv4 or IPv6
-  /// literal with no port — a change of it invalidates every transport and
-  /// every binding at once. `*_interface` is the platform's own identity
-  /// for the interface, never parsed and only ever compared to another one
-  /// of itself; two networks can hand out the same address, and a phone
-  /// that walks from one office to another gets away with it until a call
-  /// comes in. `*_resolves` is whether a name can become an address there,
-  /// because that is the one failure that leaves everything else looking
-  /// healthy. Any of the four address or interface arguments may be null
-  /// with a length of zero, for a fact the application has none to give.
+  /// `*_link` is a SipralLink. `*_address` is the local address the
+  /// transports are bound to, an IP literal without port; a change
+  /// invalidates every transport and binding. `*_interface` is the
+  /// platform's interface id, only compared, since two networks can hand out
+  /// the same address. `*_resolves` says whether names resolve there, the
+  /// one failure that looks healthy. Address and interface may be null with
+  /// zero length.
   ///
-  /// `out_recovery` receives what was decided, as a SipralRecovery, so
-  /// this is safe to call as often as the platform delivers the
-  /// notification — most of the time nothing this stack uses is different,
-  /// and `SIPRAL_RECOVERY_NOTHING` is the whole of what happens. It may be
-  /// null.
+  /// `out_recovery`, which may be null, receives a SipralRecovery.
+  /// Cheap enough to call on every notification: usually the answer is
+  /// `SIPRAL_RECOVERY_NOTHING` and nothing happens.
   ///
   /// Safety
   ///
@@ -11009,13 +8566,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 fromLink, ffi.Pointer<ffi.Char> fromAddress, ffi.Size fromAddressLen, ffi.Pointer<ffi.Char> fromInterface, ffi.Size fromInterfaceLen, ffi.Uint32 fromResolves, ffi.Uint32 toLink, ffi.Pointer<ffi.Char> toAddress, ffi.Size toAddressLen, ffi.Pointer<ffi.Char> toInterface, ffi.Size toInterfaceLen, ffi.Uint32 toResolves, ffi.Uint64 nowMs, ffi.Pointer<ffi.Uint32> outRecovery),
       int Function(int stack, int fromLink, ffi.Pointer<ffi.Char> fromAddress, int fromAddressLen, ffi.Pointer<ffi.Char> fromInterface, int fromInterfaceLen, int fromResolves, int toLink, ffi.Pointer<ffi.Char> toAddress, int toAddressLen, ffi.Pointer<ffi.Char> toInterface, int toInterfaceLen, int toResolves, int nowMs, ffi.Pointer<ffi.Uint32> outRecovery)>('sipral_stack_network_changed');
 
-  /// There is no usable interface.
-  ///
-  /// Distinct from sipral_stack_name_resolution_lost because the
-  /// recovery is the opposite one: with nothing that can leave, nothing is
-  /// tried and nothing is scheduled, which is the cheapest this stack ever
-  /// is. The way out is sipral_stack_network_changed, the notification
-  /// every platform delivers when an interface comes back.
+  /// There is no usable interface. Nothing is tried or scheduled until
+  /// sipral_stack_network_changed reports one back; the opposite of
+  /// sipral_stack_name_resolution_lost.
   ///
   /// Safety
   ///
@@ -11026,11 +8579,9 @@ final class Sipral {
 
   /// Names no longer become addresses.
   ///
-  /// The dangerous one: the interface is up and packets leave, so
-  /// everything reads healthy, while every address this stack learned from
-  /// a name may now stand for somewhere else. A binding whose registrar was
-  /// written as a name stops being evidence; one pointed at a literal
-  /// address never needed a resolver and is left running.
+  /// Everything looks healthy while every address learned from a name may
+  /// be wrong. Bindings whose registrar is a name stop being trusted; ones
+  /// aimed at a literal address keep running.
   ///
   /// Safety
   ///
@@ -11041,27 +8592,19 @@ final class Sipral {
 
   /// Point an account at a transport and an address again.
   ///
-  /// `remote` is the far end this account's requests go to now, as
-  /// `host:port`. `contact` is where this endpoint can be reached, as it
-  /// goes in `Contact`; it is not optional, because after a change of
-  /// address the old one names somewhere the far end cannot reach, and a
-  /// stack that let it stand would register a binding that silently
-  /// receives nothing.
+  /// `remote` is where its requests go, `host:port`. `contact` is required:
+  /// after an address change the old one is unreachable, and keeping it
+  /// would register a binding that receives nothing.
   ///
-  /// `transport` must be one this stack already has —
+  /// `transport` must already exist:
   /// SIPRAL_TRANSPORT_MAIN or
-  /// a further one sipral_stack_transport_bind
-  /// has bound — and any other number is `SIPRAL_STATUS_INVALID_ARGUMENT`:
-  /// this call points an account at a transport, it does not open one.
+  /// one sipral_stack_transport_bind
+  /// bound; anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. This does not
+  /// open one.
   ///
-  /// Safe to call whether or not this stack is waiting for it. When it is,
-  /// answering climbs the next rung at once rather than waiting out the
-  /// rest of the back-off — the application answering in milliseconds is
-  /// the normal case, and there is nothing to be gained by making a wake
-  /// take a further half minute. When it is not, this still repoints the
-  /// account, and the next REGISTER this stack sends for it — a refresh, or
-  /// the next rung of a ladder started afterwards — uses what was given
-  /// here.
+  /// When recovery is waiting for it, the next rung runs at once instead of
+  /// waiting out the back-off. Otherwise the account is still repointed and
+  /// the next REGISTER uses it.
   ///
   /// Safety
   ///
@@ -11071,16 +8614,10 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Uint32 transport, ffi.Pointer<ffi.Char> remote, ffi.Size remoteLen, ffi.Pointer<ffi.Char> contact, ffi.Size contactLen, ffi.Uint64 nowMs),
       int Function(int stack, int account, int transport, ffi.Pointer<ffi.Char> remote, int remoteLen, ffi.Pointer<ffi.Char> contact, int contactLen, int nowMs)>('sipral_account_rebind');
 
-  /// Say the process has just started, so that time to ready is measured
-  /// from somewhere.
+  /// Mark the process start, the zero of sipral_account_time_to_ready.
   ///
-  /// The zero of sipral_account_time_to_ready, and a declaration rather
-  /// than something this library could observe: a stack is created long
-  /// before the launch it belongs to is over, and only the application
-  /// knows which moment its users are waiting from. Every account's
-  /// measurement is cleared and taken again, so calling this twice restarts
-  /// the clock rather than confusing two launches.
-  ///
+  /// Only the application knows the moment its users wait from. Each call
+  /// clears and restarts every account's measurement.
   /// Safety
   ///
   /// Safe to call with any handle value.
@@ -11088,33 +8625,21 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint64 nowMs),
       int Function(int stack, int nowMs)>('sipral_stack_cold_start');
 
-  /// Write an account's registration down, so a later start can carry it on
-  /// instead of paying for a whole handshake.
+  /// Write an account's registration down, so a later start can carry it
+  /// on without a full handshake.
   ///
-  /// `out_len` receives how many bytes it takes whether or not there was
-  /// room, so a caller passing a null `buffer` and a `capacity` of zero is
-  /// asking how much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`
-  /// with the answer — that is the question, not a failure. Nothing is
-  /// written to a buffer too short.
+  /// `out_len` always receives the size; a null `buffer` with `capacity`
+  /// zero asks for it and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is
+  /// written to a short buffer.
   ///
-  /// **The bytes are opaque, and reading them is not part of this ABI.**
-  /// They carry a version, and a build reads only the layouts it was made
-  /// for; an application that parses them is an application that stops
-  /// working when the layout grows a field. Storing them is the
-  /// application's, and so is protecting them: a snapshot is not a secret,
-  /// but it names an address of record, which is a record of who uses this
-  /// device.
+  /// **The bytes are opaque; parsing them is not part of this ABI.** They are
+  /// versioned and a build reads only its known layouts. Storing and
+  /// protecting them is the application's: they name an address of record.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` when there is nothing worth keeping — an
-  /// account that has never registered, one that never will, one whose
-  /// registration failed, or one whose binding has been given up. A cold
-  /// start after that is an ordinary cold start, which is what would have
-  /// happened anyway.
-  ///
-  /// The clock is read and not moved: this writes nothing and sends
-  /// nothing, so a snapshot taken on the way into suspend cannot be what
-  /// stops a later `now_ms` from being accepted.
-  ///
+  /// `SIPRAL_STATUS_WRONG_STATE` when there is nothing to keep: never
+  /// registered, never will, failed, or given up. The clock is read, not
+  /// moved, so a snapshot on the way into suspend cannot reject a later
+  /// `now_ms`.
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or be null with a
@@ -11124,29 +8649,21 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Uint8> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outLen, ffi.Uint64 nowMs),
       int Function(int stack, int account, ffi.Pointer<ffi.Uint8> buffer, int capacity, ffi.Pointer<ffi.Size> outLen, int nowMs)>('sipral_account_freeze');
 
-  /// Read one back, on an account that has been added and has not
-  /// registered.
+  /// Read one back, on an account that was added and has not registered.
   ///
-  /// `asleep_ms` is how long the snapshot sat unused, and it is the
-  /// caller's to supply because nothing here reads a wall clock and a
-  /// monotonic instant does not survive the process that minted it. The
-  /// application is the only one that knows whether this is a wake from
-  /// suspend or a cold launch a week later. What is left of the binding's
-  /// life is what was left when it was written down, less that.
+  /// `asleep_ms` is how long the snapshot sat unused: only the application
+  /// knows, since no wall clock is read here and instants die with the
+  /// process. The binding keeps what it had left, less that.
   ///
-  /// The account comes up in
-  /// SIPRAL_REGISTRATION_STATE_RESTORED
-  /// rather than registered: a binding nobody has confirmed since the
-  /// machine slept is a belief, not evidence, and the refresh this books is
-  /// what turns one into the other.
+  /// The account comes up
+  /// SIPRAL_REGISTRATION_STATE_RESTORED,
+  /// not registered, until the refresh this books confirms it.
   ///
-  /// Refused, with the account left exactly as it was:
-  /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` for bytes a newer build wrote,
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account that does not register at
-  /// all, and `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
-  /// snapshot, are damaged, or are another account's — an address of record
-  /// that is not this account's is the one mix-up that would otherwise send
-  /// a REGISTER for somebody else.
+  /// Refused with the account unchanged: `SIPRAL_STATUS_UNSUPPORTED_VERSION`
+  /// for bytes a newer build wrote, `SIPRAL_STATUS_NOT_SUPPORTED` for an
+  /// account that does not register, `SIPRAL_STATUS_INVALID_ARGUMENT` for
+  /// bytes that are not a snapshot, are damaged, or belong to another
+  /// address of record (which would register somebody else).
   ///
   /// Safety
   ///
@@ -11155,19 +8672,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Uint8> snapshot, ffi.Size snapshotLen, ffi.Uint64 asleepMs, ffi.Uint64 nowMs),
       int Function(int stack, int account, ffi.Pointer<ffi.Uint8> snapshot, int snapshotLen, int asleepMs, int nowMs)>('sipral_account_thaw');
 
-  /// How long this account took to become reachable, measured from
-  /// sipral_stack_cold_start.
+  /// How long this account took to become reachable, from
+  /// sipral_stack_cold_start. A queue's ring timeout must exceed it, or
+  /// a waking phone is always skipped.
   ///
-  /// The number a queue needs: how long it rings each agent before giving
-  /// up and trying the next one has to be longer than this, or a phone that
-  /// was asleep is skipped every time and its owner is told the queue was
-  /// quiet.
-  ///
-  /// `out_has_value` is zero, and `out_ms` zero with it, until there is an
-  /// answer — before the account has registered, for an account that never
-  /// registers, and always when no cold start was ever declared, because
-  /// nothing marks the moment those became reachable. Zero milliseconds
-  /// with `out_has_value` set is a real answer and a different one.
+  /// `out_has_value` and `out_ms` are zero until there is an answer: before
+  /// registration, for an account that never registers, or with no cold
+  /// start declared. Zero with `out_has_value` set is a real answer.
   ///
   /// Safety
   ///
@@ -11182,33 +8693,18 @@ final class Sipral {
   /// The answer to
   /// SIPRAL_EVENT_KIND_RESOLVE_NEEDED,
   /// with `dialog` the handle that event carried. `addresses` is
-  /// comma-separated `host:port`, **in RFC 3263 §4.3 priority order**: the
-  /// first one this stack already has an open transport of the wanted
-  /// protocol for is taken, and the ones after it are kept for this stack
-  /// to try in turn if that one goes on to fail. A list is therefore not a
-  /// convenience — it is what makes failover possible at all, and one
-  /// address is a list of one that cannot fail over.
+  /// comma-separated `host:port` in RFC 3263 §4.3 priority order: the first
+  /// one with an open transport of the wanted protocol is taken, the rest
+  /// are kept for failover.
   ///
-  /// `protocol` is a SipralTransport when
-  /// the lookup named one, which a NAPTR or SRV answer does, and zero when
-  /// it did not — an A lookup with nothing above it — in which case the flow
-  /// keeps speaking whatever it already spoke. It is looked for, never
-  /// opened: nothing here owns a socket, so a protocol nothing has bound is
-  /// not something this can invent. An address on one is passed over, and
-  /// answering again after
-  /// sipral_stack_transport_bind
-  /// is how it gets another chance.
+  /// `protocol` is a SipralTransport when the lookup named one (NAPTR,
+  /// SRV), or zero to keep the flow's protocol. It is never opened: an
+  /// address on an unbound protocol is passed over; answer again after
+  /// sipral_stack_transport_bind.
   ///
-  /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer when none
-  /// of the addresses is one this stack can reach on the protocol asked
-  /// for: the flow stands exactly as it did. A dialog that has ended by the
-  /// time the answer comes is `SIPRAL_STATUS_STALE_HANDLE`, like every
-  /// other handle to something that is gone, and changes nothing either;
-  /// an application that resolves in the background treats the two alike.
-  ///
-  /// There is no `now_ms` here on purpose. Every other call that changes
-  /// what this stack will send takes the time because something it does is
-  /// timed; this one only writes an address down.
+  /// `SIPRAL_STATUS_OK` with nothing changed when no address is reachable.
+  /// `SIPRAL_STATUS_STALE_HANDLE` for a dialog that has ended. No `now_ms`:
+  /// nothing here is timed.
   ///
   /// Safety
   ///
@@ -11219,24 +8715,14 @@ final class Sipral {
 
   /// Point an account's registration at another address.
   ///
-  /// For a registrar named by a record with more than one target, and for
-  /// the one after it when the first stops answering. The binding's
-  /// `Call-ID`, its sequence number and its credentials are all kept, so
-  /// the next REGISTER reads to the registrar as the same device
-  /// continuing, not as a second one arriving — which is the whole of the
-  /// saving and the reason this is not "remove the account and add it
-  /// again".
+  /// For a registrar with several targets. The binding's `Call-ID`,
+  /// sequence and credentials are kept, so the registrar sees the same
+  /// device continuing. A REGISTER in flight or booked is superseded at
+  /// once; retargeting to the current address is `SIPRAL_STATUS_OK` and
+  /// sends nothing.
   ///
-  /// A REGISTER already in flight or already booked for this account is
-  /// superseded at once rather than waited out. Retargeting to the address
-  /// an account is already using is `SIPRAL_STATUS_OK` and sends nothing.
-  ///
-  /// `registrar_address` is `host:port`, not a name: resolving one is the
-  /// application's, here as everywhere else in this module.
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar — a
-  /// trunk authenticated by address has nothing to retarget, and
-  /// `sipral_account_config_t::registrar_address` is where its outbound
-  /// proxy is set.
+  /// `registrar_address` is `host:port`, not a name.
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar.
   ///
   /// Safety
   ///
@@ -11249,14 +8735,9 @@ final class Sipral {
   /// Copy one call's diagnostic record into `buffer`, as the JSON
   /// `docs/14-diagnostics.md` describes.
   ///
-  /// Readable at any point in the call's life, and for as long after it as
-  /// the endpoint has not evicted the record to make room for a newer one —
-  /// how many are kept is `sipral_stack_config_t::diagnostic_records`,
-  /// 32 when it is zero. A call whose
-  /// record has been evicted, or that has had nothing decided about it yet,
-  /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
-  /// record, and refusing to read one that happens to be empty would make
-  /// a caller unable to tell "nothing yet" from "something went wrong".
+  /// Readable during the call and after it, until the record is evicted
+  /// (`sipral_stack_config_t::diagnostic_records` are kept, 32 when zero).
+  /// An evicted or still empty record answers `SIPRAL_STATUS_OK` with `{}`.
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
   /// document, with the length needed in `out_needed`.
@@ -11272,12 +8753,8 @@ final class Sipral {
   /// Copy the whole diagnostic document into `buffer`: what a bug report
   /// carries, as the JSON `docs/14-diagnostics.md` describes.
   ///
-  /// That is the endpoint's own record — everything decided outside any
-  /// call — and then one record per call still held, in the same document,
-  /// with the number of records evicted to make room. It is deliberately
-  /// the whole of it rather than the endpoint's half: a report that arrives
-  /// without the calls it is about answers nothing, and
-  /// sipral_call_record_json is already the way to ask about one call.
+  /// The endpoint's own record (decisions outside any call), then one record
+  /// per call still held, and the count of evicted records.
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
   /// document, with the length needed in `out_needed`.
@@ -11291,11 +8768,8 @@ final class Sipral {
       int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_stack_diagnostics_json');
 
   /// What a `conference` subscription holds about the conference as a
-  /// whole (RFC 4575 §5.5).
-  ///
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that holds no
-  /// conference: one to another package, one no document has reached yet,
-  /// or one that is not live.
+  /// whole (RFC 4575 §5.5). `SIPRAL_STATUS_NOT_SUPPORTED` when it holds
+  /// none: another package, no document yet, or not live.
   ///
   /// Safety
   ///
@@ -11317,14 +8791,11 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle subscription, ffi.Size index, ffi.Pointer<SipralConferenceUser> outUser),
       int Function(int stack, int subscription, int index, ffi.Pointer<SipralConferenceUser> outUser)>('sipral_subscription_conference_user_at');
 
-  /// A piece of text about the conference or one of its users, copied into
-  /// the caller's buffer the way `sipral_subscription_dialog_text` copies
-  /// one: `out_needed` receives the bytes it needs including the NUL, a
-  /// buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing
-  /// written, and a piece the focus did not send is one byte, the NUL.
-  ///
-  /// `which` is a SipralConferenceText; `index` names the user for the
-  /// pieces about one, and is ignored for the others.
+  /// Text about the conference or a user, as `which` (a
+  /// SipralConferenceText) and `index` say. `out_needed` gets the bytes
+  /// needed including the NUL; a small buffer is
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written; absent text is
+  /// just the NUL.
   ///
   /// Safety
   ///
@@ -11335,13 +8806,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle subscription, ffi.Size index, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(int stack, int subscription, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_subscription_conference_text');
 
-  /// Say, or stop saying, that this end is the focus of a conference the
-  /// call belongs to (RFC 4579 §4.2): `isfocus` on the `Contact` of every
-  /// request and response the call sends from here on — the answer, for a
-  /// call not answered yet, and the next re-INVITE or UPDATE for one that
-  /// is up, which is how the far end learns it.
-  ///
-  /// `focus` is one to say it and zero to stop.
+  /// Put (`focus` 1) or remove (0) `isfocus` on this call's `Contact` from
+  /// the next message on (RFC 4579 §4.2): the answer, or the next re-INVITE
+  /// or UPDATE on an established call.
   ///
   /// Safety
   ///
@@ -11350,12 +8817,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 focus),
       int Function(int stack, int call, int focus)>('sipral_call_set_focus');
 
-  /// The URI of the conference a call belongs to, when its far end said it
-  /// is a focus (`isfocus` in its `Contact`, RFC 4579 §4.2), copied into
-  /// the caller's buffer as `sipral_subscription_conference_text` copies.
-  ///
-  /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end said nothing of
-  /// the kind.
+  /// The conference URI when the far end's `Contact` has `isfocus` (RFC 4579
+  /// §4.2), copied as `sipral_subscription_conference_text` copies.
+  /// `SIPRAL_STATUS_NOT_A_FOCUS` otherwise.
   ///
   /// Safety
   ///
@@ -11367,13 +8831,9 @@ final class Sipral {
       int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_call_conference_uri');
 
   /// Subscribe to the conference package of the call's focus (RFC 4579
-  /// §3.4), outside the call's dialog, from the call's own account, and
-  /// write the subscription's handle. It is kept like any subscription and
-  /// outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` says what it
-  /// learns.
-  ///
-  /// `SIPRAL_STATUS_NOT_A_FOCUS` for a call whose far end did not say it is
-  /// a focus.
+  /// §3.4), outside the call's dialog, from the call's account. The
+  /// subscription outlives the call. `SIPRAL_STATUS_NOT_A_FOCUS` when the
+  /// far end is not a focus.
   ///
   /// Safety
   ///
@@ -11382,16 +8842,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralHandle> outSubscription, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<SipralHandle> outSubscription, int nowMs)>('sipral_call_subscribe_conference');
 
-  /// Publish this account's presence (RFC 3903, RFC 3856 §6.2): a PIDF
-  /// document for its address of record, open or closed, with the activity
-  /// and the note `presence` gives. The first call publishes it and every
-  /// later one modifies the same publication; the stack keeps it refreshed
-  /// until sipral_account_unpublish_presence.
+  /// Publish this account's presence (RFC 3903, RFC 3856 §6.2). Later calls
+  /// modify the same publication; the stack refreshes it until
+  /// sipral_account_unpublish_presence.
   ///
-  /// Nothing has happened when this returns: the PUBLISH is in the
-  /// transmit queue, and `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
-  /// `SIPRAL_PRESENCE_KIND_PUBLICATION` says what the compositor did with
-  /// it.
+  /// The PUBLISH is only queued on return; the outcome arrives as
+  /// `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with `SIPRAL_PRESENCE_KIND_PUBLICATION`.
   ///
   /// Safety
   ///
@@ -11415,17 +8871,11 @@ final class Sipral {
       int Function(int stack, int account, int nowMs)>('sipral_account_unpublish_presence');
 
   /// Queue text the user typed for the far end, UTF-8.
+  /// Sent every 300 ms within the far end's rate, with `red` redundancy
+  /// when agreed. CR, LF or CR LF is a new line; U+0008 erases.
   ///
-  /// It goes in the next transmission interval (300 ms), at no more
-  /// characters a second than the far end said it takes, each block sent
-  /// twice more as redundancy where both ends agreed `red`. A CR LF, a
-  /// lone CR or a lone LF goes as a new line, and BACKSPACE (U+0008) erases
-  /// the far end's last character.
-  ///
-  /// `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no text stream,
-  /// and `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent than a
-  /// stream holds; nothing is queued then, and a later call finds room as
-  /// the far end reads.
+  /// `SIPRAL_STATUS_NOT_NEGOTIATED` without a text stream;
+  /// `SIPRAL_STATUS_EXHAUSTED` when the queue is full (nothing queued).
   ///
   /// Safety
   ///
@@ -11435,14 +8885,8 @@ final class Sipral {
       int Function(int media, ffi.Pointer<ffi.Char> text, int textLen)>('sipral_media_send_text');
 
   /// The next datagram due on the call's text socket.
-  ///
-  /// A `len` of zero in the packet means nothing is due; call it again at
-  /// the deadline `sipral_stack_poll` names, or with every frame of audio.
-  /// Send what it writes from the socket at `text_address`, never the
-  /// audio one.
-  ///
-  /// `now_ms` is read as the stack reads it and moves nothing, as with
-  /// every media entry point.
+  /// `len` zero means nothing due; poll again at the stack's deadline. Send
+  /// from the `text_address` socket, not the audio one.
   ///
   /// Safety
   ///
@@ -11453,11 +8897,8 @@ final class Sipral {
       int Function(int media, int nowMs, ffi.Pointer<SipralMediaPacket> packet)>('sipral_media_poll_text');
 
   /// Take a datagram off the call's text socket.
-  ///
-  /// `out_taken` is written with 1 when it was this call's text, and 0
-  /// when it was not: not RTP, another payload type, from somewhere other
-  /// than where the stream has latched, or on a call with no text. What it
-  /// carried arrives as `SIPRAL_EVENT_KIND_TEXT_RECEIVED`.
+  /// `out_taken` is 1 when it was this call's text, else 0 (not RTP, other
+  /// payload type, not the latched source, or no text stream).
   ///
   /// Safety
   ///
@@ -11470,16 +8911,11 @@ final class Sipral {
   /// Record a call to a recording server (RFC 7866), and write the
   /// recording session's handle to `out_recording`.
   ///
-  /// The call must be one this stack runs the media of, with its audio
-  /// started: `SIPRAL_STATUS_WRONG_STATE` before
-  /// `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for a call already being
-  /// recorded to a server. The recording session goes from the recorded
-  /// call's account, over a stream transport when the INVITE, which
-  /// carries the metadata beside the offer, is too large for UDP.
-  ///
-  /// Hanging the recording session up with
-  /// sipral_call_stop_recording_to or `sipral_call_hangup` stops the
-  /// recording; the server hanging it up does the same.
+  /// `SIPRAL_STATUS_WRONG_STATE` before `SIPRAL_EVENT_KIND_MEDIA_STARTED`,
+  /// for a call whose media this stack does not run, or one already
+  /// recorded. Sent from the call's account; a stream transport when too
+  /// large for UDP. Stopped by sipral_call_stop_recording_to,
+  /// `sipral_call_hangup` on it, or the server hanging up.
   ///
   /// Safety
   ///
@@ -11490,11 +8926,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralRecordConfig> config, ffi.Pointer<SipralHandle> outRecording, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<SipralRecordConfig> config, ffi.Pointer<SipralHandle> outRecording, int nowMs)>('sipral_call_record_to');
 
-  /// Stop recording a call to its recording server: the copies stop at
-  /// once, and the recording session is hung up.
-  ///
-  /// `call` is the recorded call, not the recording session.
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call nothing records.
+  /// Stop copies at once and hang up the recording session. `call` is the
+  /// recorded call. `SIPRAL_STATUS_WRONG_STATE` when nothing records it.
   ///
   /// Safety
   ///
@@ -11504,12 +8937,9 @@ final class Sipral {
       int Function(int stack, int call, int nowMs)>('sipral_call_stop_recording_to');
 
   /// The next copy of this call's audio for its recording server.
-  ///
-  /// A `len` of zero in the packet means none is waiting. Otherwise
-  /// `out_far_end` says which socket to send it from: 0 for `this_end`,
-  /// the copy of what this end sent, and 1 for `far_end`, the copy of what
-  /// it received. Collect them with every frame, in a loop to empty: a
-  /// copy nobody collects for a second is dropped, the oldest first.
+  /// `len` zero means none waiting. `out_far_end` is 0 to send from
+  /// `this_end`, 1 from `far_end`. Drain every frame: copies older than a
+  /// second are dropped, oldest first.
   ///
   /// Safety
   ///
@@ -11520,23 +8950,17 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<SipralMediaPacket> packet, ffi.Pointer<ffi.Uint32> outFarEnd),
       int Function(int media, ffi.Pointer<SipralMediaPacket> packet, ffi.Pointer<ffi.Uint32> outFarEnd)>('sipral_media_poll_recording');
 
-  /// Start recording the signalling this stack is fed from here on
-  /// (`docs/18-replay.md`), on a seed of its own. Starting moves every
-  /// branch, tag and `Call-ID` the stack draws from here on onto a fresh
-  /// seed, derived one way from the `entropy` `sipral_stack_create` was
-  /// given; the recording carries that seed and never `entropy`, and
-  /// stopping moves the stack on again, so nothing drawn after the stop
-  /// can be worked out from the file. Read `docs/18-replay.md` before
-  /// reaching for this: it records what arrives, exactly as it arrived,
-  /// and never what this end sent.
+  /// Start recording the signalling this stack is fed (`docs/18-replay.md`).
+  /// Starting moves the stack onto a fresh seed derived one way from
+  /// `entropy`; the recording carries that seed, never `entropy`, and
+  /// stopping moves the stack on again. It records what arrives, never what
+  /// this end sent.
   ///
   /// `note` is one line of prose for whoever opens the file later, or null
   /// for none.
   ///
-  /// A recording already running is replaced, not refused. Nothing is
-  /// written until `sipral_stack_recording_stop`, so a second start costs
-  /// only the frames taken since the first; `sipral_media_record_start`
-  /// refuses a second start because its file is already open on disk.
+  /// A running recording is replaced, not refused: nothing is written until
+  /// `sipral_stack_recording_stop`.
   ///
   /// Safety
   ///
@@ -11549,24 +8973,14 @@ final class Sipral {
   /// Stop the recording sipral_stack_recording_start began, and copy
   /// the text of it into `buffer` (`docs/18-replay.md`).
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` when no recording is running, the same
-  /// answer `sipral_media_record_stop` gives for the same question about
-  /// an audio recording. `SIPRAL_STATUS_WRONG_STATE` again, with the reason
-  /// in the last error, when something this session was fed could not go
-  /// in the recording — a message with a body that is not text is the one
-  /// way that happens — in which case nothing is written to `buffer` and
-  /// the recording is not produced at all: a text format that quietly left
-  /// out the one message it could not spell would replay into a different
-  /// session and say nothing about it.
+  /// `SIPRAL_STATUS_WRONG_STATE` when no recording is running. Also
+  /// `SIPRAL_STATUS_WRONG_STATE`, with the reason in the last error, when a
+  /// message could not go in the text format (a non-text body); then nothing
+  /// is produced, since a recording missing a message would replay differently.
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-  /// text, with the length needed in `out_needed` — asking again with a bigger
-  /// buffer answers the same recording rather than stopping a new one,
-  /// so a caller that does not yet know how big a buffer to bring may ask
-  /// twice: once to be told, once to be handed the text. Once a call here
-  /// copies the whole of it out, the recording is gone from the stack, the
-  /// same as `sipral_last_error_message` empties the slot it reads on a
-  /// call that succeeds.
+  /// text, with the length needed in `out_needed`; asking again returns the
+  /// same recording. Once copied out whole, the recording is gone from the stack.
   ///
   /// Safety
   ///
@@ -11576,15 +8990,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_stack_recording_stop');
 
-  /// Ask the platform what devices there are, and say how many the list
-  /// holds now.
+  /// Ask the platform for its devices and say how many the list holds.
   ///
-  /// A device seen before keeps its id; one that has gone keeps its row,
-  /// marked absent; a new one gets the next id. The engine refreshes by
-  /// itself when the platform announces a change, so this is for a
-  /// settings screen opening, not for polling.
-  /// `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not answer
-  /// within `audio_probe_ms`, with the list left as it was.
+  /// Known devices keep their ids; gone ones keep their rows, marked absent.
+  /// For a settings screen, not polling: the engine refreshes on platform
+  /// notices. `SIPRAL_STATUS_DEVICE_TIMED_OUT` past `audio_probe_ms`, with
+  /// the list unchanged.
   ///
   /// Safety
   ///
@@ -11595,11 +9006,9 @@ final class Sipral {
 
   /// How many devices the list holds, present or not.
   ///
-  /// The first read of a stack's list, here or through
-  /// `sipral_audio_device_at`, asks the platform when nothing has yet, so
-  /// a new stack lists every device without `sipral_audio_refresh`
-  /// (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
-  /// answer within `audio_probe_ms`, and the next read asks again.
+  /// The first read of a list asks the platform, so no refresh is needed.
+  /// `SIPRAL_STATUS_DEVICE_TIMED_OUT` past `audio_probe_ms`; the next read
+  /// asks again.
   ///
   /// Safety
   ///
@@ -11610,13 +9019,10 @@ final class Sipral {
 
   /// The device at `index` in the list, and its name into `buffer`.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end. The name
-  /// is written the way every other text this ABI hands out is: UTF-8 with
-  /// a trailing NUL, and `out_needed`, when it is not null, receives the
-  /// bytes it needs with that NUL counted. When the name does not fit, the
-  /// answer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written,
-  /// neither to `buffer` nor to `out_device`: ask with a capacity of zero
-  /// to learn the length, then again with room.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` past the end. The name is UTF-8 with a
+  /// trailing NUL; `out_needed`, when not null, receives its length with the
+  /// NUL. `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes neither `buffer` nor
+  /// `out_device`.
   ///
   /// Safety
   ///
@@ -11631,20 +9037,16 @@ final class Sipral {
   /// Put a role on a device, or back on the system's route with a
   /// `device` of zero.
   ///
-  /// Refused before any platform call is made: `SIPRAL_STATUS_NO_SUCH_DEVICE`
-  /// for an id the list never held, `SIPRAL_STATUS_DEVICE_UNUSABLE` for a
-  /// device with no channels in the role's direction or one that is not
-  /// plugged in, `SIPRAL_STATUS_NOT_SUPPORTED` where the platform cannot
-  /// put that role on a device of its own — macOS runs the call's
-  /// microphone and loudspeaker as one unit, and the microphone follows
-  /// the system's input. A refused selection changes nothing.
+  /// Refused before any platform call, changing nothing:
+  /// `SIPRAL_STATUS_NO_SUCH_DEVICE` for an unknown id,
+  /// `SIPRAL_STATUS_DEVICE_UNUSABLE` for a device absent or without channels
+  /// in the role's direction, `SIPRAL_STATUS_NOT_SUPPORTED` where the
+  /// platform cannot separate the role (on macOS the microphone follows the
+  /// system's input).
   ///
-  /// While the engine is active the role is reopened at once, the gain and
-  /// the mute of its direction carried over, and
-  /// `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` says `SIPRAL_AUDIO_CHANGE_SELECTED`
-  /// from the engine. A device chosen and later unplugged is a preference:
-  /// the role runs on the system's route meanwhile and goes back to the
-  /// device when it returns.
+  /// While active the role reopens at once, keeping gain and mute, and
+  /// `SIPRAL_AUDIO_CHANGE_SELECTED` follows. A chosen device that is
+  /// unplugged stays the preference and is used again when it returns.
   ///
   /// Safety
   ///
@@ -11653,10 +9055,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 role, ffi.Uint32 device),
       int Function(int stack, int role, int device)>('sipral_audio_select');
 
-  /// What a role was asked to be on, and what it is running on: the id
-  /// chosen with `sipral_audio_select` or zero for the system's route, and
-  /// the id of the device the role is actually open on or zero when it is
-  /// not open. The two differ while a chosen device is unplugged.
+  /// What a role was asked to be on (zero: the system's route) and what it
+  /// runs on (zero: not open). They differ while a chosen device is absent.
   ///
   /// Safety
   ///
@@ -11665,12 +9065,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 role, ffi.Pointer<ffi.Uint32> outSelected, ffi.Pointer<ffi.Uint32> outRunning),
       int Function(int stack, int role, ffi.Pointer<ffi.Uint32> outSelected, ffi.Pointer<ffi.Uint32> outRunning)>('sipral_audio_selection');
 
-  /// Set the gain of one direction, as a fixed-point ratio with 256 for
-  /// unity: 128 halves, 512 doubles, 0 is silence, and anything above 1024
-  /// is taken as 1024. The input direction's gain is the microphone gain;
-  /// the output's is the volume. Applied to the frames rather than to the
-  /// operating system's own control, so a film playing beside the call is
-  /// not turned down with it, and kept across every device change.
+  /// Set the gain of one direction, fixed-point with 256 for unity, capped
+  /// at 1024. Input is the microphone gain, output the volume. Applied to
+  /// the frames, not the OS control, and kept across device changes.
   ///
   /// Safety
   ///
@@ -11688,9 +9085,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 direction, ffi.Pointer<ffi.Uint32> outGain),
       int Function(int stack, int direction, ffi.Pointer<ffi.Uint32> outGain)>('sipral_audio_gain');
 
-  /// Mute one direction, or unmute it, kept across every device change. A
-  /// muted microphone still runs and sends silence, so the far end hears a
-  /// stream rather than a gap.
+  /// Mute or unmute one direction, kept across device changes. A muted
+  /// microphone sends silence, so the far end hears a stream, not a gap.
   ///
   /// Safety
   ///
@@ -11708,10 +9104,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 direction, ffi.Pointer<ffi.Uint32> outMuted),
       int Function(int stack, int direction, ffi.Pointer<ffi.Uint32> outMuted)>('sipral_audio_muted');
 
-  /// The meter of one direction: the loudest sample of the last tenth of a
-  /// second, 0 to 32767, held for between one window and two so that a
-  /// bar drawn from it neither flickers nor sticks. Cheap enough to poll
-  /// at a window's frame rate; zero while nothing is open.
+  /// The meter of one direction: the peak sample of the last 100 ms, 0 to
+  /// 32767, held one to two windows. Cheap to poll per frame; zero while
+  /// nothing is open.
   ///
   /// Safety
   ///
@@ -11720,13 +9115,10 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 direction, ffi.Pointer<ffi.Uint32> outPeak),
       int Function(int stack, int direction, ffi.Pointer<ffi.Uint32> outPeak)>('sipral_audio_level');
 
-  /// Open the devices and start the pump now, whatever the calls are
-  /// doing. Under `SIPRAL_AUDIO_ACTIVATION_MANUAL` this is the only thing
-  /// that does; under automatic activation it opens them early.
-  ///
-  /// `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT`
-  /// when a direction could not be opened: the engine is active all the
-  /// same, silent in that direction, and `sipral_audio_info` says which.
+  /// Open the devices and start the pump now. The only way under
+  /// `SIPRAL_AUDIO_ACTIVATION_MANUAL`; early under automatic activation.
+  /// `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT` for
+  /// a direction that failed: the engine is still active, silent there.
   ///
   /// Safety
   ///
@@ -11745,12 +9137,10 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack),
       int Function(int stack)>('sipral_audio_deactivate');
 
-  /// Play a ring tone on the ringer — the device `SIPRAL_AUDIO_ROLE_RINGER`
-  /// is on, or the loudspeaker when it is on none of its own — until
-  /// `sipral_audio_stop_ringing`, or once through when `looped` is zero.
-  /// The tone is mono sixteen-bit samples at `sample_rate_hz`, copied, so
-  /// the caller's buffer is its own again when this returns. Under
-  /// automatic activation a ring opens the devices.
+  /// Ring on the ringer's device (or the loudspeaker) until
+  /// `sipral_audio_stop_ringing`, or once when `looped` is zero. Mono 16-bit
+  /// samples at `sample_rate_hz`, copied before return. Under automatic
+  /// activation a ring opens the devices.
   ///
   /// Safety
   ///
@@ -11780,25 +9170,15 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralAudioInfo> outInfo),
       int Function(int stack, ffi.Pointer<SipralAudioInfo> outInfo)>('sipral_audio_info');
 
-  /// Turn the platform's own echo cancellation on or off on a running
-  /// stack: `on` is a `SipralToggle`, and zero leaves it as it is
-  /// (ABI 1.1). What `sipral_stack_config_t::system_echo_cancellation`
-  /// chose at creation, without a new stack.
+  /// Turn the platform's echo cancellation on or off on a running stack:
+  /// `on` is a `SipralToggle`, and zero leaves it.
   ///
-  /// Takes effect at once. While the devices are open the microphone and
-  /// the loudspeaker are reopened with or without the platform's
-  /// processing — the voice-processing unit on macOS and iOS, the
-  /// communications stream on Windows, the voice-communication preset on
-  /// Android — on the devices they were on, with the gain and the mute of
-  /// each direction, and each says so with `SIPRAL_AUDIO_CHANGE_REOPENED`
-  /// from the engine. A call in progress keeps its media and hears a gap
-  /// of as long as the platform takes to open them; a direction the
-  /// platform refuses is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`, as after any
-  /// reopen. With the devices closed, the next open uses it.
-  /// `sipral_audio_info_t::system_echo_cancellation` says what the
-  /// platform did, and `sipral_stack_settings_t::system_echo_cancellation`
-  /// what is asked for. `SIPRAL_STATUS_WRONG_STATE` in application mode,
-  /// where the devices are the application's, whatever `on` says.
+  /// Open devices are reopened at once with or without the platform
+  /// processing, on the same devices with gain and mute, each reported as
+  /// `SIPRAL_AUDIO_CHANGE_REOPENED`. A call hears a short gap; a refused
+  /// direction is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`. Closed devices use it
+  /// on the next open. `sipral_audio_info_t` says what the platform did.
+  /// `SIPRAL_STATUS_WRONG_STATE` in application mode.
   ///
   /// Safety
   ///
@@ -11807,45 +9187,33 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 on),
       int Function(int stack, int on)>('sipral_audio_set_system_echo_cancellation');
 
-  /// Send this stack's log to `callback`, at `level` and louder — or turn
-  /// it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
+  /// Send this stack's log to `callback`, at `level` and louder, or turn it
+  /// off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.
   ///
-  /// A stack is created with its log off, and a log that is off costs
-  /// nothing: no line is formatted for it. Calling this again replaces the
-  /// callback and the level, on this stack alone; lines already waiting go
-  /// to the new callback. Turning the log off drops what was waiting.
-  ///
-  /// What each level carries, how lines are rate-limited and how they are
-  /// redacted is in this module's documentation and in
-  /// `docs/17-observability.md`. A level above `SIPRAL_LOG_LEVEL_TRACE` is
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing.
+  /// Off by default and free when off. A second call replaces callback and
+  /// level on this stack; queued lines go to the new callback. Turning off
+  /// drops the queue. Details: `docs/17-observability.md`. A level above
+  /// `SIPRAL_LOG_LEVEL_TRACE` is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   ///
   /// Safety
   ///
-  /// `callback`, when not null, is called from inside later calls into this
-  /// stack on whichever thread made them, once the stack has been let go
-  /// (see SipralLogCallback). `user_data` is handed back to it untouched
-  /// and must stay valid until the log is turned off or replaced and no
-  /// thread is inside this stack any more.
+  /// `callback`, when not null, is called inside later calls into this stack,
+  /// after the stack is released (see SipralLogCallback). `user_data`
+  /// must stay valid until the log is replaced or off and no thread is
+  /// inside this stack.
   late final int Function(int stack, int level, ffi.Pointer<ffi.NativeFunction<SipralLogCallback>> callback, ffi.Pointer<ffi.Void> userData) stackLog = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 level, ffi.Pointer<ffi.NativeFunction<SipralLogCallback>> callback, ffi.Pointer<ffi.Void> userData),
       int Function(int stack, int level, ffi.Pointer<ffi.NativeFunction<SipralLogCallback>> callback, ffi.Pointer<ffi.Void> userData)>('sipral_stack_log');
 
-  /// Copy a snapshot of everything this stack is holding into `buffer`, as
-  /// text for a crash report: its accounts and their registrations, its
-  /// calls and their states, its transports, its media sessions, the last
-  /// calls into it that were refused, its queues, its RTP port range and
-  /// its counters — redacted, and never longer than
-  /// `SIPRAL_STATE_TEXT_MAX` bytes with the NUL, so a buffer that size
-  /// always has room.
+  /// Copy a redacted snapshot of this stack into `buffer` for a crash
+  /// report: accounts and registrations, calls and states, transports, media
+  /// sessions, last refused calls, queues, RTP port range and counters. At
+  /// most `SIPRAL_STATE_TEXT_MAX` bytes with the NUL.
   ///
-  /// Safe from any thread, including one the stack is busy on, and never
-  /// waits. When no other thread is inside the stack the snapshot is taken
-  /// there and then; when one is, what comes back is the last snapshot a
-  /// poll kept — polls keep one at most once a second, and only when
-  /// something happened — and its first line says so and when it was
-  /// taken. A call's media session that a thread is in the middle of a
-  /// frame on is reported as busy rather than waited for.
+  /// Safe from any thread and never waits. If another thread holds the
+  /// stack, the last snapshot kept by a poll (at most once a second) is
+  /// returned, and its first line says so. A media session busy on a frame
+  /// is reported as busy.
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_needed`,
   /// when it does not fit; `out_needed` may be null.
@@ -11861,11 +9229,8 @@ final class Sipral {
   /// Reserve a free even port from this stack's RTP range, with the odd
   /// port above it kept for RTCP, and write it to `out_port`.
   ///
-  /// `SIPRAL_STATUS_EXHAUSTED` when every pair in the range is taken —
-  /// reserved, or described by a call this stack still holds — and the
-  /// last error says how many pairs the range has. Nothing is reserved
-  /// then. `SIPRAL_STATUS_WRONG_STATE` on a stack created without a range:
-  /// its ports are the application's to choose.
+  /// `SIPRAL_STATUS_EXHAUSTED` when every pair is taken (the last error
+  /// gives the range size). `SIPRAL_STATUS_WRONG_STATE` without a range.
   ///
   /// Safety
   ///
@@ -11874,13 +9239,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Uint32> outPort),
       int Function(int stack, ffi.Pointer<ffi.Uint32> outPort)>('sipral_stack_rtp_port_reserve');
 
-  /// Give back a port sipral_stack_rtp_port_reserve handed out that no
-  /// call is using: the socket could not be bound there, or the call was
-  /// refused. A port a call took comes back by itself when the call ends,
-  /// and needs no release.
-  ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a port that is not reserved,
-  /// which is also what a second release of the same port is.
+  /// Give back a reserved port no call used. A port a call took comes back
+  /// by itself. `SIPRAL_STATUS_INVALID_ARGUMENT` for one not reserved,
+  /// including a second release.
   ///
   /// Safety
   ///
@@ -11889,21 +9250,17 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 port),
       int Function(int stack, int port)>('sipral_stack_rtp_port_release');
 
-  /// Verify the callers of the calls this stack's accounts receive, against
-  /// `config`'s trust anchors, from now on (RFC 8224 §6.2).
+  /// Verify incoming callers against `config`'s trust anchors from now on
+  /// (RFC 8224 §6.2).
   ///
-  /// Replaces whatever an earlier call set. Every account that reports —
-  /// the default — verifies once there is at least one anchor, and none
-  /// does with none; an account set to `SIPRAL_STIR_VERIFICATION_STRICT`
-  /// verifies either way. `config.unix_seconds` is the wall clock at
-  /// `now_ms`, and the stack signs and verifies by it from here on; zero
-  /// keeps what an earlier call gave, and is `SIPRAL_STATUS_WRONG_STATE`
-  /// on the first. A stack whose accounts only sign calls makes this call
-  /// too, with no anchors.
+  /// Replaces any earlier setting. Reporting accounts verify only with at
+  /// least one anchor; `SIPRAL_STIR_VERIFICATION_STRICT` accounts always do.
+  /// `config.unix_seconds` sets the wall clock at `now_ms`; zero keeps the
+  /// previous one and is `SIPRAL_STATUS_WRONG_STATE` the first time. A stack
+  /// whose accounts only sign also calls this, with no anchors.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not
-  /// certificates, or whose key is not P-256; `SIPRAL_STATUS_NOT_SUPPORTED`
-  /// in a build without `SIPRAL_FEATURE_STIR`.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anchors that are not P-256
+  /// certificates; `SIPRAL_STATUS_NOT_SUPPORTED` without `SIPRAL_FEATURE_STIR`.
   ///
   /// Safety
   ///
@@ -11913,17 +9270,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralStirConfig> config, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<SipralStirConfig> config, int nowMs)>('sipral_stack_stir');
 
-  /// The certificate chain a call's `Identity` named, as fetched from the
-  /// URL `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` gave with
-  /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED` — PEM or DER, the
-  /// signing certificate first — or null and zero for one that could not
-  /// be fetched.
+  /// The certificate chain for a call's `Identity`, fetched from the URL of
+  /// `SIPRAL_VERIFICATION_STAGE_CERTIFICATE_WANTED`: PEM or DER, signing
+  /// certificate first. Null and zero if it could not be fetched.
   ///
-  /// The call's verdict is reached here and reported, and the call
-  /// delivered or refused, before this returns; the events come out of the
-  /// next `sipral_stack_poll`. `SIPRAL_STATUS_STALE_HANDLE` for a call no
-  /// longer waiting: it was already answered, its wait ran out, or the
-  /// caller gave up.
+  /// The verdict is reached and the call delivered or refused before this
+  /// returns; the events come from the next `sipral_stack_poll`.
+  /// `SIPRAL_STATUS_STALE_HANDLE` for a call no longer waiting.
   ///
   /// Safety
   ///
@@ -11933,8 +9286,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Uint8> chain, ffi.Size chainLen, ffi.Uint64 nowMs),
       int Function(int stack, int call, ffi.Pointer<ffi.Uint8> chain, int chainLen, int nowMs)>('sipral_call_stir_certificate');
 
-  /// How many streams one call's encryption report has: one per stream
-  /// the call carries, which for this library is its one audio stream.
+  /// How many streams one call's encryption report has (one audio stream).
   ///
   /// Safety
   ///
@@ -11943,9 +9295,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.Size> outCount),
       int Function(int media, ffi.Pointer<ffi.Size> outCount)>('sipral_media_encryption_count');
 
-  /// How one stream of a call is protected, now: whether it is encrypted,
-  /// how its keys were exchanged, which suite it runs, and whether the
-  /// exchange authenticated the far end. An index past the end is
+  /// How one stream of a call is protected now. An index past the end is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
   ///
   /// Safety
@@ -11956,12 +9306,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Size index, ffi.Pointer<SipralStreamEncryption> outStream),
       int Function(int media, int index, ffi.Pointer<SipralStreamEncryption> outStream)>('sipral_media_encryption_at');
 
-  /// Listen for keypad digits in this call's far-end audio as `mode` says:
-  /// a SipralDtmfDetection. Before the call has media as well as
-  /// after, for the rest of the call.
-  ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
-  /// not run.
+  /// Listen for keypad digits in the far-end audio as `mode` (a
+  /// SipralDtmfDetection) says. `SIPRAL_STATUS_WRONG_STATE` if this
+  /// stack does not run the call's media.
   ///
   /// Safety
   ///
@@ -11970,16 +9317,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 mode),
       int Function(int stack, int call, int mode)>('sipral_call_dtmf_detection');
 
-  /// Listen for call progress on this call and decide who answers it, as
-  /// `config` says, or stop with `config.listen` off. Meant for a call this
-  /// stack placed, straight after `sipral_call_place`: the tones are
-  /// listened for from the first frame of early media, and who answered is
-  /// decided from the 2xx on. Each thing heard is a
-  /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
+  /// Listen for call progress and decide who answered, as `config` says;
+  /// `config.listen` off stops. Call right after `sipral_call_place`. Each
+  /// finding is a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
-  /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT` for a value no detector
-  /// takes, which changes nothing.
+  /// `SIPRAL_STATUS_WRONG_STATE` if this stack does not run the call's media;
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a bad value, changing nothing.
   ///
   /// Safety
   ///
@@ -11989,13 +9332,11 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralProgressConfig> config),
       int Function(int stack, int call, ffi.Pointer<SipralProgressConfig> config)>('sipral_call_detect_progress');
 
-  /// Beep on this call while it is recorded, as `tone` says, or play no
-  /// tone with `tone.enabled` off. A recording already running starts
-  /// beeping at once; one started later beeps from its first frame.
+  /// Beep while the call is recorded, as `tone` says; `tone.enabled` off
+  /// silences it. Applies at once to a running recording.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
-  /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT`, naming the member, for a
-  /// tone that is not a beep, which changes nothing.
+  /// `SIPRAL_STATUS_WRONG_STATE` if this stack does not run the call's media;
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming the bad member, changing nothing.
   ///
   /// Safety
   ///
@@ -12005,16 +9346,12 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<SipralConsentTone> tone),
       int Function(int stack, int call, ffi.Pointer<SipralConsentTone> tone)>('sipral_call_consent_tone');
 
-  /// Start recording this call to `path`, written as `options` say: WAV or
-  /// Ogg Opus, mixed or stereo with this end on the left, at a rate of the
-  /// file's own. Everything else is sipral_media_record_start's,
-  /// which is this with every option zero.
+  /// Start recording this call to `path` as `options` say. With every option
+  /// zero this is sipral_media_record_start.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for options no file can be written
-  /// with and for a path the file system refuses, and
-  /// `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build with no Opus.
-  /// `SIPRAL_STATUS_RECORDING_FAILED` when the file was made and would not
-  /// take its header.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for invalid options or a refused path;
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build without Opus;
+  /// `SIPRAL_STATUS_RECORDING_FAILED` when the header could not be written.
   ///
   /// Safety
   ///
@@ -12025,28 +9362,26 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.Char> path, ffi.Size pathLen, ffi.Pointer<SipralRecordingOptions> options),
       int Function(int media, ffi.Pointer<ffi.Char> path, int pathLen, ffi.Pointer<SipralRecordingOptions> options)>('sipral_media_record_start_with');
 
-  /// Make a local conference on this stack, empty but for this end when
-  /// `config` says it takes part, and write its handle to
-  /// `out_conference`.
+  /// Make a local conference on this stack, holding only this end if it
+  /// takes part, and write its handle to `out_conference`.
   ///
-  /// In device mode the audio engine starts carrying it at once, opening
-  /// the devices under automatic activation as a call's media does.
+  /// In device mode the engine carries it at once, opening the devices
+  /// under automatic activation.
   ///
-  /// `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate that is not 8, 16, 32
-  /// or 48 kHz and for more than 1024 members.
+  /// `SIPRAL_STATUS_CONFERENCE_REFUSED` for a rate other than 8, 16, 32 or
+  /// 48 kHz, or more than 1024 members.
   ///
   /// Safety
   ///
   /// `config` must point at a `sipral_local_conference_config_t` whose
-  /// `size` member says how long it is, and `out_conference` at one
-  /// `sipral_handle_t`.
+  /// `size` says how long it is, and `out_conference` at one `sipral_handle_t`.
   late final int Function(int stack, ffi.Pointer<SipralLocalConferenceConfig> config, ffi.Pointer<SipralHandle> outConference) localConferenceCreate = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralLocalConferenceConfig> config, ffi.Pointer<SipralHandle> outConference),
       int Function(int stack, ffi.Pointer<SipralLocalConferenceConfig> config, ffi.Pointer<SipralHandle> outConference)>('sipral_local_conference_create');
 
-  /// End a conference. Every call still in it goes back to carrying its
-  /// own audio — in device mode, the audio engine takes each up again —
-  /// a recording running is finished, and the handle is stale.
+  /// End a conference. Its calls carry their own audio again (in device
+  /// mode the engine takes them back), a running recording is finished, and
+  /// the handle is stale.
   ///
   /// Safety
   ///
@@ -12055,14 +9390,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle conference),
       int Function(int conference)>('sipral_local_conference_destroy');
 
-  /// Add a call. It takes part from the next tick, at its own codec's rate,
-  /// and its far end hears everybody in the conference but itself.
+  /// Add a call, from the next tick, at its codec's rate; its far end hears
+  /// everybody but itself.
   ///
-  /// The call needs media running, as for `sipral_call_media`.
-  /// `SIPRAL_STATUS_CONFERENCE_REFUSED` when the conference is full, for a
-  /// call already in this one or another or joined with
-  /// `sipral_call_join`, and for a codec the conference cannot mix — a
-  /// rate other than 8, 16, 32 or 48 kHz, or frames past 60 ms.
+  /// The call needs running media. `SIPRAL_STATUS_CONFERENCE_REFUSED` when
+  /// full, for a call already in a conference or joined with
+  /// `sipral_call_join`, or for an unmixable codec (rate not 8, 16, 32 or
+  /// 48 kHz, or frames over 60 ms).
   ///
   /// Safety
   ///
@@ -12071,9 +9405,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle conference, SipralHandle call),
       int Function(int conference, int call)>('sipral_local_conference_add');
 
-  /// Take a call out. From the next tick nobody in the conference hears it
-  /// and it hears nobody; its media is the application's again — in device
-  /// mode, the audio engine carries it as it carries any call.
+  /// Take a call out, from the next tick. Its media is the application's
+  /// again (in device mode, the engine's).
   ///
   /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not in it.
   ///
@@ -12084,11 +9417,10 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle conference, SipralHandle call),
       int Function(int conference, int call)>('sipral_local_conference_remove');
 
-  /// Mute or unmute one way of a member, from the next tick: its input,
-  /// which everybody else stops hearing, or its output, which it stops
-  /// hearing. `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or
-  /// `SIPRAL_AUDIO_DIRECTION_OUTPUT`; `member` is a call in the conference,
-  /// or the conference's own handle for this end.
+  /// Mute or unmute one direction of a member from the next tick: input
+  /// (others stop hearing it) or output (it stops hearing).
+  /// `direction` is `SIPRAL_AUDIO_DIRECTION_INPUT` or `_OUTPUT`; `member` is a
+  /// call in the conference, or the conference handle for this end.
   ///
   /// `SIPRAL_STATUS_WRONG_STATE` for a member that is not in it.
   ///
@@ -12099,10 +9431,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle conference, SipralHandle member, ffi.Uint32 direction, ffi.Uint32 muted),
       int Function(int conference, int member, int direction, int muted)>('sipral_local_conference_set_muted');
 
-  /// Set the level of one way of a member, from the next tick, in the
-  /// steps `sipral_audio_set_gain` takes: 256 is unity and 1024, four
-  /// times, the most. Its input's level is what everybody else hears of
-  /// it; its output's is what it hears.
+  /// Set one direction's level for a member, from the next tick, in
+  /// `sipral_audio_set_gain` steps: 256 unity, 1024 at most. Input is what
+  /// others hear of it; output is what it hears.
   ///
   /// Safety
   ///
@@ -12116,30 +9447,29 @@ final class Sipral {
   /// Safety
   ///
   /// `out_info` must point at a `sipral_local_conference_info_t` whose
-  /// `size` member says how long it is.
+  /// `size` says how long it is.
   late final int Function(int conference, ffi.Pointer<SipralLocalConferenceInfo> outInfo) localConferenceInfo = library.lookupFunction<
       ffi.Int32 Function(SipralHandle conference, ffi.Pointer<SipralLocalConferenceInfo> outInfo),
       int Function(int conference, ffi.Pointer<SipralLocalConferenceInfo> outInfo)>('sipral_local_conference_info');
 
-  /// One member, by index: this end first when it takes part, then the
-  /// calls in the order they joined. The index is stable until the next
-  /// member joins or leaves.
+  /// One member by index: this end first if it takes part, then calls in
+  /// join order. Stable until the next join or leave.
   ///
   /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last member.
   ///
   /// Safety
   ///
   /// `out_member` must point at a `sipral_local_conference_member_t` whose
-  /// `size` member says how long it is.
+  /// `size` says how long it is.
   late final int Function(int conference, int index, ffi.Pointer<SipralLocalConferenceMember> outMember) localConferenceMemberAt = library.lookupFunction<
       ffi.Int32 Function(SipralHandle conference, ffi.Size index, ffi.Pointer<SipralLocalConferenceMember> outMember),
       int Function(int conference, int index, ffi.Pointer<SipralLocalConferenceMember> outMember)>('sipral_local_conference_member_at');
 
-  /// Who was talking in the last tick, by rank: index zero is the
-  /// loudest. A muted member is never listed.
+  /// Who talked in the last tick, loudest at index zero. Muted members are
+  /// never listed.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the last talker,
-  /// which `sipral_local_conference_info_t::talkers` counts.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` past the last talker (count in
+  /// `sipral_local_conference_info_t::talkers`).
   ///
   /// Safety
   ///
@@ -12148,34 +9478,31 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle conference, ffi.Size index, ffi.Pointer<SipralHandle> outMember),
       int Function(int conference, int index, ffi.Pointer<SipralHandle> outMember)>('sipral_local_conference_talker_at');
 
-  /// Twenty milliseconds of conference, in application mode: `mic` is this
-  /// end's frame, `sipral_local_conference_info_t::frame_samples` long,
-  /// and `speaker` is filled with what this end hears, the same length,
-  /// written to `out_written`. A conference without this end reads no
-  /// microphone — `mic` may be null — and fills `speaker` with silence.
+  /// 20 ms of conference in application mode. `mic` is this end's frame,
+  /// `sipral_local_conference_info_t::frame_samples` long; `speaker` gets
+  /// what this end hears, same length, written to `out_written`. Without
+  /// this end, `mic` may be null and `speaker` gets silence.
   ///
-  /// Call it once every twenty milliseconds, from the thread that carries
-  /// the audio, and then drain `sipral_local_conference_poll_transmit`.
+  /// Call every 20 ms from the audio thread, then drain
+  /// `sipral_local_conference_poll_transmit`.
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` in device mode, where the audio engine
-  /// ticks it; `SIPRAL_STATUS_INVALID_ARGUMENT` for a frame of any other
-  /// length, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a speaker buffer
-  /// shorter than a frame, with the length needed in `out_written`.
+  /// `SIPRAL_STATUS_WRONG_STATE` in device mode;
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a wrong frame length;
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` for a short speaker buffer, with the
+  /// length needed in `out_written`.
   ///
   /// Safety
   ///
-  /// `mic` must be readable for `mic_count` `int16_t`, `speaker` writable
-  /// for `capacity` `int16_t`, and `out_written` must point at one
-  /// `size_t` or be null.
+  /// `mic` readable for `mic_count` `int16_t`, `speaker` writable for
+  /// `capacity` `int16_t`, `out_written` one `size_t` or null.
   late final int Function(int conference, int nowMs, ffi.Pointer<ffi.Int16> mic, int micCount, ffi.Pointer<ffi.Int16> speaker, int capacity, ffi.Pointer<ffi.Size> outWritten) localConferenceTick = library.lookupFunction<
       ffi.Int32 Function(SipralHandle conference, ffi.Uint64 nowMs, ffi.Pointer<ffi.Int16> mic, ffi.Size micCount, ffi.Pointer<ffi.Int16> speaker, ffi.Size capacity, ffi.Pointer<ffi.Size> outWritten),
       int Function(int conference, int nowMs, ffi.Pointer<ffi.Int16> mic, int micCount, ffi.Pointer<ffi.Int16> speaker, int capacity, ffi.Pointer<ffi.Size> outWritten)>('sipral_local_conference_tick');
 
   /// The oldest packet a member's call owes its far end, in application
-  /// mode: `out_call` names the call, whose media socket sends it, and
-  /// `packet` is filled as `sipral_media_capture` fills one. A `len`
-  /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
-  /// waiting. Drain it after every tick.
+  /// mode. `out_call` names the call whose socket sends it; `packet` is
+  /// filled as by `sipral_media_capture`. `len` zero with
+  /// `SIPRAL_HANDLE_NONE` means nothing waits. Drain after every tick.
   ///
   /// Safety
   ///
@@ -12185,21 +9512,17 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet),
       int Function(int conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet)>('sipral_local_conference_poll_transmit');
 
-  /// Record the whole conference to `path`: everybody it hears, each at
-  /// its own level, in one channel, written as `options` say — WAV or Ogg
-  /// Opus, at the conference's rate unless another is named.
+  /// Record the whole conference mix to `path`, one channel, as `options`
+  /// say (WAV or Ogg Opus, at the conference rate unless another is named).
   ///
-  /// `SIPRAL_STATUS_WRONG_STATE` when it is already being recorded,
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a stereo layout, for options no
-  /// file can be written with and for a path the file system refuses, and
-  /// `SIPRAL_STATUS_RECORDING_FAILED` when the file would not take its
-  /// header.
+  /// `SIPRAL_STATUS_WRONG_STATE` if already recording;
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for stereo, unusable options or a
+  /// refused path; `SIPRAL_STATUS_RECORDING_FAILED` if the header write fails.
   ///
   /// Safety
   ///
-  /// `path` must be readable for `path_len` bytes, and `options` must point
-  /// at a `sipral_recording_options_t` whose `size` member says how long
-  /// it is.
+  /// `path` readable for `path_len` bytes; `options` a
+  /// `sipral_recording_options_t` whose `size` says how long it is.
   late final int Function(int conference, ffi.Pointer<ffi.Char> path, int pathLen, ffi.Pointer<SipralRecordingOptions> options) localConferenceRecordStart = library.lookupFunction<
       ffi.Int32 Function(SipralHandle conference, ffi.Pointer<ffi.Char> path, ffi.Size pathLen, ffi.Pointer<SipralRecordingOptions> options),
       int Function(int conference, ffi.Pointer<ffi.Char> path, int pathLen, ffi.Pointer<SipralRecordingOptions> options)>('sipral_local_conference_record_start');
@@ -12219,25 +9542,16 @@ final class Sipral {
   /// SIPRAL_EVENT_KIND_LOOKUP_WANTED
   /// back to the account that asked.
   ///
-  /// `name` and `record` are the event's, as it named them; `answer` is a
-  /// SipralDnsAnswer. With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is
-  /// what the resolver returned, every record of the kind asked for,
-  /// separated by commas, each its fields separated by spaces: the
-  /// time-to-live in seconds, then the data as a zone file writes it —
-  /// an address for A and AAAA (`300 192.0.2.40`); priority, weight,
-  /// port and target for SRV (`300 10 60 5060 sip1.example.com`); order,
-  /// preference, flags, service and replacement for NAPTR, the regular
-  /// expression left out since RFC 3263 follows none (`300 10 50 S
-  /// SIP+D2U _sip._udp.example.com`). Null or empty for none, which
-  /// reads as `SIPRAL_DNS_ANSWER_NOTHING`. Text, rather than an array of
-  /// structs, because it is what a platform resolver prints and what
-  /// every binding hands over as it is.
+  /// `name` and `record` are the event's; `answer` is a SipralDnsAnswer.
+  /// With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is comma-separated records,
+  /// each space-separated: TTL in seconds, then zone-file data. A/AAAA:
+  /// `300 192.0.2.40`; SRV: `300 10 60 5060 sip1.example.com`; NAPTR
+  /// without the regexp: `300 10 50 S SIP+D2U _sip._udp.example.com`.
+  /// Null or empty reads as `SIPRAL_DNS_ANSWER_NOTHING`.
   ///
-  /// Answer every lookup, a resolver that failed included: the procedure
-  /// waits for each. An answer to a lookup nothing is waiting for any
-  /// more — the account was located since, or it has been asked for
-  /// again — is `SIPRAL_STATUS_OK` and changes nothing, as is one for an
-  /// account that locates nothing.
+  /// Answer every lookup, failures included: the procedure waits for each.
+  /// An answer nothing waits for any more is `SIPRAL_STATUS_OK` and changes
+  /// nothing.
   ///
   /// Safety
   ///
@@ -12247,20 +9561,13 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Char> name, ffi.Size nameLen, ffi.Uint32 record, ffi.Uint32 answer, ffi.Pointer<ffi.Char> records, ffi.Size recordsLen, ffi.Uint64 nowMs),
       int Function(int stack, int account, ffi.Pointer<ffi.Char> name, int nameLen, int record, int answer, ffi.Pointer<ffi.Char> records, int recordsLen, int nowMs)>('sipral_account_looked_up');
 
-  /// Check the certificate a TLS server presented against the one the
-  /// account pins, from inside the application's certificate verifier.
+  /// Check the server's leaf certificate (DER) against the account's pin:
+  /// SHA-256 over the bytes, constant-time. `unix_seconds` is used only for
+  /// the reported dates.
   ///
-  /// `certificate` is the DER encoding of the leaf, the first certificate
-  /// the server sent, and `unix_seconds` the wall clock, which only the
-  /// dates reported in `out_pinned` are read against. The fingerprint
-  /// is SHA-256 over those exact bytes, compared in constant time.
-  ///
-  /// `SIPRAL_STATUS_OK` with `pinned` set: the certificate is the pinned
-  /// one, and the handshake is to be accepted whatever its chain, its name
-  /// or its dates. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: the account pins a
-  /// certificate and this is another; refuse the handshake, and nothing is
-  /// written. `SIPRAL_STATUS_OK` with `pinned` zero: the account pins
-  /// nothing, and the platform's own checks decide.
+  /// `SIPRAL_STATUS_OK` with `pinned` 1: accept. With `pinned` 0: no pin,
+  /// platform checks decide. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse;
+  /// nothing written.
   ///
   /// Safety
   ///
@@ -12271,25 +9578,16 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Uint8> certificate, ffi.Size certificateLen, ffi.Uint64 unixSeconds, ffi.Pointer<SipralPinnedCertificate> outPinned),
       int Function(int stack, int account, ffi.Pointer<ffi.Uint8> certificate, int certificateLen, int unixSeconds, ffi.Pointer<SipralPinnedCertificate> outPinned)>('sipral_account_check_certificate');
 
-  /// The address to advertise — in a `Contact`, a `bind_address`, a
-  /// `media_address` — for a socket bound at `bound` whose traffic goes to
-  /// `peer`, as `host:port`, written into `buffer` with a NUL after it.
+  /// The `host:port` to advertise for a socket bound at `bound` whose
+  /// traffic goes to `peer` (both `host:port` addresses, not names),
+  /// NUL-terminated into `buffer`.
   ///
-  /// A socket bound to a specific address advertises it, unless it is a
-  /// loopback address and `peer` is not: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`,
-  /// with nothing written. A socket bound to the wildcard address
-  /// (`0.0.0.0:5060`, `[::]:5060`) advertises the address of the
-  /// operating system's route toward `peer`, with its own port; the route
-  /// is found by connecting a datagram socket and closing it, and nothing
-  /// is sent. No route to `peer` at all is `SIPRAL_STATUS_TRANSPORT_DOWN`.
-  /// `peer` is the registrar for the signalling socket, and the far end —
-  /// or the registrar, while the far end is not known yet — for a media
-  /// socket. Both are `host:port` addresses, not names.
-  ///
-  /// Callable from any thread at any time: it names no stack. Text out as
-  /// every such call writes it: `out_needed` receives the length with the
-  /// NUL counted, `buffer` may be null with a `capacity` of zero to ask for
-  /// it, and `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
+  /// A specific address is used as is; loopback toward a non-loopback
+  /// `peer` is `SIPRAL_STATUS_UNREACHABLE_ADDRESS`. A wildcard bind uses
+  /// the OS route toward `peer` (found without sending);
+  /// `SIPRAL_STATUS_TRANSPORT_DOWN` when there is none. Any thread.
+  /// `out_needed` gets the length with the NUL; `buffer` may be null with
+  /// `capacity` zero; `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes nothing.
   ///
   /// Safety
   ///
@@ -12300,16 +9598,13 @@ final class Sipral {
       ffi.Int32 Function(ffi.Pointer<ffi.Char> bound, ffi.Size boundLen, ffi.Pointer<ffi.Char> peer, ffi.Size peerLen, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(ffi.Pointer<ffi.Char> bound, int boundLen, ffi.Pointer<ffi.Char> peer, int peerLen, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_advertised_address');
 
-  /// Turn the diagnostic trace on or off while the stack runs: `on` is a
-  /// `SipralToggle`, and zero leaves it as it is (ABI 0.34).
+  /// Turn the diagnostic trace on or off: `on` is a `SipralToggle`, zero
+  /// leaves it (ABI 0.34).
   ///
-  /// On, the trace level of `sipral_stack_log` writes every SIP message
-  /// whole, with the peer it went to or came from, and prose lines
-  /// without pseudonyms: for a diagnosis, where pseudonyms would hide the
-  /// difference between two runs. What is never written, on or off, is a
-  /// credential or a key — `sipral_stack_config_t::diagnostic_trace` has
-  /// the list. Off, the trace is pseudonymised as it always was. Nothing
-  /// is written at all unless the log is at `SIPRAL_LOG_LEVEL_TRACE`.
+  /// On, the trace level writes whole SIP messages with the peer and no
+  /// pseudonyms, to compare runs. Credentials and keys are never written
+  /// (list in `sipral_stack_config_t::diagnostic_trace`). Off, the trace is
+  /// pseudonymised. Only applies at `SIPRAL_LOG_LEVEL_TRACE`.
   ///
   /// Safety
   ///
@@ -12318,14 +9613,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 on),
       int Function(int stack, int on)>('sipral_stack_diagnostic_trace');
 
-  /// The SRTP suites this stack's calls offer and accept unless their
-  /// account names its own, in the order they are offered, as
-  /// `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
-  /// creation, or this build's own (ABI 0.35). `out_count` always receives
-  /// how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
-  /// caller that passes a capacity of zero and a null buffer learns how
-  /// much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
-  /// `sipral_stack_codec_order` does.
+  /// The SRTP suites calls use by default, in order, as `sipral_srtp_suite_t`
+  /// numbers. `out_count` always receives the total; too small a capacity is
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
   ///
   /// Safety
   ///
@@ -12335,22 +9625,16 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Uint32> outSuites, ffi.Size capacity, ffi.Pointer<ffi.Size> outCount),
       int Function(int stack, ffi.Pointer<ffi.Uint32> outSuites, int capacity, ffi.Pointer<ffi.Size> outCount)>('sipral_stack_srtp_suite_order');
 
-  /// Set one call's own gain in one direction, on top of the stack's
-  /// (`sipral_audio_set_gain`), in the same steps: the input direction is
-  /// what the microphone sends that call alone, the output how loud that
-  /// call is in the loudspeaker beside the others (ABI 0.35). Applied in
-  /// the engine's mix from the next frame; kept while the call is held or
-  /// moved into a conference and back, and gone when it ends. While the
-  /// call is a member of a local conference they go with it and act on
-  /// its path there, on top of the conference's own member controls
-  /// (`sipral_local_conference_set_muted` and `_set_gain`): the input
-  /// direction on what the conference sends the call, which is what its
-  /// far end hears, and the output direction on what the call says into
-  /// the conference, which is what this end and every other member hear
-  /// of it.
-  /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
-  /// carrying — before its media starts, after it ends, or in application
-  /// mode, where the frames are the application's own.
+  /// Set one call's own gain in one direction, on top of the stack's, in
+  /// `sipral_audio_set_gain` steps. Input is what the microphone sends that
+  /// call; output is how loud it plays. Kept through hold and conference,
+  /// gone when the call ends.
+  ///
+  /// In a local conference it acts on the call's path, on top of the
+  /// conference's member controls: input on what its far end hears, output
+  /// on what it says into the conference.
+  /// `SIPRAL_STATUS_WRONG_STATE` when the engine is not carrying the call's
+  /// media: before it starts, after it ends, or in application mode.
   ///
   /// Safety
   ///
@@ -12359,8 +9643,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 direction, ffi.Uint32 gain),
       int Function(int stack, int call, int direction, int gain)>('sipral_audio_call_set_gain');
 
-  /// One call's own gain in one direction, in the steps
-  /// `sipral_audio_call_set_gain` takes (ABI 0.35).
+  /// One call's own gain in one direction, in `sipral_audio_set_gain` steps.
   ///
   /// Safety
   ///
@@ -12369,14 +9652,9 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 direction, ffi.Pointer<ffi.Uint32> outGain),
       int Function(int stack, int call, int direction, ffi.Pointer<ffi.Uint32> outGain)>('sipral_audio_call_gain');
 
-  /// Mute one call in one direction, or unmute it (ABI 0.35): the far end
-  /// of that call alone hears silence, or that call alone is silent in the
-  /// loudspeaker, while every other call goes on — the other half of a
-  /// consultation. In a local conference the mute goes with the call: its
-  /// far end hears nobody there, or nobody there hears it (see
-  /// `sipral_audio_call_set_gain`). A muted
-  /// direction still runs and sends silence. Kept and dropped as
-  /// `sipral_audio_call_set_gain` is, and refused the same way.
+  /// Mute or unmute one call in one direction while other calls go on (a
+  /// consultation). A muted direction sends silence. Kept, dropped and
+  /// refused as `sipral_audio_call_set_gain` is, conference included.
   ///
   /// Safety
   ///
@@ -12385,8 +9663,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 direction, ffi.Uint32 muted),
       int Function(int stack, int call, int direction, int muted)>('sipral_audio_call_set_muted');
 
-  /// Whether one call is muted in one direction: one or zero into
-  /// `out_muted` (ABI 0.35).
+  /// Whether one call is muted in one direction: one or zero.
   ///
   /// Safety
   ///
@@ -12395,11 +9672,8 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 direction, ffi.Pointer<ffi.Uint32> outMuted),
       int Function(int stack, int call, int direction, ffi.Pointer<ffi.Uint32> outMuted)>('sipral_audio_call_muted');
 
-  /// One call's meter in one direction (ABI 0.35): the loudest sample of
-  /// the last tenth of a second of what the microphone sent that call, or
-  /// of what the call played, after its own gain and mute, 0 to 32767 —
-  /// `sipral_audio_level`'s reading for one call of several. Cheap enough
-  /// to poll at a window's frame rate.
+  /// One call's meter in one direction, after its own gain and mute: what
+  /// `sipral_audio_level` reads, for one call of several.
   ///
   /// Safety
   ///

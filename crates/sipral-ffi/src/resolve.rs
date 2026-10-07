@@ -1,42 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Where requests actually go, when it is not where they were going.
+//! Where requests actually go: name resolution answered by the application.
 //!
-//! Nothing below this boundary owns a resolver, for the same reason nothing
-//! below it owns a socket: a library that looked a name up would be a library
-//! that blocked, picked a DNS client for the application, and could not be
-//! replayed. So the two places where an address has to be chosen are both
-//! questions put to the application, and this module is where the answers come
-//! back in.
+//! Nothing below owns a resolver, as nothing owns a socket: a lookup would
+//! block, impose a DNS client and break replay.
 //!
 //! [`sipral_stack_resolved`] answers a
-//! [`SIPRAL_EVENT_KIND_RESOLVE_NEEDED`](crate::event::SipralEventKind::ResolveNeeded),
-//! which says a dialog's route set and remote target name a next hop that is
-//! not where its requests are going (RFC 3261 §12.2.1.1, RFC 3263 §4). The
-//! answer is a list in priority order, not one address: RFC 3263 §4.3 has the
-//! first usable one taken and the rest kept, and this endpoint tries them in
-//! turn on its own when the flow it settled on fails.
+//! [`SIPRAL_EVENT_KIND_RESOLVE_NEEDED`](crate::event::SipralEventKind::ResolveNeeded)
+//! (RFC 3261 §12.2.1.1, RFC 3263 §4) with a priority list; RFC 3263 §4.3 takes
+//! the first usable one and keeps the rest for failover.
+//! [`sipral_account_retarget`] moves an account's next REGISTER while keeping
+//! its `Call-ID`, sequence and credentials.
 //!
-//! [`sipral_account_retarget`] is the account-level sibling and a different
-//! thing: it says where an account's next REGISTER goes, without losing the
-//! binding's `Call-ID`, its sequence or its credentials. A registrar named by
-//! an SRV record with two targets is why it exists — the second target is not
-//! a second account.
-//!
-//! # What neither of them does
-//!
-//! Neither opens a transport. A protocol is only ever *found*: an address on a
-//! protocol this stack has nothing bound for is not one that can be used
-//! today, and the way it gets another chance is
-//! [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
-//! followed by answering again.
-//!
-//! And nothing times out. A resolve request that goes unanswered leaves the
-//! dialog on the flow its first message travelled, which RFC 3261 §8.1.2
-//! allows as an alternate address and which is the only thing that survives a
-//! NAT. Ignoring the event is a legitimate choice and the common one, so there
-//! is no second event saying the first was ignored.
+//! Neither opens a transport, and nothing times out: an unanswered request
+//! leaves the dialog on its first flow, which RFC 3261 §8.1.2 allows.
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
@@ -49,12 +27,8 @@ use crate::stack::{SipralTransport, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::required_text;
 
-/// The addresses a caller wrote, in the order it wrote them.
-///
-/// Comma-separated `host:port`, which is the same shape
-/// `sipral_stack_config_t::codecs` uses for an ordered list of short strings
-/// and which an IPv6 literal does not collide with: RFC 3261 §19.1.1 already
-/// puts one in brackets, and there is no comma inside them.
+/// The addresses a caller wrote, in order: comma-separated `host:port`. An
+/// IPv6 literal is bracketed (RFC 3261 §19.1.1), so it holds no comma.
 fn addresses_in(list: &str) -> Result<Vec<SocketAddr>, Fail> {
     let mut out = Vec::new();
     for (index, written) in list.split(',').map(str::trim).enumerate() {
@@ -86,33 +60,18 @@ entry! {
     /// The answer to
     /// [`SIPRAL_EVENT_KIND_RESOLVE_NEEDED`](crate::event::SipralEventKind::ResolveNeeded),
     /// with `dialog` the handle that event carried. `addresses` is
-    /// comma-separated `host:port`, **in RFC 3263 §4.3 priority order**: the
-    /// first one this stack already has an open transport of the wanted
-    /// protocol for is taken, and the ones after it are kept for this stack
-    /// to try in turn if that one goes on to fail. A list is therefore not a
-    /// convenience — it is what makes failover possible at all, and one
-    /// address is a list of one that cannot fail over.
+    /// comma-separated `host:port` in RFC 3263 §4.3 priority order: the first
+    /// one with an open transport of the wanted protocol is taken, the rest
+    /// are kept for failover.
     ///
-    /// `protocol` is a [`SipralTransport`] when
-    /// the lookup named one, which a NAPTR or SRV answer does, and zero when
-    /// it did not — an A lookup with nothing above it — in which case the flow
-    /// keeps speaking whatever it already spoke. It is looked for, never
-    /// opened: nothing here owns a socket, so a protocol nothing has bound is
-    /// not something this can invent. An address on one is passed over, and
-    /// answering again after
-    /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
-    /// is how it gets another chance.
+    /// `protocol` is a [`SipralTransport`] when the lookup named one (NAPTR,
+    /// SRV), or zero to keep the flow's protocol. It is never opened: an
+    /// address on an unbound protocol is passed over; answer again after
+    /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind).
     ///
-    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer when none
-    /// of the addresses is one this stack can reach on the protocol asked
-    /// for: the flow stands exactly as it did. A dialog that has ended by the
-    /// time the answer comes is `SIPRAL_STATUS_STALE_HANDLE`, like every
-    /// other handle to something that is gone, and changes nothing either;
-    /// an application that resolves in the background treats the two alike.
-    ///
-    /// There is no `now_ms` here on purpose. Every other call that changes
-    /// what this stack will send takes the time because something it does is
-    /// timed; this one only writes an address down.
+    /// `SIPRAL_STATUS_OK` with nothing changed when no address is reachable.
+    /// `SIPRAL_STATUS_STALE_HANDLE` for a dialog that has ended. No `now_ms`:
+    /// nothing here is timed.
     ///
     /// # Safety
     ///
@@ -126,8 +85,6 @@ entry! {
     ) {
         let list = unsafe { required_text(addresses, addresses_len, "addresses") }?;
         let addresses = addresses_in(list)?;
-        // checked before the stack is reached, so a number this ABI names
-        // nothing for never becomes a protocol nothing speaks
         let wanted = match protocol {
             0 => None,
             named => Some(crate::stack::transport_of(named)?.protocol()),
@@ -143,24 +100,14 @@ entry! {
 entry! {
     /// Point an account's registration at another address.
     ///
-    /// For a registrar named by a record with more than one target, and for
-    /// the one after it when the first stops answering. The binding's
-    /// `Call-ID`, its sequence number and its credentials are all kept, so
-    /// the next REGISTER reads to the registrar as the same device
-    /// continuing, not as a second one arriving — which is the whole of the
-    /// saving and the reason this is not "remove the account and add it
-    /// again".
+    /// For a registrar with several targets. The binding's `Call-ID`,
+    /// sequence and credentials are kept, so the registrar sees the same
+    /// device continuing. A REGISTER in flight or booked is superseded at
+    /// once; retargeting to the current address is `SIPRAL_STATUS_OK` and
+    /// sends nothing.
     ///
-    /// A REGISTER already in flight or already booked for this account is
-    /// superseded at once rather than waited out. Retargeting to the address
-    /// an account is already using is `SIPRAL_STATUS_OK` and sends nothing.
-    ///
-    /// `registrar_address` is `host:port`, not a name: resolving one is the
-    /// application's, here as everywhere else in this module.
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar — a
-    /// trunk authenticated by address has nothing to retarget, and
-    /// `sipral_account_config_t::registrar_address` is where its outbound
-    /// proxy is set.
+    /// `registrar_address` is `host:port`, not a name.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar.
     ///
     /// # Safety
     ///
@@ -205,13 +152,11 @@ mod tests {
     use crate::transport::tests::drain_addressed;
     use std::ptr;
 
-    /// Somewhere else entirely, so that a message going there cannot be one
-    /// that merely kept its old flow.
+    /// Not the old flow's address.
     const ELSEWHERE: &str = "198.51.100.7:5080";
 
-    /// A call answered by a far end whose `Contact` names a host rather than
-    /// the address the answer came from, which is what makes the dialog's
-    /// next hop something only a resolver can turn into an address.
+    /// A call answered with a `Contact` that names a host, so the next hop
+    /// needs a resolver.
     fn called_a_name(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let handle = stack(observed);
         let account = account_on(handle);
@@ -248,8 +193,6 @@ mod tests {
         );
     }
 
-    /// The answer is the point: after it, the dialog's own requests go where
-    /// the application said, and not where the call was answered from.
     #[test]
     fn answering_moves_where_the_dialogs_requests_go() {
         let mut observed = Observed::default();
@@ -280,8 +223,6 @@ mod tests {
         );
     }
 
-    /// Ignoring the request is the documented common case, and it has to be
-    /// free: the dialog stays on the flow its first message travelled.
     #[test]
     fn ignoring_the_request_leaves_the_call_where_it_was() {
         let mut observed = Observed::default();
@@ -304,9 +245,7 @@ mod tests {
         );
     }
 
-    /// A list, because RFC 3263 4.3 keeps what it does not use: the first
-    /// address this stack can reach is taken and the rest are kept for it to
-    /// try on its own.
+    /// RFC 3263 4.3: the first reachable address is taken.
     #[test]
     fn a_list_is_taken_in_the_order_it_was_written() {
         let mut observed = Observed::default();
@@ -395,9 +334,7 @@ mod tests {
         );
     }
 
-    /// A protocol is found, never opened: this stack speaks UDP and nothing
-    /// else, so an answer naming TCP changes nothing and says so by leaving
-    /// the dialog where it was.
+    /// This stack has only UDP bound, so an answer naming TCP changes nothing.
     #[test]
     fn an_address_on_a_protocol_nothing_here_speaks_is_passed_over() {
         let mut observed = Observed::default();
@@ -450,8 +387,6 @@ mod tests {
         );
     }
 
-    // -- retargeting an account ------------------------------------------
-
     #[test]
     fn a_retargeted_account_registers_at_the_new_address() {
         let mut observed = Observed::default();
@@ -483,8 +418,6 @@ mod tests {
             .find(|(message, _)| start_line(message).starts_with("REGISTER"))
             .expect("the REGISTER the retarget sent");
         assert_eq!(now, ELSEWHERE, "the retarget did not move the REGISTER");
-        // the whole of the saving: the registrar reads it as the same device
-        // continuing, not a second one arriving
         assert_eq!(
             call_id_of(early),
             call_id_of(later),
@@ -512,8 +445,7 @@ mod tests {
         );
     }
 
-    /// A handle whose stack has been destroyed is stale rather than invalid:
-    /// this library minted it, and saying so beats saying it never did.
+    /// Stale, not invalid: this library minted the handle.
     #[test]
     fn retargeting_an_account_on_a_stack_that_is_gone_is_stale() {
         let mut observed = Observed::default();
@@ -530,8 +462,7 @@ mod tests {
         );
     }
 
-    /// What this test reads out of a REGISTER, written here rather than
-    /// borrowed because the call module's own reader is about a dialog.
+    /// The `Call-ID` line of a REGISTER.
     fn call_id_of(message: &[u8]) -> String {
         let text = String::from_utf8_lossy(message);
         text.lines()

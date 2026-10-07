@@ -3,24 +3,15 @@
 
 //! Calls: placed, answered, held, handed on, hung up.
 //!
-//! Every call here is named by a handle of this stack's, and every one of them
-//! takes the time from the caller, for the same reason poll does: nothing in
-//! this library reads a clock, so a retransmission schedule that started at an
-//! instant the caller did not name would be one the caller cannot reason
-//! about.
+//! Every entry point takes the time from the caller: this library reads no clock.
 //!
-//! A call is placed with a session description and answered with one. Offering
-//! nothing and letting the far end offer in its 2xx is legal (§13.2.1) and is
-//! deliberately not reachable from here: the answer would then have to travel
-//! in the ACK, written by an application that has no media layer on this side
-//! of the boundary to write it with.
+//! A call is placed and answered with a session description. Offering nothing
+//! is legal (§13.2.1) and is not reachable from here: the answer would then
+//! travel in the ACK, and the application has no media layer here to write it.
 //!
-//! DTMF goes out three ways and the caller picks one per send, because which
-//! of them a peer accepts is a fact about the peer: RFC 4733's telephone event
-//! in the media, which is the one to reach for, and an INFO carrying either
-//! `application/dtmf-relay` or `application/dtmf` for the switches that take
-//! only signalling. A stack built with no media path can still send the last
-//! two.
+//! DTMF goes out three ways, chosen per send because which one a peer accepts
+//! is a fact about the peer: RFC 4733 events in the media, or an INFO carrying
+//! `application/dtmf-relay` or `application/dtmf`.
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
@@ -31,8 +22,7 @@ use sipral::{CallMedia, CodecCatalog, IcePolicy, SrtpPolicy};
 use sipral_core::endpoint::{SendError, TransportId};
 use sipral_core::msg::{HeaderName, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
-// only the tests below name the bound by number; the entry point delegates to
-// `sipral_ua::dtmf::duration_ms` without repeating it
+// only the tests name the bound by number
 #[cfg(test)]
 use sipral_ua::dtmf::{DEFAULT_DTMF_MS, MAX_DTMF_MS};
 
@@ -50,8 +40,7 @@ use crate::versioned::{Versioned, read_versioned};
 record! {
     /// What a call is placed with.
     ///
-    /// Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before
-    /// filling anything in.
+    /// Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before filling it in.
     #[derive(Clone, Copy)]
     pub struct SipralCallConfig {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -60,148 +49,93 @@ record! {
         pub target: *const c_char,
         /// How many bytes of it.
         pub target_len: usize,
-        /// The session description to offer, for a call this stack manages no
-        /// audio for.
-        ///
-        /// Exactly one of this and `media_address` is set. Two descriptions of one
-        /// session is one too many, and neither is a call whose answer would have
-        /// to be written into the ACK.
+        /// The session description to offer, for a call whose audio the application runs.
+        /// Exactly one of this and `media_address` is set.
         pub sdp: *const u8,
         /// How many bytes of it.
         pub sdp_len: usize,
-        /// Where to send the INVITE, as `host:port`, or null to send it where the
-        /// account registers — which is the outbound proxy for a registered line,
-        /// and the reason a phone behind a NAT works at all.
+        /// Where to send the INVITE, as `host:port`, or null for where the account registers
+        /// (the outbound proxy of a registered line).
         pub destination: *const c_char,
         /// How many bytes of it.
         pub destination_len: usize,
-        /// Whether to keep every branch a proxy forks the INVITE into. Zero keeps
-        /// the first that answers and hangs up the rest, which is what a telephone
-        /// does.
+        /// Nonzero keeps every branch a proxy forks the INVITE into. Zero keeps the first that
+        /// answers and hangs up the rest.
         pub keep_all_forks: u32,
-        /// Where this end will receive media, as `host:port`, for a call this
-        /// stack describes and runs the audio of.
+        /// Where this end receives media, as `host:port`, for a call whose audio this stack runs.
         ///
-        /// The application owns the socket, so it is the only one that can say. Set
-        /// it and the offer is written from this stack's codec order, the answer is
-        /// read, and the call gets a media session that the `sipral_media_*`
-        /// entry points reach. Leave it null and set `sdp` instead for a call
-        /// where the application describes its own session and runs its own RTP.
+        /// Set, the offer is written from this stack's codec order and the call gets a media
+        /// session the `sipral_media_*` entry points reach. Null: set `sdp` instead.
         pub media_address: *const c_char,
         /// How many bytes of it.
         pub media_address_len: usize,
-        /// Header fields to put on the INVITE, in the order given, or null for
-        /// none.
+        /// Header fields to put on the INVITE, in order, or null for none.
         ///
-        /// Each is checked before anything is built: the name a token, the value
-        /// one line of text, and not a field the stack writes on a call itself.
-        /// Those are listed in `docs/04-ua.md` with the reason for each, and
-        /// `User-Agent` joins them when `sipral_stack_config_t::user_agent` is
-        /// set. A refusal is `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element,
-        /// and no call.
+        /// Each is checked first: the name a token, the value one line, and not a field the
+        /// stack writes itself (`docs/04-ua.md`; `User-Agent` too when
+        /// `sipral_stack_config_t::user_agent` is set). A refusal is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element, and no call.
         pub headers: *const SipralHeader,
         /// How many elements `headers` has.
         pub headers_len: usize,
-        /// What this call does about SRTP, overriding
-        /// `sipral_stack_config_t::srtp` for it: a `SipralSrtp`, or zero to
-        /// take the stack's own setting. Any other value is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        ///
-        /// Read only for a call this stack describes the media of —
-        /// `media_address` set — and otherwise not this ABI's to act on: a
-        /// call placed with `sdp` is a session the application wrote, and
-        /// SRTP in it is the application's own line to write or not.
+        /// What this call does about SRTP, overriding `sipral_stack_config_t::srtp`: a
+        /// `SipralSrtp`, or zero for the stack's setting. Any other value is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Read only with `media_address` set.
         pub srtp: Number<SipralSrtp>,
-        /// Which transport the INVITE goes out on, read only together with
-        /// `destination`: [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN)
-        /// for zero, or a further number
-        /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
-        /// has bound. Nonzero with `destination` null is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
-        /// override already goes out on its account's own transport, and
-        /// there is nothing to combine this with.
+        /// Which transport the INVITE goes out on, read only with `destination`:
+        /// [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN) for zero, or a
+        /// number [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
+        /// has bound. Nonzero with `destination` null is `SIPRAL_STATUS_INVALID_ARGUMENT`.
         pub transport: u32,
-        /// What this call offers and in what order, overriding
-        /// `sipral_stack_config_t::codecs` for it: codec names separated by
-        /// commas, as `sipral_codec_info_t::name` spells them, UTF-8 and not
-        /// NUL-terminated. Null for the stack's own order.
+        /// What this call offers and in what order, overriding `sipral_stack_config_t::codecs`:
+        /// codec names separated by commas, as `sipral_codec_info_t::name` spells them, UTF-8,
+        /// not NUL-terminated. Null for the stack's order.
         ///
-        /// Everything else the stack's catalogue carries — frame length,
-        /// named events, multiplexing, and SRTP where `srtp` here does not
-        /// override it — is kept, because a call that names its codecs has
-        /// said nothing about any of those. A name this build has no encoder
-        /// for, a name given twice, and a stray comma are each
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming what was wrong, and no
-        /// call.
-        ///
-        /// Read only for a call this stack describes the media of —
-        /// `media_address` set — for the reason `srtp` gives: a call placed
-        /// with `sdp` is a session the application wrote, and the order in it
-        /// is already the application's own. The names are still checked, so
-        /// that a caller who has one wrong learns it here either way.
+        /// The rest of the stack's catalogue (frame length, events, multiplexing, SRTP) is kept.
+        /// An unknown name, a repeated name or a stray comma is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// Applied only with `media_address` set, but the names are checked either way.
         pub codecs: *const c_char,
         /// How many bytes of it.
         pub codecs_len: usize,
-        /// What this call does about ICE, overriding
-        /// `sipral_stack_config_t::ice` for it: a `SipralIce`, or zero to
-        /// take the stack's own setting. Any other value is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        ///
-        /// Read only for a call this stack describes the media of —
-        /// `media_address` set — for the reason `srtp` gives: a call placed
-        /// with `sdp` is a session the application wrote, and the candidates
-        /// in it are already the application's own to write or not.
+        /// What this call does about ICE, overriding `sipral_stack_config_t::ice`: a `SipralIce`,
+        /// or zero for the stack's setting. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// Read only with `media_address` set.
         pub ice: Number<SipralIce>,
-        /// Where this call's real-time text arrives (RFC 4103): a second
-        /// socket the application bound, as an address and a port. Set, the
-        /// offer or answer carries an `m=text` stream for T.140 with its
-        /// redundancy, and once both ends agree it `sipral_media_send_text`,
-        /// `sipral_media_poll_text` and `sipral_media_receive_text` carry
-        /// it. Null for a call with no text. Not NUL-terminated.
+        /// Where this call's real-time text arrives (RFC 4103), as `host:port` of a second
+        /// socket the application bound, not NUL-terminated; null for no text. Set, the
+        /// description carries an `m=text` stream for T.140 with redundancy, carried by
+        /// `sipral_media_send_text`, `sipral_media_poll_text` and `sipral_media_receive_text`.
         ///
-        /// Read only with `media_address`, and not offered on a call keyed
-        /// by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
-        /// and no candidates of its own, and typed text sent in the clear
-        /// beside encrypted audio is worse than none.
+        /// Read only with `media_address`. Not offered with SRTP, DTLS-SRTP or ICE: the text
+        /// stream has no key or candidates of its own, and clear text beside encrypted audio is
+        /// worse.
         pub text_address: *const c_char,
         /// How many bytes of it.
         pub text_address_len: usize,
-        /// Whether this call asks for RTCP feedback: a `SipralToggle`. On
-        /// offers RTP/AVPF (RFC 4585) with Generic NACKs and reduced-size
-        /// RTCP (RFC 5506), and runs RFC 4585's timing when the answer takes
-        /// it; zero leaves it off, as it is by default, because a far end
-        /// that knows only RTP/AVP refuses a profile it does not know. Read
-        /// only with `media_address`. An offer on a feedback profile is
-        /// answered on that profile whatever this says, since RFC 4585 §4.1
-        /// leaves an answerer no other way to take the stream; the Generic
-        /// NACKs and reduced-size RTCP it asks for are agreed only when this
-        /// is on, on the answer too.
+        /// Whether this call asks for RTCP feedback: a `SipralToggle`. On offers RTP/AVPF
+        /// (RFC 4585) with Generic NACKs and reduced-size RTCP (RFC 5506). Off by default,
+        /// because a far end that knows only RTP/AVP refuses the profile. Read only with
+        /// `media_address`. An offer on a feedback profile is answered on it regardless
+        /// (RFC 4585 §4.1); the NACKs and reduced-size RTCP are agreed only when this is on.
         pub feedback: Number<SipralToggle>,
         /// Nonzero to say this end is the focus of a conference (RFC 4579
         /// §3.3): `isfocus` goes on the Contact of every message this call
         /// sends from here on.
         pub focus: u32,
-        /// Nonzero to follow a 3xx to the targets its `Contact` names (RFC
-        /// 3261 §8.1.3.4): each as a new INVITE of the same call, most
-        /// preferred first, the next tried when one refuses, and a target
-        /// already tried, a 380, a 6xx, a forked call and anything past eight
-        /// redirected INVITEs not followed. Zero, as it is by default, ends
-        /// the call with `SIPRAL_EVENT_KIND_CALL_ENDED` carrying the 3xx's
-        /// status and its `Contact` addresses readable, for an application
-        /// that redirects by itself. Added in ABI 1.2.
+        /// Nonzero to follow a 3xx to its `Contact` targets (RFC 3261 §8.1.3.4), most preferred
+        /// first, as new INVITEs of the same call. Not followed: a target already tried, a 380, a
+        /// 6xx, a forked call, past eight redirections. Zero (default) ends the call with
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED` carrying the 3xx status and readable `Contact` addresses.
+        /// Added in ABI 1.2.
         pub follow_redirects: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. Set it to zero; the library reads nothing from
-        /// it.
+        /// Zero. Pads the struct to a multiple of its alignment, so a member a later version
+        /// appends never lands in padding. The library reads nothing from it.
         pub reserved: u32,
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and all-zero is valid: every pointer is null beside a length of
-// zero.
+// Safety: plain data with no invariant between members; all-zero is valid (null pointers
+// beside zero lengths).
 unsafe impl Versioned for SipralCallConfig {
     const NAME: &'static str = "sipral_call_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCallConfig, focus);
@@ -214,34 +148,28 @@ unsafe impl Versioned for SipralCallConfig {
 /// Why the layer below would not do it.
 pub(crate) fn ua_failed(error: &UaError) -> Fail {
     let status = match *error {
-        // the handle was live here, so the layer below disagreeing means what
-        // it named has just gone
+        // the handle was live, so the layer below has just let it go
         UaError::NoSuchAccount | UaError::NoSuchCall | UaError::NoSuchPublication => {
             SipralStatus::StaleHandle
         }
         UaError::NotAFocus => SipralStatus::NotAFocus,
         UaError::UnreachableAddress { .. } => SipralStatus::UnreachableAddress,
-        // a document that cannot be written and metadata that does not fit a
-        // recording session are both values that would be taken corrected
+        // values that would be taken corrected
         UaError::Publish(sipral_ua::PublishError::Unwritable(_)) | UaError::Recording(_) => {
             SipralStatus::InvalidArgument
         }
-        // `NoWallClock` among them: an account that signs, on a stack that
-        // was never told the time, is a moment wrong rather than a value,
-        // and `sipral_stack_stir` or `media_clock_unix_seconds` is the way
-        // out
+        // a moment wrong, not a value: `sipral_stack_stir` or `media_clock_unix_seconds`
+        // supplies the time
         UaError::WrongState(_)
         | UaError::NoSession
         | UaError::ChangeInProgress
         | UaError::CannotRenegotiate
         | UaError::NoWallClock
-        // a located account whose first answer has not come: a moment
-        // wrong, and the next `SIPRAL_EVENT_KIND_LOCATED` ends it
+        // the next `SIPRAL_EVENT_KIND_LOCATED` ends it
         | UaError::NotLocated
         | UaError::Publish(sipral_ua::PublishError::NothingPublished) => SipralStatus::WrongState,
-        // an account configured without a registrar is the wrong account to
-        // register rather than the wrong moment: a corrected configuration
-        // would be taken, and no amount of waiting will change this one
+        // no registrar is the wrong account rather than the wrong moment: waiting will not
+        // change it
         UaError::Sdp(_)
         | UaError::NoRegistrar
         | UaError::Header(_)
@@ -250,14 +178,10 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::NotARedirection(_)
         | UaError::Signing
         | UaError::MessageTooLarge { .. } => SipralStatus::InvalidArgument,
-        // an out-of-dialog MESSAGE to this target is already in flight; the
-        // object this call is about is busy with a request of its own, the
-        // same reading `SipralStatus::Busy` already has elsewhere
+        // an out-of-dialog MESSAGE to this target is already in flight
         UaError::MessagePending => SipralStatus::Busy,
         UaError::Send(SendError::LimitReached { .. }) => SipralStatus::LimitReached,
-        // every number an account or a call can name was checked against
-        // the table when it was given, so a transport the layer below does
-        // not know is one that was retired since and not bound again
+        // every number was checked when given, so an unknown transport was retired since
         UaError::Send(SendError::UnknownTransport) => SipralStatus::TransportDown,
         _ => SipralStatus::NotSent,
     };
@@ -293,13 +217,11 @@ unsafe fn description(sdp: *const u8, len: usize) -> Result<Option<Arc<[u8]>>, F
     Ok(unsafe { bytes(sdp, len, "sdp") }?.map(Arc::from))
 }
 
-/// Where this end will receive media, when the call is one this stack
-/// describes.
+/// Where this end will receive media, for a call this stack describes.
 ///
 /// # Safety
 ///
-/// The two members it reads must be a pointer readable for the length beside
-/// it.
+/// `config.media_address` must be readable for `config.media_address_len` bytes.
 unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>, Fail> {
     let Some(local) = (unsafe {
         text(
@@ -311,8 +233,7 @@ unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>,
     else {
         return Ok(None);
     };
-    // an sdp of no bytes is no sdp, whatever the pointer, as every other
-    // optional piece of text or bytes in this ABI reads
+    // an sdp of no bytes is no sdp, whatever the pointer
     if config.sdp_len != 0 {
         return Err(fail(
             SipralStatus::InvalidArgument,
@@ -330,21 +251,13 @@ unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>,
     Ok(Some(address))
 }
 
-/// The member of `sipral_call_config_t` [`sipral_call_ring_media`] needs:
-/// where this end will receive media. `srtp` and `codecs` also apply to a call
-/// this stack is about to describe, and are read by the entry point itself.
-///
-/// Every other member names something a call to place would need — who to
-/// call, where to send the INVITE, which forks to keep, what headers to
-/// add — and a call this old already has one. Each is refused by name rather
-/// than read and ignored, so a caller who set one learns that it has no
-/// effect here instead of finding out from a call that behaved as though it
-/// had not been set.
+/// The member of `sipral_call_config_t` [`sipral_call_ring_media`] needs: where this end
+/// will receive media. Members only a call to place needs are refused by name rather than
+/// ignored.
 ///
 /// # Safety
 ///
-/// `config.media_address` must be readable for `config.media_address_len`
-/// bytes.
+/// `config.media_address` must be readable for `config.media_address_len` bytes.
 unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fail> {
     fn refused(member: &str) -> Fail {
         fail(
@@ -355,8 +268,7 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
             ),
         )
     }
-    // a member of no bytes is absent whatever its pointer, as the header's
-    // conventions say of every optional piece of text, bytes or records
+    // a member of no bytes is absent whatever its pointer
     if config.target_len != 0 {
         return Err(refused("target"));
     }
@@ -384,13 +296,9 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
     }
 }
 
-/// The codec order `config` names, as a checked list of names, or `None` for
-/// the stack's own order.
+/// The codec order `config` names, checked, or `None` for the stack's order.
 ///
-/// Read before the stack is locked, like `srtp`, so that a name this build has
-/// no encoder for is refused while the caller still knows which string it
-/// passed and before anything has been built. The catalogue it becomes cannot
-/// be derived here, because it is derived from the stack's.
+/// Read before the stack is locked, so a bad name is refused before anything is built.
 ///
 /// # Safety
 ///
@@ -400,37 +308,21 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
         return Ok(None);
     };
     let named = crate::media::names_in(list)?;
-    // which names this build has an encoder for is a fact about the build and
-    // not about any stack, so it is settled here: before the stack is reached,
-    // and whether or not the entry point reading this has a catalogue to apply
-    // the order to at all
+    // which names have an encoder is a fact about the build, not the stack
     CodecCatalog::with_order(&named).map_err(|error| media_failed(&error))?;
     Ok(Some(named))
 }
 
-/// The catalogue one call runs its media with, or `None` for the stack's own
-/// catalogue untouched — which is what `srtp`, `ice` and `codecs` all left
-/// unset has to mean.
+/// The catalogue one call runs its media with, or `None` for the stack's own untouched.
 ///
-/// The overrides compose here rather than each in its own branch, because a
-/// call is allowed to name several and a second branch that rebuilt the
-/// catalogue from names would be a branch that dropped the policy the first
-/// one applied.
+/// The overrides compose here, so one does not drop the policy another applied. Worked
+/// out before the socket's relay is taken ([`outside`]): a relay taken and then dropped
+/// with a refusal would be lost to the socket.
 ///
-/// Worked out before the socket's relay is taken ([`outside`]), since it is
-/// the half that can still be refused: a relay taken and then dropped with
-/// the refusal would be lost to the socket with nothing sent to its server.
-///
-/// `base` is what the call starts from: its account's catalogue for a call
-/// being placed — the stack's, with the account's own SRTP policy and suites
-/// laid over it — and the one an incoming call arrived with for one being
-/// rung. `floor` is the SRTP policy the call's account named for itself
-/// (`sipral_account_config_t::srtp`), when it named one: a call that asks for
-/// one that would carry audio the account's refuses — plain, where the
-/// account requires SRTP — is refused here with
-/// `SIPRAL_STATUS_SECURITY_POLICY`, before anything is built. A call may
-/// tighten its account's policy and never loosen it; the stack's own policy
-/// stays a default a call overrides.
+/// `base` is the account's catalogue for a call being placed, or the incoming call's for
+/// one being rung. `floor` is the SRTP policy the account named for itself: a call may
+/// tighten it and never loosen it, else `SIPRAL_STATUS_SECURITY_POLICY` before anything
+/// is built.
 fn call_catalog(
     base: &CodecCatalog,
     floor: Option<SrtpPolicy>,
@@ -477,17 +369,11 @@ fn floor_of(state: &StackState, account: Option<sipral_ua::AccountId>) -> Option
         .and_then(|srtp| srtp.policy)
 }
 
-/// The catalogue and settings one call runs its media with, or `None` for the
-/// stack's own catalogue untouched: [`call_catalog`]'s answer, dressed in
-/// what the stack learned about the socket.
+/// The catalogue and settings one call runs its media with, or `None` for the stack's own
+/// untouched: [`call_catalog`]'s answer plus what the stack learned about the socket.
 ///
-/// `public` is where the call's media socket appears from outside, when the
-/// stack asked a STUN server about it ([`crate::nat`]): a call described by
-/// it is never the stack's own catalogue untouched, because the description
-/// names another address and asks for multiplexing.
-///
-/// `relay` is the relay a TURN server allocated for the socket, when the
-/// stack names one ([`crate::nat`]): the call's relayed ICE candidate.
+/// `public` is the socket's STUN-learned address ([`crate::nat`]); a call described by it
+/// is never the untouched catalogue. `relay` is its TURN relay, the relayed ICE candidate.
 fn call_media(
     state: &StackState,
     base: &CodecCatalog,
@@ -520,13 +406,11 @@ fn media_choices(
     Ok((srtp, ice, feedback))
 }
 
-/// Where the call's real-time text arrives, when its configuration names
-/// a socket for it.
+/// Where the call's real-time text arrives, when its configuration names a socket.
 ///
 /// # Safety
 ///
-/// `config.text_address` must be readable for `config.text_address_len`
-/// bytes.
+/// `config.text_address` must be readable for `config.text_address_len` bytes.
 unsafe fn text_address(
     config: &SipralCallConfig,
     managed: bool,
@@ -581,10 +465,8 @@ fn dressed(
     media
 }
 
-/// Where a call on the media socket `local` is described as being, and the
-/// relay it takes: [`crate::nat::Nat::public_for`] and
-/// [`crate::nat::Nat::relay_for`], asked in that order so that a socket still
-/// waiting for its STUN answer is refused before its relay is taken.
+/// Where a call on media socket `local` is described as being, and the relay it takes,
+/// asked in that order so a socket still awaiting STUN is refused before its relay is taken.
 fn outside(
     state: &mut StackState,
     local: SocketAddr,
@@ -595,16 +477,9 @@ fn outside(
     Ok((public, relay))
 }
 
-/// Where `config` sends the INVITE, other than the account's own address, and
-/// what it does about the branches a fork leaves behind — the two members
-/// [`sipral_call_place`] and [`sipral_call_accept_transfer`] read exactly the
-/// same way, neither needing the target to make sense of.
-///
-/// `config.transport` is read only together with `config.destination`: a call
-/// with no destination override already goes where its account does, over
-/// the account's own transport (`sipral_ua`'s own fallback for one, once
-/// neither is given here), so a `transport` with nothing to pair it with is
-/// refused rather than read for nothing.
+/// Where `config` sends the INVITE, other than the account's address, and what it does with
+/// forked branches: read the same way by [`sipral_call_place`] and
+/// [`sipral_call_accept_transfer`].
 ///
 /// # Safety
 ///
@@ -641,10 +516,8 @@ unsafe fn destination_and_forks(
     Ok((destination, forks))
 }
 
-/// Turn what crossed the boundary into a call to place.
-///
-/// `managed` says the description is this stack's to write, so the one in the
-/// config is neither wanted nor required.
+/// Turn what crossed the boundary into a call to place. `managed`: the description is
+/// this stack's to write.
 ///
 /// # Safety
 ///
@@ -702,23 +575,17 @@ unsafe fn outgoing_from(
 entry! {
     /// Place a call, and write its handle to `out_call`.
     ///
-    /// The handle exists from here on, before any dialog does, because there
-    /// has to be something to hang up with while the INVITE is still in
-    /// flight. A proxy that forks the INVITE gives the branches handles of
-    /// their own, reported as `SIPRAL_EVENT_KIND_CALL_FORKED`.
+    /// The handle exists before any dialog, so the INVITE can be hung up while in flight.
+    /// Branches a proxy forks get their own handles (`SIPRAL_EVENT_KIND_CALL_FORKED`).
     ///
-    /// With `media_address` set, the offer is this stack's to write and the
-    /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-    /// and the `sipral_media_*` entry points carry the packets from then on.
-    /// `config.srtp`
-    /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
-    /// no other kind.
+    /// With `media_address` set the stack writes the offer and runs the audio:
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when, and `sipral_media_*` carry the packets.
     ///
     /// # Safety
     ///
-    /// `config` must point at a `sipral_call_config_t` whose `size` member
-    /// says how long it is, with every pointer in it readable for the length
-    /// beside it, and `out_call` at one `sipral_handle_t`.
+    /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+    /// with every pointer in it readable for the length beside it, and `out_call` at one
+    /// `sipral_handle_t`.
     fn sipral_call_place(
         stack: SipralHandle,
         account: SipralHandle,
@@ -731,8 +598,7 @@ entry! {
         }
         let config = unsafe { read_versioned(config) }?;
         let media = unsafe { managed_media(&config) }?;
-        // checked here, before the account is even looked up, so a bad value
-        // never reaches the point of building anything
+        // checked before the account is looked up, so nothing is built
         let choices = media_choices(&config)?;
         let codecs = unsafe { codec_order(&config) }?;
         let text = unsafe { text_address(&config, media.is_some()) }?;
@@ -750,9 +616,7 @@ entry! {
                     let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
                     let outside = outside(state, local)?;
                     let placed = match call_media(state, &base, catalog, outside, text) {
-                        // the stack's own catalogue, untouched: this is what
-                        // `srtp` and `codecs` both unspecified on the call
-                        // have to mean
+                        // the stack's own catalogue, untouched
                         None => {
                             state.engine.place(&mut state.agent, id, outgoing, local, now)
                         }
@@ -765,8 +629,7 @@ entry! {
                             now,
                         ),
                     };
-                    // a relay the call was handed goes back onto its socket
-                    // when the user agent refused the call
+                    // the refused call's relay goes back onto its socket
                     crate::nat::Nat::take_back(state, now);
                     let placed = placed.map_err(|error| media_failed(&error))?;
                     crate::nat::Nat::spent(state, local, now);
@@ -794,9 +657,7 @@ entry! {
 entry! {
     /// Say a call that came in is ringing.
     ///
-    /// A description makes it a 183 Session Progress rather than a 180
-    /// Ringing, because 180 with a body is a contradiction the far end has to
-    /// guess at. Pass none for the ordinary case.
+    /// A description makes it a 183 rather than a 180, since a 180 with a body is ambiguous.
     ///
     /// # Safety
     ///
@@ -820,54 +681,29 @@ entry! {
 }
 
 entry! {
-    /// Say a call that came in is ringing, with this stack running the audio
-    /// before anybody answers.
+    /// Say a call that came in is ringing, with this stack running the audio before anybody
+    /// answers.
     ///
-    /// The answer to the offer the INVITE carried is written from this
-    /// stack's codec order, against `config.media_address` — where this end
-    /// will receive media, which only the application can say because it owns
-    /// the socket — and the session opens on it there and then: the far end
-    /// hears whatever the application plays before anybody picks up.
-    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows.
+    /// The answer to the INVITE's offer is written from this stack's codec order against
+    /// `config.media_address`, and the session opens at once: the far end hears what the
+    /// application plays. `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows. `config.srtp` and
+    /// `config.codecs` override the stack's for this call, and `sipral_call_answer_media` keeps
+    /// what was settled here; it is the only way an incoming call chooses its own SRTP policy.
     ///
-    /// `config.srtp` overrides the stack's own SRTP policy for this call, the
-    /// same way it does on `sipral_call_place`; it is the one way an incoming
-    /// call can choose its own SRTP policy at all, since
-    /// `sipral_call_answer_media` reads no configuration of its own. Once
-    /// this has set it, `sipral_call_answer_media` keeps it: it is answering
-    /// a call that already has a catalogue, not choosing one.
+    /// `sipral_call_answer_media` then reuses this session and description. What its 200 OK
+    /// carries follows RFC 3262 §5 and RFC 6337 §3.1.1, by whether the 183 went out reliably
+    /// (`docs/05-media.md`, "Ringing with media").
     ///
-    /// `config.codecs` overrides the stack's codec order for this call in the
-    /// same way and for the same window: the answer written here is written
-    /// from it, and `sipral_call_answer_media` keeps what it settled.
-    ///
-    /// `sipral_call_answer_media` after this reuses the session and the
-    /// description written here rather than negotiating a second one. What
-    /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
-    /// §3.1.1 exactly, from whether this call's 183 went out reliably — see
-    /// `docs/05-media.md`, "Ringing with media".
-    ///
-    /// Every other member of `config` — `target`, `sdp`, `destination`,
-    /// `transport`, `keep_all_forks`, `headers` — names something a call to
-    /// place would need, and this call already exists; setting one of them
-    /// is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
-    ///
-    /// An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
-    /// nothing sent: the offer this end would make instead belongs in no
-    /// provisional response this stack can follow up (RFC 3261 §13.2.1,
-    /// RFC 6337 §3.1.2).
-    ///
-    /// Calling this twice on one call is `SIPRAL_STATUS_WRONG_STATE`, and so is
-    /// calling it after a `sipral_call_ring` that sent a description of the
-    /// application's own: every description in the responses to one INVITE
-    /// has to be that same one (RFC 3261 §13.2.1, RFC 6337 §3.1.1). After a
-    /// `sipral_call_ring` that sent none, it is not.
+    /// Setting `target`, `sdp`, `destination`, `transport`, `keep_all_forks` or `headers` is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it. `SIPRAL_STATUS_WRONG_STATE`, with nothing
+    /// sent: an INVITE with no offer (RFC 3261 §13.2.1, RFC 6337 §3.1.2); a second call of this;
+    /// a call after a `sipral_call_ring` that sent the application's own description
+    /// (RFC 3261 §13.2.1, RFC 6337 §3.1.1).
     ///
     /// # Safety
     ///
-    /// `config` must point at a `sipral_call_config_t` whose `size` member
-    /// says how long it is, with `media_address` readable for
-    /// `media_address_len` bytes.
+    /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+    /// with `media_address` readable for `media_address_len` bytes.
     fn sipral_call_ring_media(
         stack: SipralHandle,
         call: SipralHandle,
@@ -919,8 +755,7 @@ unsafe fn described(
                 .set_focus(id, true)
                 .map_err(|error| ua_failed(&error))?;
         }
-        // a call already rung with media keeps the description its 183
-        // carried, and its socket's mapping is not asked about again
+        // a call rung with media keeps its 183's description and mapping
         let (public, relay) = if reply == Reply::Answer && state.agent.has_described(id) {
             (None, None)
         } else {
@@ -930,8 +765,7 @@ unsafe fn described(
             call_media(state, &base, catalog, (public, relay), text),
             reply,
         ) {
-            // the stack's own catalogue, untouched: this is what `srtp`
-            // and `codecs` both unspecified on the call have to mean
+            // the stack's own catalogue, untouched
             (None, Reply::Ring) => state.engine.ring(&mut state.agent, id, local, now),
             (Some(media), Reply::Ring) => {
                 state
@@ -945,8 +779,7 @@ unsafe fn described(
                     .answer_with(&mut state.agent, id, local, media, now)
             }
         };
-        // a response refused — twice on one call, an INVITE with no offer —
-        // hands the socket's relay back for the next try
+        // a refused response hands the socket's relay back
         crate::nat::Nat::take_back(state, now);
         sent.map_err(|error| media_failed(&error))?;
         crate::nat::Nat::spent(state, local, now);
@@ -956,11 +789,7 @@ unsafe fn described(
 }
 
 entry! {
-    /// Answer a call that came in.
-    ///
-    /// `sdp` is the answer to the offer the INVITE carried, and is required:
-    /// answering with nothing puts the offer on this end and the answer in the
-    /// far end's ACK, which this ABI has no way to hand back.
+    /// Answer a call that came in with `sdp`, the answer to the INVITE's offer (required).
     ///
     /// # Safety
     ///
@@ -991,21 +820,12 @@ entry! {
 entry! {
     /// Answer a call that came in, and let this stack run its audio.
     ///
-    /// The answer to the offer the INVITE carried is written from this stack's
-    /// codec order, against `media_address` — where this end will receive
-    /// media, which only the application can say because it owns the socket.
+    /// The answer is written from this stack's codec order against `media_address`.
     /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows once the stream is open.
     ///
-    /// The other half of `sipral_call_place` with `media_address` set, and the
-    /// alternative to `sipral_call_answer`, which answers with a description
-    /// the application wrote and leaves the audio to it.
-    ///
-    /// On a call `sipral_call_ring_media` already rang, nothing is written and
-    /// no second session opens: the 183's description and session stand,
-    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` has already been reported, and
-    /// `media_address` must still be an address and a port but is not used.
-    /// The 200 OK repeats that description when the 183 went out unreliably and
-    /// carries none when it went out reliably (RFC 6337 §3.1.1).
+    /// On a call `sipral_call_ring_media` already rang, the 183's description and session
+    /// stand and `media_address` must still parse but is unused. The 200 OK repeats that
+    /// description if the 183 went unreliably and carries none if reliably (RFC 6337 §3.1.1).
     ///
     /// # Safety
     ///
@@ -1020,11 +840,8 @@ entry! {
         let local = unsafe { address(media_address, media_address_len, "media_address") }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            // a call already rung with media keeps the description its 183
-            // carried, so its socket's mapping is not asked about again, and
-            // a relay waiting on the socket goes back when it is spent below;
-            // nor is it for a call the engine never saw, which is refused
-            // below with nothing of the socket's taken
+            // a call rung with media keeps its 183's description, so its mapping is not asked
+            // again; nor for a call the engine never saw, refused below with nothing taken
             let catalog = state.engine.call_catalog(id).cloned();
             let (public, relay) = if state.agent.has_described(id) || catalog.is_none() {
                 (None, None)
@@ -1053,23 +870,15 @@ entry! {
 }
 
 entry! {
-    /// Answer a call that came in with media this stack describes, from
-    /// `config`: `sipral_call_answer_media` with the choices
-    /// `sipral_call_ring_media` takes — `media_address`, `srtp`, `codecs`,
-    /// `ice`, `text_address` for real-time text, `feedback` for RTP/AVPF
-    /// and `focus` for a conference focus. Every other member names
-    /// something only a call to place needs, and setting one is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
-    ///
-    /// On a call `sipral_call_ring_media` already rang, the 183's
-    /// description and session stand exactly as `sipral_call_answer_media`
-    /// says, and nothing in `config` but `focus` changes them.
+    /// Answer a call that came in with media this stack describes, from `config`:
+    /// `sipral_call_answer_media` with the members `sipral_call_ring_media` reads. Any other
+    /// member set is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it. On a call already rung with
+    /// media, only `focus` changes anything.
     ///
     /// # Safety
     ///
-    /// `config` must point at a `sipral_call_config_t` whose `size` member
-    /// says how long it is, with every pointer in it readable for the length
-    /// beside it.
+    /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+    /// with every pointer in it readable for the length beside it.
     fn sipral_call_answer_with(
         stack: SipralHandle,
         call: SipralHandle,
@@ -1081,10 +890,8 @@ entry! {
 }
 
 entry! {
-    /// Refuse a call that came in, with a response code of your choosing.
-    ///
-    /// 486 Busy Here for a line that is in use, 603 Decline for a person who
-    /// does not want to talk. The difference is what a proxy does next.
+    /// Refuse a call that came in with a response code of your choosing: 486 for a line in use,
+    /// 603 for a person who declines. A proxy acts differently on each.
     ///
     /// # Safety
     ///
@@ -1107,11 +914,8 @@ entry! {
 }
 
 entry! {
-    /// Hang up, whatever the call is doing.
-    ///
-    /// A CANCEL before it is answered, a BYE after, a refusal for one that
-    /// came in and has not been answered. A call that is already ending is
-    /// left alone rather than refused.
+    /// Hang up, whatever the call is doing: CANCEL before an answer, BYE after, a refusal for
+    /// an unanswered incoming call. A call already ending is left alone.
     ///
     /// # Safety
     ///
@@ -1128,30 +932,22 @@ entry! {
 }
 
 entry! {
-    /// Set the header fields that go on what this call sends at the
-    /// application's request, from now until they are set again.
+    /// Set the header fields that go on what this call sends at the application's request,
+    /// until set again.
     ///
-    /// They go on the 180 or 183 from `sipral_call_ring`, the 200 from
-    /// `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
-    /// `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
-    /// turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
-    /// `sipral_call_resume` send. Kept rather than spent on the first of those,
-    /// so that a field set before ringing is on the 200 as well. Never on a
-    /// CANCEL, which a proxy answers and replaces with its own, and never on
-    /// what the stack sends by itself: a session refresh, or the BYE for a 2xx
-    /// that was never acknowledged or for a fork that lost.
+    /// They go on the responses of `sipral_call_ring`, `sipral_call_answer`,
+    /// `sipral_call_answer_media` and `sipral_call_reject`, the refusal or BYE of
+    /// `sipral_call_hangup`, and the re-INVITE or UPDATE of `sipral_call_hold` and
+    /// `sipral_call_resume`. Kept across them. Never on a CANCEL (a proxy replaces it) or on
+    /// what the stack sends by itself.
     ///
-    /// Replaces what was set before, whole, and a `headers_len` of zero takes
-    /// every field off. Each field is checked first, as it is on
-    /// `sipral_call_config_t::headers`, and a refusal names the element, keeps
-    /// none of the new fields and leaves the old ones in place. Nothing is
-    /// sent.
+    /// Replaces the previous set whole; `headers_len` zero clears it. Each field is checked as
+    /// on `sipral_call_config_t::headers`; a refusal names the element and keeps the old set.
     ///
     /// # Safety
     ///
-    /// `headers` must be null with `headers_len` zero, or readable for
-    /// `headers_len` elements, each with a name and a value readable for the
-    /// lengths beside them.
+    /// `headers` must be null with `headers_len` zero, or readable for `headers_len` elements,
+    /// each with a name and a value readable for the lengths beside them.
     fn sipral_call_set_headers(
         stack: SipralHandle,
         call: SipralHandle,
@@ -1173,18 +969,14 @@ entry! {
 entry! {
     /// Put a call on hold (RFC 3264 §8.4).
     ///
-    /// The description is the stack's to write: the one already negotiated
-    /// with every stream's direction changed. Asking for a hold that is
-    /// already in place, or already on its way, sends nothing and succeeds.
+    /// The stack writes the description: the negotiated one with every direction changed. A
+    /// hold already in place or on its way sends nothing and succeeds.
     ///
-    /// Asked for while another session change is running in the call, in
-    /// either direction, it succeeds and waits: its request goes once that
-    /// change is over (RFC 3261 §14.1), and the outcome arrives as
-    /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
-    /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` like any other. What waits
-    /// is the state asked for last, so a resume asked for behind a hold still
-    /// on its way goes after it. One still waiting when the call ends is
-    /// never sent, and `SIPRAL_EVENT_KIND_CALL_ENDED` is the last word on it.
+    /// While another session change runs, it succeeds and waits until that is over
+    /// (RFC 3261 §14.1); the outcome arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
+    /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`. Only the last state asked for waits, so a
+    /// resume asked for while a hold is still on its way goes after it. One still waiting
+    /// when the call ends is never sent.
     ///
     /// # Safety
     ///
@@ -1198,12 +990,8 @@ entry! {
 }
 
 entry! {
-    /// Take it off hold again.
-    ///
-    /// Every stream goes back to the direction it had before, which is not
-    /// always both ways: one that was offered receive-only is resumed
-    /// receive-only. It waits for a change already running exactly as
-    /// `sipral_call_hold` does.
+    /// Take it off hold. Each stream returns to its previous direction (a receive-only one stays
+    /// receive-only), and waits for a running change as `sipral_call_hold` does.
     ///
     /// # Safety
     ///
@@ -1222,30 +1010,18 @@ entry! {
 entry! {
     /// Offer a call again on another list of codecs (RFC 3264 §8.3.2).
     ///
-    /// `codecs` names them the way `sipral_call_config_t::codecs` does:
-    /// separated by commas, in the order to offer them. Only the codecs
-    /// change. Everything else the call has agreed is offered again as it
-    /// is — its media address, its SRTP key or DTLS fingerprint, its ICE
-    /// credentials — so nothing is re-keyed and nothing restarts, and a call
-    /// on hold stays on hold: `sipral_call_resume` takes it off, on the new
-    /// list. A dynamic payload type keeps the codec it has named on this
-    /// call, and a codec new to it gets a number nothing has had.
+    /// `codecs` is as `sipral_call_config_t::codecs`. Only the codecs change: address, keys,
+    /// fingerprint and ICE credentials are offered as they are, and a held call stays held. A
+    /// dynamic payload type keeps its codec; a new codec gets an unused number.
     ///
-    /// The list becomes the call's own once the far end accepts it, and
-    /// `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the codec its answer settled
-    /// on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and
-    /// leaves the call on the list it had.
+    /// The list becomes the call's once accepted; `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the
+    /// codec settled on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
     ///
-    /// For a call whose media the stack describes: one placed or answered
-    /// with `media_address` set. `SIPRAL_STATUS_NOT_SUPPORTED` for a name
-    /// this build has no codec behind; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
-    /// list that is empty, names a codec twice or has a stray comma;
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call the stack writes no description
-    /// for, one with none agreed yet, one whose stream was refused (a change
-    /// of codecs does not bring it back), one still early with a far end that
-    /// never listed UPDATE, or while another change is on its way;
-    /// `SIPRAL_STATUS_EXHAUSTED` when a codec new to the call finds every
-    /// dynamic payload type number already taken.
+    /// For a call placed or answered with `media_address`. `SIPRAL_STATUS_NOT_SUPPORTED`: a name
+    /// with no codec in this build. `SIPRAL_STATUS_INVALID_ARGUMENT`: an empty list, a repeated
+    /// name or a stray comma. `SIPRAL_STATUS_WRONG_STATE`: no stack-written description, none
+    /// agreed yet, a refused stream, an early call whose far end never listed UPDATE, or
+    /// another change on its way. `SIPRAL_STATUS_EXHAUSTED`: no dynamic payload type left.
     ///
     /// # Safety
     ///
@@ -1265,8 +1041,7 @@ entry! {
                 .engine
                 .change_codecs(&mut state.agent, id, &named, now)
                 .map_err(|error| match error {
-                    // the call is real — the handle was just found — so what
-                    // the engine does not know is its media
+                    // the handle was just found, so what the engine lacks is its media
                     sipral::MediaError::NoSuchCall => fail(
                         SipralStatus::WrongState,
                         "the stack writes no description for this call: it was placed or \
@@ -1279,31 +1054,19 @@ entry! {
 }
 
 entry! {
-    /// Restart ICE on a call (RFC 8445 §9): offer the call again with new
-    /// credentials of this end's own, and check every pair again once the
-    /// far end has answered.
+    /// Restart ICE on a call (RFC 8445 §9): offer it again with new credentials and check every
+    /// pair again once the far end answers.
     ///
-    /// The call's last description is offered again with its ICE lines
-    /// written as for a first offer — both `ice-ufrag` and `ice-pwd` changed,
-    /// which is how RFC 8839 §4.4.1.1.1 signals a restart — the candidates
-    /// its agent still holds, and the role it had. Nothing else moves, and
-    /// nothing reaches the running agent until the far end accepts: "Should
-    /// a subsequent offer fail, ICE processing continues as if the
-    /// subsequent offer had never been made" (§4.4). Then the agent checks
-    /// again under both ends' new credentials while the pair it had goes on
-    /// carrying the audio, and the new selection arrives as another
-    /// `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`; the far end's checks that
-    /// arrive before its answer are kept and answered then. A refusal
-    /// arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as
-    /// it was.
+    /// The last description is offered again with new `ice-ufrag` and `ice-pwd`
+    /// (RFC 8839 §4.4.1.1.1), the candidates still held, and the same role. Nothing reaches the
+    /// agent until the far end accepts (§4.4). The old pair carries audio meanwhile, and the new
+    /// selection arrives as `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`. A refusal arrives as
+    /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and leaves ICE as it was.
     ///
-    /// The remedy for a path whose consent was lost
-    /// (`SIPRAL_MEDIA_FAULT_ICE`), and for a network change this end sees
-    /// first. For a call whose media the stack describes: one placed or
-    /// answered with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a
-    /// call the stack writes no description for, one running no ICE agent,
-    /// one with no description yet, or while another change is on its way;
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
+    /// The remedy for lost consent (`SIPRAL_MEDIA_FAULT_ICE`) and a local network change. For a
+    /// call placed or answered with `media_address`. `SIPRAL_STATUS_WRONG_STATE`: no
+    /// stack-written description, no ICE agent, no description yet, or another change on its
+    /// way. `SIPRAL_STATUS_NOT_SUPPORTED` from a build without ICE.
     ///
     /// # Safety
     ///
@@ -1327,8 +1090,7 @@ fn restart_ice(
         .engine
         .restart_ice(&mut state.agent, call, now)
         .map_err(|error| match error {
-            // the call is real — the handle was just found — so what the
-            // engine does not know is its media
+            // the handle was just found, so what the engine lacks is its media
             sipral::MediaError::NoSuchCall => fail(
                 SipralStatus::WrongState,
                 "the stack writes no description for this call: it was placed or answered \
@@ -1357,34 +1119,23 @@ fn restart_ice(
 }
 
 entry! {
-    /// Describe a call's media at the socket the application bound for it on
-    /// a new network, and offer that to the far end (RFC 3264 §8.3.1): what
-    /// `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for.
+    /// Describe a call's media at a socket the application bound on a new network and offer it
+    /// to the far end (RFC 3264 §8.3.1), as `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks.
     ///
-    /// `media_address` is where the new socket is bound, as `host:port`;
-    /// `public_address` is where it appears from outside when the
-    /// application has learned that for it, or null with a length of zero
-    /// to describe the call by `media_address` itself. The re-INVITE carries
-    /// the call's last description with only `c=` and the port on `m=`
-    /// moved — codecs, direction, keys and fingerprint stay as they were —
-    /// and the account's `Contact` as it is when this is called, so
-    /// `sipral_account_rebind` goes first. The new socket is the call's from
-    /// here on whatever the far end answers; the answer arrives as
-    /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` and `SIPRAL_EVENT_KIND_MEDIA_CHANGED`,
-    /// a refusal as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
+    /// `media_address` is the new socket, `host:port`; `public_address` is where it appears
+    /// from outside, or null with length zero. The re-INVITE moves only `c=` and the `m=` port,
+    /// and carries the account's current `Contact`, so `sipral_account_rebind` goes first. The
+    /// new socket is the call's whatever the answer: `SIPRAL_EVENT_KIND_SESSION_CHANGED` and
+    /// `SIPRAL_EVENT_KIND_MEDIA_CHANGED`, or `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`.
     ///
-    /// For a call whose media the stack describes: one placed or answered
-    /// with `media_address` set. `SIPRAL_STATUS_WRONG_STATE` for a call the
-    /// stack writes no description for, one whose session runs ICE (which
-    /// moves by a restart gathered on the new socket, not by this), one with
-    /// no description yet, or while another change is on its way — asking
-    /// again once that change is answered moves it then.
+    /// For a call placed or answered with `media_address`. `SIPRAL_STATUS_WRONG_STATE`: no
+    /// stack-written description, a session running ICE (moved by a restart instead), no
+    /// description yet, or another change on its way.
     ///
     /// # Safety
     ///
-    /// `media_address` must be readable for `media_address_len` bytes, and
-    /// `public_address` for `public_address_len` bytes or null with a length
-    /// of zero.
+    /// `media_address` must be readable for `media_address_len` bytes, and `public_address` for
+    /// `public_address_len` bytes or null with a length of zero.
     fn sipral_call_media_readdress(
         stack: SipralHandle,
         call: SipralHandle,
@@ -1412,8 +1163,7 @@ entry! {
                 .engine
                 .readdress(&mut state.agent, id, local, public, now)
                 .map_err(|error| match error {
-                    // the call is real — the handle was just found — so what
-                    // the engine does not know is its media
+                    // the handle was just found, so what the engine lacks is its media
                     sipral::MediaError::NoSuchCall => fail(
                         SipralStatus::WrongState,
                         "the stack writes no description for this call: it was placed or \
@@ -1432,22 +1182,15 @@ entry! {
 }
 
 entry! {
-    /// Join two active calls into a local conference of three: from here on,
-    /// each call's far end hears the other's far end and this end's own
-    /// microphone, mixed. [`sipral_media_mix`](crate::media::sipral_media_mix)
-    /// drives one frame of it at a time, on the two calls' own media
-    /// handles; this only records the pairing.
+    /// Join two active calls into a local three-way conference: each far end hears the other
+    /// and this end's microphone, mixed. [`sipral_media_mix`](crate::media::sipral_media_mix)
+    /// drives it one frame at a time; this only records the pairing.
     ///
-    /// Nothing like a SIP conference server: neither far end's own signalling
-    /// ever names the other, and this stack sends no `Refer-To`. Both calls
-    /// must already have media running — placed or answered with
-    /// `media_address` set, and negotiated — and must agree on a sample rate
-    /// and a frame length, since nothing here resamples.
+    /// No SIP conference: neither far end is told. Both calls need running media and the same
+    /// sample rate and frame length, since nothing resamples.
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`;
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no running session, a call
-    /// already joined to another, or two calls whose sessions would decode
-    /// at different rates or cut audio into frames of different lengths.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`; `SIPRAL_STATUS_WRONG_STATE` for a
+    /// call with no running session, one already joined, or mismatched rate or frame length.
     ///
     /// # Safety
     ///
@@ -1467,14 +1210,8 @@ entry! {
 }
 
 entry! {
-    /// Take `call` back out of the pair it is in.
-    ///
-    /// Neither call's session is touched: each one goes back to carrying its
-    /// own audio directly, through `sipral_media_playback` and
-    /// `sipral_media_capture`, exactly as an unjoined call always has.
-    ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not currently joined to
-    /// another.
+    /// Take `call` back out of its pair. Neither session is touched; each call carries its own
+    /// audio again. `SIPRAL_STATUS_WRONG_STATE` for a call not joined.
     ///
     /// # Safety
     ///
@@ -1489,22 +1226,15 @@ entry! {
 }
 
 entry! {
-    /// Accept a change the far end offered, reported as
-    /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
+    /// Accept a change the far end offered (`SIPRAL_EVENT_KIND_SESSION_OFFERED`).
     ///
-    /// `sdp` is the answer to the offer it carried, and is required: every
-    /// such event carries an offer, and RFC 3264 §5 has an offer answered,
-    /// so a null or empty `sdp` is `SIPRAL_STATUS_INVALID_ARGUMENT` and the
-    /// request is still waiting for this or its refusal. A re-INVITE nobody
-    /// answers is retransmitted and then ends the call, so this or
-    /// [`sipral_call_reject_session`] has to follow that event. An offer that
-    /// arrived in a PRACK (RFC 3262 §5) is answered the same way, in the
-    /// PRACK's 2xx.
+    /// `sdp`, the answer, is required (RFC 3264 §5): null or empty is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and the request still waits. An unanswered re-INVITE
+    /// ends the call, so this or [`sipral_call_reject_session`] must follow the event. An offer
+    /// in a PRACK (RFC 3262 §5) is answered the same way, in the PRACK's 2xx.
     ///
-    /// Only for a call the application describes. One this stack describes
-    /// answers its own re-offers, from the same codec order, before the poll
-    /// that saw the request returns — so the event never arrives and this is
-    /// `SIPRAL_STATUS_WRONG_STATE`.
+    /// Only for a call the application describes; a stack-described call answers its own
+    /// re-offers, so this is `SIPRAL_STATUS_WRONG_STATE` there.
     ///
     /// # Safety
     ///
@@ -1535,13 +1265,8 @@ entry! {
 }
 
 entry! {
-    /// Refuse one instead. The session stands exactly as it was (§14.1).
-    ///
-    /// 488 Not Acceptable Here is the code that says the description was the
-    /// problem rather than the request.
-    ///
-    /// As with [`sipral_call_accept_session`], only for a call the application
-    /// describes.
+    /// Refuse one instead; the session stands as it was (§14.1). 488 Not Acceptable Here says
+    /// the description was the problem. Only for a call the application describes.
     ///
     /// # Safety
     ///
@@ -1565,23 +1290,12 @@ entry! {
 }
 
 codes! {
-    /// Which way a digit goes to the far end. Names for
-    /// [`sipral_call_send_dtmf`]'s `via`.
-    ///
-    /// The choice is per send, not per call, because it is a fact about the peer
-    /// rather than about this end, and the way to find out which one a peer takes
-    /// is to try. A carrier that ignores one of these ignores it silently.
+    /// Which way a digit goes to the far end: [`sipral_call_send_dtmf`]'s `via`. Chosen per
+    /// send, since it is a fact about the peer, and a peer ignores an unsupported one silently.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDtmf: u32 {
-        /// In the media, as an RFC 4733 named telephone event. What to reach for:
-        /// it is the only one carried end to end by every gateway on the path, and
-        /// the only one whose timing survives transcoding.
-        ///
-        /// It is one rather than zero on purpose. Zero is what a caller who
-        /// filled nothing in leaves behind, and the way a digit travels is the
-        /// one setting here that a peer can ignore in silence: a call that
-        /// meant INFO and sent nothing at all looks, from this end, exactly
-        /// like a call that sent it. So zero names no form and is refused.
+        /// In the media, as an RFC 4733 telephone event: the one to reach for, carried end to
+        /// end and surviving transcoding. One, not zero: zero is an unfilled field, refused.
         Rtp = 1,
         /// An INFO per digit carrying `application/dtmf-relay`, which states the
         /// signal and how long it was held.
@@ -1589,54 +1303,31 @@ codes! {
         /// An INFO per digit carrying `application/dtmf`, whose whole body is the
         /// character. Some switches take only this one.
         InfoPlain = 3,
-        /// In the media, as the two tones of each key written into the audio in
-        /// place of the microphone, whatever the negotiation settled on: for
-        /// the far end that negotiated a telephone event and then listens only
-        /// to the audio. `SIPRAL_DTMF_RTP` does this by itself on a call that
-        /// negotiated no telephone event.
+        /// In the media, as the key's two tones written into the audio in place of the microphone,
+        /// for a far end that listens only to the audio. `SIPRAL_DTMF_RTP` falls back to this on a
+        /// call with no telephone event.
         InBand = 4,
     }
 }
 
 entry! {
-    /// Send DTMF on a call that is up, in whichever of the three forms the far
-    /// end takes.
+    /// Send DTMF on a call that is up, in the form the far end takes.
     ///
-    /// `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
-    /// RFC 4733 §3.2, in the order they were pressed, checked as a whole
-    /// before anything goes out: one character no keypad has, anywhere in the
-    /// string, sends nothing, not even the keys ahead of it. `duration_ms` is
-    /// how long each one lasts, or zero for the hundred milliseconds every
-    /// one of the three forms defaults to.
+    /// `digits` are `0`-`9`, `*`, `#` and `A`-`D`, the sixteen events of
+    /// RFC 4733 §3.2, in the order they were pressed. The whole string is checked first: one
+    /// bad character sends nothing. `duration_ms` is each tone's length, or zero for 100 ms.
     ///
-    /// `via` is a [`SipralDtmf`], and it is chosen per send rather than per
-    /// call: which form a peer accepts is a fact about the peer, and an
-    /// application that has just learned the answer for this one must not have
-    /// to tear the call down to act on it. `SIPRAL_DTMF_RTP` puts the digits in
-    /// the media, where they replace the audio for as long as they last and
-    /// queue behind each other. The two INFO forms put one request per digit
-    /// in the dialog, but not all at once: over UDP, overlapping non-INVITE
-    /// transactions can arrive in any order, so the next digit's INFO waits
-    /// for the one before it to reach a final answer. A 2xx sends it; a
-    /// refusal, a timeout or a transport failure ends the sequence there
-    /// instead, and the digits still waiting are discarded rather than sent
-    /// out of order — the digit that ended it is what
-    /// `SIPRAL_EVENT_KIND_DTMF_SENT` names, and nothing is reported for the
-    /// ones it took down with it. Digits handed over while an INFO of this
-    /// call is still unanswered queue behind the ones already waiting, as the
-    /// media's do, rather than go out at once. A call holds at most sixty-four
-    /// INFO digits at once, the one in flight included; a string that would
-    /// take it past that is refused whole with `SIPRAL_STATUS_INVALID_ARGUMENT`,
-    /// the same as one with a character no keypad has, and nothing of it is
-    /// sent.
+    /// `via` is a [`SipralDtmf`]. `SIPRAL_DTMF_RTP` puts the digits in the media, replacing the
+    /// audio while they last, queued. The INFO forms send one request per digit, each after the
+    /// previous one's final answer, since UDP may reorder overlapping transactions. A refusal,
+    /// timeout or transport failure ends the sequence: `SIPRAL_EVENT_KIND_DTMF_SENT` names that
+    /// digit, and the rest are discarded unreported. Digits handed over meanwhile queue behind.
+    /// A call holds at most sixty-four INFO digits, the one in flight included; a string past
+    /// that is refused whole with `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
-    /// `SIPRAL_DTMF_RTP` on a call whose negotiation settled on no telephone
-    /// event payload type writes the digits into the audio instead, as
-    /// `SIPRAL_DTMF_IN_BAND` does on any call: the one way such a far end can
-    /// hear a key. Both need the call's media, and answer
-    /// `SIPRAL_STATUS_WRONG_STATE` before there is any. The INFO forms need a
-    /// dialog rather than a negotiation, and answer
-    /// `SIPRAL_STATUS_WRONG_STATE` before there is one.
+    /// `SIPRAL_DTMF_RTP` without a negotiated telephone event writes the tones into the audio,
+    /// as `SIPRAL_DTMF_IN_BAND` always does. The media forms are `SIPRAL_STATUS_WRONG_STATE`
+    /// before there is media, the INFO forms before there is a dialog.
     ///
     /// # Safety
     ///
@@ -1691,10 +1382,8 @@ fn dtmf_form(via: u32) -> Result<SipralDtmf, Fail> {
     }
 }
 
-/// Refuse a session change on a call whose descriptions are this stack's.
-///
-/// Not a guess about what the application meant: the engine has already
-/// answered the re-offer, so a second answer would be a second one on the wire.
+/// Refuse a session change on a call whose descriptions are this stack's: the engine has
+/// already answered the re-offer.
 fn describes_its_own(state: &StackState, call: sipral_ua::CallHandle) -> Result<(), Fail> {
     if state.manages(call) {
         return Err(fail(
@@ -1706,12 +1395,8 @@ fn describes_its_own(state: &StackState, call: sipral_ua::CallHandle) -> Result<
     Ok(())
 }
 
-/// The digits, upper-cased, or which one was not a key.
-///
-/// Delegates to [`sipral_ua::dtmf::digit`], the one validation RFC 4733
-/// sending, INFO sending and INFO receiving all read through: the sixteen
-/// characters accepted here are the same sixteen an incoming INFO is read
-/// against.
+/// The digits, upper-cased, or which one was not a key. Delegates to
+/// [`sipral_ua::dtmf::digit`], the validation incoming INFO shares.
 fn keypad(pressed: &str) -> Result<Vec<u8>, Fail> {
     let mut keys = Vec::with_capacity(pressed.len());
     for (index, key) in pressed.chars().enumerate() {
@@ -1734,25 +1419,19 @@ fn keypad(pressed: &str) -> Result<Vec<u8>, Fail> {
     Ok(keys)
 }
 
-/// Delegates to [`sipral_ua::dtmf::duration_ms`], the bound RFC 4733 sending
-/// and both INFO bodies share; a length received by INFO is held only to its
-/// ceiling, because it reports a tone the peer already held. Run before the
-/// form is looked at, so all three refuse a length with this one status and
-/// these same words.
+/// Delegates to [`sipral_ua::dtmf::duration_ms`], the bound every form shares. Run before
+/// the form is looked at, so all three refuse a length with the same status and words.
 fn tone_length(duration_ms: u32) -> Result<u32, Fail> {
     sipral_ua::dtmf::duration_ms(duration_ms)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))
 }
 
 entry! {
-    /// Ask the far end to call somebody else, and hang up when it has
-    /// (RFC 3515).
+    /// Ask the far end to call somebody else, and hang up when it has (RFC 3515).
     ///
-    /// A blind transfer: nobody consults the destination first. This end stays
-    /// in the call until the transfer has succeeded, because hanging up first
-    /// turns a transfer that failed into a call that vanished. Progress
-    /// arrives as `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS` and then
-    /// `SIPRAL_EVENT_KIND_TRANSFER_DONE`.
+    /// A blind transfer. This end stays in the call until the transfer succeeds, so a failed
+    /// transfer does not lose the call. Progress arrives as `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS`,
+    /// then `SIPRAL_EVENT_KIND_TRANSFER_DONE`.
     ///
     /// # Safety
     ///
@@ -1777,19 +1456,11 @@ entry! {
 }
 
 entry! {
-    /// Call the transfer target, so that there is somebody to hand the call
-    /// to, and write the new call's handle to `out_consultation`.
+    /// Call the transfer target, and write the new call's handle to `out_consultation`.
     ///
-    /// The consultation leg of an attended transfer. It is answered like any
-    /// other call, and [`sipral_call_transfer_to`] is what follows. Putting
-    /// `call` on hold first is the application's: it is a session change, and
-    /// this stack does not make those uninvited.
-    ///
-    /// `media_address` is `SIPRAL_STATUS_NOT_SUPPORTED` here. The media engine
-    /// places and answers calls; it does not consult, and a consultation leg
-    /// registered with it by hand would be one it has described nothing for.
-    /// A consultation with audio is placed with `sdp` and run by the
-    /// application, as every call was before this stack carried media.
+    /// The consultation leg of an attended transfer; [`sipral_call_transfer_to`] follows.
+    /// Holding `call` first is the application's choice. `media_address` is
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` here: place the consultation with `sdp` and run its audio.
     ///
     /// # Safety
     ///
@@ -1815,9 +1486,7 @@ entry! {
                  leg; place it with sdp and run its audio in the application",
             ));
         }
-        // no catalogue here to apply either of them to, but the same refusals
-        // as `sipral_call_place` for a value this ABI names nothing for and
-        // for a codec this build has no encoder for
+        // nothing to apply them to, but the same refusals as `sipral_call_place`
         media_choices(&config)?;
         unsafe { codec_order(&config) }?;
         unsafe { text_address(&config, false) }?;
@@ -1846,11 +1515,8 @@ entry! {
 }
 
 entry! {
-    /// Hand `call` to the far end of `other` (RFC 3891).
-    ///
-    /// The attended half of a transfer: `other` is normally the consultation
-    /// call, and the party at its far end replaces the call it already has
-    /// rather than answering a second one. Any call that is up may be named.
+    /// Hand `call` to the far end of `other` (RFC 3891): the attended half of a transfer, where
+    /// `other` is normally the consultation call. Any call that is up may be named.
     ///
     /// # Safety
     ///
@@ -1873,43 +1539,27 @@ entry! {
 }
 
 entry! {
-    /// Take a transfer that was asked for, place the call it names the way
-    /// [`sipral_call_place`] places one, and write its handle to
-    /// `out_placed`.
+    /// Take a transfer that was asked for, place the call it names as [`sipral_call_place`]
+    /// does, and write its handle to `out_placed`.
     ///
-    /// `config.target` is not read: the far end already said where this goes
-    /// when it asked for the transfer, and a target of the caller's own would
-    /// be a second one contradicting it — `SIPRAL_STATUS_INVALID_ARGUMENT`
-    /// naming it. Everything else in `config` means what it means on
-    /// `sipral_call_place`: `sdp` for a description the application wrote and
-    /// runs the audio of, `media_address` for one this stack writes and runs
-    /// (`config.srtp` overriding the stack's own policy for it, the same
-    /// way), `headers`, `destination`, `transport` and `keep_all_forks` for
-    /// the INVITE this places. `Replaces` and `Referred-By` among `headers`
-    /// are `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
-    /// there to take: that INVITE takes both from the REFER. Giving neither
-    /// `sdp` nor `media_address` is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
-    /// `sipral_call_place`: the answer to an offerless INVITE has nowhere to
-    /// go but the ACK, and this ABI hands nothing back from there.
+    /// `config.target` set is `SIPRAL_STATUS_INVALID_ARGUMENT`: the REFER names the target.
+    /// Every other member means what it means on `sipral_call_place`. `Replaces` or
+    /// `Referred-By` among `headers` is `SIPRAL_STATUS_INVALID_ARGUMENT` with the transfer still
+    /// waiting: the INVITE takes both from the REFER. Neither `sdp` nor `media_address` is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, as on `sipral_call_place`.
     ///
-    /// `call` may be a referral's handle instead — the `call` of a
-    /// `SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any dialog — and it is
-    /// taken exactly the same way, the call placed from the account the
-    /// event names. The 202 opens the dialog its NOTIFYs travel in, and the
-    /// handle is spent once this has answered the REFER: it is stale
-    /// afterwards, whether the call then went or not. One refused before
-    /// anything was sent — a header, a target — is still there to take.
+    /// `call` may be a referral's handle (`SIPRAL_EVENT_KIND_REFERRAL`, a REFER outside any
+    /// dialog), placed from the account the event names. Its handle is stale once the REFER is
+    /// answered; one refused before anything was sent is still there to take.
     ///
-    /// A call that cannot be sent once the 202 has gone ends the REFER's
-    /// subscription with RFC 3515 §2.4.5's 503, so the far end is told, and
-    /// this answers `SIPRAL_STATUS_NOT_SENT` as it would for any call.
+    /// A call that cannot be sent after the 202 ends the subscription with RFC 3515 §2.4.5's
+    /// 503, and this answers `SIPRAL_STATUS_NOT_SENT`.
     ///
     /// # Safety
     ///
-    /// `config` must point at a `sipral_call_config_t` whose `size` member
-    /// says how long it is, with every pointer in it readable for the length
-    /// beside it, and `out_placed` at one `sipral_handle_t`.
+    /// `config` must point at a `sipral_call_config_t` whose `size` member says how long it is,
+    /// with every pointer in it readable for the length beside it, and `out_placed` at one
+    /// `sipral_handle_t`.
     fn sipral_call_accept_transfer(
         stack: SipralHandle,
         call: SipralHandle,
@@ -1921,8 +1571,7 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "out_placed is null"));
         }
         let config = unsafe { read_versioned(config) }?;
-        // absent when its length is zero, whatever the pointer, like every
-        // optional piece of text in this ABI
+        // absent when its length is zero, whatever the pointer
         if config.target_len != 0 {
             return Err(fail(
                 SipralStatus::InvalidArgument,
@@ -1944,10 +1593,8 @@ entry! {
         }
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            // a referral answered is spent, however the call it asked for
-            // then went, and its handle is retired below rather than left
-            // naming nothing; one refused before anything was sent is still
-            // waiting, and keeps it
+            // a referral answered is spent and its handle retired below; one refused before
+            // anything was sent keeps it
             let referral = state.agent.referral_waiting(id);
             let mut accept = || -> Result<SipralHandle, Fail> {
             let (destination, forks) = unsafe { destination_and_forks(state, &config) }?;
@@ -1959,11 +1606,8 @@ entry! {
                     state.user_agent.is_some(),
                 )
             }?;
-            // taken once the configuration has been read whole, since a
-            // relay taken is the socket's no longer, and before the headers
-            // below borrow the stack's own User-Agent, since taking one is a
-            // change to the stack: a transfer refused for its configuration
-            // is still there to take, and so is the relay
+            // taken after the configuration is read and before the headers borrow the stack's
+            // User-Agent, so a refused transfer keeps both the transfer and the relay
             let base = state.agent.call_account(id).map_or_else(
                 || state.engine.catalog().clone(),
                 |account| state.engine.account_catalog(account),
@@ -1988,9 +1632,7 @@ entry! {
             };
             let placed = if let (Some(local), Some((catalog, outside))) = (media, outside) {
                 let placed = match call_media(state, &base, catalog, outside, text) {
-                    // the stack's own catalogue, untouched: this is what
-                    // `srtp` and `codecs` both unspecified on the call have
-                    // to mean
+                    // the stack's own catalogue, untouched
                     None => state
                         .engine
                         .accept_transfer(&mut state.agent, id, local, extra, now),
@@ -2003,9 +1645,7 @@ entry! {
                         now,
                     ),
                 };
-                // a transfer the user agent refused — a `Replaces` among the
-                // headers, say — hands the socket's relay back for the one
-                // taken after
+                // a refused transfer hands the socket's relay back
                 crate::nat::Nat::take_back(state, now);
                 let placed = placed.map_err(|error| media_failed(&error))?;
                 crate::nat::Nat::spent(state, local, now);
@@ -2045,25 +1685,18 @@ entry! {
 }
 
 entry! {
-    /// Take a transfer that was asked for inside `call` with a call the
-    /// application placed itself, `placed`, and report that call's progress
-    /// to the far end as though the REFER had placed it (ABI 1.2).
+    /// Take a transfer asked for inside `call` with a call the application placed itself,
+    /// `placed`, and report that call's progress to the far end as if the REFER had placed it
+    /// (ABI 1.2).
     ///
-    /// For an application that reaches the target its own way — a bridge
-    /// that calls it on a line of its own and joins the two calls — rather
-    /// than having `sipral_call_accept_transfer` send an INVITE with the
-    /// REFER's `Replaces` and `Referred-By`. The REFER is answered 202 (RFC
-    /// 3515 §2.4.2), and from then on `placed` reports to it as a call the
-    /// stack placed for it would: a NOTIFY carrying each provisional status
-    /// (§2.4.5), and its final status ending the subscription (§2.4.7). A
-    /// `placed` already up is reported with a 200 at once. `call` stays as
-    /// it is: ending it once the transfer has worked is the application's.
+    /// For an application that reaches the target its own way, such as a bridge. The REFER is
+    /// answered 202 (RFC 3515 §2.4.2); `placed` then reports each provisional status in a
+    /// NOTIFY (§2.4.5), and its final status ends the subscription (§2.4.7). A `placed` already
+    /// up is reported with a 200 at once. Ending `call` stays the application's.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` when nothing is waiting to be taken on
-    /// `call` — a referral's handle (`SIPRAL_EVENT_KIND_REFERRAL`) among
-    /// them, which `sipral_call_accept_transfer` takes — or when `placed` is
-    /// `call`, is over, or already reports to another REFER. Everything is
-    /// checked before the REFER is answered, so a refusal leaves it waiting.
+    /// `SIPRAL_STATUS_WRONG_STATE` when nothing waits on `call` (a referral's handle included),
+    /// or `placed` is `call`, is over, or already reports to another REFER. A refusal leaves the
+    /// REFER waiting.
     ///
     /// # Safety
     ///
@@ -2107,10 +1740,8 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let status = status_code(code)?;
-            // RFC 3515 §2.4.2 allows "any appropriate 4xx-6xx class response"
-            // here, and a 3xx redirects; anything under 300 would tell the
-            // far end the REFER was taken, or is being worked on, when it is
-            // being refused
+            // RFC 3515 §2.4.2 allows "any appropriate 4xx-6xx class response", and a 3xx
+            // redirects; under 300 would say the REFER was taken
             if status.get() < 300 {
                 return Err(fail(
                     SipralStatus::InvalidArgument,
@@ -2134,11 +1765,9 @@ entry! {
 entry! {
     /// Where a call is, as a `SipralCallState`.
     ///
-    /// A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
-    /// poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
-    /// `SIPRAL_STATUS_STALE_HANDLE` after that. A referral's handle
-    /// (`SIPRAL_EVENT_KIND_REFERRAL`) is `SIPRAL_STATUS_WRONG_STATE`: it
-    /// names a request, and there is no call yet to be anywhere.
+    /// A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the poll delivering
+    /// `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, then `SIPRAL_STATUS_STALE_HANDLE`. A
+    /// referral's handle is `SIPRAL_STATUS_WRONG_STATE`: there is no call yet.
     ///
     /// # Safety
     ///
@@ -2158,8 +1787,7 @@ entry! {
                 ));
             }
             let where_it_is = state.agent.call_state(id).map_or(
-                // the handle is still ours and the layer below has let the
-                // call go, which is what being over looks like from here
+                // the layer below let the call go: that is what over looks like here
                 SipralCallState::Terminated,
                 |state| call_state(Some(state)),
             );
@@ -2171,14 +1799,12 @@ entry! {
 }
 
 entry! {
-    /// Which way a call is held: `out_here` is set when this end asked the far
-    /// end to stop sending, `out_there` when the far end asked this one.
-    /// Either may be null.
+    /// Which way a call is held: `out_here` when this end asked the far end to stop sending,
+    /// `out_there` when the far end asked. Either may be null.
     ///
     /// # Safety
     ///
-    /// `out_here` and `out_there` must each be null or point at one
-    /// `uint32_t`.
+    /// `out_here` and `out_there` must each be null or point at one `uint32_t`.
     fn sipral_call_hold_state(
         stack: SipralHandle,
         call: SipralHandle,
@@ -2237,15 +1863,13 @@ pub(crate) mod tests {
     const PEER: &str = "203.0.113.5:5060";
     const TARGET: &str = "sip:bob@example.com";
 
-    /// Where a managed call receives its media, which is the application's
-    /// socket and therefore the application's to name.
+    /// Where a managed call receives its media (the application's socket).
     pub(crate) const MEDIA: &str = "192.0.2.10:40000";
 
     /// Where the far end receives its own, as the answers below say.
     pub(crate) const PEER_MEDIA: &str = "203.0.113.5:41000";
 
-    /// What a media test offers, so that the answer it writes has one format to
-    /// agree with.
+    /// What a media test offers, so the answer has one format to agree with.
     const ONE_CODEC: &str = "PCMU";
 
     const OFFER: &[u8] = b"v=0\r\n\
@@ -2266,9 +1890,8 @@ m=audio 41000 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=sendrecv\r\n";
 
-    /// A re-offer that changes the format list, which is what the user agent
-    /// has no policy of its own for: a change that keeps the same media is one
-    /// it answers itself, and only a different one reaches the layer above.
+    /// A re-offer that changes the format list: a change keeping the same media is answered by
+    /// the user agent itself and never reaches the layer above.
     pub(crate) const REOFFERED: &[u8] = b"v=0\r\n\
 o=bob 1 2 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -2279,8 +1902,7 @@ a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n\
 a=sendrecv\r\n";
 
-    /// An answer naming a format nobody offered, which happens and is better
-    /// said than played as noise.
+    /// An answer naming a format nobody offered.
     pub(crate) const ALAW_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -2425,9 +2047,7 @@ a=recvonly\r\n";
         }
     }
 
-    /// What `sipral_call_accept_transfer` reads: everything `call_config`
-    /// does except `target`, which is not this call's to give — the REFER
-    /// already named it.
+    /// What `sipral_call_accept_transfer` reads: `call_config` without `target`.
     pub(crate) fn transfer_config() -> SipralCallConfig {
         SipralCallConfig {
             target: ptr::null(),
@@ -2445,9 +2065,7 @@ a=recvonly\r\n";
         }
     }
 
-    /// What `sipral_call_ring_media` reads: `media_address` and, when asked,
-    /// `srtp` — every other member zeroed, since a call this old already has
-    /// them.
+    /// What `sipral_call_ring_media` reads: `media_address` and, when asked, `srtp`.
     pub(crate) fn ring_media_config() -> SipralCallConfig {
         let (media_address, media_address_len) = as_text(MEDIA);
         SipralCallConfig {
@@ -2487,8 +2105,7 @@ a=recvonly\r\n";
         account
     }
 
-    /// The same, presenting itself with a display name, which is what a call
-    /// it places writes in `From`.
+    /// The same, with a display name, which a call it places writes in `From`.
     fn account_named(handle: SipralHandle, display_name: &str) -> SipralHandle {
         let mut config = account_config();
         (config.display_name, config.display_name_len) = as_text(display_name);
@@ -2505,8 +2122,7 @@ a=recvonly\r\n";
         (handle, account_on(handle))
     }
 
-    /// The same, offering one codec, so that a test writes an answer of one
-    /// line rather than conducting a negotiation of its own.
+    /// The same, offering one codec, so a test answers in one line.
     pub(crate) fn media_line(
         observed: &mut Observed,
         tune: impl FnOnce(&mut crate::stack::SipralStackConfig),
@@ -2541,9 +2157,8 @@ a=recvonly\r\n";
         state
     }
 
-    /// What the stack wanted written, drained the way
-    /// `sipral_stack_poll_transmit` drains it: whatever is held back for want of
-    /// a buffer comes first, then the queue behind it.
+    /// What the stack wanted written, drained as `sipral_stack_poll_transmit` drains it:
+    /// what is held back for want of a buffer first.
     pub(crate) fn sent(stack: SipralHandle) -> Vec<Vec<u8>> {
         with_stack(stack, |state| {
             let mut all = Vec::new();
@@ -2585,12 +2200,8 @@ a=recvonly\r\n";
         .into_owned()
     }
 
-    /// The 200 the far end answers an INVITE with: the same dialog, a tag of
-    /// its own, somewhere to send the ACK, and the answer to the offer.
-    ///
-    /// The tag is added only to the first one. A re-INVITE goes out inside a
-    /// dialog whose `To` already carries it, and a second tag would name a
-    /// dialog nobody is in.
+    /// The far end's 200 to an INVITE, with the answer. The tag is added only when `first`:
+    /// a re-INVITE's `To` already carries it.
     pub(crate) fn accepted(request: &[u8], body: &[u8], first: bool) -> Vec<u8> {
         let mut out = b"SIP/2.0 200 OK\r\n".to_vec();
         for (name, value) in [
@@ -2618,9 +2229,8 @@ a=recvonly\r\n";
         out
     }
 
-    /// The far end's final answer to a non-INVITE request this end sent
-    /// inside the dialog `request` opened or travelled in — a BYE, a REFER,
-    /// or an INFO.
+    /// The far end's final answer to a non-INVITE request (BYE, REFER, INFO) this end sent
+    /// in the dialog `request` opened or travelled in.
     pub(crate) fn answered_with(request: &[u8], status: u32, reason: &str) -> Vec<u8> {
         let mut out = format!("SIP/2.0 {status} {reason}\r\n").into_bytes();
         for (name, value) in [
@@ -2639,13 +2249,9 @@ a=recvonly\r\n";
         out
     }
 
-    /// An INFO the far end sends inside a dialog this end placed the INVITE
-    /// for, carrying a body of the caller's own content type — `accepted`'s
-    /// only body is `application/sdp`, which the DTMF bodies never are.
-    ///
-    /// `branch` and `cseq` are the caller's rather than fixed, so a second
-    /// INFO in the same test does not read back as a retransmission of the
-    /// first.
+    /// An INFO from the far end in a dialog this end placed, with a body of the caller's
+    /// content type. `branch` and `cseq` are the caller's, so a second INFO is not read as a
+    /// retransmission.
     fn incoming_info(
         invite: &[u8],
         branch: &str,
@@ -2727,8 +2333,7 @@ a=recvonly\r\n";
         .expect("the stack is live");
     }
 
-    /// A call this end placed and the far end answered, described by the
-    /// application and carrying no audio this stack knows about.
+    /// A call this end placed and the far end answered, with the application's description.
     pub(crate) fn connected(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let (handle, account) = line(observed);
         let (status, call) = place(handle, account, &call_config(), 1_000);
@@ -2743,14 +2348,12 @@ a=recvonly\r\n";
             SipralCallState::Confirmed as u32,
             "the call did not come up"
         );
-        // the ACK the answer produced, taken the way a caller takes it; what is
-        // left waiting here would be the next test's "one message out"
+        // take the ACK, or the next test sees it as its one message
         let _ = sent(handle);
         (handle, call)
     }
 
-    /// The same, with the session described by this stack and audio running on
-    /// it: what every media test starts from.
+    /// The same, with audio run by this stack: what every media test starts from.
     pub(crate) fn media_call(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         media_call_tuned(observed, |_| {})
     }
@@ -2764,9 +2367,7 @@ a=recvonly\r\n";
         up(observed, handle, account, ANSWER)
     }
 
-    /// The same, offering the codecs named and answered with the line given,
-    /// for the test that needs a call on something other than the mu-law
-    /// every other fixture here negotiates.
+    /// The same, offering the codecs named and answered with the line given.
     pub(crate) fn media_call_offering(
         observed: &mut Observed,
         codecs: &'static str,
@@ -2780,9 +2381,7 @@ a=recvonly\r\n";
         up(observed, handle, account, answer)
     }
 
-    /// What the far end answers a second call on the same line with: the
-    /// same codec, on a port of its own, so the second call's media is never
-    /// mistaken for the first's.
+    /// The far end's answer to a second call on the line: same codec, its own port.
     pub(crate) const SECOND_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
@@ -2795,16 +2394,8 @@ a=sendrecv\r\n";
     /// Where the far end of [`SECOND_ANSWER`] receives its own media.
     pub(crate) const SECOND_PEER_MEDIA: &str = "203.0.113.5:42000";
 
-    /// A second call, placed and answered on the same stack and the same
-    /// account as `media_call`'s — a call this ABI can be asked to join to
-    /// another. `media_call` places the first, and this places the second on
-    /// its line rather than minting a stack of its own, since a join is a
-    /// fact about two calls that share a stack.
-    ///
-    /// Not `up` again: `up` places and answers at fixed timestamps, which is
-    /// exactly right for the one call every other fixture here places and
-    /// wrong for a second one on a stack whose clock has already moved past
-    /// them.
+    /// A second call, placed and answered on `media_call`'s stack and account, for join
+    /// tests. Not `up`, whose fixed timestamps are already behind this stack's clock.
     pub(crate) fn second_media_call(
         observed: &Observed,
         handle: SipralHandle,
@@ -2829,8 +2420,7 @@ a=sendrecv\r\n";
         call
     }
 
-    /// Two calls on one stack, both with media running — what a join test
-    /// starts from.
+    /// Two calls on one stack, both with media running, for join tests.
     pub(crate) fn media_call_pair(
         observed: &mut Observed,
     ) -> (SipralHandle, SipralHandle, SipralHandle) {
@@ -2840,8 +2430,7 @@ a=sendrecv\r\n";
         (handle, call_a, call_b)
     }
 
-    /// One call placed on a line that is ready, answered with `answer`, and
-    /// up with audio on it.
+    /// One call placed on a ready line, answered with `answer`, up with audio.
     pub(crate) fn up(
         observed: &Observed,
         handle: SipralHandle,
@@ -2867,8 +2456,7 @@ a=sendrecv\r\n";
         (handle, call)
     }
 
-    /// A managed call whose far end answered with a format nobody offered, so
-    /// that the negotiation fails while the call stands.
+    /// A managed call answered with a format nobody offered: negotiation fails, call stands.
     pub(crate) fn media_call_refused(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let (handle, account) = media_line(observed, |_| {});
         let (status, call) = place(handle, account, &managed_config(), 1_000);
@@ -2879,8 +2467,7 @@ a=sendrecv\r\n";
         (handle, call)
     }
 
-    /// The ACK the far end sends for a 200 it was answered with, which is what
-    /// finally confirms a call that came in.
+    /// The far end's ACK for a 200, which confirms a call that came in.
     pub(crate) fn acknowledged(response: &[u8]) -> Vec<u8> {
         let mut out = format!("ACK {CONTACT} SIP/2.0\r\n").into_bytes();
         for (name, value) in [
@@ -2904,10 +2491,8 @@ a=sendrecv\r\n";
         out
     }
 
-    /// A re-INVITE from the far end, inside the dialog the INVITE opened.
-    ///
-    /// The dialog seen from over there: what we put in `From` is its `To`, and
-    /// the tag it answered with is its own.
+    /// A re-INVITE from the far end in the dialog the INVITE opened: our `From` is its `To`,
+    /// and its answer tag is its own.
     pub(crate) fn reoffer(invite: &[u8], body: &[u8]) -> Vec<u8> {
         let mut from = field(invite, HeaderName::To);
         from.extend_from_slice(b";tag=farend");
@@ -2966,9 +2551,8 @@ Content-Type: application/sdp\r\n"
         out
     }
 
-    /// The same, with a `From` whose quoted display name escapes a quote of
-    /// its own, and a `To` whose URI carries a parameter that belongs to the
-    /// address rather than to the header.
+    /// The same, with a `From` display name escaping a quote, and a `To` URI carrying a
+    /// parameter of the address.
     fn invitation_with_identity() -> Vec<u8> {
         let mut out = b"INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-call-in-id\r\n\
@@ -2985,8 +2569,7 @@ Content-Type: application/sdp\r\n"
         out
     }
 
-    /// The same message with an extra header field, inserted right after the
-    /// start line.
+    /// The same message with an extra header field after the start line.
     pub(crate) fn insert_header(message: &[u8], extra: &str) -> Vec<u8> {
         let head = message
             .iter()
@@ -3020,9 +2603,7 @@ Content-Length: 0\r\n\r\n"
         insert_header(&invitation(), &format!("{list}: 100rel\r\n"))
     }
 
-    /// The CANCEL the far end sends for [`invitation`] before it is answered:
-    /// the same Request-URI, `Via`, `From`, `To`, `Call-ID` and sequence
-    /// number (RFC 3261 §9.1).
+    /// The far end's CANCEL for [`invitation`] before it is answered (RFC 3261 §9.1).
     fn cancellation() -> Vec<u8> {
         b"CANCEL sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-call-in\r\n\
@@ -3035,9 +2616,8 @@ Content-Length: 0\r\n\r\n"
             .to_vec()
     }
 
-    /// A request the far end sends inside the dialog this end's 200 opened:
-    /// `From` and `To` exactly as that 200 wrote them, since the far end is the
-    /// one that sent the INVITE, and `more` written in before the body.
+    /// A request from the far end in the dialog this end's 200 opened, `From` and `To` as
+    /// that 200 wrote them, and `more` before the body.
     fn from_far_end(ours: &[u8], method: &str, branch: &str, cseq: u32, more: &str) -> Vec<u8> {
         let mut out = format!(
             "{method} sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
@@ -3152,9 +2732,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The map this comes from is forgotten in the same `drain` that
-    /// translates the call's own ending, so this is also the test that the
-    /// bytes a delivery already queued do not go with it.
+    /// The map is forgotten in the same `drain` that translates the call's end, so this also
+    /// checks that bytes a delivery already queued are not dropped with it.
     #[test]
     fn an_incoming_calls_identity_survives_into_its_own_ended_event() {
         let mut observed = Observed::default();
@@ -3183,9 +2762,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A caller who gives up at once: the INVITE and its CANCEL both arrive
-    /// before the application polls, so the layer below has already let the
-    /// call go when the event announcing it is translated.
+    /// A caller who gives up at once: INVITE and CANCEL arrive before the poll, so the call
+    /// is already gone when its event is translated.
     #[test]
     fn a_call_cancelled_before_the_poll_still_names_who_was_calling() {
         let mut observed = Observed::default();
@@ -3208,9 +2786,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Answer an incoming call and have the far end REFER it to carol, so
-    /// that `sipral_call_accept_transfer` has something to take. Returns the
-    /// call the REFER arrived on.
+    /// Answer an incoming call and have the far end REFER it to carol. Returns the call the
+    /// REFER arrived on.
     pub(crate) fn ready_for_a_transfer(
         observed: &mut Observed,
         handle: SipralHandle,
@@ -3267,9 +2844,7 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         (status, placed, invite)
     }
 
-    /// The third way a call is placed through this ABI, beside
-    /// `sipral_call_place` and `sipral_call_consult`: the one a REFER asked
-    /// for, taken with `sipral_call_accept_transfer`.
+    /// The third way to place a call: the one a REFER asked for.
     #[test]
     fn a_call_a_transfer_placed_names_its_own_from_and_to_and_call_id() {
         let mut observed = Observed::default();
@@ -3293,10 +2868,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.4.4: accepted with `media_address`, the transfer's INVITE carries an
-    /// offer this stack wrote from its own codecs, and audio comes up once
-    /// carol answers and the 2xx is acknowledged — the same as a call placed
-    /// with `sipral_call_place`.
+    /// 8.4.4: accepted with `media_address`, the transfer's INVITE carries this stack's offer
+    /// and audio comes up once carol answers, as with `sipral_call_place`.
     #[test]
     fn a_transfer_accepted_with_media_address_places_an_invite_this_stack_wrote_and_media_starts_when_it_is_up()
      {
@@ -3323,9 +2896,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.4.4: accepted with `sdp`, the transfer's INVITE carries exactly that
-    /// description, and this stack runs no audio for it — the description is
-    /// the application's, the same as a call placed with `sipral_call_place`.
+    /// 8.4.4: accepted with `sdp`, the INVITE carries exactly that description and no audio
+    /// is run here.
     #[test]
     fn a_transfer_accepted_with_sdp_carries_exactly_that_description_and_the_stack_runs_no_audio() {
         let mut observed = Observed::default();
@@ -3409,10 +2981,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.4.4: `Replaces` on the INVITE an accepted transfer places is the
-    /// REFER's to give (RFC 3891 §3 has a second one refused with a 400), so
-    /// one in `config.headers` is refused, nothing is sent, and the transfer
-    /// is still there to take.
+    /// 8.4.4: `Replaces` is the REFER's to give (RFC 3891 §3), so one in `config.headers` is
+    /// refused, nothing is sent, and the transfer is still there to take.
     #[test]
     fn a_replaces_in_the_headers_of_an_accepted_transfer_is_invalid_argument_and_places_nothing() {
         let mut observed = Observed::default();
@@ -3472,15 +3042,11 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The rule that an offerless INVITE gets its answer in the ACK is
-    /// RFC 3261 §13.2.1 (Creating the Initial INVITE); §14.1 is UAC behavior
-    /// for a re-INVITE that modifies a session already up, a different rule
-    /// this same file cites correctly elsewhere. The needle is assembled at
-    /// runtime so this test does not just match its own assertion.
+    /// Offerless INVITE answered in the ACK is RFC 3261 §13.2.1, not §14.1. The needle is
+    /// assembled at runtime so the test does not match itself.
     #[test]
     fn the_module_doc_cites_the_section_that_puts_the_answer_in_the_ack() {
-        // the needle spans a line break, and a Windows checkout puts a CR in
-        // front of it
+        // the needle spans a line break; Windows checkouts add a CR
         let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
@@ -3630,11 +3196,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         payload.get(12..).unwrap_or_default().to_vec()
     }
 
-    /// What a party this end holds is sent in application mode: silence by
-    /// default, since the frames handed over may be a microphone's, and
-    /// when `held_audio` asks for it; the frames the application hands
-    /// over — hold music, an announcement, a voice agent's speech — when it
-    /// asks for those by name. Mu-law silence is 0xFF in every byte.
+    /// A held party gets silence by default (mu-law 0xFF), since the frames may be a
+    /// microphone's, and the application's frames when `held_audio` asks for them.
     #[test]
     fn a_held_party_hears_silence_in_application_mode_unless_the_application_is_named() {
         let silent =
@@ -3661,15 +3224,11 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         );
     }
 
-    /// `HELD_ANSWER` carries `a=recvonly`, which per RFC 4566 means the party
-    /// that wrote it — the far end — will receive and not send. The doc
-    /// comment above the constant had the two swapped. The needle is
-    /// assembled at runtime so this test does not just match its own
-    /// assertion.
+    /// `HELD_ANSWER` carries `a=recvonly`: the far end receives and does not send
+    /// (RFC 4566). The needle is assembled at runtime so the test does not match itself.
     #[test]
     fn the_held_answer_doc_matches_what_recvonly_means() {
-        // the needle spans a line break, and a Windows checkout puts a CR in
-        // front of it
+        // the needle spans a line break; Windows checkouts add a CR
         let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
@@ -3705,10 +3264,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11-bis(b): over UDP, overlapping non-INVITE transactions can
-    /// arrive in any order, so a string of digits goes out one INFO at a
-    /// time — the second only after the first's final answer, and so on —
-    /// rather than all at once.
+    /// 8.3.11-bis(b): UDP may reorder overlapping non-INVITE transactions, so each INFO digit
+    /// waits for the previous one's final answer.
     #[test]
     fn a_string_of_digits_goes_out_one_info_at_a_time() {
         let mut observed = Observed::default();
@@ -3740,8 +3297,7 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
             );
             let text = String::from_utf8_lossy(&written).into_owned();
             assert!(text.contains(expected), "{text}");
-            // 8.3.11-bis(d): the same hundred milliseconds every form of
-            // DTMF defaults to
+            // 8.3.11-bis(d): the 100 ms every form defaults to
             assert!(text.contains("Duration=100"), "{text}");
             deliver(handle, &answered_with(&written, 200, "OK"), 2_100);
         }
@@ -3752,9 +3308,8 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A non-2xx anywhere in the middle of the string ends the sequence
-    /// there: the digits still waiting are discarded rather than sent out of
-    /// order.
+    /// A non-2xx mid-string ends the sequence; the waiting digits are discarded, not sent out
+    /// of order.
     #[test]
     fn a_refusal_mid_string_means_the_rest_is_never_sent() {
         let mut observed = Observed::default();
@@ -3822,12 +3377,9 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         let mut observed = Observed::default();
         let (handle, _) = line(&mut observed);
         poll(handle, 1_000);
-        // an OPTIONS is what a proxy pings a phone with, and §11.2 makes
-        // answering it a MUST. It used to arrive here as one more unclaimed
-        // event that nothing replied to, and an Asterisk that got no reply
-        // marked the contact unreachable and refused every inbound call to
-        // it with 503. There is no decision in the answer, so the stack
-        // gives it and the caller never hears about it
+        // §11.2 makes answering OPTIONS a MUST, and a proxy pings with it: Asterisk marks a
+        // silent contact unreachable and refuses its inbound calls with 503. The stack answers
+        // and the caller never hears of it
         let ping = b"OPTIONS sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-are-you-there\r\n\
 Max-Forwards: 70\r\n\
@@ -3838,8 +3390,7 @@ CSeq: 1 OPTIONS\r\n\
 Content-Length: 0\r\n\r\n";
         deliver(handle, ping, 1_100);
 
-        // before the poll, which drains the transmit queue on the caller's
-        // behalf and would carry the answer away with it
+        // before the poll, which would drain the answer away
         let answers: Vec<String> = sent(handle)
             .iter()
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
@@ -3849,8 +3400,7 @@ Content-Length: 0\r\n\r\n";
             panic!("expected exactly one answer to the OPTIONS, got {answers:?}");
         };
         assert!(answer.starts_with("SIP/2.0 200 "), "{answer}");
-        // §11.2: built as though the request had been an INVITE, so it says
-        // what this end can do rather than only that it is alive
+        // §11.2: built as for an INVITE, so it says what this end can do
         assert!(answer.contains("Allow: "), "{answer}");
         assert!(answer.contains("OPTIONS"), "{answer}");
         assert!(answer.contains("Accept: application/sdp"), "{answer}");
@@ -3870,11 +3420,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A form this ABI has no number for is refused rather than quietly taken
-    /// as the default: an application that meant the media and passed a
-    /// mistyped constant would otherwise send in the dialog and never know.
-    /// Zero is the case that matters most, because it is what a caller who
-    /// filled the field in with nothing leaves behind.
+    /// A form with no number is refused rather than taken as the default, else a mistyped
+    /// constant would silently send in the dialog. Zero, an unfilled field, most of all.
     #[test]
     fn a_way_of_sending_a_digit_that_does_not_exist_is_refused() {
         assert_eq!(dtmf_form(1).ok(), Some(SipralDtmf::Rtp));
@@ -3886,8 +3433,7 @@ Content-Length: 0\r\n\r\n";
         }
     }
 
-    /// The other INFO body: the whole of it is the key. A switch that reads
-    /// this one and not the other is the reason the form is chosen per send.
+    /// The other INFO body, whose whole content is the key.
     #[test]
     fn the_plain_info_body_is_the_key_and_nothing_else() {
         let mut observed = Observed::default();
@@ -3945,9 +3491,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A call whose far end negotiated no telephone event takes a digit in
-    /// its audio, from the media form as well as the in-band one: the digits
-    /// queue, sound over the frames that follow, and are done.
+    /// With no negotiated telephone event, a digit goes into the audio from the media form as
+    /// well as the in-band one: the digits queue, sound, and are done.
     #[test]
     fn a_call_with_no_named_events_takes_a_digit_in_its_audio() {
         let mut observed = Observed::default();
@@ -3988,10 +3533,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11(c): a tone length refused by one form is refused by every one,
-    /// with the same status and the same words, and nothing goes out. RFC
-    /// 4733 used to take a floor from the media that the two INFO forms did
-    /// not have, so 20 ms went out as an INFO and never as an event.
+    /// 8.3.11(c): a tone length refused by one form is refused by every one, with the same
+    /// status and words, and nothing goes out.
     #[test]
     fn a_tone_length_one_form_refuses_is_refused_by_every_form_alike() {
         let mut observed = Observed::default();
@@ -4020,9 +3563,7 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11(a): a refusal of the INFO reaches the application named with
-    /// the digit and the status, not swallowed the way a BYE's or a REFER's
-    /// challenge-free answer is.
+    /// 8.3.11(a): a refused INFO reaches the application with the digit and the status.
     #[test]
     fn a_refused_info_reaches_the_application_as_dtmf_sent() {
         let mut observed = Observed::default();
@@ -4061,10 +3602,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11(b): an INFO the far end sends is read against both content
-    /// types and reported as the same `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` an
-    /// RFC 4733 event is, `SIPRAL_DIGIT_SOURCE_INFO` naming which one this
-    /// was.
+    /// 8.3.11(b): an incoming INFO of either content type is reported as
+    /// `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` with `SIPRAL_DIGIT_SOURCE_INFO`.
     #[test]
     fn an_incoming_info_of_either_content_type_is_a_digit_received_from_info() {
         let mut observed = Observed::default();
@@ -4121,8 +3660,7 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11-bis(c): a peer that held a key for no time at all said so, and
-    /// this used to be reported as the hundred-millisecond default instead.
+    /// 8.3.11-bis(c): a key held for no time is reported as zero, not the 100 ms default.
     #[test]
     fn a_received_duration_of_zero_is_reported_as_zero() {
         let mut observed = Observed::default();
@@ -4158,12 +3696,9 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// 8.3.11-bis(a): only `application/dtmf-relay` and `application/dtmf`
-    /// are read as a digit. An INFO carrying anything else — RFC 5168's
-    /// media control here, and one with no body at all — is answered by the
-    /// stack by RFC 6086 §4.2.2, because an application on this ABI has no
-    /// way to answer one: counted as unclaimed and left, it was retransmitted
-    /// for thirty-two seconds and then, by RFC 3261 §12.2.1.2, ended the call.
+    /// 8.3.11-bis(a): only `application/dtmf-relay` and `application/dtmf` are digits. Any
+    /// other INFO (RFC 5168 media control, or no body) is answered by the stack (RFC 6086
+    /// §4.2.2), else it is retransmitted and ends the call (RFC 3261 §12.2.1.2).
     #[test]
     fn an_info_that_is_not_dtmf_is_answered_by_the_stack() {
         let mut observed = Observed::default();
@@ -4232,19 +3767,12 @@ Content-Length: 0\r\n\r\n";
         }
     }
 
-    /// RFC 4733's section 3 has only 3.1, 3.2 and 3.3; the sixteen DTMF event
-    /// codes are Table 3 in 3.2. A doc comment pointing at a section that
-    /// does not exist is a defect the generator copies into the public
-    /// header verbatim, so it is checked here rather than left to be noticed
-    /// by eye. `sipral_ua::dtmf`'s own test does the same for the `KEYPAD`
-    /// constant that used to live in this file.
-    ///
-    /// The needle is assembled at runtime, not written as one literal, so
-    /// this test inspecting its own file does not just match itself.
+    /// RFC 4733 §3 has only 3.1-3.3; the DTMF events are Table 3 in 3.2. The generator copies
+    /// this doc into the public header, so the citation is checked here. The needle is
+    /// assembled at runtime so the test does not match itself.
     #[test]
     fn the_send_dtmf_doc_cites_a_section_rfc_4733_actually_has() {
-        // the needle spans a line break, and a Windows checkout puts a CR in
-        // front of it
+        // the needle spans a line break; Windows checkouts add a CR
         let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
@@ -4280,8 +3808,7 @@ Content-Length: 0\r\n\r\n";
         );
         let bye = one(handle);
         assert!(start_line(&bye).starts_with("BYE"));
-        // the BYE is out and the dialog is gone with it; what is left is the
-        // event that says so, and the handle lives until it is delivered
+        // the BYE is out and the dialog gone; the handle lives until the event is delivered
         assert_eq!(state_of(handle, call), SipralCallState::Terminated as u32);
 
         poll(handle, 2_000);
@@ -4459,8 +3986,7 @@ Content-Length: 0\r\n\r\n";
         assert_ne!(second, first);
         assert_eq!(state_of(handle, second), SipralCallState::Calling as u32);
         assert!(start_line(&one(handle)).starts_with("INVITE"));
-        // handing the first call to a leg that is still ringing is refused:
-        // there is no dialog to name in a Replaces
+        // a still-ringing leg has no dialog to name in a Replaces
         assert_eq!(
             unsafe { sipral_call_transfer_to(handle, first, second, 2_100) },
             SipralStatus::WrongState
@@ -4485,10 +4011,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Every change the far end offers carries an offer, and RFC 3264 §5 has
-    /// an offer answered: accepting one with no description used to send a
-    /// 2xx with no body. It is refused as an argument instead, and the
-    /// request is still there to be answered properly.
+    /// Every offered change carries an offer, and RFC 3264 §5 has it answered: accepting with
+    /// no description is refused, and the request still waits.
     #[test]
     fn a_change_the_far_end_offered_is_accepted_only_with_an_answer() {
         let mut observed = Observed::default();
@@ -4539,10 +4063,8 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_call_handle_from_one_stack_does_not_open_another() {
-        // tags of its own, so both stacks start at the first generation the way
-        // every stack did before a handle carried one; tags from the process's
-        // own set come back carrying whatever other tests minted, and can refuse
-        // the handle for a reason that has nothing to do with its stack
+        // tags of its own, so both stacks start at the first generation; the process's shared
+        // set carries other tests' tags and could refuse the handle for unrelated reasons
         static TAGS: StackTags = StackTags::new();
         let mut first_observed = Observed::default();
         let mut second_observed = Observed::default();
@@ -4555,8 +4077,7 @@ Content-Length: 0\r\n\r\n";
         let (status, own) = place(second, second_account, &call_config(), 1_000);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let _ = one(second);
-        // both stacks number their calls from the same first slot, so the two
-        // handles differ in nothing but the stack they carry
+        // both stacks number calls from the same slot, so only the stack differs
         assert_ne!(foreign, own);
         assert_eq!(
             unsafe { sipral_call_hangup(second, foreign, 1_000) },
@@ -4577,9 +4098,8 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(second) }, SipralStatus::Ok);
     }
 
-    /// The tag is given back when a stack goes and taken by the next one, so
-    /// the handles an application kept from the first stack carry the tag the
-    /// second one mints with. They still name nothing there.
+    /// A stack's tag is reused by the next one, so old handles carry the new stack's tag.
+    /// They still name nothing there.
     #[test]
     fn a_handle_kept_from_a_destroyed_stack_names_nothing_on_the_stack_that_took_its_tag() {
         static TAGS: StackTags = StackTags::new();
@@ -4684,8 +4204,7 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A call has one description of its session. Two ways of saying what it
-    /// is are one too many, and the answer says which two.
+    /// A call has one description of its session; setting two is refused, naming both.
     #[test]
     fn a_call_described_twice_is_refused_rather_than_one_of_them_winning() {
         let mut observed = Observed::default();
@@ -4714,8 +4233,7 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The other half of a managed call: one that came in, answered with a
-    /// description this stack writes.
+    /// The other half of a managed call: an incoming call answered with this stack's description.
     #[test]
     fn a_call_that_comes_in_can_be_answered_with_media_of_this_stacks_own() {
         let mut observed = Observed::default();
@@ -4747,13 +4265,9 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A change the far end offers on a managed call is answered by the stack,
-    /// from the same codec order, before the poll that saw it returns. So it is
-    /// not handed to the application, and the two entry points that would
-    /// answer it a second time say so. This particular re-offer only adds a
-    /// format the catalogue does not carry, so the answer keeps running the
-    /// codec and the address it already had, and `MEDIA_CHANGED` — which is
-    /// for the far end's audio actually moving — is silent about it.
+    /// A re-offer on a managed call is answered by the stack before the poll returns, so it
+    /// never reaches the application and the entry points that would answer it say so. This
+    /// one only adds an unknown format, so nothing moves and `MEDIA_CHANGED` stays silent.
     #[test]
     fn a_stack_that_describes_a_call_answers_its_own_re_offers() {
         let mut observed = Observed::default();
@@ -4776,11 +4290,8 @@ Content-Length: 0\r\n\r\n";
             !sent(handle).is_empty(),
             "nothing went out in answer to the re-offer"
         );
-        // the re-offer only adds a format this stack's own catalogue does not
-        // carry, so the answer still runs PCMU at the address it already had:
-        // nothing about the session actually moved, and there is nothing to
-        // tell the application that a hold, a resume or a real codec change
-        // would be
+        // the re-offer only adds a format this stack does not carry, so PCMU runs at the same
+        // address: nothing moved, nothing to report
         assert!(
             !observed.kinds().contains(&SipralEventKind::MediaChanged),
             "a re-offer that changed nothing the running session uses should \
@@ -4932,10 +4443,8 @@ a=sendrecv\r\n";
         }
     }
 
-    /// The network changes under a call placed with `media_address`: the
-    /// stack names the call, and the address handed back goes out in a
-    /// re-INVITE's `c=` and on its `m=`, with nothing else in the stream
-    /// moved.
+    /// The network changes under a managed call: the stack names the call, and the new
+    /// address goes out in a re-INVITE's `c=` and `m=`, nothing else moved.
     #[test]
     fn a_call_whose_network_changed_is_named_and_offered_at_the_new_address() {
         let mut observed = Observed::default();
@@ -4986,9 +4495,8 @@ a=sendrecv\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// What `sipral_call_media_readdress` refuses: an address that is not
-    /// one, a call whose description is the application's, and a call
-    /// already changing.
+    /// What `sipral_call_media_readdress` refuses: a bad address, an application-described
+    /// call, and a call already changing.
     #[test]
     fn moving_a_call_says_why_it_cannot() {
         let mut observed = Observed::default();
@@ -5024,8 +4532,6 @@ a=sendrecv\r\n";
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
-
-    // -- who is calling, why a call ended, and where to send it -------------
 
     /// What a carrier's INVITE says about the caller, besides its `From`.
     const ASSERTING: &str = "P-Asserted-Identity: \"Bob Jones\" <tel:+15551234567;verstat=TN-Validation-Passed>\r\n\
@@ -5146,8 +4652,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
             SipralStatus::InvalidArgument,
             "past the end"
         );
-        // a caller that brought room enough need not ask how much was needed:
-        // `out_needed` may be null here as on every other text-out call
+        // with room enough, `out_needed` may be null
         let mut buffer = [0 as c_char; 64];
         assert_eq!(
             unsafe {
@@ -5353,8 +4858,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The per-account options the Rust account had and the C ABI did not:
-    /// the session timer, and placing calls anonymously.
+    /// The per-account options the C ABI lacked: the session timer and anonymous calls.
     #[test]
     fn an_account_from_c_sets_its_session_timer_and_its_anonymity() {
         let mut observed = Observed::default();
@@ -5454,8 +4958,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let offered = String::from_utf8_lossy(&body(&reinvite)).into_owned();
         assert!(offered.contains(" RTP/AVP 8"), "{offered}");
         assert!(!offered.contains("PCMU"), "{offered}");
-        // another change while this one is on its way is the user agent's
-        // refusal, said as a state
+        // another change on its way is the user agent's refusal, as a state
         assert_eq!(
             change_codecs(handle, call, "PCMU", 1_250),
             SipralStatus::WrongState
@@ -5508,9 +5011,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A half-wired feature behind this ABI is worse than an absent one, so the
-    /// consultation leg says what it cannot do rather than taking a media
-    /// address it would then ignore.
+    /// The consultation leg refuses a media address it would ignore rather than taking it.
     #[test]
     fn a_consultation_with_media_of_this_stacks_own_is_refused_rather_than_ignored() {
         let mut observed = Observed::default();
@@ -5547,16 +5048,14 @@ Alert-Info: <urn:alert:source:external>\r\n";
             unsafe { sipral_call_hangup(handle, SIPRAL_HANDLE_NONE, 0) },
             unsafe { sipral_call_hold(handle, SIPRAL_HANDLE_NONE, 0) },
             unsafe { sipral_call_resume(handle, SIPRAL_HANDLE_NONE, 0) },
-            // a real list, because the names are read before the handle is
-            // looked up, the same as the way of sending a digit is
+            // a real list: the names are read before the handle is looked up
             change_codecs(handle, SIPRAL_HANDLE_NONE, "PCMU", 0),
             unsafe { sipral_call_reject(handle, SIPRAL_HANDLE_NONE, 486, 0) },
             unsafe {
                 sipral_call_answer(handle, SIPRAL_HANDLE_NONE, ANSWER.as_ptr(), ANSWER.len(), 0)
             },
             unsafe {
-                // a real form, because the way of sending is read before the
-                // handle is looked up, the same as a struct's size is
+                // a real form: it is read before the handle is looked up
                 sipral_call_send_dtmf(
                     handle,
                     SIPRAL_HANDLE_NONE,
@@ -5577,10 +5076,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The size is checked before either handle is even looked up: a stack
-    /// that was never created and a call config too short to be any version
-    /// of this one both fail, and the size is the one this answers with — for
-    /// a call placed on an account and for a consultation leg of a call alike.
+    /// The size is checked before either handle is looked up: with no stack and a config too
+    /// short for any version, the size is what fails, for a placed call and a consultation alike.
     #[test]
     fn a_call_config_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle() {
         let mut config = call_config();
@@ -5608,20 +5105,14 @@ Alert-Info: <urn:alert:source:external>\r\n";
         );
     }
 
-    /// The collision 8.4.17 exists to close: on the first stack of a
-    /// process, its first account, its first call and its first media handle
-    /// are all tag zero, slot zero, generation one, and every lookup here
-    /// used to tell them apart only by which table happened to be asked. A
-    /// handle of any other kind is now `SIPRAL_STATUS_INVALID_HANDLE`
-    /// wherever one kind is expected — including
-    /// `sipral_call_hangup(stack, stack, now)`, the exact call this test is
-    /// named for.
+    /// 8.4.17: the first stack's first account, call and media handle share tag, slot and
+    /// generation, so a handle of another kind is `SIPRAL_STATUS_INVALID_HANDLE` wherever one
+    /// kind is expected, `sipral_call_hangup(stack, stack, now)` included.
     #[test]
     fn a_handle_of_the_wrong_kind_is_invalid_handle_wherever_it_is_offered() {
         let mut observed = Observed::default();
         let (stack_handle, call) = media_call(&mut observed);
-        // a second account of this stack's, so a wrong-kind check can be
-        // proven without disturbing the one the call was placed on
+        // a second account, so the wrong-kind check leaves the call's account alone
         let account = account_on(stack_handle);
         let mut media = SIPRAL_HANDLE_NONE;
         assert_eq!(
@@ -5647,8 +5138,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
                 "{wrong:#018x} is not an account"
             );
         }
-        // media was expected — reached by its own handle, with no stack to
-        // resolve first, so this is the table's own kind check alone
+        // media was expected: no stack to resolve, so this is the table's own kind check
         for wrong in [stack_handle, account, call] {
             assert_eq!(
                 unsafe { sipral_media_release(wrong) },
@@ -5672,8 +5162,6 @@ Alert-Info: <urn:alert:source:external>\r\n";
         );
     }
 
-    // -- header fields -------------------------------------------------------
-
     fn header_of(name: &str, value: &str) -> crate::header::SipralHeader {
         let (name, name_len) = as_text(name);
         let (value, value_len) = as_text(value);
@@ -5685,8 +5173,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         }
     }
 
-    /// The first line of a field, read the way C reads it: through the
-    /// accessor, with the offset and the length it answers.
+    /// The first line of a field, read through the C accessor.
     fn field_through_c(message: &[u8], name: &str) -> Option<Vec<u8>> {
         let mut count = usize::MAX;
         let status = unsafe {
@@ -5725,8 +5212,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let (near, account) = line(&mut near_seen);
         let labelled = [header_of("X-Conversation-Id", "c-7")];
         let mut config = call_config();
-        // to the address of record the far end's account has, so that the call
-        // it answers belongs to a line and its 200 carries that line's Contact
+        // to the far end's address of record, so its 200 carries that line's Contact
         (config.target, config.target_len) = as_text(AOR);
         config.headers = labelled.as_ptr();
         config.headers_len = labelled.len();
@@ -5738,8 +5224,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
             Some(&b"c-7"[..])
         );
 
-        // the far end is a stack of its own, and reads the field back out of
-        // the INVITE through the accessor to echo it
+        // the far end, a stack of its own, echoes the field it reads from the INVITE
         let mut far_seen = Observed::default();
         let (far, _) = line(&mut far_seen);
         deliver(far, &invite, 1_000);
@@ -5934,11 +5419,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `SIPRAL_SRTP_REQUIRED` reaches the offer through `catalog_of` and
-    /// `with_srtp` exactly as `SIPRAL_SRTP_OFFERED` does — both write the
-    /// secure profile with a key; only a plain re-offer or a plain answer is
-    /// where the two differ, and this is not that (`docs/05-media.md`, "SRTP
-    /// through the facade").
+    /// `SIPRAL_SRTP_REQUIRED` reaches the offer exactly as `SIPRAL_SRTP_OFFERED` does; they
+    /// differ only on a plain re-offer or answer (`docs/05-media.md`, "SRTP through the facade").
     #[test]
     fn a_stack_set_to_srtp_required_offers_the_secure_profile_with_a_key() {
         let mut observed = Observed::default();
@@ -5973,9 +5455,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// This build's own built-in default (`SrtpPolicy::default()`,
-    /// `docs/08-ffi.md`), and what `sipral_stack_config_t::srtp` left at zero
-    /// has always meant, before this member existed to say so explicitly.
+    /// This build's default (`SrtpPolicy::default()`, `docs/08-ffi.md`): what zero means.
     #[test]
     fn a_stack_set_to_srtp_not_offered_offers_the_plain_profile() {
         let mut observed = Observed::default();
@@ -6029,9 +5509,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// D6: the order is a property of the call, not of the process. The
-    /// stack offers one codec and this call offers another, from the same
-    /// stack and without a second one.
+    /// D6: the order is the call's, not the process's: the stack offers one codec, this call
+    /// another.
     #[test]
     fn a_calls_own_codecs_override_the_stacks() {
         let mut observed = Observed::default();
@@ -6054,10 +5533,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// And the stack's order is left where it was: the next call off the same
-    /// stack offers what the stack was configured with, which is the race
-    /// D6 is about — a per-call order that mutated a shared catalogue would
-    /// leave this second offer naming G.722.
+    /// D6: the stack's order is left alone: the next call offers what the stack was
+    /// configured with, not G.722.
     #[test]
     fn a_calls_own_codecs_leave_the_stacks_order_alone() {
         let mut observed = Observed::default();
@@ -6079,8 +5556,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The two overrides compose. A call that names both gets both, which a
-    /// second branch rebuilding the catalogue from the names would have lost.
+    /// The two overrides compose: a call naming both gets both.
     #[test]
     fn a_call_that_names_codecs_and_srtp_gets_both() {
         let mut observed = Observed::default();
@@ -6106,9 +5582,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Everything else the stack's catalogue carries and the call said
-    /// nothing about is kept, which is the whole reason the derivation starts
-    /// from the stack's catalogue rather than from a fresh one.
+    /// What the call said nothing about is kept from the stack's catalogue, which is why the
+    /// derivation starts from it.
     #[test]
     fn a_call_that_names_codecs_keeps_the_stacks_frame_length() {
         let mut observed = Observed::default();
@@ -6175,9 +5650,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `sipral_call_consult` takes the same struct, and a codec this build
-    /// has no encoder for is refused there too rather than accepted by one
-    /// entry point and refused by its sibling.
+    /// `sipral_call_consult` refuses a codec this build has no encoder for too.
     #[test]
     fn an_unknown_codec_on_a_consultation_is_refused_and_places_nothing() {
         let mut observed = Observed::default();
@@ -6216,10 +5689,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `sipral_call_consult` takes the same `sipral_call_config_t`, and the
-    /// member's own documentation promises the same refusal wherever the
-    /// struct is read: a value this ABI names nothing for is not quietly
-    /// accepted by one entry point and refused by its sibling.
+    /// `sipral_call_consult` refuses a value this ABI names nothing for too.
     #[test]
     fn an_out_of_range_srtp_on_a_consultation_is_invalid_argument_and_places_nothing() {
         let mut observed = Observed::default();
@@ -6248,10 +5718,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Where `SIPRAL_SRTP_OFFERED` and `SIPRAL_SRTP_REQUIRED` part ways, reached
-    /// through the C entry points: the stack's policy is also what a call that
-    /// comes in is answered under, and a plain offer is answered plainly under
-    /// the first and not answered at all under the second (`docs/05-media.md`,
+    /// Where `SIPRAL_SRTP_OFFERED` and `SIPRAL_SRTP_REQUIRED` part: an incoming plain offer is
+    /// answered plainly under the first and refused under the second (`docs/05-media.md`,
     /// "SRTP through the facade").
     #[test]
     fn a_plain_offer_is_answered_under_srtp_offered_and_not_under_srtp_required() {
@@ -6288,8 +5756,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         let status = unsafe {
             sipral_call_answer_media(handle, call, media_address, media_address_len, 1_100)
         };
-        // 8.10: refused by the policy it was answered under, with the
-        // answer to an offer whose terms this end cannot take, and said so
+        // 8.10: refused by the policy it was answered under
         assert_eq!(
             status,
             SipralStatus::SecurityPolicy,
@@ -6306,16 +5773,14 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// An `sdp` of no bytes beside a `media_address` is no `sdp`, whatever
-    /// its pointer: it was refused as a second description of the session.
+    /// An `sdp` of no bytes beside a `media_address` is no `sdp`, whatever its pointer.
     #[test]
     fn a_call_config_with_an_empty_sdp_beside_its_media_address_places_the_call() {
         let mut observed = Observed::default();
         let (handle, account) = media_line(&mut observed, |_| {});
         let mut call_config = managed_config();
         let nothing = [0_u8; 1];
-        // a binding that hands every buffer over as a pointer and a length
-        // hands an empty one over as a real pointer and zero: that is no sdp
+        // a binding passes an empty buffer as a real pointer and zero
         call_config.sdp = nothing.as_ptr();
         call_config.sdp_len = 0;
         let (status, _) = place(handle, account, &call_config, 1_000);
@@ -6323,12 +5788,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A `sipral_call_config_t` that ends before `srtp`, as it did before
-    /// `srtp` and `transport` were appended to it, comes from an ABI before
-    /// the freeze. `transport` was appended in the tail padding of a length a
-    /// caller of that time declared, so it would be read from whatever that
-    /// caller's stack held there; the struct is refused instead, because the
-    /// oldest version of every struct the frozen ABI serves is minor 33's.
+    /// A `sipral_call_config_t` ending before `srtp` predates the freeze and is refused:
+    /// `transport` would be read from its tail padding. The oldest version served is minor 33's.
     #[test]
     fn a_call_config_from_before_the_freeze_is_refused() {
         let mut observed = Observed::default();
@@ -6341,13 +5802,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    // -- 8.4.9: early media when answering, with this stack running the
-    // audio ---------------------------------------------------------------
-
-    /// This INVITE asks for neither `Require` nor `Supported: 100rel`, so the
-    /// 183 goes unreliably: RFC 6337 §3.1.1 calls it only a preview, and the
-    /// 200 OK — the exchange's first reliable non-failure response — has to
-    /// repeat it unchanged.
+    /// No 100rel asked, so the 183 goes unreliably, a preview (RFC 6337 §3.1.1), and the
+    /// 200 OK repeats it unchanged.
     #[test]
     fn ringing_with_media_unreliably_is_repeated_in_the_200_ok() {
         let mut observed = Observed::default();
@@ -6401,10 +5857,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The same, with the INVITE requiring 100rel: the 183 goes reliably, the
-    /// far end's PRACK completes it, and RFC 6337 §3.1.1's UAS rule #2 —
-    /// nothing sent reliably is repeated — means the 200 OK that follows
-    /// carries nothing at all.
+    /// With 100rel required the 183 goes reliably and is PRACKed, so the 200 OK carries no
+    /// description (RFC 6337 §3.1.1, UAS rule #2).
     #[test]
     fn ringing_with_media_reliably_holds_the_200_ok_for_the_prack() {
         let mut observed = Observed::default();
@@ -6464,8 +5918,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Ringing with media twice on one call is refused, with the error
-    /// answering twice would use.
+    /// Ringing with media twice on one call is refused, as answering twice would be.
     #[test]
     fn ringing_with_media_twice_is_refused() {
         let mut observed = Observed::default();
@@ -6519,12 +5972,9 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// An INVITE that carried no offer cannot be rung with media. RFC 3261
-    /// §13.2.1 puts the offer this end would have to make in "the first
-    /// reliable non-failure message", and RFC 6337 §3.1.2 has the UAS put no
-    /// description in any other response; the far end's answer to one sent
-    /// reliably would come back in the PRACK (RFC 3262 §5), which nothing here
-    /// hands to the engine. Refused, with nothing on the wire.
+    /// An INVITE with no offer cannot be rung with media: the offer belongs in the first
+    /// reliable non-failure message (RFC 3261 §13.2.1, RFC 6337 §3.1.2), and its answer would
+    /// come in a PRACK (RFC 3262 §5) that nothing here hands on. Refused, nothing sent.
     #[test]
     fn ringing_with_media_an_invite_that_carried_no_offer_is_refused() {
         let mut observed = Observed::default();
@@ -6549,11 +5999,9 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A 183 the application described itself already carried the answer, or
-    /// its preview: RFC 3261 §13.2.1 allows only "that same exact answer" in
-    /// any other response, and RFC 6337 §3.1.1 has every description in the
-    /// responses to one INVITE identical. A second one written by this stack is
-    /// a different answer, so ringing with media after it is refused.
+    /// After a 183 the application described, ringing with media is refused: RFC 3261 §13.2.1
+    /// allows only "that same exact answer" in other responses, and RFC 6337 §3.1.1 has them
+    /// all identical.
     #[test]
     fn ringing_with_media_after_a_183_the_application_described_is_refused() {
         let mut observed = Observed::default();
@@ -6581,11 +6029,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `srtp` on the ringing config overrides the stack's own, closing the
-    /// gap 8.4.6 left: an incoming call answered directly had no way to
-    /// choose its own SRTP policy at all. The stack requires SRTP; the
-    /// ringing config asks for `OFFERED` instead, so a plain offer — which
-    /// the stack's own REQUIRED would refuse outright — is answered plainly.
+    /// `srtp` on the ringing config overrides the stack's: the stack requires SRTP, the call
+    /// asks for `OFFERED`, so a plain offer is answered plainly.
     #[test]
     fn ringing_config_srtp_overrides_the_stacks_own() {
         let mut observed = Observed::default();
@@ -6611,10 +6056,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The other half: `srtp` REQUIRED on the ringing config is not a softer
-    /// promise than REQUIRED on the stack — a plain INVITE offering no keyed
-    /// stream is refused exactly as `sipral_call_answer_media` refuses it
-    /// today, with nothing sent.
+    /// `srtp` REQUIRED on the ringing config refuses a plain INVITE exactly as
+    /// `sipral_call_answer_media` does, with nothing sent.
     #[test]
     fn ringing_config_srtp_required_refuses_a_plain_invite_offering_no_key() {
         let mut observed = Observed::default();
@@ -6643,8 +6086,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// Refuse `sipral_call_ring_media` for a member it does not read, naming
-    /// it, rather than reading it and having it do nothing.
+    /// Assert `sipral_call_ring_media` refuses a member it does not read, naming it.
     fn assert_ring_media_refuses(
         handle: SipralHandle,
         call: SipralHandle,
@@ -6693,10 +6135,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A member the call does not read is refused when it is set, and one of
-    /// no bytes is not set, whatever its pointer: the header's conventions
-    /// promise that of every optional piece of text, bytes or records, and a
-    /// binding that hands every string over as a buffer has no null to pass.
+    /// A member the call does not read is refused when set; one of no bytes is unset whatever
+    /// its pointer, since a binding passing buffers has no null to pass.
     #[test]
     fn ringing_media_config_reads_an_empty_member_as_absent_whatever_its_pointer() {
         let mut observed = Observed::default();
@@ -6738,8 +6178,7 @@ Content-Length: 0\r\n\r\n"
         .into_bytes()
     }
 
-    /// A stack that takes referrals, with its one line, the referral
-    /// delivered and reported.
+    /// A stack that takes referrals, with its line, the referral delivered and reported.
     fn referred(observed: &mut Observed, branch: &str) -> (SipralHandle, SipralHandle) {
         let (handle, account) = media_line(observed, |config| {
             config.referrals = crate::media::SipralToggle::On as u32;
@@ -6777,9 +6216,8 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// `target` on a transfer's config is refused when it is set; one of no
-    /// bytes is not set, whatever its pointer, as the header's conventions
-    /// say of every optional text.
+    /// `target` on a transfer's config is refused when set; one of no bytes is unset,
+    /// whatever its pointer.
     #[test]
     fn a_transfer_config_with_an_empty_target_pointer_is_taken() {
         let mut observed = Observed::default();
@@ -6878,8 +6316,7 @@ Content-Length: 0\r\n\r\n"
     fn a_referral_is_refused_with_a_refusal_and_its_handle_goes_with_it() {
         let mut observed = Observed::default();
         let (handle, referral) = referred(&mut observed, "refuse");
-        // RFC 3515 §2.4.2's refusals are 4xx to 6xx; a 2xx would say it was
-        // taken
+        // RFC 3515 §2.4.2's refusals are 4xx-6xx; a 2xx would say it was taken
         assert_eq!(
             unsafe { sipral_call_reject_transfer(handle, referral, 200, 1_100) },
             SipralStatus::InvalidArgument

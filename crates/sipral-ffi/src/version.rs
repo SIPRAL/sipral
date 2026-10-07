@@ -3,13 +3,8 @@
 
 //! What ABI this library speaks, and whether a binding can speak it.
 //!
-//! The ABI has a version of its own, and it is not the crate's. A shared
-//! library is loaded by a package that was generated against some header, and
-//! the two are shipped separately often enough — a NuGet package next to a
-//! native asset from another build, an AAR with a stale `.so` — that the
-//! mismatch has to be found at load, with a sentence saying which two versions
-//! disagree, rather than as a crash in the first call that reads a member that
-//! was not there.
+//! The ABI version is not the crate's. Bindings and native libraries ship
+//! separately, so a mismatch must be caught at load, naming both versions.
 
 use std::ffi::c_char;
 use std::mem::size_of;
@@ -26,12 +21,8 @@ constants! {
     /// against a library at that minor or any later one.
     pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 1;
 
-    /// The ABI's minor version, raised by anything the header gains —
-    /// everything the generator prints, and not only a function or a struct
-    /// member. `sipral_abi_check` compares the major and this one; the patch it
-    /// does not ask about. The
-    /// rule for all three numbers is the Versioning section of
-    /// `docs/08-ffi.md`, which is where the ABI contract is written down.
+    /// The ABI's minor version, raised by anything the header gains. Rules:
+    /// Versioning section of `docs/08-ffi.md`.
     pub const SIPRAL_ABI_VERSION_MINOR: u32 = 2;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -52,11 +43,7 @@ record! {
         pub minor: u32,
         /// A fix that changed no declaration.
         pub patch: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads to alignment so later members never land in padding.
         pub reserved: u32,
     }
 }
@@ -94,33 +81,19 @@ entry! {
     }
 }
 
-/// Whether a library at `library` (major, minor) serves a caller built
-/// against `caller`: the same major, and a minor no later than the library's.
-///
-/// Apart from `sipral_abi_check` so that the rule can be held to libraries
-/// other than this one — a later minor than this build has is the case a
-/// binding meets in the field and this build cannot show by itself.
+/// Same major, caller minor no later than the library's. Separate so tests
+/// can check libraries other than this build.
 const fn serves(library: (u32, u32), caller: (u32, u32)) -> bool {
     caller.0 == library.0 && caller.1 <= library.1
 }
 
 entry! {
     /// Whether this library can serve a binding generated against
-    /// `major`.`minor`. Called once, at load, before anything else: by the
-    /// binding itself where its language gives it somewhere to call from, and
-    /// by the application where it does not. The Versioning section of
-    /// `docs/08-ffi.md` says which binding is which.
+    /// `major`.`minor`: same major and a minor no later than this library's.
+    /// Called once at load, before anything else.
     ///
-    /// It can when `major` is this library's major and `minor` is no later
-    /// than this library's minor: a later minor only appends to an earlier
-    /// one, so a binding built against 1.0 loads against a library at 1.4,
-    /// and one built against 1.4 is turned away by a library at 1.0, which
-    /// lacks what 1.4 added.
-    ///
-    /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
-    /// naming both versions, which is what the binding should put in the
-    /// exception it throws. The patch number is not asked for: it never
-    /// changes a declaration, so it cannot make two builds disagree.
+    /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` otherwise, with a last error naming
+    /// both versions. The patch never changes a declaration, so it is not asked.
     ///
     /// # Safety
     ///
@@ -145,17 +118,9 @@ entry! {
 entry! {
     /// How many bytes this build compiled one of the ABI's structs to.
     ///
-    /// `name` is what the header calls the type — `sipral_stack_config_t` —
-    /// as bytes and a length, the way every string crosses here. A name this
-    /// build has no struct for is `SIPRAL_STATUS_INVALID_ARGUMENT`, which is
-    /// the answer a caller holding somebody else's header gets.
-    ///
-    /// Nothing in the library needs asking: the `size` member a struct
-    /// carries settles a disagreement in the ordinary course of a call. This
-    /// is for finding out there is one before making it. A package built
-    /// against one header and loaded over a native library from another
-    /// shows up here as a `sizeof` that differs, in one call at load, rather
-    /// than in whichever member happened to move.
+    /// `name` is the header's type name, e.g. `sipral_stack_config_t`. An
+    /// unknown name is `SIPRAL_STATUS_INVALID_ARGUMENT`. Lets a binding detect
+    /// a header mismatch at load.
     ///
     /// # Safety
     ///
@@ -185,14 +150,8 @@ entry! {
 
 entry! {
     /// How many of the ABI's structs carry a `size` member.
-    ///
-    /// The companion to `sipral_abi_struct_size`, and the part of the check a
-    /// caller cannot write for itself. A caller that compares lengths holds
-    /// a list of the structs it knows about, and the list is what goes
-    /// stale: a struct this ABI gained is one nobody thought to ask about,
-    /// and a length check that covers all but the newest still passes. Ask
-    /// for this number, compare it with the length of that list, and the day
-    /// the ABI grows another the caller is told.
+    /// Compare it with the caller's own list of structs, so a struct added to
+    /// the ABI is not missed by `sipral_abi_struct_size` checks.
     ///
     /// # Safety
     ///
@@ -224,8 +183,6 @@ mod tests {
     use std::mem::size_of;
     use std::ptr;
 
-    /// What C would ask: a NUL-terminated name, passed as bytes and a length
-    /// the way the boundary takes every string.
     fn size_of_struct(name: &str) -> Result<usize, SipralStatus> {
         let mut size = usize::MAX;
         let status =
@@ -355,9 +312,6 @@ mod tests {
         );
     }
 
-    /// The 1.x promise held against libraries this build is not: a library
-    /// at a later minor serves a binding at an earlier one, and the reverse
-    /// is refused.
     #[test]
     fn a_library_at_a_later_minor_serves_a_binding_at_an_earlier_one() {
         assert!(serves((1, 0), (1, 0)), "equal minors");
@@ -369,9 +323,7 @@ mod tests {
         assert!(!serves((2, 0), (1, 9)), "another major, below");
     }
 
-    /// Every 0.x binding is refused, the 0.36 one with this very surface
-    /// included: 0.x promised nothing between its minors, and a binding
-    /// printed then was never told that 1.0 would keep its shapes.
+    /// 0.x promised nothing between minors, so every 0.x binding is refused.
     #[test]
     fn a_binding_built_against_major_zero_is_refused() {
         assert_eq!(
@@ -418,8 +370,6 @@ mod tests {
         );
     }
 
-    /// The Rust spelling is not a name the C side has, and answering to it
-    /// would make two names for one struct.
     #[test]
     fn the_rust_name_is_not_a_name_this_answers_to() {
         assert_eq!(
@@ -442,8 +392,6 @@ mod tests {
         );
     }
 
-    /// What a caller's list of structs is compared against, so that a
-    /// struct added here and not there is caught on the caller's side.
     #[test]
     fn the_count_is_every_record_that_carries_a_size() {
         let mut counted = usize::MAX;
@@ -462,9 +410,6 @@ mod tests {
         assert!(counted > 0, "nothing carries a size, which cannot be");
     }
 
-    /// Every struct the count promises there is answers to `sipral_abi_struct_size`
-    /// by the name the header gives it, since a caller walking the one uses
-    /// the other.
     #[test]
     fn every_struct_the_count_covers_answers_for_its_length() {
         let mut counted = 0_usize;
@@ -496,8 +441,7 @@ mod tests {
             unsafe { sipral_abi_struct_size(name.as_ptr().cast(), name.len(), ptr::null_mut()) },
             SipralStatus::InvalidArgument
         );
-        // said before the name is looked at, so the sentence is about the
-        // argument that was wrong and not about a name that was not
+        // the null output is reported before the unknown name
         let unknown = "sipral_nothing_t";
         assert_eq!(
             unsafe {

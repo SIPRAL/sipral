@@ -1,58 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Recording a call: where a path becomes a file, and who closes it.
+//! Recording a call: the sans-I/O tree writes to a sink; this is where a path
+//! becomes a file.
 //!
-//! Everything below this boundary writes to a sink it was handed and opens
-//! nothing. That is deliberate and it is why recording is reachable from a
-//! headless agent, from a test that records into memory, and from here. What is
-//! left over is the one decision a sans-I/O tree cannot make for itself — which
-//! file — and this is where it is made.
+//! The media session owns the file. C hands over a path and gets a status, and
+//! has nothing to free. A WAVE header holds two lengths known only at stop, so
+//! every ending closes the file: [`sipral_media_record_stop`], the call ending,
+//! and the stack being destroyed (even from the event callback). A crash leaves
+//! a file playable up to the last checkpoint (every five seconds by default).
 //!
-//! # Who owns the handle
-//!
-//! The media session does, and therefore the stack does. C never sees the file:
-//! it hands over a path and gets a status, and from then on the recording is a
-//! property of the call the same way the codec is. A caller cannot leak it,
-//! cannot close it underneath the stack, and has nothing to free.
-//!
-//! That leaves one question, and it is the whole of the ownership problem here:
-//! a WAVE header carries two lengths that are not known until the recording
-//! stops, so a file whose recorder was dropped rather than closed has zeroes
-//! in them. The audio is all there and any editor repairs it, but nobody should
-//! have to.
-//!
-//! So there are three ways a recording ends and all three close it properly:
-//!
-//! - [`sipral_media_record_stop`], which is the ordinary one;
-//! - the call ending, where the engine stops the recording before it lets the
-//!   stream go;
-//! - the stack being destroyed, including from inside the event callback, where
-//!   what the poll is still holding is closed as it is dropped.
-//!
-//! The third is the one that has to be arranged rather than inherited, and the
-//! media engine arranges it as it is dropped: destroying a stack mid-recording
-//! leaves a playable file, not a repair job. Nothing can be done about a process that
-//! dies, and nothing here pretends otherwise.
-//!
-//! A process that dies cannot finish anything, so a recording is checkpointed
-//! as it goes — every five seconds unless `sipral_recording_options_t` says
-//! otherwise — and what a crash leaves plays up to the last checkpoint: a WAVE
-//! file whose header states the audio written by then, with what came after
-//! it in the file past that length, or an Ogg stream of whole pages without
-//! the page that marks its end.
-//!
-//! # What is written
-//!
-//! By [`sipral_media_record_start`]: RIFF/WAVE, linear 16-bit PCM, one
-//! channel, at `sipral_media_info_t::sample_rate` — both directions mixed
-//! into one file, which is what a recording of a conversation is for. By
-//! [`sipral_media_record_start_with`]: what [`SipralRecordingOptions`] says —
-//! two channels, this end left and the far end right; Ogg Opus; a rate of the
-//! file's own. Either way the file keeps its rate when a re-negotiation moves
-//! the call to a codec at another one. An existing file at that path is
-//! replaced: a recording is named by the caller, and a stack that refused
-//! would be a stack that loses the recording rather than the old one.
+//! [`sipral_media_record_start`] writes mono 16-bit WAVE at the codec's rate,
+//! both directions mixed; [`sipral_media_record_start_with`] takes
+//! [`SipralRecordingOptions`]. The file keeps its rate across re-negotiation.
+//! An existing file at the path is replaced.
 
 use std::ffi::c_char;
 use std::fs::File;
@@ -117,11 +78,8 @@ record! {
         /// How often, in milliseconds, what has been written is made to
         /// survive a crash, or zero for every five seconds.
         pub checkpoint_ms: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. Set it to zero; the library reads nothing from
-        /// it.
+        /// Zero; never read. Pads the struct to its alignment so a member added
+        /// later never lands in padding of an older caller's struct.
         pub reserved: u32,
     }
 }
@@ -173,9 +131,7 @@ pub(crate) fn options_of(options: &SipralRecordingOptions) -> Result<RecordingOp
     })
 }
 
-/// Ogg Opus, where the facade this crate sits on linked the encoder — asked
-/// of the facade's own capabilities, since a Cargo feature belongs to the
-/// crate that declares it.
+/// Ogg Opus if the facade linked the encoder; its own capabilities say so.
 fn ogg_opus() -> Result<RecordingFormat, Fail> {
     RecordingFormat::ogg_opus().ok_or_else(|| {
         fail(
@@ -188,8 +144,7 @@ fn ogg_opus() -> Result<RecordingFormat, Fail> {
 /// Make the file and start the recording in it, with this call's media held.
 fn start(media: SipralHandle, path: &str, options: &RecordingOptions) -> Result<(), Fail> {
     with_media(media, |session, _| {
-        // the call is looked at before the file is made, so a handle that
-        // names nothing does not leave an empty recording behind
+        // checked before the file exists, so a bad handle leaves no file
         if session.is_recording() {
             return Err(fail(
                 SipralStatus::WrongState,
@@ -209,19 +164,13 @@ fn start(media: SipralHandle, path: &str, options: &RecordingOptions) -> Result<
 }
 
 entry! {
-    /// Start recording this call to `path`.
+    /// Start recording this call to `path`: both directions mixed, as WAVE.
+    /// Each start makes a new file.
     ///
-    /// Both directions, mixed, as WAVE. It can be started and stopped as often
-    /// as the person on the phone presses the button, and each recording is a
-    /// file of its own: a path written to twice would have two headers in it.
-    ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
-    /// already being recorded — two writers on one stream would interleave
-    /// frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
-    /// system refuses the path, with what it said in the last error.
-    ///
-    /// The file is made with this call's media held, so this call's audio
-    /// waits for the file system to answer and no other call's does.
+    /// `SIPRAL_STATUS_WRONG_STATE` when the media has ended or a recording is
+    /// already running. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
+    /// refuses the path, with its reason in the last error. The file is created
+    /// with this call's media held, so only this call's audio waits on it.
     ///
     /// # Safety
     ///
@@ -233,16 +182,12 @@ entry! {
 }
 
 entry! {
-    /// Start recording this call to `path`, written as `options` say: WAV or
-    /// Ogg Opus, mixed or stereo with this end on the left, at a rate of the
-    /// file's own. Everything else is [`sipral_media_record_start`]'s,
-    /// which is this with every option zero.
+    /// Start recording this call to `path` as `options` say. With every option
+    /// zero this is [`sipral_media_record_start`].
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for options no file can be written
-    /// with and for a path the file system refuses, and
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build with no Opus.
-    /// `SIPRAL_STATUS_RECORDING_FAILED` when the file was made and would not
-    /// take its header.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for invalid options or a refused path;
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for Ogg Opus in a build without Opus;
+    /// `SIPRAL_STATUS_RECORDING_FAILED` when the header could not be written.
     ///
     /// # Safety
     ///
@@ -257,19 +202,17 @@ entry! {
     ) {
         let path = unsafe { required_text(path, path_len, "path") }?;
         let options = options_of(&unsafe { read_versioned(options) }?)?;
-        // refused before the file is made, so options no file can be written
-        // with leave nothing behind
+        // checked before the file exists, so bad options leave no file
         options.rate_for(8_000).map_err(|error| media_failed(&error))?;
         start(media, path, &options)
     }
 }
 
 entry! {
-    /// Stop it, and close the file.
+    /// Stop the recording and close the file.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded. A failure
-    /// here leaves a file with all of the audio in it and zeroes in the two
-    /// header fields, which is recoverable and is said rather than hidden.
+    /// `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded. On failure
+    /// the file holds all the audio but zero header lengths.
     ///
     /// # Safety
     ///
@@ -285,10 +228,7 @@ entry! {
 
 entry! {
     /// Whether a recording is running on this call, and how much audio it has
-    /// taken. Either out parameter may be null.
-    ///
-    /// The length is of the audio written, not of the file: the header in front
-    /// of it is not a recording of anything.
+    /// taken (audio only, not the header). Either out parameter may be null.
     ///
     /// # Safety
     ///
@@ -331,9 +271,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A path in the platform's temporary directory that no other test in this
-    /// binary will pick. Tests run on threads of one process, so the counter is
-    /// enough and the process id keeps two runs apart.
+    /// A temporary path unique per test (counter) and per run (process id).
     fn scratch(what: &str) -> PathBuf {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -359,20 +297,15 @@ mod tests {
         (recording, taken)
     }
 
-    /// The header a recording's file starts with: RIFF, a `JUNK` chunk held
-    /// for RF64, `fmt ` and the data chunk's own header.
+    /// RIFF, a `JUNK` chunk held for RF64, `fmt ` and the data chunk header.
     const HEADER: usize = 80;
 
-    /// Where the sampling rate sits in it.
     const RATE_AT: usize = 60;
 
-    /// Where the channel count sits.
     const CHANNELS_AT: usize = 58;
 
-    /// Where the data chunk's length sits.
     const DATA_LENGTH_AT: usize = 76;
 
-    /// One of the little-endian fields of a WAVE header.
     fn field(wav: &[u8], at: usize, len: usize) -> u32 {
         let mut value = 0_u32;
         for (index, byte) in wav[at..at + len].iter().enumerate() {
@@ -381,8 +314,6 @@ mod tests {
         value
     }
 
-    /// Put a few frames of a conversation through the call, so that there is
-    /// something in the file to have a length.
     fn talk(media: SipralHandle, frames: usize) {
         for _ in 0..frames {
             play_one(media);
@@ -443,9 +374,7 @@ mod tests {
         );
     }
 
-    /// The first half of the ownership question: a recording nobody stopped,
-    /// on a call that ended. The engine closes it before it lets the stream go,
-    /// so the file is playable and the handle is gone.
+    /// The engine closes a recording nobody stopped before it drops the stream.
     #[test]
     fn a_call_that_ends_closes_the_recording_it_was_carrying() {
         let mut observed = Observed::default();
@@ -480,10 +409,7 @@ mod tests {
         );
     }
 
-    /// The other half, and the one that has to be arranged: the stack is
-    /// destroyed with a recording running. Nothing asked the session to stop,
-    /// and the file still ends up playable, because the header is patched as
-    /// the stack is dropped.
+    /// The header is patched as the stack is dropped, without a stop.
     #[test]
     fn destroying_a_stack_mid_recording_still_leaves_a_playable_file() {
         let mut observed = Observed::default();
@@ -544,8 +470,6 @@ mod tests {
         }
     }
 
-    /// Stereo at a rate of the file's own: this end on the left, the far
-    /// end on the right, and twice the samples of the call's own rate.
     #[test]
     fn a_stereo_recording_at_its_own_rate_is_what_the_options_asked_for() {
         let mut observed = Observed::default();
@@ -590,9 +514,6 @@ mod tests {
         );
     }
 
-    /// Ogg Opus where the build has the encoder, and a clear refusal where it
-    /// does not; either way nothing is left behind by options no file can be
-    /// written with.
     #[test]
     fn ogg_opus_is_written_where_this_build_can_and_bad_options_leave_no_file() {
         let mut observed = Observed::default();
@@ -714,9 +635,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Recording is a property of a call's media, so a call this stack
-    /// describes nothing for has no media handle to put a tap on, and a handle
-    /// nobody minted records nothing.
     #[test]
     fn a_call_with_no_media_cannot_be_recorded() {
         let mut observed = Observed::default();

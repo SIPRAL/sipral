@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The failures a softphone meets in the field, each written down as the
-//! guarantee that answers it.
+//! Field failures, each tested as the guarantee that answers it.
 //!
-//! Every test here is one line of the table in `docs/11-testing.md`, "What a
-//! field failure is answered by": a call from a thread nothing registered, a
-//! subscription asked for before its account has done anything, a feature
-//! this build lacks, text with neither a length nor a terminator, a storm of
-//! INVITEs at one line, a connection that takes a request and never answers,
-//! the millisecond an event is raised at, and a CANCEL asked for before
-//! anything came back. What needs a real network to show — a datagram broken
-//! into fragments, a connection whose path goes dark — is in `scripts/lab.sh
-//! robust`; what is here needs none.
+//! One test per line of the table in `docs/11-testing.md`, "What a field
+//! failure is answered by". Cases that need a real network are in
+//! `scripts/lab.sh robust`.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
@@ -121,16 +114,9 @@ fn start_line(message: &[u8]) -> String {
         .to_owned()
 }
 
-// -- a call from any thread ----------------------------------------------
-
-/// What a thread may be answered, whatever it asked and whenever: every
-/// status this surface has for a call that could not be done now, and none
-/// that says the library broke. `Panic` is not among them — a caught panic
-/// is still a bug, and this is the test that would find one. `LimitReached`
-/// is: the workers place calls faster than they hang them up, and past
-/// `max_dialogs` a call placed is refused before anything is sent. So is
-/// `ClockBehind`: eight threads reading one clock and racing for the stack
-/// hand it readings more than the slack apart when the machine is loaded.
+/// Statuses a racing thread may get; never `Panic`. `LimitReached` comes
+/// from passing `max_dialogs`, `ClockBehind` from racing threads on a loaded
+/// machine.
 const TOLERATED: &[SipralStatus] = &[
     SipralStatus::Ok,
     SipralStatus::Busy,
@@ -144,16 +130,9 @@ const TOLERATED: &[SipralStatus] = &[
     SipralStatus::ClockBehind,
 ];
 
-/// A stack that asserts on a thread it was not told about brings the whole
-/// application down from any thread a platform happens to call back on;
-/// there is no such thing here, and this is the proof under load: eight
-/// threads nobody registered,
-/// each calling a mix of entry points on one stack as fast as they can —
-/// polling it, adding and removing accounts, placing and hanging up calls,
-/// handing in datagrams whole and broken, subscribing — while the stack is
-/// destroyed under them halfway through. Every call is answered with a
-/// status, none of them `SIPRAL_STATUS_PANIC`, and every call after the
-/// destroy is refused as a handle that names nothing.
+/// Eight unregistered threads hammer one stack with a mix of entry points
+/// while it is destroyed halfway. Every call gets a tolerated status, and
+/// every call after the destroy is refused as a dead handle.
 #[test]
 fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
     /// How many calls each worker makes once the destroy has returned.
@@ -171,9 +150,7 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
             let mut after_destroy = Vec::new();
             let mut round = 0_u64;
             let started = Instant::now();
-            // a second and a half at the least, and then on until some calls
-            // have been made after the destroy returned, however long a
-            // loaded machine keeps the destroy waiting for its turn
+            // at least 1.5 s, then until enough calls follow the destroy
             while started.elapsed() < Duration::from_millis(1_500)
                 || (after_destroy.len() < AFTER_DESTROY
                     && started.elapsed() < Duration::from_secs(30))
@@ -197,17 +174,13 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
         "{destroy:?}"
     );
     if destroy == SipralStatus::Busy {
-        // a worker was inside; the stack is asked again until it is free
         let mut again = SipralStatus::Busy;
         while again == SipralStatus::Busy {
             again = unsafe { sipral_stack_destroy(stack) };
         }
         assert_eq!(again, SipralStatus::Ok);
     }
-    // only once the destroy has returned: a call that began before that
-    // could still find the stack there, and answered as it would any other
-    // time, however many of them a loaded machine fits in before the destroy
-    // gets its turn
+    // only after the destroy returned: earlier calls may still find the stack
     destroyed.store(true, Ordering::SeqCst);
     let mut calls = 0_usize;
     for worker in workers {
@@ -220,8 +193,6 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
                 last_error_text()
             );
         }
-        // every call that began after the destroy returned names a stack
-        // that is gone
         assert!(
             after.len() >= AFTER_DESTROY,
             "a worker made {} calls after the destroy",
@@ -326,8 +297,6 @@ fn one_call(
     }
 }
 
-// -- a subscription before anything else ---------------------------------
-
 fn subscribe(stack: SipralHandle, account: SipralHandle, now: u64) -> (SipralStatus, SipralHandle) {
     let target = "sip:2001@example.com";
     let package = "dialog";
@@ -358,9 +327,7 @@ fn subscribe(stack: SipralHandle, account: SipralHandle, now: u64) -> (SipralSta
     (status, subscription)
 }
 
-/// The busy lamp field asked for in the same breath as the account is
-/// added, before the account has registered or sent anything: a SUBSCRIBE
-/// goes, and the subscription says where it stands as an event.
+/// A subscription before the account registered still sends a SUBSCRIBE.
 #[test]
 fn a_subscription_asked_for_the_moment_its_account_exists_goes_and_is_reported() {
     let mut heard = Heard::default();
@@ -388,9 +355,7 @@ fn a_subscription_asked_for_the_moment_its_account_exists_goes_and_is_reported()
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// The same on a connection that has closed: nothing can leave, and the
-/// application is told so — refused where it asked, or an event — rather
-/// than left with a subscription that silently never went.
+/// On a closed connection the application is told, by status or event.
 #[test]
 fn a_subscription_on_a_transport_that_has_died_is_told_never_a_crash() {
     for protocol in [SipralTransport::Tcp, SipralTransport::Tls] {
@@ -422,23 +387,17 @@ fn a_subscription_on_a_transport_that_has_died_is_told_never_a_crash() {
             assert!(TOLERATED.contains(&status), "{protocol:?}: {status:?}");
             assert!(!last_error_text().is_empty(), "a refusal says why");
         }
-        // the stack is still whole: time passes and it is polled as usual
         let _ = poll(stack, 40_000);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 }
 
-// -- nothing a build lacks is taken in silence -------------------------------
-
 /// A setting that asks a stack for one optional feature.
 type Ask = fn(&mut SipralStackConfig);
 
-/// For every optional feature: the setting that asks for it, applied to a
-/// stack configuration. Each bit clear in `sipral_capabilities` must make
-/// its setting `SIPRAL_STATUS_NOT_SUPPORTED`; each bit set must make it
-/// something other than that. Run in the default build and in the one
-/// without default features, which `scripts/check.sh` runs both of, so both
-/// halves of every line are exercised somewhere.
+/// A feature bit clear in `sipral_capabilities` makes its setting
+/// `SIPRAL_STATUS_NOT_SUPPORTED`; a set bit does not. `scripts/check.sh` runs
+/// both feature sets, so both halves run.
 #[test]
 fn every_feature_this_build_lacks_is_refused_where_it_is_asked_for_never_ignored() {
     let mut capabilities = SipralCapabilities {
@@ -507,13 +466,10 @@ fn every_feature_this_build_lacks_is_refused_where_it_is_asked_for_never_ignored
     }
 }
 
-// -- text across the boundary -------------------------------------------------
-
 /// The pointer types that carry text or bytes across the boundary.
 const TEXT_TYPES: &[&str] = &["*constc_char", "*mutc_char", "*constu8", "*mutu8"];
 
-/// A type as the declaration spelled it, with the spacing the tokens came
-/// with taken out.
+/// A type as declared, without whitespace.
 fn spelled(rust_type: &str) -> String {
     rust_type
         .chars()
@@ -521,9 +477,7 @@ fn spelled(rust_type: &str) -> String {
         .collect()
 }
 
-/// Whether `member`, beside the members in `all`, has its length there: the
-/// member named `<member>_len`, or one of the two ways an output buffer
-/// says how much room it has.
+/// Whether `member` has a `_len` or capacity sibling in `all`.
 fn has_length(member: &str, all: &[&str]) -> bool {
     let named = |suffix: &str| all.contains(&format!("{member}{suffix}").as_str());
     named("_len")
@@ -532,12 +486,8 @@ fn has_length(member: &str, all: &[&str]) -> bool {
         || (member == "buffer" && all.contains(&"capacity"))
 }
 
-/// No text crosses in either direction without a length beside it, so that
-/// nothing on either side ever has to find where a string ends by looking for
-/// a NUL that may not be there. Walked over the whole declared surface: every
-/// text pointer a function takes and every one a record carries has its
-/// length; the only text handed out without one is the handful of static
-/// names, and each of those is NUL-terminated, every value checked.
+/// Every text pointer on the declared surface has a length beside it; the
+/// only exceptions are static names, each checked NUL-terminated.
 #[test]
 fn no_text_crosses_the_boundary_without_its_length_or_a_terminator() {
     let mut unmeasured = Vec::new();
@@ -570,7 +520,6 @@ fn no_text_crosses_the_boundary_without_its_length_or_a_terminator() {
         "text with no length beside it: {unmeasured:?}"
     );
 
-    // what is handed out with no length: the functions returning a pointer
     let mut returning: Vec<&str> = SURFACE
         .functions
         .iter()
@@ -610,13 +559,10 @@ fn no_text_crosses_the_boundary_without_its_length_or_a_terminator() {
     }
 }
 
-/// The input half, read the way it is written: a buffer with no NUL in it
-/// and garbage after its length is read for exactly its length.
 #[test]
 fn text_handed_in_is_read_for_its_length_and_not_to_a_nul() {
     let mut observed = Observed::default();
     let stack = crate::stack::tests::stack(&mut observed);
-    // the target, then bytes that are no part of it and no NUL anywhere
     let mut buffer = b"sip:2001@example.com".to_vec();
     let length = buffer.len();
     buffer.extend_from_slice(b">>>not part of it<<<");
@@ -660,8 +606,6 @@ fn text_handed_in_is_read_for_its_length_and_not_to_a_nul() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-// -- a storm of INVITEs at one line -------------------------------------------
-
 /// Call `n` of the storm: its own `Call-ID`, `From` tag and branch.
 fn storm_invite(n: usize) -> Vec<u8> {
     String::from_utf8_lossy(&invitation())
@@ -686,13 +630,9 @@ Content-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-/// A hundred and twenty INVITEs at one line inside one millisecond, each
-/// sent twice, from the one address a PBX sends from. With the rate floor
-/// raised out of the way, every one is a call of its own; a CANCEL for every
-/// third ends that call and no other, a refusal of one refuses that one, and
-/// each response on the wire names its own call. With the floor where
-/// `sipral_stack_create` leaves it, the calls past it are refused on the
-/// wire and never become a handle, and the ones admitted are untouched.
+/// 120 INVITEs in one millisecond, each sent twice, from one address. With
+/// the rate floor raised, each is its own call and CANCELs and refusals hit
+/// only theirs. At the default floor, the excess is refused on the wire.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn an_invite_storm_at_one_line_keeps_every_call_to_itself() {
@@ -819,24 +759,16 @@ fn an_invite_storm_at_one_line_keeps_every_call_to_itself() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-// -- a connection that takes a request and never answers -----------------
-
-/// A server that accepts the connection and then says nothing, or a path
-/// that goes dark after the handshake: the operating system keeps
-/// retransmitting the segment for a quarter of an hour before it reports
-/// anything, and a call that waits for it rings for a quarter of an hour.
-/// Timer B (RFC 3261 §17.1.1.2) runs on a stream as on a datagram, and ends
-/// the call at sixty-four times T1 — thirty-two seconds — with nothing from
-/// the transport at all. The INVITE is written once: a stream retransmits
-/// for itself.
+/// A silent stream peer: the OS would wait about 15 minutes. Timer B (RFC
+/// 3261 §17.1.1.2) runs on streams too and ends the call at 64*T1 = 32 s.
+/// The INVITE is written once: a stream retransmits for itself.
 #[test]
 fn a_stream_that_takes_the_invite_and_never_answers_ends_the_call_at_timer_b() {
     for protocol in [SipralTransport::Tcp, SipralTransport::Tls] {
         let mut heard = Heard::default();
         let stack = stack_hearing(&mut heard, protocol);
         let account = account_on(stack);
-        // the connection is open, to where the account's requests go: the
-        // far end accepted it, and will say nothing on it
+        // open to the account's server, which will say nothing
         let local = crate::stack::tests::BIND;
         let remote = "203.0.113.5:5060";
         let status = unsafe {
@@ -894,8 +826,6 @@ fn a_stream_that_takes_the_invite_and_never_answers_ends_the_call_at_timer_b() {
     }
 }
 
-// -- a name cut between two reads ------------------------------------------------
-
 /// The caller's name, in characters of two, three and four bytes.
 const NAME: &str = "Zo\u{eb} \u{65e5}\u{672c} \u{1f4de}";
 
@@ -921,11 +851,8 @@ Content-Length: {}\r\n\r\n",
     out
 }
 
-/// A display name in UTF-8, arriving over TCP in two reads that cut it
-/// inside a character — every place inside every character of it. A stack
-/// that decoded each read as it came would hand the application two broken
-/// halves, or replacement characters; this one frames the message first
-/// (RFC 3261 §18.3) and the name comes out whole, byte for byte.
+/// A UTF-8 display name split over two TCP reads at every byte inside a
+/// character comes out whole: framing happens first (RFC 3261 §18.3).
 #[test]
 fn a_display_name_cut_between_two_reads_arrives_whole() {
     let invite = named_invitation();
@@ -999,13 +926,8 @@ fn a_display_name_cut_between_two_reads_arrives_whole() {
     }
 }
 
-// -- the millisecond an event is raised at -------------------------------------
-
-/// Time is the application's `now_ms`, and nothing between it and an event
-/// rounds it: a retransmission due 500 ms after the INVITE goes at a poll at
-/// exactly 500 ms and not at 499, `next_poll_in_ms` names the millisecond,
-/// and the end at Timer B is raised by the poll at 32 000 ms and not by the
-/// one at 31 999.
+/// Nothing rounds `now_ms`: Timer A fires at 500 ms not 499, and Timer B at
+/// 32 000 ms not 31 999.
 #[test]
 fn an_event_is_raised_at_the_millisecond_its_deadline_names() {
     let mut heard = Heard::default();
@@ -1063,13 +985,8 @@ fn an_event_is_raised_at_the_millisecond_its_deadline_names() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-// -- a CANCEL before anything came back ----------------------------------------
-
-/// RFC 3261 §9.1: "If no provisional response has been received, the CANCEL
-/// request MUST NOT be sent; rather, the client MUST wait for the arrival of
-/// a provisional response before sending the request." A hang-up before
-/// anything came back is held — nothing is written — and goes the moment a
-/// 100 arrives; the 487 then ends the call as cancelled.
+/// RFC 3261 §9.1: no CANCEL before a provisional response. The hang-up is
+/// held until the 100; the 487 then ends the call as cancelled.
 #[test]
 fn a_hangup_before_any_provisional_holds_the_cancel_until_one_arrives() {
     let mut heard = Heard::default();
@@ -1124,8 +1041,7 @@ fn a_hangup_before_any_provisional_holds_the_cancel_until_one_arrives() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// The same hang-up, and nothing ever comes back: no CANCEL is ever sent —
-/// there is nothing to send one after — and the call still ends, at Timer B.
+/// Nothing ever comes back: no CANCEL, and the call ends at Timer B.
 #[test]
 fn a_hangup_before_any_provisional_to_a_silent_peer_sends_no_cancel_and_still_ends() {
     let mut heard = Heard::default();
@@ -1160,8 +1076,6 @@ fn a_hangup_before_any_provisional_to_a_silent_peer_sends_no_cancel_and_still_en
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// The same hang-up, and the first thing back is a 180: the CANCEL goes on
-/// it, since any provisional response will do.
 #[test]
 fn a_hangup_held_for_a_provisional_goes_on_a_ringing_as_on_a_trying() {
     let mut heard = Heard::default();

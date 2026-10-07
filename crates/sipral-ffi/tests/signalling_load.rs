@@ -3,49 +3,33 @@
 
 //! What a hundred calls' worth of signalling costs one stack.
 //!
-//! The media load test beside the library (`src/load.rs`) measures a frame of
-//! audio; this measures everything around it that is not audio. Two stacks —
-//! a user agent and a media engine each, exactly what one `sipral_stack_new`
-//! holds — call each other with no network between them, and every call goes
-//! the whole way a call on a PBX goes: an INVITE the far end challenges, the
-//! same INVITE again with digest credentials, a 100, a reliable 180 and its
-//! PRACK, a 200 and the ACK, a re-INVITE that holds it and another that
-//! resumes it, and a BYE and its 200. The calls are concurrent: every one of
-//! them is placed before the first answer is delivered, so each stack holds
-//! all of them at once, and the same is true of the hold, the resume and the
-//! hangup after it.
+//! `src/load.rs` measures an audio frame; this measures the signalling. Two
+//! stacks (a user agent and a media engine each) call each other with no
+//! network between them. Every call runs a PBX-style exchange: INVITE, 401
+//! challenge, INVITE with digest credentials, 100, reliable 180 and PRACK,
+//! 200 and ACK, a hold re-INVITE, a resume re-INVITE, BYE and 200. Calls are
+//! concurrent: all are placed before the first answer, and likewise for
+//! hold, resume and hangup.
 //!
-//! What it prints, and `scripts/bench.sh` collects into
-//! `docs/19-numbers.md`: the time each stack spent inside the library
-//! bringing one call up and on one transaction, how many messages one stack
-//! gets through in a second of that time, and what a live call holds in
-//! memory on each end — the dialog and its transactions apart from the media
-//! session that is opened beside them. The time is the wall clock read
-//! around every call into the library, on the one thread making them, not
-//! the processor time the operating system charged that thread: a machine
-//! busy with other work reads slower. Memory is counted by this file's own
-//! allocator rather than read off the operating system, so it is the bytes
-//! the library asked for and nothing the process did around it; that
-//! allocator's one `unsafe impl` is why the test lives in this crate, the one
-//! whose lints allow it.
+//! Printed (and collected by `scripts/bench.sh` into `docs/19-numbers.md`):
+//! time inside the library per call set-up and per transaction, messages per
+//! second, and memory per live call at each end, dialog apart from media.
+//! Time is wall clock around each library call on one thread, so a busy
+//! machine reads slower. Memory comes from this file's counting allocator
+//! (bytes the library asked for); its `unsafe impl` is why the test lives in
+//! this crate.
 //!
-//! And it is a test before it is a measurement. Every call has to end the
-//! way it was ended — hung up here, hung up there — every message that
-//! crossed is counted against the number the exchange above makes, so a
-//! transaction lost or answered twice is a failure, and once the calls are
-//! over the clock is run on past every timer RFC 3261 has, and nothing may go
-//! out: a retransmission then is a transaction that was never finished.
+//! It is also a test: every call must end as it was ended, every message is
+//! counted against the expected tally (a lost or doubled transaction fails),
+//! and after the calls the clock runs past every RFC 3261 timer with nothing
+//! sent (a retransmission means an unfinished transaction).
 //!
-//! The one thing not taken from the library is the far end's half of digest
-//! authentication. A user agent answers challenges; it does not issue them.
-//! The challenge is the 401 a PBX answers with, written by the answering
-//! stack's own `reject` with the field on it, and the credentials that come
-//! back are checked here, by the test, the way RFC 7616 §3.4.1 has a server
-//! check them — outside the time either stack is charged with.
+//! The server half of digest is the test's own: the answering stack's
+//! `reject` sends the 401, and the test checks the credentials as RFC 7616
+//! §3.4.1 has a server do, outside the measured time.
 
-// the test says what it means; the library's no-panic discipline is not for
-// a test harness. And the two ends of a call are the caller and the callee,
-// which is what they are called everywhere else too, one letter apart or not
+// panics are fine in a test harness; `caller` and `callee` are the names
+// used everywhere
 #![allow(
     clippy::panic,
     clippy::unwrap_used,
@@ -69,7 +53,7 @@ use sipral::{
 use sipral_core::auth::DigestAlgorithm;
 use sipral_core::msg::HeaderName;
 
-// -- the processor time --------------------------------------------------------
+// the processor time
 
 /// `struct timespec` on the 64-bit targets the floor is held on.
 #[cfg(all(
@@ -96,8 +80,7 @@ const THREAD_CPU: i32 = 16;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 const THREAD_CPU: i32 = 3;
 
-/// The processor time this thread has been given so far, where the platform
-/// says; `None` elsewhere.
+/// This thread's processor time so far, where the platform provides it.
 fn thread_cpu() -> Option<Duration> {
     #[cfg(all(
         any(target_os = "macos", target_os = "linux"),
@@ -108,8 +91,8 @@ fn thread_cpu() -> Option<Duration> {
             seconds: 0,
             nanoseconds: 0,
         };
-        // SAFETY: a clock both platforms define, and a live structure of
-        // the layout their C library writes into.
+        // SAFETY: a clock both platforms define, and a live struct of the
+        // layout their C library writes.
         let status = unsafe { clock_gettime(THREAD_CPU, &raw mut now) };
         if status != 0 {
             return None;
@@ -128,7 +111,7 @@ fn thread_cpu() -> Option<Duration> {
     }
 }
 
-// -- the allocator ------------------------------------------------------------
+// the allocator
 
 /// Every byte asked for, and every byte given back, since the process began.
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
@@ -137,9 +120,8 @@ static FREED: AtomicUsize = AtomicUsize::new(0);
 /// The system's own allocator, counting as it goes.
 struct Counting;
 
-// SAFETY: every method hands the call to `System` unchanged, with the layout
-// and pointer it was given, and only adds to two counters afterwards; the
-// counters are atomics, so the allocator stays safe to share across threads.
+// SAFETY: every method forwards to `System` unchanged and only then updates
+// two atomic counters, so the allocator stays safe to share across threads.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller's contract for `alloc` is `System`'s contract.
@@ -179,29 +161,26 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// The bytes held right now, by everything in the process.
-///
-/// Only meaningful because this file has one test in it: the harness runs
-/// tests on threads of their own, and a second test would be counted too.
+/// Bytes held right now by the whole process. Valid only because this file
+/// has a single test; the harness would count a second one too.
 fn live() -> usize {
     ALLOCATED
         .load(Ordering::Relaxed)
         .saturating_sub(FREED.load(Ordering::Relaxed))
 }
 
-// -- the two stacks -----------------------------------------------------------
+// the two stacks
 
 /// How many calls each stack holds at once.
 const CALLS: usize = 100;
 
 const UDP: TransportId = TransportId(1);
 
-/// Past the last timer any RFC 3261 transaction runs: 64 × T1 is thirty-two
-/// seconds, and nothing an exchange started is still alive after it.
+/// Past the last RFC 3261 transaction timer (64 × T1 = 32 s).
 const TRANSACTIONS_OVER: Duration = Duration::from_secs(40);
 
-/// The realm the answering end challenges in, and the password only the
-/// calling end's account and this test's check know.
+/// The challenge realm, and the password known to the caller's account and
+/// this test's check.
 const REALM: &str = "sipral.test";
 const USER: &str = "alice";
 const PASSWORD: &str = "correct horse battery staple";
@@ -217,24 +196,21 @@ fn uri(text: &str) -> Uri {
     Uri::parse_str(text).expect("a written URI")
 }
 
-/// A media address of its own for call `n`: two sessions on one port is what
-/// a stack refuses, and it is the application that owns the port.
+/// A media address per call `n`: a stack refuses two sessions on one port.
 fn media_address(host: &str, n: usize) -> SocketAddr {
     address(&format!("{host}:{}", 20_000 + 2 * n))
 }
 
-/// One stack, and what it cost: the wall time spent inside the library on
-/// its behalf, the processor time the thread was given meanwhile, and the
-/// messages that crossed its edge either way.
+/// One stack and its cost: wall time inside the library, processor time
+/// meanwhile, and messages in and out.
 struct Side {
     agent: UserAgent,
     engine: MediaEngine,
     sip: SocketAddr,
     host: &'static str,
     spent: Duration,
-    /// The processor time inside those same calls, where the platform says,
-    /// which other work on the machine does not inflate: what the floor
-    /// under a regression is held to.
+    /// Processor time inside those calls, where available; unaffected by
+    /// other load, so the regression floor uses it.
     worked: Option<Duration>,
     sent: BTreeMap<String, usize>,
     received: BTreeMap<String, usize>,
@@ -243,12 +219,9 @@ struct Side {
 impl Side {
     fn new(seed: u8, host: &'static str, calls: usize, now: Instant) -> Self {
         let sip = address(&format!("{host}:5060"));
-        // the defaults hold 128 dialogs and 256 server transactions, which
-        // is a softphone's ceiling and a flood's, and every call here has
-        // two INVITE server transactions live at once while it is set up. A
-        // run of more calls than that raises both, the way a media server
-        // built on this stack would; a run within them measures the stack
-        // as it ships
+        // defaults are 128 dialogs and 256 server transactions; each call has
+        // two INVITE server transactions during set-up, so larger runs raise
+        // both, as a media server would
         let mut config = EndpointConfig::default();
         config.max_dialogs = config.max_dialogs.max(calls);
         config.max_server_transactions = config.max_server_transactions.max(2 * calls);
@@ -264,9 +237,7 @@ impl Side {
                 now,
             )
             .expect("a transport");
-        // mu-law and nothing else, the codec the media numbers are taken on:
-        // what is measured here is the signalling, and an Opus session's own
-        // encoder and decoder would be counted as a call's memory
+        // mu-law only: an Opus codec's state would be counted as call memory
         let catalog = CodecCatalog::with_order(&["PCMU"]).expect("a catalogue");
         let engine = MediaEngine::new(
             catalog,
@@ -329,10 +300,8 @@ impl Side {
         self.timed(|agent, engine| engine.poll_event(agent, now))
     }
 
-    /// Time passes for this stack: its transactions' timers and its
-    /// sessions' watchdogs both get a look, and the RTCP reports that fall
-    /// due are written — and dropped, since they go to a media address and
-    /// no audio is running on these calls.
+    /// Advance this stack's time: transaction timers and session watchdogs
+    /// run, and due RTCP reports are written and dropped (no audio here).
     fn tick(&mut self, now: Instant) {
         self.timed(|agent, engine| {
             agent.handle_timeout(now);
@@ -352,8 +321,7 @@ impl Side {
     }
 }
 
-/// A message by what it is: the method of a request, the status of a
-/// response. What the tally of a run is kept in.
+/// A message by method or status; the key of a run's tally.
 fn kind(datagram: &[u8]) -> String {
     let line = datagram
         .split(|byte| *byte == b'\r')
@@ -366,7 +334,7 @@ fn kind(datagram: &[u8]) -> String {
     }
 }
 
-// -- the far end's half of digest --------------------------------------------
+// the far end's half of digest
 
 /// The parameters of a `Digest` credentials value, unquoted.
 fn digest_parameters(value: &str) -> BTreeMap<String, String> {
@@ -396,8 +364,8 @@ fn digest_parameters(value: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// The nonces this end has handed out, and the highest count each has been
-/// answered with: a count that does not rise is a replay (RFC 7616 §3.4).
+/// Nonces issued and their highest count; a count that does not rise is a
+/// replay (RFC 7616 §3.4).
 #[derive(Default)]
 struct Nonces {
     issued: usize,
@@ -412,8 +380,7 @@ impl Nonces {
         format!("Digest realm=\"{REALM}\", nonce=\"{nonce}\", qop=\"auth\", algorithm=MD5")
     }
 
-    /// Whether `value` answers one of this end's challenges for an INVITE,
-    /// with the password this end knows.
+    /// Whether `value` answers one of our INVITE challenges with our password.
     fn verify(&mut self, value: &str) {
         let fields = digest_parameters(value);
         let get = |name: &str| {
@@ -442,7 +409,7 @@ impl Nonces {
     }
 }
 
-// -- the run ------------------------------------------------------------------
+// the run
 
 /// Both stacks, the calls between them, and what each end has seen of them.
 struct Run {
@@ -471,10 +438,8 @@ impl Run {
         let now = Instant::now();
         let mut caller = Side::new(0x11, "192.0.2.1", capacity, now);
         let mut callee = Side::new(0x22, "192.0.2.2", capacity, now);
-        // every call arrives from one address, which is a switchboard's
-        // shape and not a phone's: the default limit, ten at once from one
-        // source, is for a phone that faces the internet, and
-        // `limit_invites` is how a deployment that answers a proxy says so
+        // all calls come from one address, like a proxy; the default limit is
+        // for a phone, and `limit_invites` is how a deployment says so
         callee.agent.limit_invites(Rate::unlimited());
         let account = caller.agent.add_account(
             Account::new(
@@ -502,8 +467,7 @@ impl Run {
         }
     }
 
-    /// Place `calls` calls, all before any answer is delivered, and carry
-    /// them to confirmed at both ends.
+    /// Place `calls` calls before any answer, and confirm them at both ends.
     fn set_up(&mut self, calls: usize) {
         for n in 0..calls {
             let local = media_address(self.caller.host, n);
@@ -525,8 +489,7 @@ impl Run {
         self.settle();
     }
 
-    /// Move everything either stack wrote to the other, and act on what each
-    /// then says, until neither has anything left to say.
+    /// Relay everything between the stacks until both are quiet.
     fn settle(&mut self) {
         loop {
             self.drain_caller();
@@ -572,8 +535,8 @@ impl Run {
         }
     }
 
-    /// A call arrived at the answering end: challenged when it carries no
-    /// credentials, and rung and answered when the ones it carries verify.
+    /// An arriving call: challenged without credentials, answered when they
+    /// verify.
     fn incoming(&mut self, call: CallHandle, credentials: Option<String>) {
         let now = self.now;
         if let Some(credentials) = credentials {
@@ -625,7 +588,7 @@ impl Run {
         }
     }
 
-    /// Hold every call, then resume every call, each round all at once.
+    /// Hold every call, then resume every call, all at once each time.
     fn hold_and_resume(&mut self) {
         for hold in [true, false] {
             for call in self.placed.clone() {
@@ -654,10 +617,8 @@ impl Run {
         self.settle();
     }
 
-    /// Run the clock on for `span`, from one timer either stack asked for to
-    /// the next, the way an application's loop does, delivering whatever
-    /// goes out; what went out is returned, since after a finished exchange
-    /// the answer should be nothing.
+    /// Run the clock on for `span`, timer to timer, delivering what goes out;
+    /// returns it, since after finished exchanges it should be empty.
     fn wait(&mut self, span: Duration) -> usize {
         let before = total(&self.caller.sent) + total(&self.callee.sent);
         let until = self.now + span;
@@ -670,8 +631,7 @@ impl Run {
                 self.now = until;
                 return total(&self.caller.sent) + total(&self.callee.sent) - before;
             };
-            // a timer already due is run now, and one that stays due after
-            // it has run would be a loop, which the bound above ends
+            // a timer still due after running would loop; the bound ends it
             self.now = next.max(self.now);
             let now = self.now;
             self.caller.tick(now);
@@ -691,8 +651,8 @@ fn short(text: &str) -> String {
     text.chars().take(160).collect()
 }
 
-/// What a run was asked for: `CALLS`, unless the environment raises it.
-/// `scripts/bench.sh` runs the same test at a larger count.
+/// The call count: `CALLS`, or more from the environment
+/// (`scripts/bench.sh`).
 fn sized() -> usize {
     std::env::var("SIPRAL_SIGNALLING_CALLS")
         .ok()
@@ -701,19 +661,13 @@ fn sized() -> usize {
         .unwrap_or(CALLS)
 }
 
-/// The exchange above, message by message, for one call, as each end writes
-/// it: the tally a run has to come to, times the number of calls.
+/// The expected messages per call, per end; a run's tally is this times the
+/// calls.
 ///
-/// The caller writes an INVITE, the ACK for its 401, the INVITE again with
-/// credentials, the PRACK for the 180, the ACK for the 200, then a re-INVITE
-/// and its ACK twice, and a BYE. The callee writes a 100 for each of the four
-/// INVITEs, the 401, the 180, the 200 for each of the three it takes, the 200
-/// for the PRACK and the 200 for the BYE.
-///
-/// The PRACK is there because both ends are this stack: each INVITE says it
-/// supports RFC 3262, so the answering end sends its 180 reliably and the
-/// calling end acknowledges it, the way it would against any PBX that does
-/// the same.
+/// Caller: INVITE, ACK for the 401, INVITE with credentials, PRACK for the
+/// 180, ACK for the 200, two re-INVITEs with ACKs, BYE. Callee: 100 for each
+/// of the four INVITEs, 401, 180, 200 for the three it takes, 200 for PRACK
+/// and for BYE. PRACK appears because both ends advertise RFC 3262.
 const CALLER_WRITES: &[(&str, usize)] = &[("ACK", 4), ("BYE", 1), ("INVITE", 4), ("PRACK", 1)];
 const CALLEE_WRITES: &[(&str, usize)] = &[("100", 4), ("180", 1), ("200", 5), ("401", 1)];
 
@@ -724,16 +678,12 @@ fn expected(per_call: &[(&str, usize)], calls: usize) -> BTreeMap<String, usize>
         .collect()
 }
 
-/// What each half of a pair configured for `capacity` calls and holding
-/// `calls` confirmed ones gives back when it is dropped: the caller's user
-/// agent and media engine, then the callee's, in bytes.
+/// Bytes freed by dropping each half of a pair with `calls` confirmed calls:
+/// caller's user agent and media engine, then the callee's.
 ///
-/// Taken apart one piece at a time, each media engine before its user agent,
-/// with nothing in flight between them: what is freed is what that piece
-/// held, and nothing the harness was carrying. `later` runs the clock on
-/// first, past the last timer of every transaction that brought the calls
-/// up, so that what is left is the dialogs and not the exchange that made
-/// them.
+/// Each media engine is dropped before its user agent, with nothing in
+/// flight. `later` first runs the clock past every set-up timer, so what is
+/// left is the dialogs, not the exchange.
 fn footprint(capacity: usize, calls: usize, later: Option<Duration>) -> [usize; 4] {
     let mut run = Run::new(capacity);
     run.set_up(calls);
@@ -755,29 +705,24 @@ fn freed<T>(piece: T) -> usize {
     before.saturating_sub(live())
 }
 
-/// Nanoseconds as microseconds with one decimal, for the printed line.
+/// Nanoseconds as microseconds with one decimal.
 #[allow(clippy::cast_precision_loss)]
 fn micros(duration: Duration, per: usize) -> f64 {
     duration.as_secs_f64() * 1e6 / per as f64
 }
 
-// -- the test -----------------------------------------------------------------
-
-// one scenario read top to bottom: the calls brought up, changed and hung up,
-// then judged, then measured for memory. Cut into pieces it would be harder
-// to read against the line it prints.
+// the test: one scenario read top to bottom, matching the line it prints
 #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 #[test]
 fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing_lost() {
     let calls = sized();
 
-    // -- time: the whole exchange, on one pair of stacks ---------------------
+    // time: the whole exchange on one pair of stacks
     let mut run = Run::new(calls);
     run.set_up(calls);
     let setup = [run.caller.spent, run.callee.spent];
-    // the floor's measure: the processor time where the platform gives it,
-    // so that a machine running three test suites at once does not read as
-    // a regression, and the wall time elsewhere
+    // processor time where available, so a busy machine is not a
+    // regression; wall time elsewhere
     let floor_measure = [
         run.caller.worked.unwrap_or(run.caller.spent),
         run.callee.worked.unwrap_or(run.callee.spent),
@@ -821,8 +766,7 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
     }
 
     run.hang_up();
-    // anything written while every transaction runs out is a transaction
-    // that was never finished
+    // anything written while transactions run out was never finished
     let late = run.wait(TRANSACTIONS_OVER);
     for side in [&mut run.caller, &mut run.callee] {
         assert_eq!(side.due(), None, "a timer outlived every call");
@@ -863,18 +807,16 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
     assert_eq!(run.caller.engine.active().count(), 0);
     assert_eq!(run.callee.engine.active().count(), 0);
 
-    // six transactions a call at each end: the two INVITEs, the PRACK, the
-    // two re-INVITEs and the BYE, client side at one end and server side at
-    // the other (an ACK for a 2xx is a transaction of its own to nobody)
+    // six transactions per call per end: two INVITEs, PRACK, two re-INVITEs,
+    // BYE (an ACK for a 2xx is not a transaction)
     let transactions = 6 * calls;
     let caller_messages = total(&run.caller.sent) + total(&run.caller.received);
     let callee_messages = total(&run.callee.sent) + total(&run.callee.received);
     let caller_rate = caller_messages as f64 / run.caller.spent.as_secs_f64();
     let callee_rate = callee_messages as f64 / run.callee.spent.as_secs_f64();
 
-    // -- memory: the same calls brought up again, and taken apart -----------
-    // a pair with no calls on it is what a pair with all of them is measured
-    // against, so that what an empty stack holds is not charged to a call
+    // memory: the same calls again, measured against an empty pair so an
+    // empty stack is not charged to a call
     let bare = footprint(calls, 0, None);
     let per_call = |loaded: [usize; 4]| {
         let mut out = [0; 4];
@@ -903,11 +845,9 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
         callee_rate,
     );
 
-    // The same memory as `scripts/check.sh --only numbers` reads it against
-    // docs/numbers.toml: a live call's signalling and media at whichever end
-    // holds more of each, the two together at the end that holds more, and
-    // what the calling stack holds with no call at all -- its user agent,
-    // its transport and its account, and its media engine.
+    // the values `scripts/check.sh --only numbers` checks against
+    // docs/numbers.toml: per-call signalling and media at the heavier end,
+    // their sum, and the calling stack with no call
     println!(
         "numbers: memory.call.signalling={} memory.call.media={} memory.call.total={} \
          memory.idle={}",
@@ -917,13 +857,9 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
         bare[0] + bare[1],
     );
 
-    // A call is brought up once and held for minutes. Anything near ten
-    // milliseconds of one core to set one up would put a dialler's burst of
-    // a hundred calls a second past a core of its own; this is a floor under
-    // a regression, not the number. Held to the processor time the thread
-    // was given, not to the wall clock: in a debug build a call costs a few
-    // milliseconds, and on a machine busy enough the wall clock alone went
-    // past ten (a gate beside two other workspace test runs read 13 ms).
+    // a floor under a regression, not the number: near 10 ms of one core
+    // per set-up would put a dialler's 100 calls a second past a core.
+    // Processor time, because a busy machine's wall clock read 13 ms.
     for spent in floor_measure {
         assert!(
             spent < Duration::from_millis(10) * u32::try_from(calls).unwrap_or(u32::MAX),

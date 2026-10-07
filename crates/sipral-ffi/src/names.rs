@@ -3,19 +3,10 @@
 
 //! Handles for the things inside one stack.
 //!
-//! Accounts and calls are named by the layer below with identifiers whose
-//! insides it keeps to itself, so they cannot be handed to C as they are. What
-//! crosses instead is a handle of the same shape as every other handle here —
-//! a slot, a generation, and the tag of the stack it belongs to, zero never
-//! live, a freed one stale — minted per stack rather than per process, because
-//! an account only means anything inside the user agent that holds it.
-//!
-//! Minted per stack is also why the tag has to be checked here and nowhere
-//! else: every stack's tables start at the same slot, and a handle that is only
-//! a slot and a generation is as much another stack's as this one's.
-//!
-//! Nothing locks. The stack's own lock is already held by whoever is looking,
-//! which is the arrangement [`crate::stack`] describes.
+//! The layer below's identifiers are opaque, so C gets ordinary handles (slot,
+//! generation, stack tag) minted per stack. The stack tag must be checked here:
+//! every stack's tables start at the same slot. No locking; the caller holds
+//! the stack's lock ([`crate::stack`]).
 
 use crate::handle::{Kind, Mint, Refused, SipralHandle, StackTag, next_generation};
 use crate::status::SipralStatus;
@@ -95,11 +86,8 @@ impl<T: Copy + PartialEq> Names<T> {
         Ok(value)
     }
 
-    /// The handle for something the layer below named by itself.
-    ///
-    /// An incoming call, or a branch of a fork, appears in an event rather than
-    /// as the result of a call, and the application still has to be given
-    /// something to answer it with.
+    /// The handle for something that arrived in an event (an incoming call,
+    /// a fork branch), minting one if needed.
     pub(crate) fn name_of(&mut self, value: T) -> Result<SipralHandle, SipralStatus> {
         let found = self
             .slots
@@ -115,10 +103,7 @@ impl<T: Copy + PartialEq> Names<T> {
         self.insert(value)
     }
 
-    /// Retire whatever handle names `value`, if one does.
-    ///
-    /// A call that has ended is gone from the layer below, and a handle that
-    /// still answered for it would name a call the user agent has forgotten.
+    /// Retire whatever handle names `value`, e.g. a call the agent forgot.
     pub(crate) fn forget(&mut self, value: T) {
         let Some((index, slot)) = self
             .slots
@@ -147,8 +132,7 @@ mod tests {
         split,
     };
 
-    /// The kind every test below names, since none of them is about telling
-    /// kinds apart — `crate::call::tests` and `crate::handle`'s own tests do.
+    /// One kind for all; kinds are tested in `crate::handle`.
     const KIND: Kind = Kind::Call;
 
     fn names(stack: &StackTag) -> Names<u32> {
@@ -327,10 +311,8 @@ mod tests {
         assert_eq!(calls.get(own_call), Ok(10));
     }
 
-    /// A slot on the last generation a handle has room to name is retired
-    /// when it is let go, by `remove` and by `forget` alike, rather than put
-    /// back on the free list at a generation no handle can carry — where the
-    /// next thing named would be refused as if the stack were full.
+    /// A slot at its last generation is retired, not freed, by both `remove`
+    /// and `forget`; otherwise the next insert would be refused as full.
     #[test]
     fn a_slot_whose_generation_cannot_move_on_is_retired_and_not_offered_again() {
         static TAGS: StackTags = StackTags::new();

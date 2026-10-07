@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The one way in, and the one way a failure is explained.
+//! Entry points and the last error.
 //!
-//! A panic that reaches C uncaught takes the host process with it, and a SIP
-//! stack reads hostile input for a living, so every entry point in this crate
-//! is written with the `entry!` macro below and nothing else. It wraps the
-//! body in [`std::panic::catch_unwind`] and turns whatever comes out into a
-//! status code, which is the only reason the release profile keeps
-//! `panic = unwind`.
-//!
-//! The sentence that goes with the code is kept per thread rather than per
-//! object or per process: the thread that made the failing call is the one
-//! asking, and two stacks in one process must not overwrite each other's
-//! explanation.
+//! A panic reaching C kills the host, so every entry point uses `entry!`,
+//! which wraps the body in [`std::panic::catch_unwind`]. This is why the
+//! release profile keeps `panic = unwind`. The message is per thread, so two
+//! stacks never overwrite each other's.
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -42,9 +35,7 @@ impl Fail {
         &self.message
     }
 
-    /// The same failure, said about one element of a list the caller handed
-    /// over: `headers[2]: ...` rather than a sentence that could be about any
-    /// of them.
+    /// The same failure, prefixed with its place, as in `headers[2]: ...`.
     pub(crate) fn within(self, place: &str) -> Self {
         Self {
             status: self.status,
@@ -53,8 +44,7 @@ impl Fail {
     }
 }
 
-/// A failure with its explanation. A borrowed message costs nothing, which is
-/// what most of them are.
+/// A failure with its explanation.
 pub(crate) fn fail(status: SipralStatus, message: impl Into<Cow<'static, str>>) -> Fail {
     Fail {
         status,
@@ -64,10 +54,8 @@ pub(crate) fn fail(status: SipralStatus, message: impl Into<Cow<'static, str>>) 
 
 /// Run the body of an entry point that reports a [`Fail`].
 ///
-/// The message is settled on the way out rather than on the way in, so that a
-/// call which succeeded leaves nothing behind even when something it called —
-/// the caller's own callback, calling back into the library — failed inside
-/// it.
+/// The message is set on the way out, so a success clears it even when a
+/// nested call from the caller's callback failed.
 pub(crate) fn guard<F>(body: F) -> SipralStatus
 where
     F: FnOnce() -> Result<(), Fail>,
@@ -90,9 +78,7 @@ where
 
 /// Run the body of an entry point that must not touch the last error.
 ///
-/// There is exactly one such entry point, the accessor below: a reader that
-/// clobbered the message on its way to fetching it would make the
-/// ask-for-the-length-then-ask-for-the-bytes sequence impossible.
+/// Only the accessor below: clobbering would break length-then-bytes reads.
 pub(crate) fn guard_quiet<F>(body: F) -> SipralStatus
 where
     F: FnOnce() -> Result<(), SipralStatus>,
@@ -113,7 +99,6 @@ where
     catch(body).unwrap_or(fallback)
 }
 
-/// The catching itself, in one place so that no wrapper can forget it.
 fn catch<T, F>(body: F) -> Result<T, String>
 where
     F: FnOnce() -> T,
@@ -132,9 +117,7 @@ fn describe(payload: &(dyn Any + Send)) -> String {
 }
 
 fn store(message: &str) {
-    // `try_with` fails only while this thread's locals are being destroyed,
-    // and `try_borrow_mut` only if a call nested inside one already holding
-    // it; both mean there is nobody left to read the message.
+    // both fail only when nobody is left to read the message
     let _ = LAST_ERROR.try_with(|slot| {
         if let Ok(mut text) = slot.try_borrow_mut() {
             text.clear();
@@ -171,8 +154,7 @@ unsafe fn copy_out(
     if capacity < needed {
         return Err(SipralStatus::BufferTooSmall);
     }
-    // `needed` is at least one, so a capacity that reaches it is not zero and
-    // the buffer is therefore not null
+    // capacity >= needed >= 1, so the buffer is not null
     unsafe {
         ptr::copy_nonoverlapping(message.as_ptr().cast::<c_char>(), buffer, message.len());
         buffer.add(message.len()).write(0);
@@ -183,19 +165,13 @@ unsafe fn copy_out(
 entry! {
     /// Copy the calling thread's last error message into `buffer`.
     ///
-    /// The message is UTF-8 and is written with a trailing NUL, which is not
-    /// counted in the length. `out_needed`, when it is not null, always receives
-    /// the number of bytes the message needs including that NUL, so a caller
-    /// that passes a capacity of zero and a null buffer gets the length back
-    /// and `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer
-    /// too small to hold the whole message: a truncated one would cut a
-    /// multi-byte character in half.
+    /// UTF-8 with a trailing NUL. `out_needed`, when not null, always receives
+    /// the size including the NUL; a null buffer with capacity zero returns
+    /// it with `SIPRAL_STATUS_BUFFER_TOO_SMALL`. A buffer too small gets
+    /// nothing, never a truncated message.
     ///
-    /// The message describes the last call this thread made and nothing else.
-    /// The next call on this thread replaces it, a call that succeeds empties
-    /// it — including one that succeeded around a nested call that did not —
-    /// and this call leaves it alone, so it can be read twice. It is never
-    /// shared with another thread.
+    /// It describes this thread's last call: the next call replaces it, a
+    /// success empties it, and this call leaves it alone.
     ///
     /// # Safety
     ///
@@ -209,14 +185,12 @@ entry! {
         let copied = with_message(|message| unsafe { copy_out(message, buffer, capacity, out_needed) });
         match copied {
             Some(result) => result,
-            // the thread's locals are already gone, so there is no message
             None => unsafe { copy_out("", buffer, capacity, out_needed) },
         }
     }
 }
 
-/// The message as a test reads it: the way C would, through the accessor and
-/// its two calls, rather than out of the thread local behind its back.
+/// The message read the way C would, through the accessor's two calls.
 #[cfg(test)]
 pub(crate) fn last_error_text() -> String {
     use std::ffi::CStr;
@@ -235,24 +209,19 @@ pub(crate) fn last_error_text() -> String {
 
 /// Declare an entry point.
 ///
-/// Three shapes, and no fourth: a call that reports a [`Fail`], the one call
-/// that must not disturb the last error, and a call that returns a value with
-/// a fallback for the panic that must not escape.
+/// Three shapes: reports a [`Fail`]; `quiet`, leaving the last error alone;
+/// returns a value with a panic fallback.
 ///
-/// Beside the function, each shape emits a module of the same name holding a
-/// [`crate::abi::Function`] built from the very tokens the declaration is made
-/// of. That is what the header and the three bindings are printed from, so
-/// there is no second place a signature is written down and nothing for the
-/// two to drift apart over. A module and a function do not share a namespace,
-/// which is what lets the descriptor take the name of the thing it describes.
+/// Each also emits a same-named module holding a [`crate::abi::Function`]
+/// built from the declaration's tokens; the header and bindings are printed
+/// from it, so a signature is written once.
 macro_rules! entry {
     (
         $(#[doc = $doc:literal])*
         fn $name:ident($($argument:ident: $type:ty),* $(,)?) $body:block
     ) => {
         $(#[doc = $doc])*
-        // an exported symbol is reachable through the linker whatever the
-        // module tree says, which is why the lint has nothing to tell us here
+        // exported symbols are reachable through the linker
         #[allow(unreachable_pub)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: $type),*) -> $crate::status::SipralStatus {
@@ -268,8 +237,7 @@ macro_rules! entry {
         quiet fn $name:ident($($argument:ident: $type:ty),* $(,)?) $body:block
     ) => {
         $(#[doc = $doc])*
-        // an exported symbol is reachable through the linker whatever the
-        // module tree says, which is why the lint has nothing to tell us here
+        // exported symbols are reachable through the linker
         #[allow(unreachable_pub)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: $type),*) -> $crate::status::SipralStatus {
@@ -286,8 +254,7 @@ macro_rules! entry {
             -> $result:ty, on_panic = $fallback:expr, $body:block
     ) => {
         $(#[doc = $doc])*
-        // an exported symbol is reachable through the linker whatever the
-        // module tree says, which is why the lint has nothing to tell us here
+        // exported symbols are reachable through the linker
         #[allow(unreachable_pub)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: $type),*) -> $result {
@@ -335,8 +302,7 @@ mod tests {
     use std::ffi::{CStr, c_char};
     use std::ptr;
 
-    /// `c_char` is signed on some targets and unsigned on others, so a test
-    /// that fills a buffer says what it means and lets the target decide.
+    /// `c_char` signedness varies by target.
     const NUL: c_char = 0;
     const UNTOUCHED: c_char = 0x7f;
 
@@ -511,17 +477,8 @@ mod tests {
         assert_eq!(message(), "no room");
     }
 
-    // The three tests above prove the wrappers catch. These prove the macro
-    // reaches for them, which is the half that would rot: an entry point
-    // declared any other way would unwind into C and take the host process
-    // with it, and nothing in the type system says otherwise. Every shape the
-    // macro offers is exercised, because a shape that forgot its wrapper would
-    // be the one nobody used until a customer did.
-    //
-    // `scripts/check.sh` covers the other direction, that nothing declares an
-    // entry point without the macro.
-    // the macro makes them `pub`, which is what a real entry point needs and
-    // what nothing outside this module can reach
+    // Every shape of the macro must reach for its wrapper, or a panic unwinds
+    // into C. `scripts/check.sh` checks nothing bypasses the macro.
     entry! {
         fn sipral_test_entry_panics() {
             panic!("from inside an entry point")
@@ -569,11 +526,7 @@ mod tests {
         assert_eq!(unsafe { sipral_test_entry_panics_with_a_value() }, 7);
     }
 
-    // The other half of what the macro is for. The header and the three
-    // bindings are printed from these descriptors, so a shape that declared an
-    // entry point without writing down what it declared would produce a
-    // library with a function no binding has. Every shape is asked, for the
-    // same reason each is asked about catching.
+    // A shape without a descriptor would be a function no binding has.
     #[test]
     fn every_shape_writes_down_what_it_declared() {
         assert_eq!(

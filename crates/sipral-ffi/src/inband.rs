@@ -3,27 +3,10 @@
 
 //! What a call carries inside its audio, from C.
 //!
-//! Three settings, each per call and each reachable before the call has any
-//! media: the settings live with the call in the engine and reach its media
-//! when there is some, so an application sets them straight after
-//! `sipral_call_place` — or on `SIPRAL_EVENT_KIND_INCOMING_CALL`, before it
-//! answers — and never has to catch the moment media starts.
-//!
-//! - [`sipral_call_dtmf_detection`]: when keypad digits are listened for in
-//!   the far end's audio. The stack's default is
-//!   `sipral_stack_config_t::dtmf_detection`.
-//! - [`sipral_call_detect_progress`]: call-progress tones on early media,
-//!   who answered, and the machine's beep, reported as
-//!   `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
-//! - [`sipral_call_consent_tone`]: a beep while the call is recorded.
-//!
-//! A digit written into the audio is a form of `sipral_call_send_dtmf`
-//! (`SIPRAL_DTMF_IN_BAND`), and a recording's format is
-//! `sipral_media_record_start_with`'s; neither is here.
-//!
-//! Every struct here starts out meaning "the defaults" when it is zeroed, so
-//! a caller names only what it wants to change. `docs/05-media.md` says what
-//! each default is and why.
+//! Three per-call settings, settable before the call has media (right after
+//! `sipral_call_place` or on the incoming event); the engine applies them
+//! when media starts. A zeroed struct means the defaults
+//! (`docs/05-media.md`).
 
 use std::time::Duration;
 
@@ -46,9 +29,8 @@ codes! {
     /// [`sipral_call_dtmf_detection`]'s `mode`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDtmfDetection: u32 {
-        /// On a call whose negotiation settled on no telephone event payload
-        /// type: the far end then has no other way to send a digit. Zero, so
-        /// that a stack that says nothing gets it.
+        /// Only when no telephone event was negotiated, since the far end
+        /// then has no other way to send a digit.
         Auto = 0,
         /// Never. Digits arrive only as RFC 4733 events or by INFO.
         Off = 1,
@@ -73,10 +55,8 @@ codes! {
 }
 
 record! {
-    /// How [`sipral_call_detect_progress`] listens. Zero in any member but
-    /// `size` is that member's default.
-    ///
-    /// Set `size` to `sizeof(sipral_progress_config_t)` before the call.
+    /// How [`sipral_call_detect_progress`] listens. A zero member is its
+    /// default. Set `size` to `sizeof(sipral_progress_config_t)`.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralProgressConfig {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -124,8 +104,7 @@ record! {
     }
 }
 
-// Safety: the trait's contract. Integers only, and all-zero is a valid value
-// of each: it is the defaults.
+// Safety: integers only; all-zero is the defaults.
 unsafe impl Versioned for SipralProgressConfig {
     const NAME: &'static str = "sipral_progress_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralProgressConfig, tone_cycles);
@@ -136,10 +115,8 @@ unsafe impl Versioned for SipralProgressConfig {
 }
 
 record! {
-    /// The beep [`sipral_call_consent_tone`] plays while a call is recorded.
-    /// Zero in any member but `size` is that member's default.
-    ///
-    /// Set `size` to `sizeof(sipral_consent_tone_t)` before the call.
+    /// The beep [`sipral_call_consent_tone`] plays. A zero member is its
+    /// default. Set `size` to `sizeof(sipral_consent_tone_t)`.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralConsentTone {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -162,8 +139,7 @@ record! {
     }
 }
 
-// Safety: the trait's contract. Integers only, and all-zero is a valid value
-// of each: it is the defaults.
+// Safety: integers only; all-zero is the defaults.
 unsafe impl Versioned for SipralConsentTone {
     const NAME: &'static str = "sipral_consent_tone";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralConsentTone, local);
@@ -316,12 +292,9 @@ fn engine_call(state: &StackState, call: SipralHandle) -> Result<sipral_ua::Call
 }
 
 entry! {
-    /// Listen for keypad digits in this call's far-end audio as `mode` says:
-    /// a [`SipralDtmfDetection`]. Before the call has media as well as
-    /// after, for the rest of the call.
-    ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
-    /// not run.
+    /// Listen for keypad digits in the far-end audio as `mode` (a
+    /// [`SipralDtmfDetection`]) says. `SIPRAL_STATUS_WRONG_STATE` if this
+    /// stack does not run the call's media.
     ///
     /// # Safety
     ///
@@ -339,16 +312,12 @@ entry! {
 }
 
 entry! {
-    /// Listen for call progress on this call and decide who answers it, as
-    /// `config` says, or stop with `config.listen` off. Meant for a call this
-    /// stack placed, straight after `sipral_call_place`: the tones are
-    /// listened for from the first frame of early media, and who answered is
-    /// decided from the 2xx on. Each thing heard is a
-    /// `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
+    /// Listen for call progress and decide who answered, as `config` says;
+    /// `config.listen` off stops. Call right after `sipral_call_place`. Each
+    /// finding is a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
-    /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT` for a value no detector
-    /// takes, which changes nothing.
+    /// `SIPRAL_STATUS_WRONG_STATE` if this stack does not run the call's media;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a bad value, changing nothing.
     ///
     /// # Safety
     ///
@@ -372,13 +341,11 @@ entry! {
 }
 
 entry! {
-    /// Beep on this call while it is recorded, as `tone` says, or play no
-    /// tone with `tone.enabled` off. A recording already running starts
-    /// beeping at once; one started later beeps from its first frame.
+    /// Beep while the call is recorded, as `tone` says; `tone.enabled` off
+    /// silences it. Applies at once to a running recording.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media this stack does
-    /// not run; `SIPRAL_STATUS_INVALID_ARGUMENT`, naming the member, for a
-    /// tone that is not a beep, which changes nothing.
+    /// `SIPRAL_STATUS_WRONG_STATE` if this stack does not run the call's media;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming the bad member, changing nothing.
     ///
     /// # Safety
     ///
@@ -463,9 +430,7 @@ mod tests {
         pcm
     }
 
-    /// The fixture's far end offered no telephone event, so by default the
-    /// call listens in the audio, and the key arrives as its own kind with
-    /// the source that says where it was heard.
+    /// No telephone event was offered, so the default listens in the audio.
     #[test]
     fn a_digit_in_the_far_ends_audio_is_its_own_event_on_a_call_with_no_named_events() {
         let mut observed = Observed::default();
@@ -537,9 +502,7 @@ mod tests {
         }
     }
 
-    /// A greeting that runs on, after an answer this stack was told to
-    /// listen through, is reported as a machine: the whole path, from the
-    /// call's own settings before it was answered to the event's own arm.
+    /// A long greeting is reported as a machine, end to end.
     #[test]
     fn a_placed_call_answered_by_a_long_greeting_is_reported_as_a_machine() {
         let mut observed = Observed::default();

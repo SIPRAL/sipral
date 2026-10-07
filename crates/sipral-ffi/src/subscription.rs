@@ -4,59 +4,27 @@
 //! Watching something at the far end: SUBSCRIBE, NOTIFY, and the busy lamp
 //! field on top of them.
 //!
-//! `crates/sipral-ua/src/subscription.rs` already does all of it — the
-//! transaction, the dialog, timer N, the refresh at a fraction of what the
-//! notifier granted, the fork that turns one SUBSCRIBE into two subscriptions
-//! (RFC 6665 §4.1.4), and the retry with a fresh `Call-ID` after something
-//! recoverable. What was missing was any way to reach it from C, which is why
-//! `sipral_capabilities` reported [`SIPRAL_FEATURE_SUBSCRIPTIONS`] off while
-//! the feature was sitting there compiled in.
+//! `sipral-ua` does the protocol work: the dialog, timer N, the refresh, forks
+//! (RFC 6665 §4.1.4), and the retry with a fresh `Call-ID`. This module exposes
+//! it to C, behind [`SIPRAL_FEATURE_SUBSCRIPTIONS`].
 //!
 //! [`SIPRAL_FEATURE_SUBSCRIPTIONS`]: crate::capabilities::SIPRAL_FEATURE_SUBSCRIPTIONS
 //!
-//! # A subscription is a handle of its own
+//! A subscription is a handle of its own, minted by
+//! [`sipral_account_subscribe`] and dead once
+//! `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` says it ended for good. A fork
+//! sibling appears in an event, like an incoming call (RFC 4235 §3.9: one per
+//! registered device).
 //!
-//! Not an account's and not a call's: one account holds thirty of them on a
-//! desk phone, each with its own dialog, its own refresh and its own state.
-//! [`sipral_account_subscribe`] mints one, and the handle is dead once
-//! `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` says the subscription ended with
-//! nothing more coming.
-//!
-//! A sibling from a fork appears by itself, in an event, the way an incoming
-//! call does: RFC 4235 §3.9 makes that the normal case for dialog state, one
-//! subscription per device the watched address is registered on, and each is
-//! answerable on its own.
-//!
-//! # What a NOTIFY brings
-//!
-//! Two events rather than one, because they answer different questions. The
-//! state changing — requesting, pending, active, ended — is
-//! `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED`, and it is what a lamp goes grey
-//! on. A notification arriving is
-//! `SIPRAL_EVENT_KIND_NOTIFIED`, and it is what a lamp changes colour on: the
-//! NOTIFY is in `sipral_event_t::message`, whole and unparsed, for a package
-//! this ABI has no reader for, and for `dialog` the parsed picture is behind
+//! A NOTIFY raises `SIPRAL_EVENT_KIND_NOTIFIED`, with the request whole in
+//! `sipral_event_t::message`; for `dialog` the parsed table is behind
 //! [`sipral_subscription_dialog_count`] and [`sipral_subscription_dialog_at`].
-//! A state change is not sent on every refresh: a lamp does not move because a
-//! refresh was scheduled.
+//! State changes are a separate event, not raised on refresh.
 //!
-//! # What does not cross, and why
-//!
-//! Application header fields on a SUBSCRIBE. `sipral_ua::Subscribe::header`
-//! takes them in Rust, but the list of fields the stack writes itself is kept
-//! per kind of message (`HeadersFor`), and a SUBSCRIBE has no entry in it: a
-//! subscription writes `Event`, `Expires`, `Accept` and the dialog's own
-//! fields, and deciding which of those an application may overwrite is a
-//! policy for `sipral-ua` rather than something this boundary should invent.
-//!
-//! Subscribing to many things in one call. `sipral_ua::UserAgent::subscribe_many`
-//! exists so that a phone's thirty lamps leave as one burst rather than thirty
-//! round trips — but nothing in it waits, so a C caller doing thirty
-//! `sipral_account_subscribe` calls before its next poll gets the same burst.
-//! What the batch adds over the loop is that its events are drained once, and
-//! this ABI drains on the poll either way. An array of configs going in would
-//! also cost the config struct its `size` member, which is what lets it grow
-//! later, and a permanent shape is a high price for a loop.
+//! Not exposed: application header fields on a SUBSCRIBE (which of the
+//! stack's fields may be overwritten is `sipral-ua`'s policy, not yet set),
+//! and batch subscribe (a loop before the next poll sends the same burst, and
+//! an array would cost the config its `size` member).
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
@@ -79,8 +47,7 @@ use crate::text::{required_text, text};
 use crate::versioned::{Versioned, declared_size, read_versioned, write_versioned};
 
 codes! {
-    /// Where a subscription is. Names for
-    /// `sipral_subscription_event_t::state` and for
+    /// Where a subscription is: `sipral_subscription_event_t::state` and
     /// [`sipral_subscription_state`]'s `out_state`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralSubscriptionState: u32 {
@@ -88,43 +55,35 @@ codes! {
         Unknown = 0,
         /// A SUBSCRIBE is on its way and nothing has answered it yet.
         Requesting = 1,
-        /// The notifier has it and has not decided. RFC 6665 §4.1.3's
-        /// `pending` is "insufficient policy information to grant or deny the
-        /// subscription yet", and nothing is known about the watched thing
-        /// until this becomes [`SipralSubscriptionState::Active`].
+        /// The notifier has not decided (RFC 6665 §4.1.3 `pending`); nothing
+        /// is known until [`SipralSubscriptionState::Active`].
         Pending = 2,
         /// Granted, and notifications are arriving.
         Active = 3,
-        /// Not live, and a fresh attempt is scheduled. The handle stays
-        /// valid: §4.1.2.2's new attempt is "an unrelated initial SUBSCRIBE
-        /// request with a freshly generated Call-ID and a new, unique From
-        /// tag", and this ABI keeps one name over both of them.
+        /// Not live, and a fresh attempt is scheduled (§4.1.2.2: new
+        /// `Call-ID` and `From` tag). The handle stays valid across both.
         Retrying = 4,
-        /// Over, with nothing more coming. The handle names nothing from
-        /// here on.
+        /// Over, nothing more coming. The handle names nothing from here on.
         Ended = 5,
     }
 }
 
 codes! {
-    /// Why a subscription is not live. Names for
-    /// `sipral_subscription_event_t::reason`.
+    /// Why a subscription is not live: `sipral_subscription_event_t::reason`.
     ///
-    /// Zero unless the state is [`SipralSubscriptionState::Retrying`] or
-    /// [`SipralSubscriptionState::Ended`]. The first nine are what a
-    /// `Subscription-State: terminated` said in its `reason` parameter (RFC
-    /// 6665 §4.1.3), and the rest are what happened here instead.
+    /// Zero unless [`SipralSubscriptionState::Retrying`] or
+    /// [`SipralSubscriptionState::Ended`]. The first eight are the `reason` of
+    /// `Subscription-State: terminated` (RFC 6665 §4.1.3); the rest happened
+    /// here.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralSubscriptionEnd: u32 {
         /// Never written by this build.
         Unknown = 0,
-        /// `deactivated`: the notifier wants this subscription started again
-        /// at once.
+        /// `deactivated`: the notifier wants it started again at once.
         Deactivated = 1,
         /// `probation`: started again, but not immediately.
         Probation = 2,
-        /// `rejected`: the notifier will not serve it, and asking again is
-        /// pointless.
+        /// `rejected`: the notifier will not serve it; do not ask again.
         Rejected = 3,
         /// `timeout`: it ran out rather than being refreshed.
         Timeout = 4,
@@ -132,28 +91,23 @@ codes! {
         GaveUp = 5,
         /// `noresource`: what was being watched does not exist any more.
         NoResource = 6,
-        /// `invariant`: the watched thing cannot change, so there is nothing
-        /// to notify about.
+        /// `invariant`: the watched thing cannot change.
         Invariant = 7,
         /// `terminated` with no reason parameter at all.
         Unstated = 8,
-        /// This end gave it up: [`sipral_subscription_end`]. It wins over
-        /// whatever the notifier's closing notification said its own reason
-        /// was, because the application asked for this one to stop and that
-        /// is the answer to why it is not live.
+        /// This end gave it up with [`sipral_subscription_end`]. Wins over
+        /// the notifier's closing reason.
         Unsubscribed = 9,
         /// The notifier answered 489: it does not know this event package.
         BadEvent = 10,
-        /// The notifier refused the SUBSCRIBE with a status trying again
-        /// cannot fix.
+        /// Refused with a status a retry cannot fix.
         Refused = 11,
-        /// The SUBSCRIBE was redirected, and following a redirect for one is
-        /// not something this stack does by itself.
+        /// Redirected; this stack does not follow redirects for SUBSCRIBE.
         Redirected = 12,
         /// Nothing answered: the notifier could not be reached at all.
         Unreachable = 13,
-        /// The SUBSCRIBE was answered and the first NOTIFY never arrived
-        /// (§4.1.2.4's timer N, 64·T1).
+        /// Answered, but the first NOTIFY never came (§4.1.2.4's timer N,
+        /// 64·T1).
         NoNotify = 14,
         /// What the notifier granted ran out with no refresh answered.
         Expired = 15,
@@ -161,10 +115,9 @@ codes! {
 }
 
 record! {
-    /// What to watch, and how. Handed to [`sipral_account_subscribe`].
-    ///
-    /// Set `size` to `sizeof(sipral_subscribe_config_t)` before the call.
-    /// Everything but `target` and `package` may be left zero.
+    /// What to watch, and how. Handed to [`sipral_account_subscribe`]. Set
+    /// `size` to `sizeof(sipral_subscribe_config_t)`; all but `target` and
+    /// `package` may be zero.
     #[derive(Clone, Copy)]
     pub struct SipralSubscribeConfig {
         /// How long this struct is, as the caller's header declares it.
@@ -173,58 +126,38 @@ record! {
         pub target: *const c_char,
         /// How many bytes of it.
         pub target_len: usize,
-        /// The event package, as the token that names it: `dialog` for a busy
-        /// lamp field (RFC 4235 §3.1), `message-summary` for message waiting
-        /// (RFC 3842 §3), `presence` (RFC 3856 §6.1).
-        ///
-        /// It goes out exactly as written here, because §8.2.1 compares it
-        /// byte for byte.
+        /// The event package token: `dialog` for a busy lamp field (RFC 4235
+        /// §3.1), `message-summary` (RFC 3842 §3), `presence` (RFC 3856 §6.1).
+        /// Sent exactly as written, since §8.2.1 compares it byte for byte.
         pub package: *const c_char,
         /// How many bytes of it.
         pub package_len: usize,
         /// The `Accept` value, when the package's default body type is not
-        /// the one wanted. Null sends no `Accept` at all, which §3.1.3 makes
-        /// the package's default — `application/dialog-info+xml` for
-        /// `dialog`.
-        ///
-        /// Sending the wrong one is worse than sending none: §4.1.2.1 has the
-        /// notifier answer 406 for a type it cannot generate, so nothing is
-        /// guessed on a caller's behalf.
+        /// wanted. Null sends none, which means the default (§3.1.3); a wrong
+        /// one gets 406 (§4.1.2.1), so nothing is guessed.
         pub accept: *const c_char,
         /// How many bytes of it.
         pub accept_len: usize,
-        /// How long to ask for, in seconds, or zero for this build's default
-        /// of one hour.
-        ///
-        /// What the notifier grants wins (§3.1.1: "The period of time in the
-        /// response is the one that defines the duration of the
-        /// subscription"), and the refresh is scheduled against that rather
-        /// than against this.
+        /// Seconds to ask for, or zero for one hour. The notifier's grant wins
+        /// (§3.1.1), and the refresh follows the grant.
         pub expires_seconds: u32,
-        /// Where to send the SUBSCRIBE, as `host:port`, or null to send it
-        /// where the account registers — which is the outbound proxy for a
-        /// registered line, and the reason a phone behind a NAT is reachable
-        /// at all.
+        /// Where to send the SUBSCRIBE, as `host:port`, or null for where the
+        /// account registers (the outbound proxy, which keeps NAT working).
         pub destination: *const c_char,
         /// How many bytes of it.
         pub destination_len: usize,
-        /// Which transport it goes out on, read only together with
-        /// `destination`, exactly as `sipral_call_config_t::transport` is.
-        /// Nonzero with `destination` null is
-        /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+        /// The transport, read only with `destination`, as
+        /// `sipral_call_config_t::transport` is. Nonzero without `destination`
+        /// is `SIPRAL_STATUS_INVALID_ARGUMENT`.
         pub transport: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. Set it to zero; the library reads nothing from
-        /// it.
+        /// Zero. Pads the struct to a multiple of its alignment, so a member
+        /// appended later never lands in padding. Never read.
         pub reserved: u32,
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and all-zero is valid: every pointer is null beside a length of
-// zero, and a zero `expires_seconds` is the default.
+// Safety: plain data, and all-zero is valid: null pointers with zero lengths,
+// and zero `expires_seconds` is the default.
 unsafe impl Versioned for SipralSubscribeConfig {
     const NAME: &'static str = "sipral_subscribe_config";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralSubscribeConfig, reserved);
@@ -241,9 +174,8 @@ pub(crate) const fn named_state(state: SubscriptionState) -> SipralSubscriptionS
         SubscriptionState::Pending => SipralSubscriptionState::Pending,
         SubscriptionState::Active => SipralSubscriptionState::Active,
         SubscriptionState::Retrying => SipralSubscriptionState::Retrying,
-        // the layer below marks it `non_exhaustive`, and a state this build
-        // has no number for is reported as no state rather than as the wrong
-        // one: a lamp that goes grey is right about not knowing
+        // `non_exhaustive` below: an unnumbered state reads as unknown, never
+        // as a wrong one
         _ => SipralSubscriptionState::Unknown,
     }
 }
@@ -266,7 +198,6 @@ pub(crate) const fn named_end(reason: SubscriptionEnd) -> SipralSubscriptionEnd 
         SubscriptionEnd::Unreachable => SipralSubscriptionEnd::Unreachable,
         SubscriptionEnd::NoNotify => SipralSubscriptionEnd::NoNotify,
         SubscriptionEnd::Expired => SipralSubscriptionEnd::Expired,
-        // as above: a reason this build has no number for is no reason
         _ => SipralSubscriptionEnd::Unknown,
     }
 }
@@ -279,7 +210,7 @@ pub(crate) fn subscription_of(
     state.subscriptions.get(subscription).map_err(handle_failed)
 }
 
-/// Turn what crossed the boundary into a [`Subscribe`], or say what was wrong.
+/// Turn a C config into a [`Subscribe`], or say what was wrong.
 ///
 /// # Safety
 ///
@@ -330,20 +261,13 @@ unsafe fn subscribe_from(
 }
 
 entry! {
-    /// Watch something at the far end (A1).
+    /// Watch something at the far end.
     ///
-    /// One SUBSCRIBE goes out on `account`'s transport, to `account`'s
-    /// address, and the handle written back names the subscription from now
-    /// until it ends. Nothing has happened yet when this returns: the request
-    /// is in the transmit queue, and
-    /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` reports each step of what
-    /// becomes of it.
-    ///
-    /// A subscription refreshes itself for as long as it is live, at a
-    /// fraction of what the notifier granted, and starts a fresh one by itself
-    /// after something recoverable — both under this same handle. What ends
-    /// it for good is [`sipral_subscription_end`], or an event saying it
-    /// ended with no retry, and the handle names nothing after that.
+    /// One SUBSCRIBE is queued on `account`'s transport and address, and the
+    /// handle names the subscription until it ends.
+    /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` reports each step. It
+    /// refreshes and retries recoverable failures under the same handle;
+    /// [`sipral_subscription_end`] or an end with no retry finishes it.
     ///
     /// # Safety
     ///
@@ -385,18 +309,12 @@ entry! {
 }
 
 entry! {
-    /// Give a subscription up.
+    /// Give a subscription up with `Expires: 0` (§4.1.2.3).
     ///
-    /// A SUBSCRIBE with `Expires: 0` (§4.1.2.3), and the subscription is not
-    /// over when this returns: §4.4.1 makes it live "until the NOTIFY
-    /// transaction with a `Subscription-State` of `terminated` completes", so
-    /// the closing notification is still answered and
+    /// It stays live until the closing NOTIFY completes (§4.4.1);
     /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` with
-    /// `SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED` says when it has. One that has
-    /// no dialog yet has nothing to send this in and ends at once.
-    ///
-    /// The handle stays usable until that event arrives, and names nothing
-    /// after it.
+    /// `SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED` says when. Without a dialog yet
+    /// it ends at once. The handle is usable until that event.
     ///
     /// # Safety
     ///
@@ -414,11 +332,8 @@ entry! {
 
 entry! {
     /// Where a subscription is, without waiting for its next event.
-    ///
-    /// [`SipralSubscriptionState::Unknown`] for a handle that names nothing,
-    /// which is what a subscription that has ended leaves behind — and a
-    /// status of `SIPRAL_STATUS_OK` all the same, because "it is over" is an
-    /// answer to this question rather than a failure of it.
+    /// [`SipralSubscriptionState::Unknown`], with `SIPRAL_STATUS_OK`, for a
+    /// handle that names nothing, as an ended one does.
     ///
     /// # Safety
     ///
@@ -445,17 +360,12 @@ entry! {
 }
 
 codes! {
-    /// What one watched dialog is doing, and what a lamp is lit from. Names
-    /// for `sipral_watched_dialog_t::phase` and for
-    /// [`sipral_subscription_lamp`]'s `out_phase`.
-    ///
-    /// RFC 4235 §3.7.1's states, with the order they rank in for a lamp:
-    /// anything ringing beats anything settled, which is §3.7.2's virtual
-    /// state machine over every dialog of one resource.
+    /// What one watched dialog is doing, and what a lamp shows:
+    /// `sipral_watched_dialog_t::phase` and [`sipral_subscription_lamp`]'s
+    /// `out_phase`. RFC 4235 §3.7.1's states, ranked as §3.7.2 ranks them.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDialogPhase: u32 {
-        /// Nothing is going on: no dialog, or every one of them terminated.
-        /// This is what an idle lamp shows.
+        /// No dialog, or all terminated: an idle lamp.
         Idle = 0,
         /// A request went out and nothing has answered.
         Trying = 1,
@@ -466,7 +376,7 @@ codes! {
         /// A call is up.
         Confirmed = 4,
         /// This dialog is over. Never [`sipral_subscription_lamp`]'s answer,
-        /// which is [`SipralDialogPhase::Idle`] when every dialog has ended.
+        /// which is [`SipralDialogPhase::Idle`] then.
         Terminated = 5,
         /// The notifier named a state this build has no number for.
         Unknown = 6,
@@ -474,8 +384,7 @@ codes! {
 }
 
 codes! {
-    /// Which end started a watched dialog. Names for
-    /// `sipral_watched_dialog_t::direction`.
+    /// Which end started a watched dialog: `sipral_watched_dialog_t::direction`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDialogDirection: u32 {
         /// The notifier did not say.
@@ -488,8 +397,8 @@ codes! {
 }
 
 codes! {
-    /// How a watched dialog ended. Names for
-    /// `sipral_watched_dialog_t::ended`, and zero while it has not.
+    /// How a watched dialog ended: `sipral_watched_dialog_t::ended`, zero
+    /// while it has not.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDialogEnded: u32 {
         /// It has not ended, or the notifier did not say how.
@@ -512,18 +421,13 @@ codes! {
 }
 
 codes! {
-    /// Which piece of text [`sipral_subscription_dialog_text`] is being asked
-    /// for.
-    ///
-    /// Every one of them is what the notifier wrote, unparsed: a display name
-    /// is whatever it put there, and an identity is a URI in the form it sent
-    /// it in.
+    /// Which text [`sipral_subscription_dialog_text`] reads. Each is what the
+    /// notifier wrote, unparsed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralDialogText: u32 {
         /// Never asked for.
         Unknown = 0,
-        /// The notifier's own name for this dialog, which is what it will
-        /// keep using for it.
+        /// The notifier's own id for this dialog.
         Id = 1,
         /// The dialog's `Call-ID`, when the notifier sent one.
         CallId = 2,
@@ -531,8 +435,7 @@ codes! {
         LocalIdentity = 3,
         /// And the display name beside it.
         LocalDisplay = 4,
-        /// Who the other end is, as a URI. This is the one a lamp shows
-        /// beside a ringing extension.
+        /// Who the other end is, as a URI: what a lamp shows when ringing.
         RemoteIdentity = 5,
         /// And the display name beside it.
         RemoteDisplay = 6,
@@ -544,10 +447,8 @@ codes! {
 }
 
 record! {
-    /// One dialog a `dialog` subscription has been told about, with the text
-    /// left behind: [`sipral_subscription_dialog_text`] reads that, because a
-    /// pointer into this library's own memory would be a pointer a caller
-    /// could outlive.
+    /// One dialog a `dialog` subscription was told about. Its text is read
+    /// with [`sipral_subscription_dialog_text`], so no pointer can dangle.
     #[derive(Clone, Copy)]
     pub struct SipralWatchedDialog {
         /// How many bytes of this struct the library filled in.
@@ -558,17 +459,14 @@ record! {
         pub direction: Number<SipralDialogDirection>,
         /// A [`SipralDialogEnded`], and zero while the dialog has not.
         pub ended: Number<SipralDialogEnded>,
-        /// The SIP status behind how it ended, when the notifier sent one.
-        /// Zero otherwise.
+        /// The SIP status behind how it ended, or zero.
         pub status_code: u32,
-        /// How long it has been up, in milliseconds, when the notifier sent a
-        /// duration. Zero otherwise.
+        /// How long it has been up, in milliseconds, or zero.
         pub duration_ms: u64,
     }
 }
 
-// Safety: the trait's contract. Plain data with no invariant between the
-// members, and the library is the only one that fills it in.
+// Safety: plain data, filled only by the library.
 unsafe impl Versioned for SipralWatchedDialog {
     const NAME: &'static str = "sipral_watched_dialog";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralWatchedDialog, duration_ms);
@@ -586,16 +484,12 @@ const fn named_phase(phase: DialogPhase) -> SipralDialogPhase {
         DialogPhase::Early => SipralDialogPhase::Early,
         DialogPhase::Confirmed => SipralDialogPhase::Confirmed,
         DialogPhase::Terminated => SipralDialogPhase::Terminated,
-        // `Unknown` is what the layer below calls a state the notifier named
-        // that RFC 4235 does not, and `non_exhaustive` covers a state a later
-        // build of it might add: neither is a phase this one can light a lamp
-        // from
+        // the notifier's non-RFC 4235 states, and states added later
         _ => SipralDialogPhase::Unknown,
     }
 }
 
-/// The table one subscription has been told about, or the failure to say why
-/// there is none.
+/// The dialog table of one subscription, or why there is none.
 fn table_of(state: &StackState, subscription: SipralHandle) -> Result<&DialogInfoTable, Fail> {
     let named = subscription_of(state, subscription)?;
     state.agent.dialog_info(named).ok_or_else(|| {
@@ -626,19 +520,13 @@ fn row_of(
 }
 
 entry! {
-    /// What a lamp for this subscription should show (A1).
+    /// What a lamp for this subscription should show: RFC 4235 §3.7.2's
+    /// virtual state machine over every known dialog, ringing beating
+    /// settled, [`SipralDialogPhase::Idle`] once all ended. The dialog
+    /// functions below give the detail.
     ///
-    /// RFC 4235 §3.7.2's virtual state machine over every dialog the notifier
-    /// has told this subscription about: anything ringing beats anything
-    /// settled, and [`SipralDialogPhase::Idle`] is what is left once they
-    /// have all ended. One call and one number, which is what a busy lamp
-    /// field is; [`sipral_subscription_dialog_count`] and the two after it
-    /// are for an application that wants to show who is on the call as well.
-    ///
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that has no dialog
-    /// state at all — one to another package, or one that is not live, whose
-    /// last notification stopped being evidence the moment it stopped being
-    /// refreshed.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription with no dialog state:
+    /// another package, or not live (its last notification is stale).
     ///
     /// # Safety
     ///
@@ -663,13 +551,9 @@ entry! {
 }
 
 entry! {
-    /// How many dialogs this subscription has been told about.
-    ///
-    /// They are in the order they were first heard of, and the index one has
-    /// here is stable only until the next notification arrives: a dialog that
-    /// ended is dropped from the table, and the numbering closes up behind
-    /// it. Read a dialog out in the same breath as the count, and read them
-    /// both again on the next
+    /// How many dialogs this subscription has been told about, in order first
+    /// heard. Indexes hold only until the next notification, which drops
+    /// ended dialogs; read again on each
     /// [`SIPRAL_EVENT_KIND_NOTIFIED`](crate::event::SipralEventKind::Notified).
     ///
     /// # Safety
@@ -738,15 +622,10 @@ entry! {
 entry! {
     /// A piece of text about one of them, copied into the caller's buffer.
     ///
-    /// The same shape `sipral_last_error_message` has, and for the same
-    /// reason: the text belongs to the library and a pointer to it would be
-    /// one a caller could outlive. `out_needed` always receives the number of
-    /// bytes the text needs including the trailing NUL, so a caller that
-    /// brought nothing can ask with `capacity` zero and then ask again with
-    /// room. A buffer too small for the whole of it is
-    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written to it.
-    ///
-    /// A piece the notifier did not send is one byte: the NUL.
+    /// `out_needed` always receives the size with the trailing NUL; ask with
+    /// `capacity` zero, then with room. Too small a buffer is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, nothing written. A piece the notifier
+    /// did not send is just the NUL.
     ///
     /// # Safety
     ///
@@ -828,8 +707,7 @@ pub(crate) mod tests {
         message.header(name).unwrap_or_default().to_vec()
     }
 
-    /// The config a test subscribes with: the busy lamp field on one
-    /// extension, which is what A1 is for.
+    /// A busy-lamp config for one extension.
     pub(crate) fn watch(target: &str) -> SipralSubscribeConfig {
         let mut config = SipralSubscribeConfig {
             reserved: 0,
@@ -850,7 +728,7 @@ pub(crate) mod tests {
         config
     }
 
-    /// Subscribe, and hand back the stack, the account and the subscription.
+    /// Subscribe; returns the stack and the subscription.
     fn watching(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let handle = stack(observed);
         let account = account_on(handle);
@@ -926,8 +804,8 @@ pub(crate) mod tests {
         out
     }
 
-    /// The notifier's last word, in a second transaction of its own so that
-    /// it does not read as a retransmission of the first notification.
+    /// The notifier's last word, in its own transaction so it is not a
+    /// retransmission.
     fn closing(subscribe: &[u8], state: &str) -> Vec<u8> {
         let mut out = notification(subscribe, state, b"", false);
         out = String::from_utf8_lossy(&out)
@@ -965,7 +843,7 @@ pub(crate) mod tests {
             "{text}"
         );
         assert_eq!(field(&subscribe, HeaderName::Event), b"dialog");
-        // asked for, not granted: the notifier's answer is what wins
+        // asked for, not granted
         assert_eq!(field(&subscribe, HeaderName::Expires), b"3600");
 
         poll(handle, 1_000);
@@ -979,10 +857,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// RFC 6665 §4.1.2.2: the 200 to a SUBSCRIBE does not establish the
-    /// subscription -- "the subscription is not established until the first
-    /// NOTIFY" -- so nothing moves on it, and what the notifier granted is
-    /// reported when the subscription actually starts.
+    /// RFC 6665 §4.1.2.2: the 200 does not establish the subscription; the
+    /// first NOTIFY does, and reports the grant.
     #[test]
     fn what_the_notifier_granted_is_what_the_event_reports() {
         let mut observed = Observed::default();
@@ -1070,14 +946,13 @@ pub(crate) mod tests {
             notified.message_len > 0,
             "the NOTIFY itself did not come with the event"
         );
-        // and the subscription is live now that a notification has arrived
         let mut state = 0_u32;
         assert_eq!(
             unsafe { sipral_subscription_state(handle, subscription, &raw mut state) },
             SipralStatus::Ok
         );
         assert_eq!(state, SipralSubscriptionState::Active as u32);
-        // the NOTIFY is answered, which is what keeps the notifier sending
+        // answering the NOTIFY keeps the notifier sending
         let answer = one(handle);
         assert!(
             answer.starts_with(b"SIP/2.0 200"),
@@ -1130,8 +1005,7 @@ pub(crate) mod tests {
         let subscribe = one(handle);
         deliver(handle, &granted(&subscribe, 600), 1_000);
         poll(handle, 1_000);
-        // a subscription with no dialog has nothing to send a closing
-        // SUBSCRIBE in, so this one is established first
+        // established first: without a dialog there is nothing to close in
         deliver(
             handle,
             &notification(&subscribe, "active;expires=600", RINGING, true),
@@ -1154,8 +1028,7 @@ pub(crate) mod tests {
         );
         assert_eq!(field(&given_up, HeaderName::Expires), b"0");
 
-        // §4.4.1: over when the closing NOTIFY says so, not when the request
-        // was sent
+        // §4.4.1: over when the closing NOTIFY says so
         deliver(
             handle,
             &closing(&subscribe, "terminated;reason=noresource"),
@@ -1171,9 +1044,7 @@ pub(crate) mod tests {
             .copied()
             .unwrap_or_else(|| panic!("nothing ended in {seen:?}"));
         assert_eq!(ended.subscription, subscription);
-        // what this end did, not what the notifier's closing parameter said:
-        // the application asked for this one to stop, and that is the answer
-        // to "why is it not live"
+        // this end's reason wins over the notifier's
         assert_eq!(ended.reason, SipralSubscriptionEnd::Unsubscribed as u32);
         assert_eq!(ended.retry_in_ms, 0, "ended for good, and a retry is named");
 
@@ -1193,9 +1064,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The other way one ends: the notifier stops it, and says why in the
-    /// `Subscription-State` it stopped it with. That reason is the one thing
-    /// telling a lamp apart from an extension that was deleted.
+    /// The notifier ends it, and its reason crosses.
     #[test]
     fn a_notifier_that_ends_it_says_why_and_the_reason_crosses() {
         let mut observed = Observed::default();
@@ -1237,8 +1106,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// What the whole feature is for: a lamp that goes on when the watched
-    /// extension rings, and off when the call is over.
+    /// The lamp goes on when the extension rings and off when the call ends.
     #[test]
     fn the_lamp_follows_the_dialog_the_notifier_describes() {
         let mut observed = Observed::default();
@@ -1247,7 +1115,6 @@ pub(crate) mod tests {
         deliver(handle, &granted(&subscribe, 600), 1_000);
         poll(handle, 1_000);
 
-        // nothing has been said about it yet
         deliver(
             handle,
             &notification(&subscribe, "active;expires=600", RINGING, true),
@@ -1295,7 +1162,6 @@ pub(crate) mod tests {
         assert_eq!(dialog.phase, SipralDialogPhase::Early as u32);
         assert_eq!(dialog.ended, SipralDialogEnded::Unknown as u32);
 
-        // and it goes out again when the call is over
         let mut done = notification(&subscribe, "active;expires=600", ENDED, true);
         done = String::from_utf8_lossy(&done)
             .replace("z9hG4bK-notify-one", "z9hG4bK-notify-three")
@@ -1319,9 +1185,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The text about one of them, which is what a lamp shows beside itself:
-    /// copied into the caller's buffer, because a pointer into the library's
-    /// own memory would be one a caller could outlive.
+    /// A watched dialog's text is copied out and says how much room it needs.
     #[test]
     fn the_text_about_a_watched_dialog_is_copied_out_and_says_how_much_room_it_needs() {
         let mut observed = Observed::default();
@@ -1370,9 +1234,7 @@ pub(crate) mod tests {
         );
         assert_eq!(&room[..3], &[b'd'.cast_signed(), b'1'.cast_signed(), 0]);
 
-        // a piece the notifier did not send is one byte, the NUL, rather
-        // than a failure: nothing is wrong with a dialog that carries no
-        // display name
+        // a piece not sent is just the NUL, not a failure
         assert_eq!(
             unsafe {
                 sipral_subscription_dialog_text(
@@ -1390,8 +1252,7 @@ pub(crate) mod tests {
         assert_eq!(needed, 1);
         assert_eq!(room[0], 0);
 
-        // and a piece of text nothing names is refused rather than read as
-        // one of the ones that do
+        // an unknown piece is refused
         assert_eq!(
             unsafe {
                 sipral_subscription_dialog_text(
@@ -1412,8 +1273,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Asking a subscription that has no dialog state says so rather than
-    /// answering an empty table, which reads as "nothing is going on".
+    /// No dialog state is reported as such, not as an empty table.
     #[test]
     fn a_subscription_with_no_dialog_state_says_so() {
         let mut observed = Observed::default();
@@ -1444,8 +1304,7 @@ pub(crate) mod tests {
         .into_bytes()
     }
 
-    /// `notification` in a transaction of its own: the `n`th in the
-    /// subscription `who` names.
+    /// `notification` as the `n`th transaction of subscription `who`.
     fn numbered(subscribe: &[u8], who: &str, n: u32, body: &[u8]) -> Vec<u8> {
         String::from_utf8_lossy(&notification(subscribe, "active;expires=600", body, true))
             .replace("z9hG4bK-notify-one", &format!("z9hG4bK-notify-{who}-{n}"))
@@ -1464,11 +1323,8 @@ pub(crate) mod tests {
         phase
     }
 
-    /// Extension 10 and extension 100 on one account, the pair a PBX with
-    /// two- and three-digit numbers always has: a lamp is the subscription's
-    /// own, found by its dialog, and one number being the start of the
-    /// other mixes nothing up — not the lamps, not the notifications, not
-    /// the refreshes.
+    /// Extensions 10 and 100 on one account: prefix numbers mix up no lamps,
+    /// notifications or refreshes.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn extensions_ten_and_a_hundred_keep_their_lamps_apart() {
@@ -1531,7 +1387,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(notified, vec![hundred, ten], "each notification is its own");
 
-        // a hundred's call is over, and ten's lamp does not go out with it
+        // a hundred's call ends; ten's lamp stays
         deliver(
             handle,
             &numbered(
@@ -1546,7 +1402,7 @@ pub(crate) mod tests {
         assert_eq!(lamp(handle, hundred), SipralDialogPhase::Idle as u32);
         assert_eq!(lamp(handle, ten), SipralDialogPhase::Confirmed as u32);
 
-        // and each refresh stays in its own dialog, naming its own number
+        // each refresh stays in its own dialog
         poll(handle, 600_000);
         let mut refreshed: Vec<(Vec<u8>, Vec<u8>)> = sent(handle)
             .iter()

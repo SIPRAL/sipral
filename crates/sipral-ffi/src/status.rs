@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What every entry point returns.
-//!
-//! The code says what kind of failure it was. The sentence saying which one
-//! lives in the calling thread's last error, in [`crate::error`], because a
-//! code that has to distinguish every reason a message can be malformed is a
-//! code nobody can switch on.
+//! What every entry point returns. The code is the kind of failure; the
+//! sentence is in the thread's last error ([`crate::error`]).
 
 use std::ffi::c_char;
 use std::ptr;
@@ -17,18 +13,11 @@ use crate::error::entry;
 codes! {
     /// The result of a call across the C ABI.
     ///
-    /// The numbers are part of the ABI. A value keeps its meaning for the life of
-    /// the ABI's major version, and a new one is only ever added at the end.
+    /// The numbers are ABI: stable for the major version, new ones only at the
+    /// end. 17 is reserved forever and never returned.
     ///
-    /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
-    /// statuses, and it stays reserved, never used and never to be given to a
-    /// status. No build returns it and `sipral_status_name` has no name for it.
-    ///
-    /// The one signed number in the ABI, and the only enumeration typed
-    /// `int32_t`: zero is success, every failure is positive, and no build
-    /// returns a negative one. A binding that treats it as unsigned loses
-    /// nothing. A newer library may return a status an older binding has no
-    /// name for; read it as a failure, with the last error for the sentence.
+    /// Typed `int32_t`: zero is success, failures are positive, none negative.
+    /// Read an unknown status from a newer library as a failure.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum SipralStatus: i32 {
         /// The call did what it was asked to.
@@ -51,118 +40,76 @@ codes! {
         /// The object is already in use by another call, including one further
         /// down the same call stack. Nothing was done, and nothing blocked.
         Busy = 6,
-        /// There is no room for another one: the library's table of objects
-        /// of this kind is full (256 stacks, say), the stack's RTP port range
-        /// is spent, or a queue a call feeds is full — the DTMF digits waiting
-        /// to go out, the dynamic payload types an offer can number, the
-        /// real-time text not yet sent. Nothing was done. Room comes back as
-        /// objects are released, ports given back, or the queue drains; which
-        /// of those the last error says. Not the same as
-        /// `SIPRAL_STATUS_LIMIT_REACHED`, which is a ceiling the application
-        /// set itself.
+        /// No room: an object table is full, the RTP port range is spent, or a
+        /// call's queue (DTMF, payload types, real-time text) is full. Nothing
+        /// was done; the last error says which. `SIPRAL_STATUS_LIMIT_REACHED`
+        /// is the application's own ceiling.
         Exhausted = 7,
-        /// A panic was caught at the boundary. The call did not finish, and the
-        /// last error carries whatever the panic said.
+        /// A panic was caught at the boundary. The call did not finish; the last
+        /// error carries the panic's message.
         Panic = 8,
-        /// What was asked for cannot be done where the object is: answering a call
-        /// this end placed, holding one that is not up, sending DTMF before there
-        /// is a dialog to send it in. Not an argument that was wrong; a moment
-        /// that was.
+        /// Not possible in the object's current state, e.g. answering a call
+        /// this end placed, or DTMF before there is a dialog.
         WrongState = 9,
         /// The request could not be assembled or handed to a transport. Nothing
-        /// went out, and nothing about the call changed.
+        /// went out, and the call did not change.
         NotSent = 10,
-        /// The value is one this ABI has a word for and this build has no code
-        /// behind. Nothing was applied, and asking again will not change that.
-        ///
-        /// The third of the three answers a configuration call may give, and the
-        /// one that has to be told apart from the other two by a machine.
-        /// [`SipralStatus::InvalidArgument`] says the value is wrong and a
-        /// corrected one would be taken; this says the value is right and there is
-        /// nothing here to take it. [`SipralStatus::UnsupportedVersion`] is about
-        /// the shape of what crossed the boundary, not about what was set in it.
-        ///
-        /// It exists so that "accepted and ignored" is not a thing this library
-        /// can do. An application that gets it turns the control off, because the
-        /// control is genuinely dead in this build; one that gets a silence
-        /// instead ships a control that does nothing and finds out from a
-        /// customer.
+        /// The value is valid in this ABI but this build has no code for it.
+        /// Nothing was applied, and retrying will not help. Unlike
+        /// [`SipralStatus::InvalidArgument`], the value is not wrong; unlike
+        /// [`SipralStatus::UnsupportedVersion`], it is not about struct shape.
+        /// Exists so that nothing is ever silently accepted and ignored.
         NotSupported = 11,
-        /// A byte stream carried something no message this library reads
-        /// starts with. Nothing in a stream marks where the next message
-        /// begins, so nothing arriving on it later can be read either: close
-        /// the connection. What rode on it is lost with it, and the call that
-        /// said so says what that was.
+        /// A byte stream carried something that starts no known message. A
+        /// stream has no resync point: close the connection. The last error
+        /// says what was lost.
         StreamBroken = 12,
-        /// An audio device id names nothing this stack's engine has ever
-        /// listed. Refused before any platform call is made;
-        /// `sipral_audio_device_at` says what the ids are.
+        /// An audio device id the engine never listed. Refused before any
+        /// platform call; `sipral_audio_device_at` lists the ids.
         NoSuchDevice = 13,
-        /// The audio device exists and cannot serve: it has no channels in
-        /// the direction asked, it is not plugged in, or the platform
-        /// refused to open it. The last error says which.
+        /// The audio device cannot serve: no channels in that direction,
+        /// unplugged, or the platform refused it. The last error says which.
         DeviceUnusable = 14,
         /// The platform did not answer about its audio devices within
-        /// `sipral_stack_config_t::audio_probe_ms`: a driver is stuck, and
-        /// the engine is not waiting on it. What was asked was not done.
+        /// `sipral_stack_config_t::audio_probe_ms`. Nothing was done.
         DeviceTimedOut = 15,
-        /// A limit the stack was created with refused new work: a call placed
-        /// while the calls this stack holds, has let in or has placed and
-        /// not yet heard back about already come to
-        /// `sipral_stack_config_t::max_dialogs`. Nothing went out. A call
-        /// that ends makes room; raising the limit means a new stack.
+        /// The stack already holds or awaits `sipral_stack_config_t::max_dialogs`
+        /// calls. Nothing went out. An ended call makes room; a higher limit
+        /// needs a new stack.
         LimitReached = 16,
-        /// Refused by the account's security policy (ABI 0.31): a call that
-        /// would carry audio unencrypted where its account, or its own
-        /// configuration, requires SRTP, or that names a policy weaker than
-        /// its account's. An INVITE refused this way has been answered with
-        /// 488 Not Acceptable Here; a call being placed never left. The last
-        /// error says which.
+        /// Refused by the security policy (ABI 0.31): unencrypted audio where
+        /// SRTP is required, or a policy weaker than the account's. A refused
+        /// INVITE was answered 488; an outgoing call never left.
         SecurityPolicy = 18,
-        /// A recording's file would not take what was written to it: the disk
-        /// filled, the volume went away, the file was taken away underneath.
-        /// Not the path, which is `SIPRAL_STATUS_INVALID_ARGUMENT` before
-        /// anything is written. The recording has stopped; the file holds the
-        /// audio up to the last checkpoint it could write.
+        /// The recording file would not take a write (disk full, volume gone).
+        /// A bad path is `SIPRAL_STATUS_INVALID_ARGUMENT` instead. The recording
+        /// stopped; the file holds audio up to the last checkpoint.
         RecordingFailed = 19,
-        /// The call never agreed on what this asks for: text sent on a call
-        /// whose answer took no `m=text` stream, say. Nothing was done, and
-        /// only a new offer that the far end accepts changes it.
+        /// The call never negotiated this, e.g. text on a call with no `m=text`
+        /// stream. Only a new accepted offer changes it.
         NotNegotiated = 20,
-        /// The far end of this call is not a conference focus: its Contact
-        /// never carried `isfocus` (RFC 4579 §4.1), so there is no
-        /// conference to name or subscribe to.
+        /// The far end's Contact never carried `isfocus` (RFC 4579 §4.1), so
+        /// there is no conference to name or subscribe to.
         NotAFocus = 21,
-        /// The transport the request would leave on has failed or closed and
-        /// has not been bound again. Nothing went out. The failure was
-        /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
-        /// the stack with `sipral_stack_transport_bind`, and ask again.
+        /// The transport has failed or closed and was not bound again. Nothing
+        /// went out. Reconnect, call `sipral_stack_transport_bind`, retry.
         TransportDown = 22,
-        /// A local conference would not take the call (ABI 0.32): it is
-        /// full, the call is already in a conference or joined into a pair
-        /// with `sipral_call_join`, or its codec hears at a rate the
-        /// conference does not mix. The last error says which.
+        /// A local conference would not take the call (ABI 0.32): full, the
+        /// call is already conferenced or joined with `sipral_call_join`, or its
+        /// codec rate is not mixed. The last error says which.
         ConferenceRefused = 23,
-        /// `now_ms` was more than fifty milliseconds behind the last reading
-        /// of the caller's clock this stack saw (ABI 0.33). Two threads that
-        /// read one clock a moment apart and race for the stack can disagree
-        /// by a little, not by that much. Nothing was done and the stack's
-        /// clock did not move: read the clock again and ask again. A caller
-        /// that keeps getting this has a clock that went backwards.
+        /// `now_ms` was more than 50 ms behind the last reading this stack saw
+        /// (ABI 0.33). Nothing was done and the clock did not move; read the
+        /// clock again and retry. Repeated, it means the clock went backwards.
         ClockBehind = 24,
-        /// The TLS server's certificate is not the one the account pins
-        /// (ABI 0.34): `sipral_account_check_certificate` compared its
-        /// SHA-256 fingerprint with `sipral_account_config_t::tls_pin_sha256`
-        /// and they differ. Refuse the handshake: with a pin, the
-        /// fingerprint is the whole verdict (`docs/22-tls.md`).
+        /// The TLS certificate's SHA-256 fingerprint differs from
+        /// `sipral_account_config_t::tls_pin_sha256` (ABI 0.34). Refuse the
+        /// handshake (`docs/22-tls.md`).
         CertificateRefused = 25,
-        /// This end was about to advertise an address the peer cannot reach
-        /// it at (ABI 0.34): a loopback address, in a `Contact` or a session
-        /// description, handed to a peer that is not on this machine, or the
-        /// unspecified address in a `Contact`. Nothing was sent; the last
-        /// error names both addresses. Bind to, and advertise, the address
-        /// of the interface that routes to the peer —
-        /// `sipral_advertised_address` finds it.
+        /// About to advertise an address the peer cannot reach (ABI 0.34):
+        /// loopback to a remote peer, or the unspecified address in a `Contact`.
+        /// Nothing was sent; the last error names both addresses.
+        /// `sipral_advertised_address` finds the right one.
         UnreachableAddress = 26,
     }
 }
@@ -285,10 +232,7 @@ mod tests {
         assert!(name(i32::MIN).is_none());
     }
 
-    /// The numbers are written out rather than walked, because a test that
-    /// derives them from the declaration would move with a declaration that
-    /// moved. Zero is the one with a reason of its own: C tests a status that
-    /// way.
+    /// Written out, not derived, so a moved declaration fails here.
     #[test]
     fn the_numbers_are_where_they_were_published() {
         assert_eq!(SipralStatus::Ok as i32, 0);

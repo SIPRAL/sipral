@@ -1,25 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! An account whose registrar or outbound proxy is a name, located by RFC
-//! 3263 with the application's resolver (ABI 0.34).
+//! An account whose server is a name, located by RFC 3263 with the
+//! application's resolver.
 //!
-//! `sipral_account_config_t::server_uri` names the server in place of
-//! `registrar_address`. The procedure — NAPTR when asked for, the SRV name
-//! for the account's transport, then A or AAAA, the SRV ranking and the
-//! fallback to the host's own addresses — is the stack's; the lookups are the
-//! application's, one at a time, the same division
-//! `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` makes for a dialog. Each
+//! The procedure (NAPTR, SRV, A/AAAA, ranking, fallback) is the stack's; each
+//! lookup is the application's. Each
 //! [`SipralEventKind::LookupWanted`](crate::event::SipralEventKind::LookupWanted)
-//! names a query, and [`sipral_account_looked_up`] hands its answer back —
-//! every one, a failure included, since the procedure waits for each.
-//! [`SipralEventKind::Located`](crate::event::SipralEventKind::Located) says
-//! where the account's requests go now, and
+//! must be answered with [`sipral_account_looked_up`], failures included.
+//! [`SipralEventKind::Located`](crate::event::SipralEventKind::Located) and
 //! [`SipralEventKind::LocateFailed`](crate::event::SipralEventKind::LocateFailed)
-//! that a lookup named no address. `docs/04-ua.md` has what happens between
-//! them: the first REGISTER waiting for the first answer, the move to the
-//! next address on a timeout, a failed transport or a 503, and the name
-//! looked up again when the answer's time-to-live runs out.
+//! report the outcome; `docs/04-ua.md` has the rest.
 
 use std::ffi::c_char;
 use std::net::IpAddr;
@@ -35,8 +26,7 @@ use crate::stack::{handle_failed, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{required_text, text};
 
-/// The most records one answer carries across the boundary: well past what a
-/// zone publishes for one name, and short of what a length nobody set says.
+/// The most records one answer carries across the boundary.
 const MAX_RECORDS: usize = 64;
 
 codes! {
@@ -67,11 +57,8 @@ codes! {
         /// The records it returned, in `records`. None at all reads as
         /// `SIPRAL_DNS_ANSWER_NOTHING`.
         Records = 1,
-        /// The name has no record of that kind, or does not exist at all.
-        /// Also the right answer from a resolver that cannot ask for the
-        /// kind: a platform lookup that only knows addresses answers every
-        /// NAPTR and SRV query with this, and the host's own addresses are
-        /// asked for next.
+        /// No record of that kind, or no such name. Also the answer from a
+        /// resolver that cannot ask for that kind (NAPTR, SRV).
         Nothing = 2,
         /// The resolver could not answer: no server reachable, a timeout, a
         /// server failure.
@@ -86,16 +73,13 @@ codes! {
     pub enum SipralLocateFailure: u32 {
         /// Nothing failed.
         None = 0,
-        /// The DNS answered, and what it answered names no address of the
-        /// family the account's transport can reach: no record, or an SRV
-        /// target of `.`.
+        /// The DNS named no reachable address: no record, or an SRV target
+        /// of `.`.
         NotFound = 1,
-        /// The resolver failed on every lookup that could have given an
-        /// address.
+        /// The resolver failed on every lookup that could give an address.
         Unanswered = 2,
-        /// The transport has no RFC 3263 procedure: WebSocket names no SRV
-        /// service and no default port, so only a numeric host, or a host
-        /// with a port, can be located for it.
+        /// The transport has no RFC 3263 procedure (WebSocket); only a
+        /// numeric host or a host with a port works.
         Unsupported = 3,
     }
 }
@@ -106,10 +90,8 @@ record! {
     /// and a [`SipralEventKind::LocateFailed`](crate::event::SipralEventKind::LocateFailed)
     /// carry, the account being `sipral_event_t::account`.
     ///
-    /// One struct for the three, the way `sipral_subscription_event_t`
-    /// answers for two kinds: a member meaningless on one kind is zero or
-    /// null there. Every pointer is the library's, valid for the duration of
-    /// the callback.
+    /// A member meaningless on a kind is zero or null. Every pointer is the
+    /// library's, valid for the duration of the callback.
     #[derive(Clone, Copy)]
     pub struct SipralLocateEvent {
         /// A [`SipralDnsRecordType`]: what to ask `name` for, on a lookup.
@@ -122,16 +104,13 @@ record! {
         pub name: *const c_char,
         /// How many bytes of it.
         pub name_len: usize,
-        /// Where the account's server was located: every address the answer
-        /// named, as `host:port` separated by commas, in RFC 3263 section
-        /// 4.3's order from the one the account's requests go to now. UTF-8,
-        /// not NUL-terminated.
+        /// Every located address, comma-separated `host:port`, in RFC 3263
+        /// section 4.3 order, the one in use first. UTF-8, not NUL-terminated.
         pub targets: *const c_char,
         /// How many bytes of it.
         pub targets_len: usize,
-        /// When the name is looked up again after a failure, in
-        /// milliseconds. An address an earlier answer named stays in use
-        /// meanwhile.
+        /// Milliseconds until the retry after a failure; an earlier address
+        /// stays in use meanwhile.
         pub retry_in_ms: u64,
     }
 }
@@ -168,14 +147,12 @@ pub(crate) const fn named_failure(reason: LocateError) -> SipralLocateFailure {
         LocateError::NotFound => SipralLocateFailure::NotFound,
         LocateError::Unanswered => SipralLocateFailure::Unanswered,
         LocateError::Unsupported => SipralLocateFailure::Unsupported,
-        // `LocateError` is `#[non_exhaustive]`: a reason this ABI has no word
-        // for yet still failed, and says nothing more
+        // `LocateError` is `#[non_exhaustive]`
         _ => SipralLocateFailure::None,
     }
 }
 
-/// One field of a record, as the number it is, refused rather than cut
-/// when it is not one.
+/// One field of a record, parsed or refused.
 fn field<T: core::str::FromStr>(
     fields: &[&str],
     at: usize,
@@ -196,9 +173,8 @@ fn field<T: core::str::FromStr>(
         })
 }
 
-/// One record the caller wrote, as the lookup takes it: the fields
-/// space-separated, the time-to-live in seconds first and then the record's
-/// data in its presentation form (RFC 1035 section 5.1, RFC 2782, RFC 3403).
+/// One record: TTL in seconds, then presentation-form data (RFC 1035 section
+/// 5.1, RFC 2782, RFC 3403), space-separated.
 fn record_of(written: &str, record: RecordType, index: usize) -> Result<Record, Fail> {
     let fields: Vec<&str> = written.split_ascii_whitespace().collect();
     let expected = match record {
@@ -298,25 +274,16 @@ entry! {
     /// [`SIPRAL_EVENT_KIND_LOOKUP_WANTED`](crate::event::SipralEventKind::LookupWanted)
     /// back to the account that asked.
     ///
-    /// `name` and `record` are the event's, as it named them; `answer` is a
-    /// [`SipralDnsAnswer`]. With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is
-    /// what the resolver returned, every record of the kind asked for,
-    /// separated by commas, each its fields separated by spaces: the
-    /// time-to-live in seconds, then the data as a zone file writes it —
-    /// an address for A and AAAA (`300 192.0.2.40`); priority, weight,
-    /// port and target for SRV (`300 10 60 5060 sip1.example.com`); order,
-    /// preference, flags, service and replacement for NAPTR, the regular
-    /// expression left out since RFC 3263 follows none (`300 10 50 S
-    /// SIP+D2U _sip._udp.example.com`). Null or empty for none, which
-    /// reads as `SIPRAL_DNS_ANSWER_NOTHING`. Text, rather than an array of
-    /// structs, because it is what a platform resolver prints and what
-    /// every binding hands over as it is.
+    /// `name` and `record` are the event's; `answer` is a [`SipralDnsAnswer`].
+    /// With `SIPRAL_DNS_ANSWER_RECORDS`, `records` is comma-separated records,
+    /// each space-separated: TTL in seconds, then zone-file data. A/AAAA:
+    /// `300 192.0.2.40`; SRV: `300 10 60 5060 sip1.example.com`; NAPTR
+    /// without the regexp: `300 10 50 S SIP+D2U _sip._udp.example.com`.
+    /// Null or empty reads as `SIPRAL_DNS_ANSWER_NOTHING`.
     ///
-    /// Answer every lookup, a resolver that failed included: the procedure
-    /// waits for each. An answer to a lookup nothing is waiting for any
-    /// more — the account was located since, or it has been asked for
-    /// again — is `SIPRAL_STATUS_OK` and changes nothing, as is one for an
-    /// account that locates nothing.
+    /// Answer every lookup, failures included: the procedure waits for each.
+    /// An answer nothing waits for any more is `SIPRAL_STATUS_OK` and changes
+    /// nothing.
     ///
     /// # Safety
     ///
@@ -430,8 +397,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// An account that registers with `sip:pbx.example.com`, located by
-    /// name rather than given an address.
+    /// An account located by name.
     fn located_account(handle: SipralHandle, server: &'static str) -> SipralHandle {
         let mut config = account_config();
         config.registrar_address = ptr::null();
@@ -524,8 +490,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Until the first answer there is nowhere to send a call that names no
-    /// destination of its own: a moment wrong, not a value.
     #[test]
     fn a_call_before_the_first_answer_is_the_wrong_moment() {
         let mut observed = Observed::default();
@@ -648,8 +612,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// A NAPTR answer, quoted the way a zone file quotes it, picks the SRV
-    /// name the account's transport is served under.
     #[test]
     fn a_naptr_answer_leads_to_the_srv_name_it_names() {
         let mut observed = Observed::default();

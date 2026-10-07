@@ -1,37 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The built-in audio engine across the boundary: the platform's devices
-//! listed, chosen, opened and pumped by the library — A2 and A3, and the
-//! mode a softphone migrating from a stack that opened the devices for it
-//! expects.
+//! The built-in audio engine across the boundary: the library lists, opens
+//! and pumps the platform's devices.
 //!
-//! A stack is created in one of two modes, `sipral_stack_config_t::audio`.
-//! In application mode, which is what a zeroed configuration says and what
-//! every stack before this module was, the application pumps its own
-//! frames through `sipral_media_capture` and `sipral_media_playback` and
-//! nothing here does anything. In device mode the library opens the
-//! microphone and the loudspeaker itself, carries every managed call's
-//! audio between them, and hands the packets it encodes to the
-//! application's `audio_transmit_callback` for the application's socket —
-//! the socket is still the application's, as it is for everything else
-//! this ABI sends. Received packets go in through `sipral_media_receive`
-//! as before, from whichever thread reads the socket.
+//! In application mode (`sipral_stack_config_t::audio` zero) the application
+//! pumps frames through `sipral_media_capture` and `sipral_media_playback`. In
+//! device mode the library opens the devices, carries every managed call's
+//! audio, and hands encoded packets to `audio_transmit_callback` for the
+//! application's socket. Received packets still go in through
+//! `sipral_media_receive`.
 //!
-//! The entry points here take the stack's handle and not its lock: a level
-//! meter polled from a window's timer, or a device list rebuilt from a
-//! settings screen, never answers `SIPRAL_STATUS_BUSY` because signalling
-//! is busy. What they take is the engine's own lock, which is held for a
-//! table lookup or a platform call bounded by `audio_probe_ms`, never for
-//! a frame.
+//! These entry points take the engine's lock, not the stack's, so they never
+//! answer `SIPRAL_STATUS_BUSY` because signalling is busy. That lock is held
+//! for a table lookup or a platform call bounded by `audio_probe_ms`, never
+//! for a frame.
 //!
-//! What the engine does on its own — a device pulled out, the default
-//! moved, a role reopened on its fallback — arrives as
-//! `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`, from the poll, with
-//! `payload.audio` saying what changed and who changed it: a change the
-//! application asked for and one the operating system made are told
-//! apart, because an application that re-applies its own choice on hearing
-//! itself announced is a loop.
+//! Engine changes arrive as `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` with an
+//! origin, so an application can tell its own change from the system's and
+//! does not loop re-applying its choice.
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_void};
@@ -56,21 +43,17 @@ use crate::versioned::{Versioned, write_versioned};
 codes! {
     /// Who pumps a stack's audio: `sipral_stack_config_t::audio`.
     ///
-    /// Zero is application mode because zero is what a configuration
-    /// written against any earlier header says, and a caller that pumps its
-    /// own frames must go on pumping them when the library underneath it is
-    /// updated. The idiomatic layers each choose their own default.
+    /// Zero is application mode, so a configuration written against an
+    /// earlier header keeps pumping its own frames.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralAudio: u32 {
-        /// The application opens the devices and pumps the frames through
-        /// `sipral_media_capture` and `sipral_media_playback`. What every
-        /// stack was before device mode existed.
+        /// The application opens the devices and pumps frames through
+        /// `sipral_media_capture` and `sipral_media_playback`.
         Application = 0,
-        /// The library opens the platform's devices and pumps every
-        /// managed call itself; the packets it encodes reach the
-        /// application's socket through `audio_transmit_callback`.
-        /// `SIPRAL_STATUS_NOT_SUPPORTED` on a platform this build has no
-        /// backend for, which `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
+        /// The library opens the devices and pumps every managed call; the
+        /// packets reach the application through `audio_transmit_callback`.
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` without a backend for the platform,
+        /// as `SIPRAL_FEATURE_AUDIO_DEVICE` says.
         Device = 1,
     }
 }
@@ -80,13 +63,10 @@ codes! {
     /// `sipral_stack_config_t::audio_activation`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralAudioActivation: u32 {
-        /// With the first managed call's media, or the first ring; closed
-        /// with the last. What a desktop softphone wants.
+        /// With the first managed call's media or ring; closed with the last.
         Automatic = 0,
-        /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`,
-        /// whatever the calls do. What CallKit and the telecom framework
-        /// want: they say when the audio session is this application's,
-        /// and a device opened before they do is a device that does not work.
+        /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`:
+        /// for CallKit and the telecom framework, which own the audio session.
         Manual = 1,
     }
 }
@@ -99,9 +79,8 @@ codes! {
         Microphone = 1,
         /// The call's loudspeaker or earpiece.
         Speaker = 2,
-        /// Where an incoming call is announced, which need not be where it
-        /// is answered: the room's speaker for the ring, the headset for
-        /// the call.
+        /// Where an incoming call is announced, which may differ from where
+        /// it is answered.
         Ringer = 3,
     }
 }
@@ -121,18 +100,16 @@ codes! {
     /// What changed, on `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralAudioChange: u32 {
-        /// A device arrived or left; the list has been refreshed, and
-        /// `sipral_audio_device_at` reads the new one. Every id that was
-        /// valid still is: a device that left keeps its row, marked absent.
+        /// A device arrived or left. Every valid id stays valid: a device
+        /// that left keeps its row, marked absent.
         ListChanged = 1,
-        /// The system's default for `direction` moved. A role the
-        /// application put on a device stays there; one on the system's
-        /// route follows, and says so with `SIPRAL_AUDIO_CHANGE_REOPENED`.
+        /// The system's default for `direction` moved. A role on a chosen
+        /// device stays; one on the system's route follows with
+        /// `SIPRAL_AUDIO_CHANGE_REOPENED`.
         DefaultChanged = 2,
         /// `role` is on `device` because `sipral_audio_select` said so.
         Selected = 3,
-        /// The device `role` was running on went away. The engine reopens
-        /// the role on its fallback and reports that separately.
+        /// The device `role` ran on went away; the reopen is reported apart.
         Lost = 4,
         /// `role` is running on `device` again.
         Reopened = 5,
@@ -143,9 +120,8 @@ codes! {
 }
 
 codes! {
-    /// Who made a change: the operating system, or this library doing what
-    /// the application asked or what a loss made it do. An application
-    /// notes the first and acts on neither by re-applying its own choice.
+    /// Who made a change. An application must not answer either by
+    /// re-applying its own choice.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralAudioOrigin: u32 {
         /// The operating system, or a person at a socket.
@@ -156,10 +132,8 @@ codes! {
 }
 
 record! {
-    /// One device, as `sipral_audio_device_at` fills it in. The name is
-    /// written beside it, into the caller's buffer.
-    ///
-    /// Set `size` to `sizeof(sipral_audio_device_t)` before the call.
+    /// One device, as `sipral_audio_device_at` fills it in. Set `size` to
+    /// `sizeof(sipral_audio_device_t)` before the call.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralAudioDevice {
         /// How many bytes of this struct the library filled in.
@@ -167,8 +141,7 @@ record! {
         /// The engine's name for the device: stable across refreshes, never
         /// reused, never zero. What `sipral_audio_select` takes.
         pub id: u32,
-        /// How many channels it captures; zero for a device that is no
-        /// microphone.
+        /// Channels it captures; zero for a device that is no microphone.
         pub input_channels: u32,
         /// How many channels it plays; zero likewise.
         pub output_channels: u32,
@@ -176,15 +149,13 @@ record! {
         pub default_input: u32,
         /// One when the system plays to it by default.
         pub default_output: u32,
-        /// One when the last refresh still found it. A device that went
-        /// keeps its row and its id, so that a selection saved against it
-        /// still names something.
+        /// One when the last refresh found it. An absent device keeps its row
+        /// and id, so a saved selection still names something.
         pub present: u32,
     }
 }
 
-// Safety: integers, no invariant between them, and zero is a valid value of
-// each.
+// Safety: integers only, and zero is valid for each.
 unsafe impl Versioned for SipralAudioDevice {
     const NAME: &'static str = "sipral_audio_device";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralAudioDevice, present);
@@ -195,25 +166,19 @@ unsafe impl Versioned for SipralAudioDevice {
 }
 
 record! {
-    /// What the engine is doing, as `sipral_audio_info` fills it in.
-    ///
-    /// Set `size` to `sizeof(sipral_audio_info_t)` before the call.
+    /// What the engine is doing, as `sipral_audio_info` fills it in. Set
+    /// `size` to `sizeof(sipral_audio_info_t)` before the call.
     #[derive(Clone, Copy, Debug)]
     pub struct SipralAudioInfo {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// One while the devices are open and the pump is running.
         pub active: u32,
-        /// One when the platform's own processing sits behind the
-        /// microphone: the voice-processing unit on macOS and iOS, which
-        /// cancels the loudspeaker's echo itself; on Windows, a stream
-        /// accepted as a communications stream, which puts the endpoint's
-        /// own processing behind it where the endpoint has any — a virtual
-        /// cable has none, and cancels nothing. An application that wants
-        /// the echo gone regardless attaches a processor to each call with
-        /// `sipral_media_attach_processor`; the delay it needs is
-        /// `render_delay_ms`, and the engine tells each managed call that
-        /// number itself, again after every device change.
+        /// One when the platform's own processing sits behind the microphone:
+        /// the voice-processing unit on macOS and iOS, a communications stream
+        /// on Windows (a virtual cable cancels nothing). For echo removal
+        /// regardless, attach a processor per call; the engine tells each
+        /// managed call `render_delay_ms` itself, after every device change.
         pub system_echo_cancellation: u32,
         /// The loudspeaker-to-microphone delay the devices report, in
         /// milliseconds.
@@ -229,17 +194,13 @@ record! {
         /// The device the ringer is running on, or zero when the ring goes
         /// through the loudspeaker.
         pub ringer: u32,
-        /// Zero. Rounds the struct up to a whole multiple of its alignment on
-        /// every target, so that a member a later version appends starts at or
-        /// past the length a caller built against this header declares, never
-        /// in padding inside it. The library writes zero here and reads nothing
-        /// from it.
+        /// Zero. Pads the struct to a multiple of its alignment, so a member
+        /// appended later never lands in padding. Written zero, never read.
         pub reserved: u32,
     }
 }
 
-// Safety: integers, no invariant between them, and zero is a valid value of
-// each.
+// Safety: integers only, and zero is valid for each.
 unsafe impl Versioned for SipralAudioInfo {
     const NAME: &'static str = "sipral_audio_info";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralAudioInfo, reserved);
@@ -250,33 +211,24 @@ unsafe impl Versioned for SipralAudioInfo {
 }
 
 record! {
-    /// One packet the engine encoded from the microphone, handed to
+    /// One packet the engine encoded, handed to
     /// `sipral_stack_config_t::audio_transmit_callback`: send it from the
     /// call's media socket and return.
     ///
-    /// Filled by the library and handed to the callback as a `const`
-    /// pointer, the shape `sipral_processor_frame_t` is: read `size` before
-    /// anything past it, and read nothing once the callback has returned.
-    /// The callback runs on the engine's own thread, once per frame per
-    /// call; it may call `sipral_media_receive` and the other media entry
-    /// points, and must not destroy the stack.
+    /// Read `size` before anything past it, and nothing once the callback
+    /// returns. The callback runs on the engine's thread, once per frame per
+    /// call; it may call the media entry points and must not destroy the stack.
     #[derive(Clone, Copy)]
     pub struct SipralAudioTransmit {
         /// How many bytes of this struct the library filled in.
         pub size: usize,
         /// The call whose socket this leaves from.
         pub call: SipralHandle,
-        /// How it leaves, as a `SipralTransport`: `SIPRAL_TRANSPORT_UDP` is
-        /// a datagram from the media socket; `SIPRAL_TRANSPORT_TCP` and
-        /// `SIPRAL_TRANSPORT_TLS` are bytes to write, in order, on the
-        /// socket's connection to its TURN server, as `sipral_media_capture`
-        /// marks them.
+        /// A `SipralTransport`: UDP is a datagram from the media socket; TCP
+        /// and TLS are bytes to write in order on the socket's TURN connection.
         pub protocol: Number<SipralTransport>,
-        /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
-        /// both put them without padding at the end of the struct, so that a
-        /// member a later version appends starts past the length a caller built
-        /// against this header declares. The library writes zero here and reads
-        /// nothing from it.
+        /// Zero. Keeps later members at the same offsets on 32- and 64-bit
+        /// targets. Written zero, never read.
         pub reserved: u32,
         /// Where to send it, `host:port`, UTF-8 and not NUL-terminated.
         pub destination: *const c_char,
@@ -311,24 +263,17 @@ record! {
         /// A `SipralAudioDirection`, for `SIPRAL_AUDIO_CHANGE_DEFAULT_CHANGED`;
         /// zero otherwise.
         pub direction: Number<SipralAudioDirection>,
-        /// The device the change is about — the one a role landed on, or
-        /// the one that went — or zero.
+        /// The device the change is about, or zero.
         pub device: u32,
     }
 }
 
-// -- the engine behind a stack --------------------------------------------
-
 /// The engine of one stack in device mode, behind its own lock.
 pub(crate) type Shared = Arc<Mutex<Engine>>;
 
-/// The clock the pump drives the calls on: the caller's, as the stack last
-/// read it, carried forward by the time since.
-///
-/// A media entry point takes `now_ms` from the caller; the pump has no
-/// caller to take it from, and a reading that disagreed with the stack's
-/// would put the calls' timers out of step with the signalling that owns
-/// them.
+/// The clock the pump drives the calls on: the stack's last poll time,
+/// carried forward by the time since. The pump has no caller to take
+/// `now_ms` from, and its own reading would put call timers out of step.
 pub(crate) struct Clock {
     origin: Instant,
     last: Mutex<(u64, Instant)>,
@@ -391,26 +336,21 @@ impl CTransmit {
 }
 
 thread_local! {
-    /// How deep this thread is inside the audio transmit callback: the
-    /// engine's pump, handing the application a packet.
+    /// How deep this thread is inside the audio transmit callback.
     static IN_TRANSMIT: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Whether this thread is the engine's pump, inside the transmit callback.
 ///
-/// The pump holds no lock of the library's while it calls out, so nothing
-/// stops a `sipral_stack_destroy` made from there — and destroying the stack
-/// drops the engine, which joins the pump: the thread waiting for itself to
-/// finish. That call is refused with `SIPRAL_STATUS_BUSY` instead, the way a
-/// processor's call into its own stack is.
+/// Destroying the stack from there would join the pump from itself, so that
+/// call is refused with `SIPRAL_STATUS_BUSY`.
 pub(crate) fn inside_transmit() -> bool {
     IN_TRANSMIT.get() != 0
 }
 
 #[cfg(test)]
 thread_local! {
-    /// A fake platform for the stack the calling thread creates next, so a
-    /// test of device mode runs without a device in the room.
+    /// A fake platform for the stack this thread creates next.
     pub(crate) static FAKE_PLATFORM: std::cell::RefCell<Option<sipral_audio::fake::FakeControl>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -514,9 +454,7 @@ pub(crate) fn event_of(event: AudioEvent) -> SipralAudioEvent {
         Change::Lost(role) => (SipralAudioChange::Lost, Some(role), None),
         Change::Reopened(role) => (SipralAudioChange::Reopened, Some(role), None),
         Change::Unavailable(role) => (SipralAudioChange::Unavailable, Some(role), None),
-        // the list changing, and a change the engine grows later that this
-        // ABI has no word for: the list is what every one of them ends up
-        // changing
+        // the list changing, or an engine change this ABI has no word for
         Change::ListChanged | _ => (SipralAudioChange::ListChanged, None, None),
     };
     SipralAudioEvent {
@@ -605,18 +543,13 @@ fn with_engine<R>(
     act(&mut engine)
 }
 
-// -- entry points -----------------------------------------------------------
-
 entry! {
-    /// Ask the platform what devices there are, and say how many the list
-    /// holds now.
+    /// Ask the platform for its devices and say how many the list holds.
     ///
-    /// A device seen before keeps its id; one that has gone keeps its row,
-    /// marked absent; a new one gets the next id. The engine refreshes by
-    /// itself when the platform announces a change, so this is for a
-    /// settings screen opening, not for polling.
-    /// `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not answer
-    /// within `audio_probe_ms`, with the list left as it was.
+    /// Known devices keep their ids; gone ones keep their rows, marked absent.
+    /// For a settings screen, not polling: the engine refreshes on platform
+    /// notices. `SIPRAL_STATUS_DEVICE_TIMED_OUT` past `audio_probe_ms`, with
+    /// the list unchanged.
     ///
     /// # Safety
     ///
@@ -638,11 +571,9 @@ entry! {
 entry! {
     /// How many devices the list holds, present or not.
     ///
-    /// The first read of a stack's list, here or through
-    /// `sipral_audio_device_at`, asks the platform when nothing has yet, so
-    /// a new stack lists every device without `sipral_audio_refresh`
-    /// (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
-    /// answer within `audio_probe_ms`, and the next read asks again.
+    /// The first read of a list asks the platform, so no refresh is needed.
+    /// `SIPRAL_STATUS_DEVICE_TIMED_OUT` past `audio_probe_ms`; the next read
+    /// asks again.
     ///
     /// # Safety
     ///
@@ -665,13 +596,10 @@ entry! {
 entry! {
     /// The device at `index` in the list, and its name into `buffer`.
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end. The name
-    /// is written the way every other text this ABI hands out is: UTF-8 with
-    /// a trailing NUL, and `out_needed`, when it is not null, receives the
-    /// bytes it needs with that NUL counted. When the name does not fit, the
-    /// answer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written,
-    /// neither to `buffer` nor to `out_device`: ask with a capacity of zero
-    /// to learn the length, then again with room.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` past the end. The name is UTF-8 with a
+    /// trailing NUL; `out_needed`, when not null, receives its length with the
+    /// NUL. `SIPRAL_STATUS_BUFFER_TOO_SMALL` writes neither `buffer` nor
+    /// `out_device`.
     ///
     /// # Safety
     ///
@@ -719,20 +647,16 @@ entry! {
     /// Put a role on a device, or back on the system's route with a
     /// `device` of zero.
     ///
-    /// Refused before any platform call is made: `SIPRAL_STATUS_NO_SUCH_DEVICE`
-    /// for an id the list never held, `SIPRAL_STATUS_DEVICE_UNUSABLE` for a
-    /// device with no channels in the role's direction or one that is not
-    /// plugged in, `SIPRAL_STATUS_NOT_SUPPORTED` where the platform cannot
-    /// put that role on a device of its own — macOS runs the call's
-    /// microphone and loudspeaker as one unit, and the microphone follows
-    /// the system's input. A refused selection changes nothing.
+    /// Refused before any platform call, changing nothing:
+    /// `SIPRAL_STATUS_NO_SUCH_DEVICE` for an unknown id,
+    /// `SIPRAL_STATUS_DEVICE_UNUSABLE` for a device absent or without channels
+    /// in the role's direction, `SIPRAL_STATUS_NOT_SUPPORTED` where the
+    /// platform cannot separate the role (on macOS the microphone follows the
+    /// system's input).
     ///
-    /// While the engine is active the role is reopened at once, the gain and
-    /// the mute of its direction carried over, and
-    /// `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` says `SIPRAL_AUDIO_CHANGE_SELECTED`
-    /// from the engine. A device chosen and later unplugged is a preference:
-    /// the role runs on the system's route meanwhile and goes back to the
-    /// device when it returns.
+    /// While active the role reopens at once, keeping gain and mute, and
+    /// `SIPRAL_AUDIO_CHANGE_SELECTED` follows. A chosen device that is
+    /// unplugged stays the preference and is used again when it returns.
     ///
     /// # Safety
     ///
@@ -768,10 +692,8 @@ entry! {
 }
 
 entry! {
-    /// What a role was asked to be on, and what it is running on: the id
-    /// chosen with `sipral_audio_select` or zero for the system's route, and
-    /// the id of the device the role is actually open on or zero when it is
-    /// not open. The two differ while a chosen device is unplugged.
+    /// What a role was asked to be on (zero: the system's route) and what it
+    /// runs on (zero: not open). They differ while a chosen device is absent.
     ///
     /// # Safety
     ///
@@ -807,12 +729,9 @@ const GAIN_UNITY: u16 = 256;
 const GAIN_MOST: u16 = 4 * GAIN_UNITY;
 
 entry! {
-    /// Set the gain of one direction, as a fixed-point ratio with 256 for
-    /// unity: 128 halves, 512 doubles, 0 is silence, and anything above 1024
-    /// is taken as 1024. The input direction's gain is the microphone gain;
-    /// the output's is the volume. Applied to the frames rather than to the
-    /// operating system's own control, so a film playing beside the call is
-    /// not turned down with it, and kept across every device change.
+    /// Set the gain of one direction, fixed-point with 256 for unity, capped
+    /// at 1024. Input is the microphone gain, output the volume. Applied to
+    /// the frames, not the OS control, and kept across device changes.
     ///
     /// # Safety
     ///
@@ -844,9 +763,8 @@ entry! {
 }
 
 entry! {
-    /// Mute one direction, or unmute it, kept across every device change. A
-    /// muted microphone still runs and sends silence, so the far end hears a
-    /// stream rather than a gap.
+    /// Mute or unmute one direction, kept across device changes. A muted
+    /// microphone sends silence, so the far end hears a stream, not a gap.
     ///
     /// # Safety
     ///
@@ -878,10 +796,9 @@ entry! {
 }
 
 entry! {
-    /// The meter of one direction: the loudest sample of the last tenth of a
-    /// second, 0 to 32767, held for between one window and two so that a
-    /// bar drawn from it neither flickers nor sticks. Cheap enough to poll
-    /// at a window's frame rate; zero while nothing is open.
+    /// The meter of one direction: the peak sample of the last 100 ms, 0 to
+    /// 32767, held one to two windows. Cheap to poll per frame; zero while
+    /// nothing is open.
     ///
     /// # Safety
     ///
@@ -897,8 +814,7 @@ entry! {
     }
 }
 
-/// The steps `sipral_audio_set_gain` takes, as a gain: anything above four
-/// times unity is taken as four times.
+/// `sipral_audio_set_gain` steps as a gain, capped at four times unity.
 fn gain_of(steps: u32) -> Gain {
     let steps = u16::try_from(steps).unwrap_or(GAIN_MOST).min(GAIN_MOST);
     Gain::from_ratio(f32::from(steps) / f32::from(GAIN_UNITY))
@@ -915,8 +831,7 @@ fn steps_of(gain: Gain) -> u32 {
     steps
 }
 
-/// Why one call's controls cannot be reached: the engine has never carried
-/// it, or has let it go.
+/// The engine is not carrying `call`.
 fn not_carried(call: SipralHandle) -> Fail {
     fail(
         SipralStatus::WrongState,
@@ -928,22 +843,16 @@ fn not_carried(call: SipralHandle) -> Fail {
 }
 
 entry! {
-    /// Set one call's own gain in one direction, on top of the stack's
-    /// (`sipral_audio_set_gain`), in the same steps: the input direction is
-    /// what the microphone sends that call alone, the output how loud that
-    /// call is in the loudspeaker beside the others (ABI 0.35). Applied in
-    /// the engine's mix from the next frame; kept while the call is held or
-    /// moved into a conference and back, and gone when it ends. While the
-    /// call is a member of a local conference they go with it and act on
-    /// its path there, on top of the conference's own member controls
-    /// (`sipral_local_conference_set_muted` and `_set_gain`): the input
-    /// direction on what the conference sends the call, which is what its
-    /// far end hears, and the output direction on what the call says into
-    /// the conference, which is what this end and every other member hear
-    /// of it.
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
-    /// carrying — before its media starts, after it ends, or in application
-    /// mode, where the frames are the application's own.
+    /// Set one call's own gain in one direction, on top of the stack's, in
+    /// `sipral_audio_set_gain` steps. Input is what the microphone sends that
+    /// call; output is how loud it plays. Kept through hold and conference,
+    /// gone when the call ends.
+    ///
+    /// In a local conference it acts on the call's path, on top of the
+    /// conference's member controls: input on what its far end hears, output
+    /// on what it says into the conference.
+    /// `SIPRAL_STATUS_WRONG_STATE` when the engine is not carrying the call's
+    /// media: before it starts, after it ends, or in application mode.
     ///
     /// # Safety
     ///
@@ -966,8 +875,7 @@ entry! {
 }
 
 entry! {
-    /// One call's own gain in one direction, in the steps
-    /// `sipral_audio_call_set_gain` takes (ABI 0.35).
+    /// One call's own gain in one direction, in `sipral_audio_set_gain` steps.
     ///
     /// # Safety
     ///
@@ -993,14 +901,9 @@ entry! {
 }
 
 entry! {
-    /// Mute one call in one direction, or unmute it (ABI 0.35): the far end
-    /// of that call alone hears silence, or that call alone is silent in the
-    /// loudspeaker, while every other call goes on — the other half of a
-    /// consultation. In a local conference the mute goes with the call: its
-    /// far end hears nobody there, or nobody there hears it (see
-    /// `sipral_audio_call_set_gain`). A muted
-    /// direction still runs and sends silence. Kept and dropped as
-    /// `sipral_audio_call_set_gain` is, and refused the same way.
+    /// Mute or unmute one call in one direction while other calls go on (a
+    /// consultation). A muted direction sends silence. Kept, dropped and
+    /// refused as `sipral_audio_call_set_gain` is, conference included.
     ///
     /// # Safety
     ///
@@ -1023,8 +926,7 @@ entry! {
 }
 
 entry! {
-    /// Whether one call is muted in one direction: one or zero into
-    /// `out_muted` (ABI 0.35).
+    /// Whether one call is muted in one direction: one or zero.
     ///
     /// # Safety
     ///
@@ -1050,11 +952,8 @@ entry! {
 }
 
 entry! {
-    /// One call's meter in one direction (ABI 0.35): the loudest sample of
-    /// the last tenth of a second of what the microphone sent that call, or
-    /// of what the call played, after its own gain and mute, 0 to 32767 —
-    /// `sipral_audio_level`'s reading for one call of several. Cheap enough
-    /// to poll at a window's frame rate.
+    /// One call's meter in one direction, after its own gain and mute: what
+    /// `sipral_audio_level` reads, for one call of several.
     ///
     /// # Safety
     ///
@@ -1081,13 +980,10 @@ entry! {
 }
 
 entry! {
-    /// Open the devices and start the pump now, whatever the calls are
-    /// doing. Under `SIPRAL_AUDIO_ACTIVATION_MANUAL` this is the only thing
-    /// that does; under automatic activation it opens them early.
-    ///
-    /// `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT`
-    /// when a direction could not be opened: the engine is active all the
-    /// same, silent in that direction, and `sipral_audio_info` says which.
+    /// Open the devices and start the pump now. The only way under
+    /// `SIPRAL_AUDIO_ACTIVATION_MANUAL`; early under automatic activation.
+    /// `SIPRAL_STATUS_DEVICE_UNUSABLE` or `SIPRAL_STATUS_DEVICE_TIMED_OUT` for
+    /// a direction that failed: the engine is still active, silent there.
     ///
     /// # Safety
     ///
@@ -1115,12 +1011,10 @@ entry! {
 }
 
 entry! {
-    /// Play a ring tone on the ringer — the device `SIPRAL_AUDIO_ROLE_RINGER`
-    /// is on, or the loudspeaker when it is on none of its own — until
-    /// `sipral_audio_stop_ringing`, or once through when `looped` is zero.
-    /// The tone is mono sixteen-bit samples at `sample_rate_hz`, copied, so
-    /// the caller's buffer is its own again when this returns. Under
-    /// automatic activation a ring opens the devices.
+    /// Ring on the ringer's device (or the loudspeaker) until
+    /// `sipral_audio_stop_ringing`, or once when `looped` is zero. Mono 16-bit
+    /// samples at `sample_rate_hz`, copied before return. Under automatic
+    /// activation a ring opens the devices.
     ///
     /// # Safety
     ///
@@ -1163,25 +1057,15 @@ entry! {
 }
 
 entry! {
-    /// Turn the platform's own echo cancellation on or off on a running
-    /// stack: `on` is a `SipralToggle`, and zero leaves it as it is
-    /// (ABI 1.1). What `sipral_stack_config_t::system_echo_cancellation`
-    /// chose at creation, without a new stack.
+    /// Turn the platform's echo cancellation on or off on a running stack:
+    /// `on` is a `SipralToggle`, and zero leaves it.
     ///
-    /// Takes effect at once. While the devices are open the microphone and
-    /// the loudspeaker are reopened with or without the platform's
-    /// processing — the voice-processing unit on macOS and iOS, the
-    /// communications stream on Windows, the voice-communication preset on
-    /// Android — on the devices they were on, with the gain and the mute of
-    /// each direction, and each says so with `SIPRAL_AUDIO_CHANGE_REOPENED`
-    /// from the engine. A call in progress keeps its media and hears a gap
-    /// of as long as the platform takes to open them; a direction the
-    /// platform refuses is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`, as after any
-    /// reopen. With the devices closed, the next open uses it.
-    /// `sipral_audio_info_t::system_echo_cancellation` says what the
-    /// platform did, and `sipral_stack_settings_t::system_echo_cancellation`
-    /// what is asked for. `SIPRAL_STATUS_WRONG_STATE` in application mode,
-    /// where the devices are the application's, whatever `on` says.
+    /// Open devices are reopened at once with or without the platform
+    /// processing, on the same devices with gain and mute, each reported as
+    /// `SIPRAL_AUDIO_CHANGE_REOPENED`. A call hears a short gap; a refused
+    /// direction is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`. Closed devices use it
+    /// on the next open. `sipral_audio_info_t` says what the platform did.
+    /// `SIPRAL_STATUS_WRONG_STATE` in application mode.
     ///
     /// # Safety
     ///
@@ -1267,8 +1151,7 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    /// The packets the transmit callback was handed: which call, where to,
-    /// and how many bytes.
+    /// Packets handed to the transmit callback: call, destination, length.
     pub(crate) type Packets = Arc<Mutex<Vec<(SipralHandle, String, usize)>>>;
 
     pub(crate) unsafe extern "C" fn transmit(
@@ -1287,8 +1170,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// A platform with a headset and the machine's own devices, the
-    /// built-in ones the defaults, delivering at 48 kHz.
+    /// A headset beside the built-in defaults, at 48 kHz.
     pub(crate) fn a_desk() -> FakeControl {
         let fake = FakeControl::new(48_000);
         fake.plug("builtin-out", "Built-in Output", 0, 2);
@@ -1402,8 +1284,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Poll at `now_ms` until the devices the engine is opening in the
-    /// background are under the calls.
+    /// Poll until the devices opening in the background are under the calls.
     pub(crate) fn landed(stack: SipralHandle, now_ms: u64) {
         let engine = crate::stack::audio_of(stack)
             .expect("the stack")
@@ -1414,9 +1295,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// One call's own gain, mute and meter, by its handle: set and read back
-    /// while the engine carries it, refused before and after, and refused in
-    /// application mode.
+    /// A call's own controls work while carried and are refused otherwise.
     #[test]
     fn a_calls_own_gain_mute_and_meter_cross_by_its_handle() {
         let mut observed = Observed::default();
@@ -1492,8 +1371,7 @@ pub(crate) mod tests {
         assert!(last_error_text().contains("application mode"));
     }
 
-    /// The platform's echo cancellation turned off at creation is not asked
-    /// for, and the engine says it runs without it.
+    /// Echo cancellation off at creation is not asked of the platform.
     #[test]
     fn the_echo_cancellation_switch_reaches_the_platform() {
         let mut observed = Observed::default();
@@ -1526,9 +1404,8 @@ pub(crate) mod tests {
         settings.system_echo_cancellation
     }
 
-    /// ABI 1.1: the platform's echo cancellation switched on a running stack
-    /// reopens the devices at once, where they were and with the gain and
-    /// the mute, the call still carried; the info and the settings say so.
+    /// Switching echo cancellation on a running stack reopens the devices in
+    /// place, keeping gain, mute and the call.
     #[test]
     fn the_echo_cancellation_switches_on_a_running_stack() {
         let mut observed = Observed::default();
@@ -1628,8 +1505,7 @@ pub(crate) mod tests {
         hangup(stack, call, 3_000);
     }
 
-    /// In application mode the devices are the application's, and there is
-    /// nothing to switch.
+    /// In application mode there is nothing to switch.
     #[test]
     fn the_echo_cancellation_switch_is_refused_in_application_mode() {
         let mut observed = Observed::default();
@@ -1661,12 +1537,8 @@ pub(crate) mod tests {
         assert!(last_error_text().contains("application mode"));
     }
 
-    /// An application that hangs up and then holds the thread the
-    /// platform's teardown waits for — on macOS, the voice unit's has been
-    /// seen to wait for the main thread, and an application shutting down
-    /// waits there for its calls to be over — still gets its BYE out: no
-    /// poll waits for the devices to be let go of, so the transmit drain
-    /// that follows each one sends what the hangup queued.
+    /// A hangup's BYE leaves while the platform's teardown is blocked (the
+    /// macOS voice unit can wait on the main thread): no poll waits for it.
     #[test]
     fn a_hangup_leaves_while_the_devices_are_still_being_let_go_of() {
         use crate::call::sipral_call_hangup;
@@ -1714,10 +1586,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A device that takes a second and a half to open does not hold the
-    /// poll that saw the call's media start: the poll returns at once, asks
-    /// to be called again soon, and the devices are under the call once a
-    /// later poll finds them open.
+    /// A slow device open does not hold the poll that starts the call.
     #[test]
     fn a_slow_device_does_not_hold_the_poll_that_starts_the_call() {
         let mut observed = Observed::default();
@@ -1727,7 +1596,6 @@ pub(crate) mod tests {
         let packets: Packets = Arc::new(Mutex::new(Vec::new()));
         let leaked: &'static Packets = Box::leak(Box::new(packets));
         let started = Instant::now();
-        // the platform's default wait, which a headset opens well within
         let (stack, _) = media_call_tuned(&mut observed, |config| {
             config.audio = SipralAudio::Device as u32;
             config.audio_activation = SipralAudioActivation::Automatic as u32;
@@ -1760,11 +1628,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// An audio call on another thread holds the engine for as long as the
-    /// platform takes to answer about its devices. A poll that waited for it
-    /// held the stack's lock all that while, so every signalling call on
-    /// every other thread answered BUSY until the platform did; now the poll
-    /// leaves the engine for the next one and says to come back soon.
+    /// A poll does not wait for an engine another thread holds; it asks to
+    /// be called back soon, so signalling never answers BUSY meanwhile.
     #[test]
     fn a_poll_does_not_wait_for_an_engine_another_thread_holds() {
         let mut observed = Observed::default();
@@ -1798,8 +1663,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// What `sipral_stack_destroy` answered from inside the transmit
-    /// callback below.
+    /// What `sipral_stack_destroy` answered inside the callback below.
     static DESTROYED_FROM_THE_PUMP: std::sync::atomic::AtomicI32 =
         std::sync::atomic::AtomicI32::new(i32::MIN);
 
@@ -1813,11 +1677,8 @@ pub(crate) mod tests {
         DESTROYED_FROM_THE_PUMP.store(status as i32, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// The pump holds no lock of the library's while it hands a packet over,
-    /// so a destroy made from the transmit callback went through: it dropped
-    /// the engine, and dropping the engine joins the pump, which is the thread
-    /// making the call. It is refused now, like a processor's call into its
-    /// own stack, and the stack is still there to destroy from elsewhere.
+    /// A destroy from the transmit callback would join the pump from itself;
+    /// it is refused, and the stack can still be destroyed elsewhere.
     #[test]
     fn a_stack_is_not_destroyed_from_inside_its_transmit_callback() {
         let mut observed = Observed::default();
@@ -1860,8 +1721,7 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::InvalidArgument);
     }
 
-    /// The list: every device with its channels, and an id that survives a
-    /// refresh and an unplug.
+    /// Every device with its channels, under ids that survive an unplug.
     #[test]
     fn the_list_is_read_with_stable_ids() {
         let mut observed = Observed::default();
@@ -1887,7 +1747,6 @@ pub(crate) mod tests {
         assert_eq!(back.id, headset.id, "the same identity gets the same id");
         assert_eq!(back.present, 1);
 
-        // past the end is an argument that was wrong, and says how many
         let mut device = SipralAudioDevice {
             size: size_of::<SipralAudioDevice>(),
             id: 0,
@@ -1908,9 +1767,7 @@ pub(crate) mod tests {
             )
         };
         assert_eq!(status, SipralStatus::InvalidArgument);
-        // a name that does not fit is said so, and the length given with its
-        // NUL counted, as every other text-out call counts it; nothing is
-        // written, the struct included
+        // a name that does not fit: length with NUL, nothing written
         let mut short = [0_u8; 11];
         let mut needed = 0;
         let status = unsafe {
@@ -1930,9 +1787,7 @@ pub(crate) mod tests {
         hangup(stack, call, 3_000);
     }
 
-    /// A stack created after another already listed the platform, and after
-    /// a device arrived whose announcement the other took, lists every
-    /// device on its first read, by count or by index, with no refresh.
+    /// A new stack lists every device on its first read, without a refresh.
     #[test]
     fn a_new_stack_lists_every_device_on_its_first_read() {
         let mut observed = Observed::default();
@@ -1962,8 +1817,7 @@ pub(crate) mod tests {
         assert_eq!(dock.output_channels, 2);
     }
 
-    /// Selection: the three refusals, each with its own status, and the
-    /// selection read back.
+    /// Each refusal has its own status, and the selection reads back.
     #[test]
     fn a_selection_is_refused_by_status_and_read_back() {
         let mut observed = Observed::default();
@@ -2069,17 +1923,15 @@ pub(crate) mod tests {
         );
     }
 
-    /// The whole path: a managed call in device mode has its microphone fed
-    /// from the fake platform, its packets handed to the transmit callback
-    /// for the call's socket, and its playback on the loudspeaker.
+    /// A managed call's audio goes from the fake microphone to the callback
+    /// and from the call to the loudspeaker.
     #[test]
     fn a_managed_call_is_pumped_and_its_packets_reach_the_callback() {
         let mut observed = Observed::default();
         let fake = a_desk();
         let (stack, call, packets) =
             device_call(&mut observed, &fake, SipralAudioActivation::Automatic);
-        // the call came up with its media, so the engine is active already,
-        // and its devices are under it once they have answered
+        // the call's media activated the engine; the devices land later
         assert_eq!(info(stack).active, 1);
         landed(stack, 2_500);
         let now = info(stack);
@@ -2103,8 +1955,7 @@ pub(crate) mod tests {
             sent.iter().all(|(_, _, len)| *len == 12 + 160),
             "mu-law, twenty milliseconds, and a header"
         );
-        // the loudspeaker is written what the call plays, which with nothing
-        // arriving is silence — but written, at the loudspeaker's rate
+        // silence, but written at the loudspeaker's rate
         wait_until("the loudspeaker to be written", || {
             fake.played_by("builtin-out").len() >= 960 * 4
         });
@@ -2121,10 +1972,8 @@ pub(crate) mod tests {
         });
     }
 
-    /// A device pulled out from under a role reaches the application as an
-    /// event from the system, and the engine's own reopening as one from
-    /// the engine; the default moving under a role the application chose
-    /// leaves it where it is.
+    /// Device changes say who made them, and a moved default leaves a chosen
+    /// role in place.
     #[test]
     fn device_changes_arrive_as_events_that_say_who_made_them() {
         let mut observed = Observed::default();
@@ -2299,9 +2148,7 @@ pub(crate) mod tests {
         fake.release();
     }
 
-    /// The numbers are written out rather than walked, because a test that
-    /// derived them from the declaration would move with a declaration that
-    /// moved.
+    /// Literal numbers, so a moved declaration fails here.
     #[test]
     fn the_numbers_are_where_they_were_published() {
         assert_eq!(SipralAudio::Application as u32, 0);
@@ -2323,8 +2170,7 @@ pub(crate) mod tests {
         assert_eq!(SipralStatus::DeviceTimedOut as i32, 15);
     }
 
-    /// The event the poll raises carries the record the engine's event
-    /// became, and nothing else.
+    /// An engine event becomes the record C reads.
     #[test]
     fn an_engine_event_becomes_the_record_c_reads() {
         let event = super::event_of(sipral_audio::AudioEvent {

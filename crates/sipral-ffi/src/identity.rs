@@ -1,23 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Who is on a call beyond its `From`, how it asked to be answered, why it
-//! ended, and where to send it instead — across the boundary.
+//! Caller identity, answer mode, end reason and redirection across the boundary.
 //!
-//! What the network says about a caller (RFC 3325's asserted identity,
-//! `Remote-Party-ID`, `verstat`), what the caller asked to keep private
-//! (RFC 3323), where the call was diverted from (RFC 5806, RFC 7044), how it
-//! asked to be answered (RFC 5373, `Alert-Info`) and why the far end ended it
-//! (RFC 3326) are read by the stack and handed to C typed: the facts most
-//! applications show ride on every call event (`sipral_call_event_t`), and
-//! the lists behind them are read one entry at a time with
-//! [`sipral_call_identity_count`] and [`sipral_call_identity_text`].
+//! Asserted identity (RFC 3325), `Remote-Party-ID`, `verstat`, privacy
+//! (RFC 3323), diversion (RFC 5806, RFC 7044), answer mode (RFC 5373) and
+//! reason (RFC 3326). Common facts ride on `sipral_call_event_t`; the lists are
+//! read with [`sipral_call_identity_count`] and [`sipral_call_identity_text`].
 //!
-//! The asserted identity is behind the account's trust gate:
-//! `trusted_peers` on `sipral_account_config_t` names the peers whose
-//! assertions are believed (RFC 3325 §8), and from anywhere else it is left
-//! out. `privacy` on the same struct places the account's calls
-//! anonymously (RFC 3323). `docs/04-ua.md` has the reasoning.
+//! Asserted identity is believed only from `trusted_peers` (RFC 3325 §8).
+//! `docs/04-ua.md` has the reasoning.
 
 use std::ffi::c_char;
 use std::sync::Arc;
@@ -134,9 +126,8 @@ codes! {
         AlertInfo = 10,
         /// Every `info=` value on `Alert-Info`.
         AlertName = 11,
-        /// The calling number this stack's verification found a valid
-        /// PASSporT signed for (RFC 8224 §6.2), canonical: one entry, or none
-        /// when nothing verified. ABI 0.31.
+        /// The canonical calling number a valid PASSporT was found for
+        /// (RFC 8224 §6.2): one entry, or none. ABI 0.31.
         VerifiedOrig = 12,
         /// Its origination identifier (RFC 8588 §5), a UUID.
         VerifiedOrigid = 13,
@@ -356,13 +347,9 @@ fn which_of(which: u32) -> Result<SipralIdentityText, Fail> {
 }
 
 entry! {
-    /// How many entries one of a call's identity lists has:
-    /// `SIPRAL_IDENTITY_TEXT_DIVERSION` for the `Diversion` values,
-    /// `SIPRAL_IDENTITY_TEXT_HISTORY` for the `History-Info` entries, and so
-    /// on — each piece of an entry answers the same count as the entry.
-    ///
-    /// Read once, as the INVITE arrived, and the same for the rest of the
-    /// call. A call this end placed has none of them: zero.
+    /// How many entries one of a call's identity lists has. Every piece of an
+    /// entry gives the same count. Read once from the INVITE; zero for a call
+    /// this end placed.
     ///
     /// # Safety
     ///
@@ -387,20 +374,12 @@ entry! {
 
 entry! {
     /// One piece of one entry of a call's identity lists, copied into the
-    /// caller's buffer with a trailing NUL: the shape
-    /// `sipral_subscription_dialog_text` has, for the same reason — the text
-    /// is the library's, and a pointer to it is one a caller could outlive.
+    /// caller's buffer with a trailing NUL.
     ///
-    /// `out_needed` always receives the bytes needed including the NUL, so a
-    /// caller that brought nothing can ask with `capacity` zero and ask again
-    /// with room; a buffer too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
-    /// nothing written. A piece the entry does not have — a display name
-    /// the field did not write — is one byte, the NUL. An index past the
-    /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
-    ///
-    /// `index` comes before `which`, as it does in every other entry point
-    /// that reads a piece of text about one of several things: the entry
-    /// first, then the piece of it.
+    /// `out_needed` always receives the bytes needed including the NUL; ask
+    /// with `capacity` zero, then again with room. Too small is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written. A missing piece
+    /// is just the NUL. An index past the end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
     /// # Safety
     ///
@@ -435,12 +414,10 @@ entry! {
     /// End a call and say why (RFC 3326): what `sipral_call_hangup` does, with
     /// a `Reason` on the BYE or the CANCEL it turns into.
     ///
-    /// `sip_cause` is a SIP status and `q850_cause` a Q.850 cause, each zero
-    /// for none; both may be given, and neither is a plain hangup. `text`, when
-    /// given, goes on the first value written: the SIP one, or the Q.850 one
-    /// when there is no SIP one. On the refusal of a call that came in and was
-    /// never answered only the Q.850 value goes (RFC 6432): a SIP one would
-    /// repeat the status the refusal carries.
+    /// `sip_cause` (SIP status) and `q850_cause` (Q.850) are each zero for none;
+    /// neither is a plain hangup. `text` goes on the first value written. On
+    /// refusing an unanswered incoming call only the Q.850 value goes
+    /// (RFC 6432).
     ///
     /// # Safety
     ///
@@ -486,16 +463,11 @@ entry! {
     /// Answer a call that came in with a 3xx: somewhere else to try
     /// (RFC 3261 §21.3), and why (RFC 5806).
     ///
-    /// `status_code` is 300 to 399, 302 for call forwarding. `targets` is where to
-    /// try, as URIs separated by commas, in the order of preference; one is
-    /// required for every status but 380. `reason`, when given, is the
-    /// `Diversion` reason — `no-answer`, `user-busy`, `unconditional`,
-    /// `deflection`, `do-not-disturb` or any other token — and puts a
-    /// `Diversion` naming the address that was called on the answer, above
-    /// the ones the INVITE already carried.
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for another status, a target that is
-    /// not a URI, or none where one is needed; `SIPRAL_STATUS_WRONG_STATE` for
-    /// a call that is not waiting to be answered.
+    /// `status_code` is 300 to 399. `targets` is comma-separated URIs in
+    /// preference order, required except for 380. `reason`, when given, adds a
+    /// `Diversion` with that reason token naming the called address.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a bad status or target;
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call not waiting to be answered.
     ///
     /// # Safety
     ///

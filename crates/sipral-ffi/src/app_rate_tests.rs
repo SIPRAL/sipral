@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! `sipral_media_set_app_rate` from the C side: the frames a call hands out
-//! and takes at the rate the application chose, a tone that crosses a call
-//! that way both directions and comes out as the tone it was, and every
-//! refusal.
+//! `sipral_media_set_app_rate` from C: frame lengths, a tone round trip, and
+//! every refusal.
 
 use std::f64::consts::TAU;
 use std::ptr;
@@ -26,21 +24,16 @@ use crate::stack::sipral_stack_destroy;
 use crate::stack::tests::Observed;
 use crate::status::SipralStatus;
 
-/// The tone sent, and how loud: a quarter of full scale, well clear of
-/// clipping in either codec.
+/// A quarter of full scale, clear of clipping in either codec.
 const TONE_HZ: f64 = 1_000.0;
 const AMPLITUDE: f64 = 8_000.0;
 
-/// What the tone may come back as: within one percent of its frequency and
-/// one and a half decibels of its level, which is wider than G.711's
-/// quantisation or Opus at its default bitrate moves a steady tone and
-/// narrower than any resampling mistake — a wrong ratio moves the pitch by a
-/// third or more, and a filter in the wrong place takes the level with it.
+/// 1% and 1.5 dB: wider than codec error, narrower than any resampling bug
+/// (a wrong ratio moves pitch by a third or more).
 const FREQUENCY_TOLERANCE: f64 = 0.01;
 const LEVEL_TOLERANCE_DB: f64 = 1.5;
 
-/// Frames pumped before the measurement starts, for the jitter buffer and
-/// the two filters to fill, and frames measured: 400 ms, 400 cycles.
+/// Warm-up frames for the jitter buffer and filters, then 400 ms measured.
 const SETTLING_FRAMES: usize = 30;
 const MEASURED_FRAMES: usize = 20;
 
@@ -48,7 +41,6 @@ fn set_rate(media: SipralHandle, hz: u32) -> SipralStatus {
     unsafe { sipral_media_set_app_rate(media, hz) }
 }
 
-/// One frame of the tone at `rate`, carrying on from `phase`.
 fn tone_frame(samples: usize, rate: u32, phase: &mut f64) -> Vec<i16> {
     let step = TAU * TONE_HZ / f64::from(rate);
     (0..samples)
@@ -66,8 +58,8 @@ fn tone_frame(samples: usize, rate: u32, phase: &mut f64) -> Vec<i16> {
         .collect()
 }
 
-/// Play one frame of `media` at whatever rate it hands out, refusing a
-/// buffer one sample short first so the length is the library's own.
+/// Play one frame, first offering a buffer one sample short so the length
+/// comes from the library.
 fn playback(media: SipralHandle) -> (Vec<i16>, SipralPlayback) {
     let frame = media_info(media).frame_samples;
     let mut short = vec![0_i16; frame - 1];
@@ -138,8 +130,7 @@ fn carry(from: SipralHandle, to: SipralHandle, samples: &[i16], now_ms: u64) {
     assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
 }
 
-/// The frequency of `heard`, from its upward zero crossings, and its level
-/// against the tone's own, in decibels.
+/// Frequency from upward zero crossings, and level relative to the tone in dB.
 fn measure(heard: &[i16], rate: u32) -> (f64, f64) {
     let upward = heard
         .windows(2)
@@ -156,9 +147,7 @@ fn measure(heard: &[i16], rate: u32) -> (f64, f64) {
     (frequency, level)
 }
 
-/// A tone sent at `rate` from one call and played at `rate` by another,
-/// both on `codec_rate` underneath: the frames are the length the rate
-/// makes of 20 ms, and the tone comes out as the tone it was.
+/// A tone at `rate` over a `codec_rate` call: 20 ms frames, tone intact.
 fn the_tone_crosses(sender: SipralHandle, receiver: SipralHandle, rate: u32, codec_rate: u32) {
     for media in [sender, receiver] {
         let before = media_info(media);
@@ -305,8 +294,6 @@ fn a_rate_that_is_not_one_of_the_four_is_refused_and_changes_nothing() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// Every one of the four is taken on a narrowband call, and each is the
-/// call's 20 ms counted at that rate.
 #[test]
 fn each_of_the_four_rates_is_twenty_milliseconds_at_that_rate() {
     let mut observed = Observed::default();
@@ -327,8 +314,7 @@ fn each_of_the_four_rates_is_twenty_milliseconds_at_that_rate() {
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
-/// A pair is mixed at its codec's rate, so a call with a rate of its own is
-/// refused there until it is set back.
+/// A pair mixes at the codec's rate, so it refuses a call with its own rate.
 #[test]
 fn a_pair_is_not_mixed_while_one_call_has_a_rate_of_its_own() {
     let mut observed = Observed::default();
