@@ -3,64 +3,28 @@
 
 //! Volume, mute, and the number a meter is drawn from.
 //!
-//! The gain is applied to the samples on their way past rather than to the
-//! device's own volume control. A device's volume belongs to the machine:
-//! turning it down for a call turns down everything else the person is
-//! listening to, it stays down after the call, and it stays down after the
-//! process dies. What is done to the frames belongs to the stream and goes
-//! when the stream goes.
-//!
-//! It is applied at the device end of the rings rather than at the caller's,
-//! because a mute has to be silent on the next frame the device asks for. The
-//! rings hold sixteen frames by default, so a gain applied on the way in would
-//! be heard a third of a second after the button was pressed.
-//!
-//! All of it runs in the callback, so it is integer arithmetic over samples
-//! that are being copied anyway — one multiply, one shift, one clamp and one
-//! comparison each — plus six relaxed atomics per callback. Nothing here
-//! allocates, takes a lock, or reads a clock.
-
-// The half of this file the audio path uses is only reached from the platform
-// code, and the types it hangs off are the portable surface and are exported
-// everywhere. So on a target with no CoreAudio what is left here does look
-// unused, and is, until something on that target calls it.
+//! Gain is applied to the samples, not the system volume, which would
+//! affect other apps and outlive the process. It is applied at the device
+//! end of the rings so a mute is heard on the next period, not a ring later.
+//! Integer arithmetic and relaxed atomics only, safe for the callback.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Unity as a whole number of 256ths.
-///
-/// A power of two, so that applying a gain is a multiply and a shift rather
-/// than a divide.
+/// Unity in 256ths, so applying a gain is a multiply and a shift.
 const UNITY_SCALE: u16 = 256;
 
-/// Bits the scale is held in, which is what applying it shifts back by.
 const SHIFT: u32 = 8;
 
-/// The loudest a gain goes: four times, a little over twelve decibels.
-///
-/// Not a limit of the arithmetic — the products fit in a `u32` many times over
-/// — but of what is worth offering. A microphone that needs more than four
-/// times is a microphone that is not plugged in, and a slider that goes there
-/// only lets somebody turn a quiet call into a distorted one.
+/// 4x (+12 dB). Not an arithmetic limit; more only buys distortion.
 const MAX_SCALE: u16 = 4 * UNITY_SCALE;
 
-/// The magnitude of a sample at either end of the sixteen-bit range.
-///
-/// The negative end reaches one further than the positive one, so this is the
-/// larger of the two and a peak is held in seventeen bits' worth of `u16`.
+/// `|i16::MIN|`, the largest magnitude.
 const FULL_SCALE: u16 = 32_768;
 
-/// How long the loudest sample is held for: a tenth of a second.
-///
-/// The window is the whole of what makes a meter readable. Reporting the peak
-/// since the last poll would make the number depend on how often the caller
-/// asks — fast polling would show a bar that flickers between a syllable and
-/// the gap after it, slow polling one that never comes down. A tenth of a
-/// second is long enough that sixty polls a second see the same number for six
-/// of them, and short enough that the bar follows speech rather than lagging
-/// behind it.
+/// The peak hold window. A fixed window, not "since last poll", keeps the
+/// meter independent of how often it is read.
 const WINDOW_MILLIS: u32 = 100;
 
 /// Samples one meter window covers at a rate.
@@ -68,8 +32,7 @@ const WINDOW_MILLIS: u32 = 100;
 pub const fn window_samples(sample_rate_hz: u32) -> u32 {
     let per_millisecond = sample_rate_hz / 1_000;
     if per_millisecond == 0 {
-        // no device runs below a kilohertz; a window of no samples would be
-        // one that ends on every callback
+        // never an empty window
         WINDOW_MILLIS
     } else {
         per_millisecond * WINDOW_MILLIS
@@ -78,36 +41,23 @@ pub const fn window_samples(sample_rate_hz: u32) -> u32 {
 
 /// What the samples are multiplied by on their way to or from the device.
 ///
-/// Held as a whole number of 256ths rather than as a float, because the
-/// multiplication happens in the callback and integers are what the samples
-/// already are.
-///
-/// Both ends of the range are defined and neither of them wraps. A ratio below
-/// zero, or one that is not a number at all, is [`Gain::SILENT`]; one above
-/// four is [`Gain::MAX`]. Applying a gain saturates at the loudest and
-/// quietest sample sixteen bits can hold, and every sample that lands there is
-/// counted by [`Controls::clipped`] — so a gain set too high is a number
-/// somebody can read rather than a distortion they can only hear.
+/// Held in 256ths. Negative or NaN ratios are [`Gain::SILENT`], above four
+/// [`Gain::MAX`]. Applying it saturates, and each clipped sample is counted
+/// in [`Controls::clipped`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Gain(u16);
 
 impl Gain {
-    /// Nothing gets through. Not the same thing as a mute, which is a separate
-    /// switch precisely so that unmuting gives back the volume that was set.
+    /// Nothing gets through. Distinct from mute, which keeps the gain.
     pub const SILENT: Self = Self(0);
 
-    /// The samples as the device gave them, or as the caller wrote them.
+    /// Samples unchanged.
     pub const UNITY: Self = Self(UNITY_SCALE);
 
-    /// The loudest this crate will multiply by: four times, +12 dB.
+    /// Four times, +12 dB.
     pub const MAX: Self = Self(MAX_SCALE);
 
-    /// A gain from a plain multiplier, clamped into the range rather than
-    /// refused.
-    ///
-    /// A slider that has been dragged past the end is a slider at the end, and
-    /// a value that is not a number at all is silence — the only answer that
-    /// cannot make somebody's ears worse.
+    /// A gain from a multiplier, clamped into range; NaN is silence.
     #[must_use]
     pub fn from_ratio(ratio: f32) -> Self {
         #[expect(
@@ -125,17 +75,13 @@ impl Gain {
         f32::from(self.0) / f32::from(UNITY_SCALE)
     }
 
-    /// A gain from decibels, which is what a fader is marked in.
-    ///
-    /// Twenty times the logarithm, not ten: these are amplitudes, and halving
-    /// one is six decibels rather than three. Getting that wrong is the
-    /// standard way for a volume slider to feel broken at the quiet end.
+    /// A gain from decibels (amplitude: 20·log10, so -6 dB is half).
     #[must_use]
     pub fn from_db(db: f32) -> Self {
         Self::from_ratio(10.0_f32.powf(db / 20.0))
     }
 
-    /// What it reads as on a fader. Negative infinity when it is silent.
+    /// In decibels; negative infinity when silent.
     #[must_use]
     pub fn db(self) -> f32 {
         20.0 * self.ratio().log10()
@@ -158,11 +104,8 @@ impl fmt::Display for Gain {
     }
 }
 
-/// The loudest sample that has gone past recently.
-///
-/// After the gain and after the mute, because what a meter is asked is "is my
-/// voice getting through", and a bar that keeps moving while the microphone is
-/// muted answers the wrong question.
+/// The recent peak, measured after gain and mute, so a muted microphone
+/// reads silent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Level(u16);
 
@@ -176,14 +119,13 @@ impl Level {
         self.0
     }
 
-    /// The same as a fraction of full scale, which is what a bar is drawn to.
+    /// As a fraction of full scale.
     #[must_use]
     pub fn fraction(self) -> f32 {
         f32::from(self.0) / f32::from(FULL_SCALE)
     }
 
-    /// The same in decibels below full scale, which is what a meter is
-    /// labelled in. Negative infinity for silence.
+    /// In dBFS; negative infinity for silence.
     #[must_use]
     pub fn dbfs(self) -> f32 {
         20.0 * self.fraction().log10()
@@ -202,29 +144,23 @@ impl fmt::Display for Level {
 
 /// The gain, the mute and the meter for one direction.
 ///
-/// One writer and any number of readers. Everything is relaxed: the audio
-/// callback is the only thing that writes the meter, a control that arrives
-/// one callback late is a slider that moved a few milliseconds ago, and an
-/// ordering here would put a fence in the callback for the sake of a volume
-/// change nobody can hear the timing of.
+/// All relaxed: a control seen one callback late is inaudible, and a fence
+/// in the callback is not worth it.
 #[derive(Debug)]
 pub struct Channel {
     scale: AtomicU16,
     muted: AtomicBool,
     clipped: AtomicU64,
-    /// Samples in a window, from the rate the stream settled on.
     window: AtomicU32,
-    /// The loudest in the window being filled, and in the last full one. The
-    /// meter is the larger, which is what holds a peak for between one window
-    /// and two.
+    /// Peaks of the current and last full window; the meter shows the larger,
+    /// so a peak holds for one to two windows.
     current: AtomicU16,
     previous: AtomicU16,
     counted: AtomicU32,
 }
 
 impl Channel {
-    /// A channel at unity gain, unmuted, metering over a window of this many
-    /// samples.
+    /// Unity gain, unmuted, with a meter window of `window` samples.
     #[must_use]
     pub fn new(window: u32) -> Self {
         Self {
@@ -238,8 +174,7 @@ impl Channel {
         }
     }
 
-    /// Say what the rate turned out to be. The device decides it, and on a
-    /// reopen it can decide differently.
+    /// Resize the window once the device has chosen a rate.
     pub fn set_window(&self, window: u32) {
         self.window.store(window.max(1), Ordering::Relaxed);
     }
@@ -264,15 +199,12 @@ impl Channel {
         self.muted.load(Ordering::Relaxed)
     }
 
-    /// How many samples the gain has driven past full scale over the life of
-    /// the channel. It only ever grows, so two readings subtract into a rate,
-    /// and a rate that is not zero is a gain set too high.
+    /// Samples clipped by the gain, ever. Monotonic.
     pub fn clipped(&self) -> u64 {
         self.clipped.load(Ordering::Relaxed)
     }
 
-    /// What a meter should show: the loudest of the window being filled and
-    /// the last full one.
+    /// What a meter should show.
     pub fn level(&self) -> Level {
         Level(
             self.current
@@ -281,21 +213,18 @@ impl Channel {
         )
     }
 
-    /// Forget what was heard. For a stream that has stopped, whose meter would
-    /// otherwise stay where the last frame left it and read as a live signal.
+    /// Reset the meter when a stream stops, so it does not look live.
     pub fn quiet(&self) {
         self.current.store(0, Ordering::Relaxed);
         self.previous.store(0, Ordering::Relaxed);
         self.counted.store(0, Ordering::Relaxed);
     }
 
-    /// Scale a block of samples where they lie, and note what came out.
+    /// Scale `samples` in place and meter them.
     ///
-    /// `covered` is how much device time the block accounts for, which is not
-    /// always its length: a starved playback callback scales what there was
-    /// and pads the rest with silence, and the window has to advance by the
-    /// silence too, or a stream that stopped being fed would leave its meter
-    /// frozen at the last thing it heard.
+    /// `covered` is the device time in samples, which can exceed the block
+    /// when a starved callback pads with silence; the window must advance by
+    /// it anyway.
     pub fn apply(&self, samples: &mut [i16], covered: usize) {
         let scale = if self.muted.load(Ordering::Relaxed) {
             0
@@ -322,7 +251,6 @@ impl Channel {
         self.note(peak, covered);
     }
 
-    /// Move the meter's window on by `covered` samples, having heard `peak`.
     fn note(&self, peak: u16, covered: usize) {
         let counted = self
             .counted
@@ -342,13 +270,8 @@ impl Channel {
 
 /// The volume, the mute and the meter for one direction of one stream.
 ///
-/// A handle rather than methods on the stream, because the slider and the
-/// meter are on the thread that draws the window and the frames are on the
-/// thread that carries the call. It can be cloned, sent and kept after the
-/// stream is dropped; what it then reports is the last thing the stream heard.
-///
-/// Reading it is a couple of relaxed loads, so a user interface may poll
-/// [`Controls::level`] on every frame it draws.
+/// A cloneable, `Send` handle for the UI thread; it may outlive the stream.
+/// Reads are relaxed loads, cheap enough to poll every UI frame.
 #[derive(Clone, Debug)]
 pub struct Controls {
     channel: Arc<Channel>,
@@ -362,25 +285,21 @@ impl Controls {
         }
     }
 
-    /// Set what the samples are multiplied by. Takes effect on the next block
-    /// the device asks for, which is one period away and not one ring away.
+    /// Set the gain; heard from the next device period.
     pub fn set_gain(&self, gain: Gain) {
         self.channel.set_gain(gain);
     }
 
-    /// What it is set to, mute or no mute.
+    /// The gain, regardless of mute.
     #[must_use]
     pub fn gain(&self) -> Gain {
         self.channel.gain()
     }
 
-    /// Mute or unmute, without disturbing the gain: unmuting gives back
-    /// exactly the volume that was set before.
+    /// Mute or unmute without touching the gain.
     ///
-    /// A muted direction keeps running rather than stopping. The device is
-    /// still read and the rings still move, at the rate they always did, so
-    /// that unmuting is heard immediately instead of replaying however much
-    /// audio piled up while nobody was listening.
+    /// The stream keeps running while muted, so unmuting does not replay
+    /// audio that piled up.
     pub fn set_muted(&self, muted: bool) {
         self.channel.set_muted(muted);
     }
@@ -391,19 +310,14 @@ impl Controls {
         self.channel.is_muted()
     }
 
-    /// The loudest sample of the last tenth of a second, after the gain and
-    /// the mute.
+    /// The peak of the last ~100 ms, after gain and mute.
     #[must_use]
     pub fn level(&self) -> Level {
         self.channel.level()
     }
 
-    /// Samples that came out at the end of the range because the gain put them
-    /// there.
-    ///
-    /// Only ever grows, so two readings subtract. Anything above zero on a
-    /// call means the gain is set too high for this microphone, and that is
-    /// worth showing next to the slider that caused it.
+    /// Samples clipped by the gain. Monotonic; a rising count means the gain
+    /// is too high.
     #[must_use]
     pub fn clipped(&self) -> u64 {
         self.channel.clipped()
@@ -416,8 +330,6 @@ mod tests {
     use std::sync::Arc;
 
     fn channel() -> Channel {
-        // a window of a hundred samples, so a test can fill one without
-        // writing out a tenth of a second of audio
         Channel::new(100)
     }
 
@@ -425,8 +337,7 @@ mod tests {
     fn a_window_is_a_tenth_of_a_second_at_any_rate() {
         assert_eq!(window_samples(8_000), 800);
         assert_eq!(window_samples(48_000), 4_800);
-        // 44100 has no whole number of samples per millisecond, and 99.8 ms is
-        // near enough for a bar on a screen
+        // 99.8 ms is near enough
         assert_eq!(window_samples(44_100), 4_400);
         assert_eq!(window_samples(0), 100);
     }
@@ -439,7 +350,6 @@ mod tests {
         channel.apply(&mut samples, wanted.len());
         assert_eq!(samples, wanted);
         assert_eq!(channel.clipped(), 0);
-        // the loudest magnitude, which the negative end holds
         assert_eq!(channel.level().peak(), 32_768);
     }
 
@@ -457,16 +367,14 @@ mod tests {
     fn a_gain_that_would_overflow_saturates_and_is_counted() {
         let channel = channel();
         channel.set_gain(Gain::from_ratio(4.0));
-        // 20000 * 4 is over the end of the range, 1000 * 4 is not
         let mut samples = [20_000i16, -20_000, 1_000, -1_000];
         channel.apply(&mut samples, 4);
 
         assert_eq!(samples, [i16::MAX, i16::MIN, 4_000, -4_000]);
-        // counted per sample, not per block: two of the four landed at an end
+        // per sample, not per block
         assert_eq!(channel.clipped(), 2);
         assert_eq!(channel.level().peak(), 32_768);
 
-        // and it accumulates rather than being reset by the next block
         let mut more = [30_000i16];
         channel.apply(&mut more, 1);
         assert_eq!(channel.clipped(), 3);
@@ -480,7 +388,6 @@ mod tests {
             let mut samples = [start];
             channel.apply(&mut samples, 1);
             let out = samples[0];
-            // the sign is the one thing a wrap would take away
             assert_eq!(out.signum(), start.signum(), "{start} came back as {out}");
             assert!(out.saturating_abs() >= start.saturating_abs() - 1);
         }
@@ -495,7 +402,6 @@ mod tests {
         let mut samples = [10_000i16; 8];
         channel.apply(&mut samples, 8);
         assert_eq!(samples, [0i16; 8]);
-        // muting does not spend the setting
         assert_eq!(channel.gain(), Gain::from_ratio(0.75));
         assert!(channel.is_muted());
 
@@ -513,8 +419,6 @@ mod tests {
         assert_eq!(channel.level().peak(), 20_000);
 
         channel.set_muted(true);
-        // one window to end the one that heard the voice, one to end the one
-        // after it
         for _ in 0..4 {
             let mut quiet = [20_000i16; 60];
             channel.apply(&mut quiet, 60);
@@ -529,13 +433,10 @@ mod tests {
         spike[3] = 8_000;
         channel.apply(&mut spike, 10);
 
-        // the same answer however often it is asked, which is what a meter
-        // polled at sixty hertz depends on
         for _ in 0..10 {
             assert_eq!(channel.level().peak(), 8_000);
         }
 
-        // quiet blocks that do not end the window leave it standing
         for _ in 0..8 {
             let mut quiet = [0i16; 10];
             channel.apply(&mut quiet, 10);
@@ -551,15 +452,12 @@ mod tests {
         channel.apply(&mut spike, 50);
         assert_eq!(channel.level().peak(), 8_000);
 
-        // the window it fell in ends here, so it becomes the last full one and
-        // goes on showing
         let mut quiet = [0i16; 50];
         channel.apply(&mut quiet, 50);
         assert_eq!(channel.level().peak(), 8_000);
         channel.apply(&mut quiet, 50);
         assert_eq!(channel.level().peak(), 8_000);
 
-        // and a window and a half after it happened, it is gone
         channel.apply(&mut quiet, 50);
         assert_eq!(channel.level(), Level::SILENT);
     }
@@ -571,8 +469,7 @@ mod tests {
         channel.apply(&mut spike, 4);
         assert_eq!(channel.level().peak(), 9_000);
 
-        // a starved playback callback: four samples came out of the ring and
-        // the device asked for two hundred, so two windows have gone by
+        // a starved playback callback covering two windows
         let mut nothing: [i16; 0] = [];
         channel.apply(&mut nothing, 200);
         channel.apply(&mut nothing, 200);
@@ -587,15 +484,12 @@ mod tests {
         let mut loud = [7_000i16; 4_000];
         channel.apply(&mut loud, 4_000);
         let mut quiet = [0i16; 700];
-        // at the hundred samples this channel was built with, these three
-        // would have taken the peak away
+        // with the original 100-sample window these would clear the peak
         for _ in 0..3 {
             channel.apply(&mut quiet, 700);
         }
         assert_eq!(channel.level().peak(), 7_000);
 
-        // and a window of no samples at all is one that ends on every block,
-        // which is not a window: it is clamped rather than divided by
         channel.set_window(0);
         channel.apply(&mut quiet, 1);
         assert_eq!(channel.level(), Level::SILENT);
@@ -616,7 +510,6 @@ mod tests {
         assert_eq!(Gain::from_ratio(0.0), Gain::SILENT);
         assert_eq!(Gain::from_ratio(1.0), Gain::UNITY);
         assert_eq!(Gain::from_ratio(4.0), Gain::MAX);
-        // past either end, and the value that is not a number at all
         assert_eq!(Gain::from_ratio(-1.0), Gain::SILENT);
         assert_eq!(Gain::from_ratio(-0.5), Gain::SILENT);
         assert_eq!(Gain::from_ratio(9.0), Gain::MAX);
@@ -629,12 +522,10 @@ mod tests {
     #[test]
     fn decibels_are_amplitudes_rather_than_powers() {
         assert_eq!(Gain::from_db(0.0), Gain::UNITY);
-        // six decibels down is half, not a bit over two thirds
         assert!((Gain::from_db(-6.02).ratio() - 0.5).abs() < 0.01);
         assert!((Gain::from_db(6.02).ratio() - 2.0).abs() < 0.02);
         assert!(Gain::UNITY.db().abs() < f32::EPSILON);
         assert_eq!(Gain::from_db(f32::NEG_INFINITY), Gain::SILENT);
-        // silence has no decibels, and saying so is better than a number
         let silent = Gain::SILENT.db();
         assert!(silent.is_infinite() && silent.is_sign_negative());
         assert_eq!(Gain::from_db(100.0), Gain::MAX);
@@ -678,7 +569,6 @@ mod tests {
         assert!(controls.is_muted());
         assert!(channel.is_muted());
 
-        // and it outlives what it was reading, rather than dangling
         let mut samples = [4_000i16; 4];
         channel.apply(&mut samples, 4);
         assert_eq!(controls.level(), Level::SILENT);

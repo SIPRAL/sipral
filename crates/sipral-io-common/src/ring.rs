@@ -3,44 +3,28 @@
 
 //! The one place a realtime thread and an ordinary one meet.
 //!
-//! The device callback runs on a thread the system will not wait for. It
-//! cannot allocate, cannot take a lock that a non-realtime thread might be
-//! holding, cannot log and cannot block, because any of those turns a late
-//! frame into a glitch and a bad day into a dropped call. So the only thing
-//! between the callback and the rest of the process is this: memory allocated
-//! once at construction, two indices, and no way for either side to wait for
-//! the other. Whoever is late loses samples, and the loss is counted.
+//! The device callback cannot allocate, lock, log or block, so it meets the
+//! rest of the process here: memory allocated once, two indices, no waiting.
+//! Whoever is late loses samples, and the loss is counted. One producer, one
+//! consumer.
 //!
-//! One producer and one consumer, never more. Which side is which depends on
-//! the direction: the callback produces what the microphone heard and consumes
-//! what goes to the speaker.
-//!
-//! The samples live in atomics rather than behind an `UnsafeCell`, so the
-//! racy window at the head of the buffer is defined behaviour instead of
-//! something to argue about. The loads and stores of the samples themselves
-//! are relaxed and compile to ordinary ones; what orders them is the pair of
-//! acquire and release on the indices.
+//! Samples are relaxed atomics rather than an `UnsafeCell`, so the racy head
+//! is defined behaviour; acquire/release on the indices orders them.
 
 use core::sync::atomic::{AtomicI16, AtomicUsize, Ordering};
 
-/// Under two slots there is nowhere to put anything.
 const MIN_CAPACITY: usize = 2;
 
-/// Four million samples is a minute and a half at 48 kHz. A caller that asks
-/// for more has made an arithmetic mistake, and rounding that up to a power of
-/// two is where the arithmetic would overflow.
+/// About 87 s at 48 kHz; also keeps `next_power_of_two` from overflowing.
 const MAX_CAPACITY: usize = 1 << 22;
 
 /// A single-producer, single-consumer buffer of samples, sized once.
 ///
-/// Neither side ever waits for the other: whoever is late loses samples,
-/// and the loss is counted where the caller keeps its counters.
+/// Neither side waits; whoever is late loses samples.
 pub struct Ring {
     cells: Box<[AtomicI16]>,
-    /// One less than a power-of-two length, so an index becomes a slot with an
-    /// `and`. It also makes the indices wrap correctly: `usize::MAX + 1` is a
-    /// multiple of any power of two, so the mapping stays continuous when they
-    /// go round.
+    /// Power-of-two length minus one, so indices wrap continuously past
+    /// `usize::MAX`.
     mask: usize,
     write: AtomicUsize,
     read: AtomicUsize,
@@ -53,8 +37,7 @@ impl Ring {
         Self::starting_at(samples, 0)
     }
 
-    /// The same, with the indices already somewhere. Only a test starts them
-    /// anywhere but zero, and only to reach the wrap in less than an hour.
+    /// Tests start the indices near the wrap.
     fn starting_at(samples: usize, index: usize) -> Self {
         let capacity = samples
             .clamp(MIN_CAPACITY, MAX_CAPACITY)
@@ -69,28 +52,22 @@ impl Ring {
         }
     }
 
-    /// How many samples it holds when full: what it was asked for, rounded
-    /// up to a power of two.
+    /// The requested size rounded up to a power of two.
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.cells.len()
     }
 
-    /// Room for more, as the producer sees it.
-    ///
-    /// Acquire on the consumer's index: the cells it has finished with are
-    /// only free once its release of that index is visible here, and the
-    /// producer is about to overwrite them.
+    /// Room for more, as the producer sees it. Acquire pairs with the
+    /// consumer's release, so freed cells are really done with.
     pub fn free(&self) -> usize {
         let write = self.write.load(Ordering::Relaxed);
         let read = self.read.load(Ordering::Acquire);
         self.cells.len() - write.wrapping_sub(read)
     }
 
-    /// Samples waiting, as the consumer sees it.
-    ///
-    /// Acquire on the producer's index, which is what makes the samples it
-    /// stored with relaxed writes visible here.
+    /// Samples waiting, as the consumer sees it. Acquire makes the
+    /// producer's relaxed sample stores visible.
     pub fn filled(&self) -> usize {
         let read = self.read.load(Ordering::Relaxed);
         let write = self.write.load(Ordering::Acquire);
@@ -99,14 +76,12 @@ impl Ring {
 
     /// Put in as much as fits, and say how much that was. Producer side only.
     pub fn write(&self, samples: &[i16]) -> usize {
-        // Relaxed: nobody but this side moves `write`, so there is nothing to
-        // synchronise with in reading back our own value.
+        // only this side moves `write`
         let index = self.write.load(Ordering::Relaxed);
         let taken = self.free().min(samples.len());
         if let Some(head) = samples.get(..taken) {
             self.store_at(index, head);
         }
-        // Release: publishes every store above to the consumer's acquire.
         self.write
             .store(index.wrapping_add(taken), Ordering::Release);
         taken
@@ -114,22 +89,18 @@ impl Ring {
 
     /// Put in a whole frame or none of it.
     ///
-    /// Between the check and the write only the consumer can act, and all it
-    /// does is free more room, so a frame that fits stays fitting.
+    /// The consumer can only free room, so a frame that fits stays fitting.
     pub fn write_frame(&self, frame: &[i16]) -> bool {
         self.free() >= frame.len() && self.write(frame) == frame.len()
     }
 
     /// Take as much as there is, and say how much that was. Consumer side only.
     pub fn read(&self, out: &mut [i16]) -> usize {
-        // Relaxed for the same reason `write` reads its own index relaxed.
         let index = self.read.load(Ordering::Relaxed);
         let taken = self.filled().min(out.len());
         if let Some(head) = out.get_mut(..taken) {
             self.load_at(index, head);
         }
-        // Release: tells the producer these cells have been read out of, so
-        // its acquire in `free` is what keeps it from overwriting them early.
         self.read
             .store(index.wrapping_add(taken), Ordering::Release);
         taken
@@ -178,14 +149,12 @@ mod tests {
     use std::thread;
 
     fn value(index: usize) -> i16 {
-        // a prime under i16::MAX, so the pattern repeats late and every value
-        // is distinguishable from its neighbours
+        // a prime, so the pattern repeats late
         i16::try_from(index % 30_011).unwrap_or(0)
     }
 
     #[test]
     fn capacity_rounds_up_and_is_clamped() {
-        // an untouched ring has room for exactly its capacity
         assert_eq!(Ring::new(0).free(), 2);
         assert_eq!(Ring::new(1).free(), 2);
         assert_eq!(Ring::new(5).free(), 8);
@@ -316,7 +285,6 @@ mod tests {
         let frame = [1i16, 2, 3, 4];
         assert!(ring.write_frame(&frame));
         assert!(ring.write_frame(&frame));
-        // the third has nowhere to go, and that is the loss the counters name
         assert!(!ring.write_frame(&frame));
         assert_eq!(ring.filled(), 8);
     }
