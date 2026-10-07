@@ -1,6 +1,6 @@
 [package]
 name = "sipral-abi-gen"
-description = "Prints the C header and the Swift, Kotlin, .NET, Python and Dart bindings from the ABI sipral-ffi declares."
+description = "Prints the C header and the Swift, Kotlin, .NET, Python, Dart and Node.js bindings from the ABI sipral-ffi declares."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

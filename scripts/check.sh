@@ -37,9 +37,9 @@ export LC_ALL=C.UTF-8
 export UseSharedCompilation=false MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0
 
 # In the order the complete gate reports them.
-AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat agents windows dart rn site"
+AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat agents windows dart rn node site"
 # The layers: every area that loads the C library built from sipral-ffi.
-LAYERS="swift dotnet kotlin jvm python pipecat agents windows dart rn"
+LAYERS="swift dotnet kotlin jvm python pipecat agents windows dart rn node"
 
 usage() {
     cat <<'EOF'
@@ -85,6 +85,9 @@ areas:
   dart     bindings/dart analysed, formatted and tested, pub.sh --dry-run.
   rn       bindings/react-native: jest, tsc, codegen, the Android library
            with Gradle, the iOS half, npm.sh --dry-run.
+  node     bindings/node: tsc over the printed koffi binding and the
+           TypeScript layer, node --test against the library, npm pack
+           --dry-run.
   site     the documentation site built and its links checked.
 
 --changed reads `git diff` against BASE (default: the merge base with
@@ -2610,6 +2613,61 @@ step_pub() {
 
 # The React Native tarball as npm would pack it, its listing held to what
 # the package has to carry and must not. Nothing is uploaded.
+# bindings/node: the package over koffi. Like Dart and Python, its raw layer
+# src/sipral_abi.ts is printed by "the header and the bindings", so a machine
+# without node has not checked that step's own output: a missing node fails.
+# tsc compiles the printed file with the hand-written layer over it, and the
+# tests run against the library: every record's koffi size held to the
+# layout table, two stacks calling each other on loopback with a tone each
+# way, digits and a hang-up, a transfer refused and one taken, and a
+# registration through a simulated registrar's digest challenge. npm pack
+# --dry-run lists what would be published; nothing is.
+step_node() {
+    step "the node package"
+    local NODE_DIR="$ROOT/bindings/node"
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        fail "node is not installed (brew install node)"
+        return
+    fi
+    if [ ! -f "$ROOT/$DYLIB" ]; then
+        fail "the node package: $DYLIB is not there to load (the build of the library, above, says why)"
+        return
+    fi
+    if [ ! -d "$NODE_DIR/node_modules/koffi" ] || ! npm --prefix "$NODE_DIR" ls >/dev/null 2>&1; then
+        fail "bindings/node/node_modules is missing or not what package-lock.json names: npm ci --prefix bindings/node"
+        return
+    fi
+    if (cd "$NODE_DIR" && rm -rf dist && ./node_modules/.bin/tsc -p .) >"$PKG_WORK/node-tsc" 2>&1; then
+        pass "tsc, bindings/node: the printed binding and the TypeScript layer"
+    else
+        fail "tsc, bindings/node:"
+        tail -40 "$PKG_WORK/node-tsc" | sed 's/^/        /'
+        return
+    fi
+    # what the runner printed is read as well as how it exited: a run that
+    # found no test exits zero too
+    if (cd "$NODE_DIR" && SIPRAL_LIBRARY="$ROOT/$DYLIB" node --test --test-concurrency=1 "dist/test/*.test.js") \
+        >"$PKG_WORK/node-test" 2>&1; then
+        passed=$(grep -Eo '^. pass [0-9]+' "$PKG_WORK/node-test" | grep -Eo '[0-9]+$' | tail -1)
+        if [ -n "$passed" ] && [ "$passed" -gt 0 ]; then
+            pass "node --test, bindings/node ($passed tests: record layouts, the loopback call, transfer, registration)"
+        else
+            fail "node --test, bindings/node, exited zero and reported no test"
+        fi
+    else
+        fail "node --test, bindings/node:"
+        tail -40 "$PKG_WORK/node-test" | sed 's/^/        /'
+    fi
+    if (cd "$NODE_DIR" && npm pack --dry-run --json) >"$PKG_WORK/node-pack" 2>&1 \
+        && grep -q '"path": "dist/sipral_abi.js"' "$PKG_WORK/node-pack" \
+        && ! grep -q '"path": "dist/test/' "$PKG_WORK/node-pack"; then
+        pass "npm pack --dry-run, bindings/node: the printed binding in, the tests out"
+    else
+        fail "npm pack --dry-run, bindings/node:"
+        tail -20 "$PKG_WORK/node-pack" | sed 's/^/        /'
+    fi
+}
+
 step_npm() {
     step "package --dry-run: the React Native package"
     pkg_run "npm.sh --dry-run" scripts/package/npm.sh --out "$PKG_WORK/npm" --dry-run
@@ -2944,6 +3002,7 @@ area_agents() { need_library; step_agents; }
 area_windows() { step_windows_python; }
 area_dart() { need_library; step_dart; step_pub; }
 area_rn() { need_library; step_react_native; step_npm; }
+area_node() { need_library; step_node; }
 area_site() { step_site; }
 
 # --changed: which areas a path reaches. Each line of $ROUTES is
@@ -3028,6 +3087,8 @@ route() {
             route_to agents "the voice-agent connectors" ;;
         bindings/dart/*)
             route_to dart "the Dart layer" ;;
+        bindings/node/*)
+            route_to node "the Node.js package" ;;
         bindings/react-native/android/src/main/java/org/sipral/reactnative/core/*|bindings/react-native/android/jvm-check/*)
             route_to "rn kotlin" "the React Native Android logic, which runs on a JVM in the kotlin area" ;;
         bindings/react-native/*)
@@ -3125,7 +3186,7 @@ run_area() {
 # done; the others start at once.
 waits_for() {
     case "$1" in
-        numbers|swift|dotnet|kotlin|jvm|python|pipecat|agents|dart|rn) printf 'abi\n' ;;
+        numbers|swift|dotnet|kotlin|jvm|python|pipecat|agents|dart|rn|node) printf 'abi\n' ;;
     esac
 }
 

@@ -1,0 +1,54 @@
+{
+  "name": "sipral",
+  "version": "1.1.0",
+  "description": "Sipral - Session Initiation Protocol Rust Audio Layer. The SIP stack for Node.js: accounts, registration, calls, DTMF, transfer and PCM media over the C ABI.",
+  "keywords": [
+    "sip",
+    "voip",
+    "rtp",
+    "telephony",
+    "softphone",
+    "voice-agent"
+  ],
+  "license": "AGPL-3.0-only OR LicenseRef-Sipral-Commercial",
+  "author": "Sytek",
+  "homepage": "https://sipral.org",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SIPRAL/sipral",
+    "directory": "bindings/node"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./abi": {
+      "types": "./dist/sipral_abi.d.ts",
+      "default": "./dist/sipral_abi.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/test",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "tsc -p . && node --test --test-concurrency=1 \"dist/test/*.test.js\""
+  },
+  "dependencies": {
+    "koffi": "3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
+  }
+}

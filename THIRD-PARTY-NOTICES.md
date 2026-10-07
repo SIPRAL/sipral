@@ -510,6 +510,15 @@ for a reason: React Native's Gradle plugin is compiled by Kotlin 2.2, which
 cannot read the Kotlin 2.4 metadata of the standard library Gradle 9.7 and
 later embed, and the Android Gradle Plugin 9.4 needs Gradle 9.6 or later.
 
+### The Node.js package
+
+`bindings/node` has one runtime dependency, koffi 3.3.2 (MIT, Copyright (C)
+2026 Niels Martignène), which loads the library and calls it; npm installs
+with it the prebuilt Node-API module for the platform, one of its
+`@koromix/koffi-*` packages, under the same licence. Nothing is compiled at
+install. TypeScript 7.0.2 (Apache-2.0) and `@types/node` 26.6.4 (MIT) build
+the package and are in no artefact.
+
 ### The Pipecat integration
 
 `integrations/pipecat`, published as `sipral-pipecat`, is a Python package

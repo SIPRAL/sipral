@@ -19,7 +19,7 @@ phone line inside a voice agent without a media server in between.**
 - **Memory-safe, and built for hostile input.** Rust throughout; `unsafe` is denied everywhere but the C boundary and the device crates; `unwrap`, `panic` and unchecked indexing fail the gate; 34 `cargo-fuzz` targets, thirty of them run 24 CPU-hours each (about 61 billion executions, nothing found); the RFC 4475 torture corpus asserted message by message.
 - **A sans-I/O core.** It opens no socket, starts no thread, reads no clock and draws no random number: the RFC 3261 §17 timer diagrams are ordinary unit tests, and a recorded field session replays deterministically ([`docs/18-replay.md`](docs/18-replay.md)).
 - **No GPL or LGPL code in it.** Written clean-room from the RFCs and ITU Recommendations, permissive dependencies only (`cargo deny` fails on anything else), offered under AGPL-3.0 or a commercial licence that ships in closed apps and app stores.
-- **One C ABI, every language printed from one declaration.** The header and the Swift, Kotlin, .NET, Python and Dart bindings come out of `tools/abi-gen`; struct layouts are checked on 64-bit and both 32-bit ABIs and compiled for six targets, and every member keeps its offset across minors.
+- **One C ABI, every language printed from one declaration.** The header and the Swift, Kotlin, .NET, Python, Dart and Node.js bindings come out of `tools/abi-gen`; struct layouts are checked on 64-bit and both 32-bit ABIs and compiled for six targets, and every member keeps its offset across minors.
 - **Device mode or headless, per stack.** The library opens the microphone and speaker itself (CoreAudio, WASAPI, AAudio, with the platform's echo cancellation as a switch and each call's own mute, gain and level meter) — a softphone with no audio code — or hands the application its PCM a frame at a time, or carries it over a socket to a separate agent process.
 - **Encrypted the ways real PBXs and carriers ask for.** SRTP with SDES (AES-CM 128/256, AES-GCM), DTLS-SRTP written in-tree, "SRTP best effort" for PBXs that answer `RTP/SAVP` with 488, TLS with the platform's trust, a private CA or one pinned certificate, and STIR/SHAKEN signing and verification (RFC 8224, 8588).
 - **NAT handled, not hoped for.** STUN with failover, TURN over UDP, TCP and TLS, ICE in the full and lite roles with restarts and consent freshness, RFC 5626 keep-alives, and a call that follows its own address when the network moves.
@@ -58,7 +58,7 @@ advertises the route toward the server it found. With
 audio backend — the same call hands over its audio instead:
 `await call.media.frames.get()` is the far end's next frame as 16-bit PCM,
 and `call.media.send_audio(pcm)` is what the far end hears, which is all a voice agent
-needs. The Swift, Kotlin, .NET, Dart and React Native layers have the same
+needs. The Swift, Kotlin, .NET, Dart, Node.js and React Native layers have the same
 shape ([`bindings/README.md`](bindings/README.md)).
 
 A [Pipecat](https://github.com/pipecat-ai/pipecat) voice agent answers calls through `sipral-pipecat`, one pipeline per call ([`integrations/pipecat`](integrations/pipecat/README.md)); `sipral-agents` joins each call to OpenAI Realtime, Gemini Live, ElevenLabs Agents, Vapi or Deepgram Voice Agent over their WebSocket APIs, with no framework ([`integrations/agents`](integrations/agents/README.md)).
@@ -70,16 +70,17 @@ a digit and plays back what it reads (CMake is needed once, for libopus).
 
 | Platform | Languages | Device mode | Artefact (`scripts/package/`) |
 |---|---|---|---|
-| macOS | Rust, C, Swift, Kotlin/Java, .NET, Python, Dart | CoreAudio voice processing | XCFramework, NuGet, wheel |
+| macOS | Rust, C, Swift, Kotlin/Java, .NET, Python, Dart, Node.js | CoreAudio voice processing | XCFramework, NuGet, wheel |
 | iOS | Rust, C, Swift, React Native, Flutter | CoreAudio voice processing, CallKit and PushKit helpers | XCFramework |
 | Android | Rust, C, Kotlin, React Native, Flutter | AAudio (API 28+), `ConnectionService` helper | AAR for arm64-v8a, armeabi-v7a, x86_64 |
-| Windows | Rust, C, .NET, Python, Dart | WASAPI communications streams | NuGet, wheel |
-| Linux | Rust, C, Kotlin/Java, .NET, Python, Dart | application mode; `sipral-io-pipewire` for a desktop | NuGet, manylinux wheels, JVM jar (x64, arm64) |
+| Windows | Rust, C, .NET, Python, Dart, Node.js | WASAPI communications streams | NuGet, wheel |
+| Linux | Rust, C, Kotlin/Java, .NET, Python, Dart, Node.js | application mode; `sipral-io-pipewire` for a desktop | NuGet, manylinux wheels, JVM jar (x64, arm64) |
 
 Application mode — PCM in the application's hands — is available on every
 platform and in every language but one: the React Native package runs device
 mode over the Swift and Kotlin layers. The Dart layer runs application mode,
-signalling over UDP with an account's own TCP or TLS connection beside it.
+signalling over UDP with an account's own TCP or TLS connection beside it; the
+Node.js layer runs application mode over UDP.
 
 ## Status
 

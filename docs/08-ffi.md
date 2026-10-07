@@ -2841,6 +2841,44 @@ places a call between two stacks on loopback, and `scripts/check.sh`'s `the
 dart bindings` step runs every test file under `bindings/dart/test` against
 the library it built.
 
+## Node.js
+
+The seventh back end: `tools/abi-gen/src/node.rs` prints
+`bindings/node/src/sipral_abi.ts` for [koffi](https://koffi.dev/) 3.3.2
+(MIT), which calls a shared library with no compiler at install time: its
+only native part is a prebuilt Node-API module per platform. Like the Python
+back end, it keeps every name the header gives: each integer alias and each
+enumeration's width is a `koffi.alias`, each record a `koffi.struct` or
+`koffi.union`, each callback a `koffi.proto`, and every entry point a member
+of `Sipral` built from its C prototype, loaded by `Sipral.open()` and refused,
+like every other binding, when `sipral_abi_check` says the library cannot
+serve the ABI the file was printed from. Two departures, both about koffi's
+conversions: a pointer member of a record is declared `void *`, because koffi
+reads a `char *` member as a string up to its first zero and the ABI's text is
+a pointer and a length with no zero promised; and a callback parameter is a
+pointer to its prototype. On the TypeScript side each enumeration is a frozen
+object of its codes (`SipralStatus.BufferTooSmall`), each record an interface
+of its members as koffi decodes them, a 64-bit integer `number | bigint`.
+`RECORD_LAYOUTS` lists every record's three lengths, and
+`bindings/node/src/test/abi.test.ts` holds `koffi.sizeof` of each to the
+64-bit one.
+
+`Stack`, `Account`, `Call` and `Media`, in `bindings/node/src/`, are written
+by hand against it, with handles as `bigint`. Everything runs on the thread
+that opened the stack: the sockets are `dgram` sockets, the poll and each
+call's frame clock are timers, and the event callback is a `koffi.register`
+function the library calls from inside `sipral_stack_poll`; it only copies the
+event out, and the copy is delivered once the poll has returned, as an
+`event` on the `EventEmitter` and through `events()`, an async iterator. The
+application carries each call's audio: `Media` emits `frame` with the far
+end's PCM and takes this end's with `sendAudio`. Signalling is UDP only: this
+layer opens no TCP or TLS connection and answers no
+`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`. `bindings/node/src/test/` places a call
+between two stacks on loopback with a tone heard each way and digits, a
+transfer refused and one taken, and a registration through a simulated
+registrar's digest challenge; `scripts/check.sh --only node` runs them against
+the library it built.
+
 ## React Native
 
 `bindings/react-native` is not a back end: nothing in it is printed,

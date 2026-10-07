@@ -43,7 +43,7 @@ use crate::model::{
     screaming, snake, upper_camel, words,
 };
 use crate::names::{Spelling, audit};
-use crate::{c, csharp, dart, kotlin, python, swift};
+use crate::{c, csharp, dart, kotlin, node, python, swift};
 
 /// Where the golden files live.
 fn golden_path(name: &str) -> PathBuf {
@@ -783,6 +783,32 @@ fn the_jni_shim_is_what_it_was() {
 #[test]
 fn the_python_binding_is_what_it_was() {
     golden("synthetic.py", &python::binding(&SYNTHETIC).unwrap());
+}
+
+#[test]
+fn the_node_binding_is_what_it_was() {
+    golden("synthetic.ts", &node::binding(&SYNTHETIC).unwrap());
+}
+
+/// The Node binding checks the ABI it was printed from at load, with the
+/// entry point and the constants the declarations name, prints over the
+/// real surface, and passes its own name audit there.
+#[test]
+fn the_node_binding_checks_the_abi_and_prints_the_real_surface() {
+    let why = node::binding(&NOTHING).unwrap_err().to_string();
+    assert!(why.contains("sipral_abi_check"), "{why}");
+    let printed = node::binding(&SYNTHETIC).unwrap();
+    assert!(
+        printed.contains(
+            "const status = sipral.sipral_abi_check(SIPRAL_ABI_VERSION_MAJOR, \
+             SIPRAL_ABI_VERSION_MINOR);"
+        ),
+        "{printed}"
+    );
+    assert!(audit(&sipral_ffi::abi::SURFACE, &node::Names).is_ok());
+    let real = node::binding(&sipral_ffi::abi::SURFACE).unwrap();
+    assert!(real.contains("koffi.struct('sipral_event_t', {"));
+    assert!(real.contains("this.sipral_stack_create = library.func("));
 }
 
 #[test]

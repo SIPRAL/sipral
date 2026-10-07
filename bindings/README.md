@@ -26,6 +26,7 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `kotlin/sipral/src/main/jni/sipral_jni.c` | The JNI that implements it |
 | `python/sipral/_sipral_cffi.py` | The raw `cffi` ABI-mode surface: `ffi` and `lib` |
 | `dart/lib/src/sipral_abi.dart` | The raw `dart:ffi` surface |
+| `node/src/sipral_abi.ts` | The raw koffi surface for Node.js, with TypeScript types |
 | `c/abi-sizes.txt` | Each sized struct's pinned member, and on each of the three layouts the length it pins and the length the struct is now |
 | `c/abi-layout.c` | Every length, offset and pin on the three layouts, as assertions a C compiler checks against the header for six targets |
 
@@ -35,7 +36,7 @@ idiomatic layer each language's application uses, written against its
 printed file (`swift/Sources/Sipral/`, `dotnet/Sipral/`,
 `kotlin/sipral/src/main/kotlin/org/sipral/{idiomatic,telecom}/` with the JNI
 shims `idiomatic_media.c` and `audio_routes.c`, `python/sipral/`,
-`dart/lib/src/`), with its tests, samples and examples; `kotlin/android/`
+`dart/lib/src/`, `node/src/`), with its tests, samples and examples; `kotlin/android/`
 (the AAR's Gradle build, the telecom helper and the Compose sample); `jvm/`
 (the Maven build of the Kotlin binding for a server JVM, with its Java face);
 `fixtures/` (the STIR certificate chain the bindings' tests share); `react-native/`
@@ -51,6 +52,7 @@ than write themselves is generated.
 | .NET | [`dotnet/README.md`](dotnet/README.md) | Windows, macOS, Linux | device or application mode |
 | Python | [`python/README.md`](python/README.md) | macOS, Windows, Linux | device or application mode |
 | Dart and Flutter | [`dart/README.md`](dart/README.md) | wherever `dart:ffi` loads the library | application mode, signalling over UDP with an account's own TCP or TLS connection beside it |
+| Node.js and TypeScript | [`node/README.md`](node/README.md) | wherever Node.js 20 or later and koffi load the library | application mode, signalling over UDP |
 | React Native | [`react-native/README.md`](react-native/README.md) | iOS, Android | device mode, over the Swift and Kotlin layers |
 
 Device mode is wherever the library has an audio backend: CoreAudio on macOS

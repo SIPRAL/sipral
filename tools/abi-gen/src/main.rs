@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Print the C header and the three bindings from what `sipral-ffi` declares.
+//! Print the C header and the bindings from what `sipral-ffi` declares.
 //!
 //! `cargo run -p sipral-abi-gen` writes them; `--check` prints them into
 //! memory and says which committed file no longer matches, which is what
@@ -16,6 +16,7 @@ mod kotlin;
 mod layout;
 mod model;
 mod names;
+mod node;
 mod python;
 mod sizes;
 mod swift;
@@ -67,6 +68,10 @@ fn outputs() -> Result<Vec<(PathBuf, String)>, Refused> {
         (
             here.join("bindings/dart/lib/src/sipral_abi.dart"),
             dart::binding(&SURFACE)?,
+        ),
+        (
+            here.join("bindings/node/src/sipral_abi.ts"),
+            node::binding(&SURFACE)?,
         ),
         (
             here.join("bindings/c/abi-sizes.txt"),
