@@ -71,6 +71,27 @@ it, compiled in only where those frameworks actually work
 too, but every type in it is `API_UNAVAILABLE(macos)`, so `canImport` alone
 is not enough to keep this package building there).
 
+`LiveCommunicationBridge` is the same for LiveCommunicationKit, Apple's
+newer system call service (iOS 17.4 and later), which an application may
+choose instead of CallKit: the bridge reports incoming calls and asks the
+system for outgoing ones (`startOutgoingCall(callee:dial:)` dials only once
+the system has agreed), mirrors the call's progress and end, and routes the
+system's join, end, mute, pause and tone actions, its audio session and its
+reset to the bound `Call`, by `CallKitBridge`'s own rules, behind
+`LiveCommunicationProviding`. `LiveCommunicationAdapter.swift` is the real
+`ConversationManager` behind it (`canImport(LiveCommunicationKit) &&
+os(iOS)`, `@available(iOS 17.4, *)`):
+
+```swift
+let adapter = LiveCommunicationAdapter(configuration: LiveCommunicationAdapter.audioConfiguration())
+let bridge = LiveCommunicationBridge(provider: adapter)
+adapter.bridge = bridge
+try bridge.drive(stack.audio!)                       // device mode follows the system's session
+let (uuid, call) = try await bridge.startOutgoingCall(callee: "sip:bob@example.com") {
+    try stack.placeCall(account: account, target: "sip:bob@example.com")
+}
+```
+
 `CallAudio` is a call's device kept through interruptions, route changes,
 media services resets and CallKit's hold, mute and audio session, over a
 `CallAudioDevice`; `VoiceProcessingAudioDevice` (wherever `AVFoundation`
@@ -796,7 +817,9 @@ there, and it registers no VoIP push without an `aps-environment`
 entitlement. The incoming-call screen and a real VoIP push need a device and
 its provisioning. `CallKitBridge` and `PushKitBridge`, the sequence that
 matters, are tested against a recording `CallKitProviding` on every
-platform. The system's own delivery of an audio interruption, a route
+platform. `LiveCommunicationAdapter` is built for iOS, the simulator and
+Mac Catalyst but driven by no test: `LiveCommunicationBridge` is, against a
+recording `LiveCommunicationProviding` (`Tests/SipralTests/LiveCommunicationBridgeTests.swift`). The system's own delivery of an audio interruption, a route
 change or a media services reset: the simulator raises none of them, so
 `AudioSessionObserverTests` posts each as the system does, and a carrier's
 call, a Bluetooth headset or CarPlay taking the route need a device. A DNS resolver for

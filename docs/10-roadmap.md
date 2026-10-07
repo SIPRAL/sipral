@@ -88,7 +88,7 @@ Q1 2027, planned.
 - A network test before the call *(done)*
 - Answering-machine detection on calls the agent places *(done)*
 - SIP over WebSocket with the connection made by the stack (RFC 7118) *(done)*
-- LiveCommunicationKit on iOS *(in progress)*
+- LiveCommunicationKit on iOS *(done)*
 
 ### 2.0 — Beyond audio
 

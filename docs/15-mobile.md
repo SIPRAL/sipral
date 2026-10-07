@@ -161,7 +161,7 @@ then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is
 `push_provider`, `push_prid`, `push_param` and `push_wakes_itself` on
 `sipral_account_config_t`, and `sipral_account_push_echo` reads the
 registrar's answer. On iOS, `CallKitBridge` and `PushKitBridge` run this
-sequence; on Android, `org.sipral.telecom.TelecomBridge` does.
+sequence (or `LiveCommunicationBridge`, below, in CallKit's place); on Android, `org.sipral.telecom.TelecomBridge` does.
 
 ## C3 — a registration that freezes and thaws
 
@@ -865,6 +865,47 @@ the same thing on iOS as `StreamEvent::DeviceLost` — the unit the system
 stopped for an interruption, or one a reset left unable to answer — and
 `Stream::recover` builds a new unit, which a test on the simulator checks
 by stopping the unit behind the stream's back.
+
+### LiveCommunicationKit
+
+LiveCommunicationKit is Apple's newer system call service: iOS, iPadOS and
+Mac Catalyst 17.4 and later (watchOS 10.4, visionOS 1.1), not plain macOS,
+per Apple's documentation read on 7 October 2026. An application on iOS 17.4
+or later may use it in CallKit's place; one that still supports iOS 15 or 16
+keeps CallKit there. The two are alternatives, one per application, and
+nothing in CallKit's path changed for it.
+
+`LiveCommunicationBridge` runs the same rules as `CallKitBridge` (it holds
+one underneath) behind `LiveCommunicationProviding`, and adds outgoing
+calls: `startOutgoingCall(callee:dial:)` asks the system first with a
+`StartConversationAction`, dials only once it has agreed, reports the call
+connecting, and reports a dial that throws as failed. `LiveCommunicationAdapter`
+is the real `ConversationManager`:
+
+| The system's signal | Carried to | What happens |
+|---|---|---|
+| `reportNewIncomingConversation` | from `LiveCommunicationBridge.reportIncomingCall` | The ringing call shown, before the push handler returns |
+| `StartConversationAction` | performed by `startOutgoingCall` | The call shown, then dialled; the audio session's category set |
+| `JoinConversationAction` | `handleJoin` | The call answered, the session's category set |
+| `EndConversationAction` | `handleEnd` | The call hung up |
+| `MuteConversationAction` | `handleMute` | Silence sent in the microphone's place; the engine's input muted in device mode |
+| `PauseConversationAction` | `handlePause` | The device let go at once, the far end held with a re-INVITE; the reverse on resume |
+| `PlayToneAction` | `handleTone` | The digits sent as DTMF |
+| `didActivate`, `didDeactivate` | `audioSessionActivated`, `audioSessionDeactivated` | The call's device, or the library's engine (`drive`), opened and let go with the system's session |
+| `conversationManagerDidReset` | `managerDidReset` | Every call hung up |
+| the call progressing, confirmed, ended | `reportConversationEvent` | `conversationStartedConnecting`, `conversationConnected`, `conversationEnded` with `failed`, `remoteEnded` or `unanswered` |
+
+Merging is not offered (`capabilities` names pausing and tones), and a
+merge or unmerge action fails. `LiveCommunicationBridgeTests` runs on macOS
+and Linux against a recording provider: an incoming report and its refusal,
+an outgoing call refused (nothing dialled), one whose dial throws, one
+placed, joined, muted, toned and ended between two stacks, and a reset. The
+adapter is built for the iOS device, the simulator and Mac Catalyst with
+`xcodebuild build -scheme Sipral` from `bindings/`. A phone is needed for
+the rest: the system's incoming screen and its join and end buttons, the
+outgoing call in the system's call list and recents, `didActivate` for a
+real call, the Dynamic Island, a cellular call put on pause, and whether
+the system accepts the adapter's configuration as given.
 
 What the simulator cannot give is the system's own delivery: a real cellular
 call interrupting the session, CallKit calling `didActivate` for a call it
