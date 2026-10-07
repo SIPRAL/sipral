@@ -5,11 +5,8 @@
 //! 3611 §4.7.2), by the event-driven algorithm RFC 3611 Appendix A.2
 //! reproduces from ETSI TS 101 329-5: "this algorithm ... takes precedence
 //! over any change that might eventually be made to the algorithm in
-//! future ETSI documents", which is why the state names and transition
-//! counters below (`c11`, `c13`, ...) keep the appendix's own names rather
-//! than renaming them into something more descriptive — a reviewer
-//! checking this against the RFC text should be able to match variable for
-//! variable.
+//! future ETSI documents". The counters (`c11`, `c13`, ...) keep the
+//! appendix's names so the code can be checked against it line by line.
 //!
 //! §4.7.2 defines a burst as the longest run that starts and ends with a
 //! lost or discarded packet and contains no run of `Gmin` or more
@@ -87,12 +84,9 @@ pub(crate) struct GminTracker {
     /// Packets discarded since construction, for §4.7.1's discard rate.
     discard_count: u64,
     /// Every packet slot observed since construction — received, lost or
-    /// discarded — §4.7.1's "total number of packets expected". Kept
-    /// separately from the burst algorithm's own `ctotal` (computed in
-    /// [`Self::metrics`]): that count only reflects packets the appendix's
-    /// state machine has flushed into a classified gap or burst, and a
-    /// trailing run of received packets not yet followed by another loss
-    /// stays outside it, which would understate loss and discard rate.
+    /// discarded: §4.7.1's "total number of packets expected". The
+    /// appendix's `ctotal` leaves out a trailing unflushed run of received
+    /// packets and would understate the loss and discard rates.
     total: u64,
 }
 
@@ -101,17 +95,9 @@ impl GminTracker {
     /// is clamped to at least 1: the appendix's `pkt >= gmin` test would
     /// otherwise classify every single loss as ending a burst on its own.
     ///
-    /// `lost` starts at 1 rather than 0. §4.7.2 states the convention the
-    /// appendix's pseudocode itself relies on but never restates: "it is
-    /// assumed that the RTP session is preceded ... by at least Gmin
-    /// received packets" — so the first loss or discard the session ever
-    /// sees should be classified exactly as if it followed a burst that
-    /// had already ended with a single loss, which is what `lost == 1`
-    /// means at every later flush. Starting at 0 instead would make that
-    /// first flush always take the pseudocode's `else` branch (since `0
-    /// != 1`) and count a clean session's very first isolated loss as the
-    /// start of a real burst, which is exactly the "at least Gmin
-    /// received packets" assumption's job to prevent.
+    /// `lost` starts at 1, not 0, because §4.7.2 assumes "the RTP session is
+    /// preceded ... by at least Gmin received packets". At 0 the first
+    /// isolated loss would be counted as the start of a burst.
     #[must_use]
     pub(crate) const fn new(gmin: u8) -> Self {
         Self {
@@ -207,21 +193,14 @@ impl GminTracker {
         let ctotal = self.c11 + self.c14 + self.c13 + self.c22 + self.c23 + c31 + c32 + self.c33;
 
         // §4.7.1: "dividing the total number of packets lost ... by the
-        // total number of packets expected" -- every slot this tracker
-        // has seen, not the appendix's `ctotal`, which only reflects
-        // packets the state machine has classified into a finished gap or
-        // burst so far and understates the true total whenever the
-        // stream's tail is still a clean, unflushed run of receives.
+        // total number of packets expected": every slot seen, not `ctotal`
+        // (see `total`).
         let loss_rate = scale_256(self.loss_count, self.total);
         let discard_rate = scale_256(self.discard_count, self.total);
 
         // §4.7.2: "MUST be set to zero if no packets have been received",
-        // extended here to "if no burst has ever occurred": p32 and p23
-        // are burst-relative quantities the appendix defines only in
-        // terms of a burst's own transitions, and with none of those
-        // ever recorded (c13 == 0), its `p23 = 1` fallback below would
-        // otherwise still produce a nonzero, meaningless density out of
-        // a stream that has never had a burst to measure one in.
+        // extended here to "if no burst has ever occurred": with c13 == 0 the
+        // `p23 = 1` fallback below would give a meaningless nonzero density.
         let burst_density = if self.c13 == 0 {
             0
         } else {
@@ -249,23 +228,12 @@ impl GminTracker {
 
         let (burst_duration_ms, gap_duration_ms) = if self.c13 == 0 {
             // §4.7.2: "If there have been no burst periods, the burst
-            // duration value MUST be zero". Whether the trailing,
-            // not-yet-flushed run of packets counts as one long gap
-            // depends on what it trails: `self.lost == 1` is this
-            // tracker's own signal for "currently between confirmed
-            // bursts, not partway through an unresolved one" (see
-            // `observe`'s reset to 1 on every gap-ending flush), which is
-            // exactly §4.7.2(b)'s "period from ... the last burst to ...
-            // the time of the report" -- read as "session start" when, as
-            // here, no burst has confirmed yet either. `self.total`, not
-            // the appendix's own `ctotal`, is the right count for it: the
-            // whole point of this branch is that nothing has been
-            // flushed into `ctotal` yet. A `lost != 1` tail instead means
-            // the session ends partway through a loss run that never
-            // reached `gmin` clean packets to close it, which is neither
-            // a confirmed gap nor a confirmed burst, so this falls back
-            // to the RFC's own "if there have been no gap periods, the
-            // gap duration value MUST be zero".
+            // duration value MUST be zero". `lost == 1` means between
+            // bursts, so the whole session so far is one gap (§4.7.2(b)),
+            // counted from `total` since nothing is in `ctotal` yet.
+            // Otherwise the session ends inside an unresolved loss run, and
+            // "if there have been no gap periods, the gap duration value
+            // MUST be zero".
             let gap_ms = if self.lost == 1 {
                 u64::from(packet_duration_ms) * self.total
             } else {
@@ -274,10 +242,6 @@ impl GminTracker {
             (0, ms_to_field(gap_ms))
         } else {
             let m = u64::from(packet_duration_ms);
-            // `self.c13 != 0` here, this branch's own condition, but the
-            // divisor is still routed through `checked_div` rather than a
-            // bare `/`: a value proven nonzero by a branch two lines away
-            // is exactly the case a future edit could silently break.
             let gap_length_ms = ((self.c11 + self.c14 + self.c13) * m)
                 .checked_div(self.c13)
                 .unwrap_or(0);
@@ -351,14 +315,9 @@ mod tests {
     /// RFC 3611 §4.7.2's own worked example: 64 packets, Gmin = 16, 10 ms
     /// packets, laid out as
     /// `11110111111111111111111X111X1011110111111111111111111X111111111`
-    /// (`1` received, `0` lost, `X` discarded) plus one trailing `1`. The
-    /// pattern as transcribed in the RFC's plain-text rendering is 63
-    /// characters, one short of the "64 packets" the prose says it
-    /// covers and of the "290 ms" it states for the final gap (28 of the
-    /// stated 29 packets at 10 ms each); the trailing receive lost to
-    /// text reflow is restored here so the packet count and every
-    /// duration figure this test does not check are internally
-    /// consistent with the RFC's own prose.
+    /// (`1` received, `0` lost, `X` discarded) plus one trailing `1`: the
+    /// RFC's text shows 63 characters, one short of its own "64 packets"
+    /// and "290 ms".
     fn rfc_example_pattern() -> &'static str {
         "11110111111111111111111X111X1011110111111111111111111X1111111111"
     }
@@ -423,9 +382,7 @@ mod tests {
         // p32 = c32/(c31+c32+c33) = 0/(1+0+2) = 0; c22+c23 = 0, so
         // p23 = 1; burst_density = 256*1/(1+0) = 256, saturating at the
         // field's 255 maximum (SS4.7.2's "limiting the maximum value to
-        // 255 to avoid overflow") -- consistent with the one burst here
-        // (c33=2, c22=c23=0) never having a single received packet
-        // inside it.
+        // 255 to avoid overflow").
         assert_eq!(metrics.burst_density, 255);
         // gap_density = 256*c14/(c11+c14) = 256*2/10 = 51.2 -> 51.
         assert_eq!(metrics.gap_density, 51);
@@ -489,15 +446,9 @@ mod tests {
 
     #[test]
     fn a_run_of_losses_at_the_very_start_is_one_burst_not_isolated_losses() {
-        // pkt starts at 0, which is < any gmin >= 1, so the first loss and
-        // every immediately-following one accumulate as c33/c23 inside a
-        // single burst, exactly like a burst anywhere else in the stream.
-        // A burst is only classified once a later flush event closes it
-        // (Appendix A.2's `lost == 1` test runs at the *next* loss or
-        // discard, not the one that starts the run), so this pattern ends
-        // with one more loss after the qualifying receive run: without
-        // it, `c13` would still be zero and `burst_duration_ms` would
-        // correctly read zero for a burst that has not been seen to end.
+        // A burst is only classified at the next loss or discard after it
+        // (Appendix A.2), so the pattern ends with one more loss; without it
+        // `c13` would still be zero.
         let mut tracker = GminTracker::new(16);
         tracker.observe(PacketOutcome::Lost);
         tracker.observe(PacketOutcome::Lost);

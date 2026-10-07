@@ -1061,20 +1061,12 @@ struct Stream {
 /// rollover counter and a replay list for.
 ///
 /// RFC 3711 §3.2.3 identifies a cryptographic context by its SSRC, and RFC
-/// 4568 §6.4.2 has every source a peer sends share the one `a=crypto` line, so
-/// each source needs state of its own. A source that loses its replay list
-/// takes a recording of what it already delivered as new, and one that loses
-/// its rollover counter has everything it sends after its first wrap refused
-/// as forged.
+/// 4568 §6.4.2 has every source share one `a=crypto` line, so each source
+/// needs its own replay list and rollover counter.
 ///
-/// Only a packet that authenticates takes a slot, so nothing a forger sends
-/// can fill the table. A peer that has sent from more sources than this under
-/// one master key has the one heard from least recently give way, which is
-/// never the one carrying the call. What the source that gave way leaves
-/// behind is its highest index, in [`Forgotten`]: heard from again, it
-/// carries on from there, its rollover counter with it, and nothing at or
-/// below that index is taken as new. Every new master key starts a table of
-/// its own.
+/// Only authenticated packets take a slot, so forgeries cannot fill the
+/// table. Beyond this many, the least recently heard source gives way and its
+/// highest index goes to [`Forgotten`], so a replay of it is still refused.
 const SOURCES: usize = 8;
 
 /// How many sources that gave way in [`Sources`] one receive context still
@@ -1573,12 +1565,9 @@ struct Retiring {
 /// What a re-negotiation did to one direction's keying, which is what decides
 /// the fate of the packet index.
 ///
-/// The distinction is not cosmetic. §4.3.1 derives the session keys from the
-/// master key, the master salt and the index, and from nothing else — not the
-/// crypto suite, not the tag length. So two crypto lines that name the same
-/// `inline:` produce the same keystream however much else about them differs,
-/// and a stream that restarted its index across such a change would encrypt a
-/// second packet under a keystream it had already spent.
+/// §4.3.1 derives session keys from master key, salt and index only, so two
+/// crypto lines with the same `inline:` share a keystream. Restarting the
+/// index across such a change would reuse it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rekeyed {
     /// A master key that has never been used here. The index starts again:
@@ -1595,16 +1584,10 @@ pub enum Rekeyed {
 /// How many arriving RTP packets the previous receive context outlives a
 /// re-key.
 ///
-/// A peer re-keys by naming the new key in SDP and then using it, and the two
-/// cross on the wire: the answer that carries the key is processed here before
-/// the first packet protected with it arrives, and everything still in flight
-/// is under the key it is replacing. Without a grace those packets are all
-/// [`SrtpError::NotAuthentic`].
-///
-/// It must not last, either. A superseded master key that still opens packets
-/// is a key whose replacement bought nothing. At the usual twenty milliseconds
-/// a packet this is five seconds — longer than any crossing, shorter than any
-/// call.
+/// Packets in flight under the old key arrive after the answer naming the new
+/// one, and would otherwise be [`SrtpError::NotAuthentic`]. At 20 ms a packet
+/// this is five seconds: longer than any crossing, short enough that the old
+/// key stops working.
 const GRACE: u32 = 250;
 
 impl Security {
@@ -1657,12 +1640,9 @@ impl Security {
     ///
     /// A packet that does not open under the current key is offered to the
     /// context a recent [`Security::rekey_remote`] retired, while that context
-    /// still has grace. Trying twice is sound because a failed attempt leaves
-    /// the datagram byte-identical: [`Unprotector::unprotect_rtp`] checks the
-    /// replay window against a copy and verifies the tag before it decrypts
-    /// anything, and so does the GCM open of the AEAD suites. A refactor or a
-    /// dependency that decrypted first would break this, and
-    /// `a_packet_that_does_not_open_is_left_as_it_arrived` would say so.
+    /// still has grace. Trying twice relies on a failed attempt leaving the
+    /// datagram unchanged (tag verified before decryption), which
+    /// `a_packet_that_does_not_open_is_left_as_it_arrived` checks.
     ///
     /// # Errors
     /// As [`Unprotector::unprotect_rtp`], reported for the current key even
@@ -1708,14 +1688,8 @@ impl Security {
 
     /// Send under what a re-negotiation settled on, from here on.
     ///
-    /// On [`Rekeyed::Key`] a plain replacement, counters and all: the index
-    /// starting again repeats nothing, because the key it counts under has
-    /// never been used. On [`Rekeyed::Terms`] the transform is replaced and
-    /// the index carries on, for the reason [`Rekeyed`] gives.
-    ///
-    /// There is no crossing to cover on this side. This endpoint decides when
-    /// it starts stamping with what the negotiation settled on, and that is
-    /// now.
+    /// On [`Rekeyed::Key`] the counters restart under the unused key; on
+    /// [`Rekeyed::Terms`] the index carries on (see [`Rekeyed`]).
     ///
     /// A master key that is the one already in use is new terms whatever
     /// `what` says: under it the index must not start again (§9.1), and the
@@ -2696,12 +2670,9 @@ mod tests {
         );
     }
 
-    // RFC 3711 §3.3.1 has a receiver joining a session already in progress
-    // told the current rollover counter out of band, since nothing in a
-    // packet's own sequence number says how many times it has wrapped. Only
-    // the first source a receiver hears from is owed that counter — every
-    // later source starts its own count at zero, from the point it starts
-    // sending (§6.4 of RFC 4568)
+    // RFC 3711 §3.3.1: a late joiner gets the rollover counter out of band,
+    // but only for the first source; later ones start at zero (RFC 4568
+    // §6.4)
     #[test]
     fn a_receiver_joining_late_starts_from_the_rollover_it_is_given() {
         let policy = Policy::new(Suite::AesCm80);

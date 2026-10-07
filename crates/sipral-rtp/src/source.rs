@@ -33,9 +33,7 @@ const MIN_SEQUENTIAL: u8 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeqUpdate {
     /// Not believed yet: fewer than two packets in a row have arrived from
-    /// this source. A.1 allows such packets to be held and delivered once the
-    /// source is valid; holding twenty milliseconds of audio to save twenty
-    /// milliseconds of audio is not worth the state, so they are dropped.
+    /// this source. A.1 allows holding such packets; they are dropped instead.
     Probation,
     /// In sequence, allowing for a gap small enough to be ordinary loss.
     InOrder,
@@ -108,7 +106,6 @@ impl SequenceState {
                     return SeqUpdate::InOrder;
                 }
             } else {
-                // one in a row again, and this one is it
                 self.probation = MIN_SEQUENTIAL.saturating_sub(1);
                 self.max = sequence;
             }

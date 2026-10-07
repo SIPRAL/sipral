@@ -8,24 +8,14 @@
 //!
 //! Sending is a state machine per event: a run of packets sharing the RTP
 //! timestamp the event began at, duration growing on each one, and the
-//! final packet repeated twice after the one that first carries the E bit
-//! (§2.5.1.4) — three transmissions in total, since the end of a DTMF digit
-//! is the one moment this stack cannot afford to lose to an ordinary
-//! dropped packet.
+//! final packet sent three times in all (§2.5.1.4).
 //!
-//! Receiving has the opposite problem: those three transmissions, and every
-//! duration update sent before them, describe one digit, not several. What
-//! identifies an event is its RTP timestamp (§2.2.1: "several RTP packets
-//! may carry the same timestamp"), not the order packets happen to arrive
-//! in, so the receiver here keys on that and reports once, when a packet
-//! says the event ended or when a different timestamp says so by
-//! implication — since the end packets are exactly the ones that can be
-//! lost.
+//! The receiver keys on the RTP timestamp (§2.2.1) and reports each event
+//! once: when a packet says it ended, or when a new timestamp implies it,
+//! since the end packets may all be lost.
 //!
-//! Neither side owns the RTP sequence number or the audio timestamp; §2.1
-//! requires both to come from "the same sequence number and timestamp base
-//! as the regular audio channel", so this module only ever reads a
-//! timestamp it is handed and never advances one on its own.
+//! Sequence numbers and timestamps belong to the audio stream (§2.1); this
+//! module never advances them.
 
 use crate::playout::Frame;
 use crate::wire::put;
@@ -42,14 +32,8 @@ pub const MAX_VOLUME: u8 = 63;
 
 /// The largest value the duration field can hold, "sufficient to express
 /// event durations of up to approximately 8 seconds" at 8 kHz (§2.3.5).
-/// Longer events are meant to be split into further segments (§2.5.1.3): a
-/// packet reporting exactly this duration with the E bit still unset,
-/// followed by a new segment whose own RTP timestamp picks up where the
-/// last one left off. [`EventSender`] does not do this — real DTMF, and even
-/// the V.18 text-telephony tones the RFC allows for (§3.1), stay well inside
-/// eight seconds, and an event that somehow runs longer simply keeps
-/// reporting this maximum until it actually ends, which costs precision on
-/// a case this stack has never needed to produce.
+/// [`EventSender`] does not split longer events into segments (§2.5.1.3); it
+/// saturates here instead. DTMF and V.18 tones (§3.1) stay well inside it.
 pub const MAX_DURATION: u16 = u16::MAX;
 
 /// One telephone-event payload: the four octets Figure 1 in §2.3 lays out.
@@ -172,11 +156,8 @@ pub struct Outgoing {
 /// Drives one outgoing telephone-event through the send procedure of §2.5.1:
 /// updates that share a timestamp and grow in duration, then the final
 /// packet with the E bit repeated twice more (§2.5.1.4), three
-/// transmissions in total.
-///
-/// This does not touch a sequence number or advance a timestamp of its
-/// own — §2.1 requires both to share the audio stream's, so the caller
-/// assigns them, the same way it already does for an audio packet.
+/// transmissions in total. The caller assigns sequence numbers and
+/// timestamps (§2.1).
 #[derive(Clone, Copy, Debug)]
 pub struct EventSender {
     event: u8,
@@ -334,13 +315,10 @@ pub(crate) const HALF_CLOCK: u32 = 1 << 31;
 /// Collapses the packets RFC 4733 sends for one event — every duration
 /// update, and the final packet's two retransmissions (§2.5.1.4) — into a
 /// single reported digit, keyed on the RTP timestamp that identifies the
-/// event (§2.2.1), which is the bug a first attempt at this almost always
-/// gets wrong: reporting on every packet turns one digit into three or five.
+/// event (§2.2.1).
 ///
-/// Meant to sit downstream of the jitter buffer, fed frames in roughly
-/// sequence order; a packet whose timestamp is behind the event currently
-/// open is dropped rather than placed, since an event that has already
-/// lapsed is not one this receiver can still report.
+/// Sits after the jitter buffer; a packet older than the open event is
+/// dropped.
 #[derive(Clone, Debug)]
 pub struct EventReceiver {
     payload_type: u8,
@@ -406,10 +384,7 @@ impl EventReceiver {
                     // over -- its own end packets may simply have been lost
                     // (§2.5.2.2's second criterion: "receives the next
                     // tone, distinguished by a different timestamp value").
-                    // this packet's own event is not reported yet even if
-                    // it already carries the end bit, since a call can only
-                    // hand back one finished event and the one that was
-                    // already open keeps the reporting order
+                    // only one event is reported per call, the older first
                     self.open = Some(fresh);
                     self.last_reported = Some(closed.timestamp);
                     return Ok(Outcome::Reported(closed.finish()));
@@ -430,12 +405,8 @@ impl EventReceiver {
     ///
     /// §2.5.2.2 closes a tone when the receiver "receives the next tone,
     /// distinguished by a different timestamp value" — the *next* one, later
-    /// on the same clock. A timestamp behind what is already open is not a
-    /// tone that has started, it is a report for one that has lapsed, and
-    /// §2.5.2.2 says further reports for such an event "MUST be ignored".
-    /// The two look identical if only the difference from the open event is
-    /// tested, which is how a single reordered packet ends up reporting a
-    /// digit at the wrong duration and silencing the rest of it.
+    /// on the same clock. An older timestamp belongs to a lapsed event, whose
+    /// reports "MUST be ignored".
     fn is_next_event(&self, timestamp: u32) -> bool {
         let Some(known) = self.open.map(|open| open.timestamp).or(self.last_reported) else {
             // nothing has been seen yet, so there is nothing to be stale

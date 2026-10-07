@@ -36,14 +36,8 @@ const MAX_CSRC: usize = 15;
 /// The payload types a receiver will believe.
 ///
 /// §5.1: "A receiver MUST ignore packets with payload types that it does not
-/// understand." What it understands is whatever the offer and the answer
-/// settled on, so the set arrives from the caller rather than from a table
-/// here — which is also what keeps anything that is not media out of the
-/// stream, since the numbers a peer may send are exactly the numbers that were
-/// negotiated.
-///
-/// Seven bits of payload type fit in one integer, so membership is a shift and
-/// a test and the set is `Copy`.
+/// understand." The set is whatever offer and answer settled on, supplied by
+/// the caller. A 128-bit mask, so the set is `Copy`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PayloadTypes(u128);
 
@@ -128,12 +122,9 @@ pub struct RtpPacket<'a> {
 impl<'a> RtpPacket<'a> {
     /// Read a datagram.
     ///
-    /// This performs the checks from Appendix A.1 that can be made without
-    /// knowing anything about the sender: the version, and that every length
-    /// the header claims fits in what actually arrived. Whether the payload
-    /// type is one this call negotiated, and whether the sequence number
-    /// belongs to a stream already being heard, are questions for a receiver
-    /// that has that state — see [`crate::RtpSession`].
+    /// Only the stateless checks of Appendix A.1: the version, and that every
+    /// length fits. Payload type and sequence are checked by
+    /// [`crate::RtpSession`].
     ///
     /// # Errors
     /// [`PacketError`], naming what did not add up.
@@ -201,11 +192,8 @@ impl<'a> RtpPacket<'a> {
         // "If the padding bit is set ... the last octet of the padding
         // contains a count of how many padding octets should be ignored,
         // including itself" (§5.1). A.1 wants that count "less than the total
-        // packet length minus the header size"; taken as written that refuses
-        // a packet which is all
-        // padding, which slices perfectly well and which no profile forbids,
-        // so the check here is that the count fits rather than that it leaves
-        // something behind
+        // packet length minus the header size", which would refuse an
+        // all-padding packet; here the count only has to fit
         let payload = if padded {
             let count = rest.last().copied().map_or(0, usize::from);
             if count == 0 || count > rest.len() {

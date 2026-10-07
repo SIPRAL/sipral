@@ -47,14 +47,9 @@ pub enum Slot {
 
 /// When reduced-size RTCP may be sent (RFC 5506 §4 and §5).
 ///
-/// Reduced size is only ever a choice for an Early packet: every Regular
-/// packet stays compound, so the reports and the CNAME keep flowing at the
-/// interval RFC 3550 sets. Nor is it a choice before this participant's
-/// first compound packet has gone out, since that is what tells the peer
-/// who it is. And none of it applies unless both ends said `a=rtcp-rsize`:
-/// without the attribute in the answer as well as the offer, the session
-/// falls back to compound RTCP throughout (§5), and a renegotiation that
-/// drops the attribute falls back the same way from that moment on.
+/// Only for Early packets, only after the first compound packet has gone,
+/// and only while both ends said `a=rtcp-rsize` (§5); Regular packets stay
+/// compound.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReducedSize {
     negotiated: bool,

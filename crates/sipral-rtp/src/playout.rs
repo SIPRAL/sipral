@@ -4,60 +4,30 @@
 //! Putting packets back in order before anyone listens to them, and deciding
 //! how long to wait for them.
 //!
-//! A network delivers audio at its own pace and sometimes in its own order.
-//! The buffer is what stands between that and a device that wants one frame
-//! every twenty milliseconds, whatever happened on the way. A packet goes into
-//! the slot its sequence number names, the consumer takes them out in order,
-//! and reordering inside the window is ordinary rather than an error.
+//! A packet goes into the slot its sequence number names and the consumer
+//! takes them out in order, one frame per device tick.
 //!
-//! How long to wait is the whole question. A delay chosen once is wrong twice:
-//! too short on the mobile leg and too long on the wired one, and it cannot be
-//! right on a path whose behaviour changes during the call. So the buffer
-//! watches when packets actually arrive, and aims at the delay that would have
-//! covered all but the slowest few of them. It grows the moment a burst says it
-//! must, and gives the delay back a frame at a time over tens of seconds, so
-//! that one bad second does not cost a minute of latency.
+//! The delay adapts: the buffer aims at the delay that would have covered all
+//! but the slowest few arrivals, grows at once on a burst and gives delay back
+//! a frame at a time over tens of seconds. It moves only in pauses, which the
+//! caller reports, since a change during speech is audible. A backlog more
+//! than a fixed allowance over the band is skipped at once, pause or not, so
+//! the delay has a bound.
 //!
-//! Changing the delay is audible if it is done while someone is talking, and
-//! inaudible if it is done in a pause. So the caller says which of the two this
-//! frame is — the detector lives with the codec, not here — and the buffer
-//! moves only in the pauses: it drops a frame to shorten the delay, or asks for
-//! one more to lengthen it. During a talk spurt it holds still and accepts
-//! being wrong until the next pause, which is the trade the ear prefers —
-//! up to a point. A backlog, packets that piled up while nobody was pulling,
-//! is not a frame or two to be wrong by: past a fixed allowance over the
-//! band it means to sit in, the buffer skips it at once, pause or not, so the
-//! delay a listener can be kept behind by has a bound.
+//! No sample is touched here: an empty slot or a stretched pause is reported,
+//! and the codec layer conceals or plays comfort noise.
 //!
-//! No signal processing happens here. When a slot comes due empty the buffer
-//! says so and the codec layer conceals; when a pause is being stretched the
-//! buffer says that too, and something upstream repeats a frame or plays
-//! comfort noise. This crate never touches a sample.
-//!
-//! The ring is fixed, which is what bounds the whole thing: a consumer that
-//! stops pulling does not turn into unbounded memory, it turns into a counter
-//! going up. The window is exactly as wide as the ring, so a sequence number in
-//! the window names one slot and only one, which makes a duplicate a single
-//! test.
-//!
-//! The slot a number names is found by its distance from the window's base,
-//! not by the number itself modulo the ring. That is not a stylistic choice:
-//! sequence numbers wrap at sixty-five thousand and a ring of, say, ten slots
-//! does not divide that, so the raw modulus stops being one-to-one exactly
-//! when the window straddles the wrap — and two live packets would then land
-//! in the same slot, one of them read as a duplicate of the other. The
-//! distance is computed with wrapping arithmetic and is smaller than the
-//! depth by the time it is used, so it is one-to-one for every depth.
+//! The ring is fixed, so a consumer that stops pulling costs a counter, not
+//! memory. A slot is found by wrapping distance from the window's base, not by
+//! sequence number modulo the ring: 65 536 is not a multiple of every depth,
+//! and the modulus would map two live packets to one slot across the wrap.
 
 use std::time::Duration;
 
 use crate::voip_metrics::{BurstGapMetrics, GminTracker, PacketOutcome};
 use crate::wire::RtpPacket;
 
-/// The widest window that makes sense: at twenty milliseconds a packet, ten
-/// seconds of audio, which is already far past the point where a call is worth
-/// listening to. It is the ring's hard bound, not a delay target — the target
-/// is chosen from what the network does and can never reach this.
+/// The ring's hard bound, not a delay target: ten seconds at 20 ms a packet.
 pub const MAX_DEPTH: u16 = 512;
 
 /// Half the sequence number space. A step of at least this much forward is
@@ -68,10 +38,8 @@ const BEHIND: u16 = 1 << 15;
 /// Half the timestamp space, for the same reason.
 const HALF_CLOCK: u32 = 1 << 31;
 
-/// How many packet-times of arrival delay the distribution is kept in. Sixty
-/// four frames is over a second of lateness; a packet later than that is not
-/// going to be played whatever the buffer does, so it only has to fall in the
-/// last bucket rather than in a bucket of its own.
+/// How many packet-times of arrival delay the distribution is kept in; later
+/// packets all fall in the last bucket.
 const DELAY_BUCKETS: usize = 64;
 
 /// Where the target sits in the distribution of recent arrival delays, as a
@@ -94,20 +62,11 @@ const SHRINK_HOLD: u32 = 150;
 /// dead band waiting for a pause to give it back in: two hundred, ten frames
 /// of twenty milliseconds.
 ///
-/// Giving delay back a frame at a time in the pauses is inaudible, and it is
-/// what the buffer does with the frame or two a pair of clocks slips. A
-/// backlog is another thing. Packets held up on their way in — a receive
-/// loop that waited a second and a half for a device to open, then handed
-/// over everything that had queued meanwhile — are played whole, since they
-/// are the far end talking, and leave that second and a half behind as delay
-/// for as long as nobody pauses; a far end that never stops, or a verdict
-/// that never finds the pause, keeps it for the rest of the call. So past
-/// this much over its band the buffer does not wait: it moves the playout
-/// point up to the top of the band at once, in one jump the listener hears
-/// once, and counts what it jumped as thrown out
-/// ([`Quality::discarded_overflow`]). With the ceiling a path's jitter may
-/// raise the target to ([`BufferConfig::max_delay`]), this is the bound on
-/// the delay the listener can be kept behind by.
+/// A backlog (say a receive loop that waited for a device to open) would
+/// otherwise stay as delay until a pause that may never come. Past this the
+/// playout point jumps to the top of the band at once and the skipped packets
+/// count as [`Quality::discarded_overflow`]. With [`BufferConfig::max_delay`]
+/// this bounds the delay.
 const EXCESS_MS: u32 = 200;
 
 /// Packets each half of the fastest-arrival window covers. The fastest recent
@@ -120,60 +79,28 @@ const BASE_WINDOW: u32 = 512;
 /// one about to be played included: one in hand, beyond the target of one a
 /// clean path gets.
 ///
-/// The earpiece and the far end run on two clocks, and which of them is the
-/// faster is not known until a frame has slipped. When the earpiece is the
-/// slow one the slip shows as a packet more than the target, and a pause
-/// drops it. When it is the fast one the slip shows as a packet fewer — and
-/// at a target of one, a packet fewer is nothing at all, so the first sign
-/// of it is the buffer running dry and a frame of silence played wherever
-/// that falls, a word included. Stretching when the queue is below its
-/// target cannot help there, since below one is empty. Keeping one frame in
-/// hand is what lets a fast earpiece's slip be seen before it is a gap: the
-/// queue falls to one, and the next pause stretches it back to two. The
-/// frame in hand is the floor the pause's dead band sits on, so a clean
-/// path's delay is two or three frames where it was one or two. That frame
-/// is bought in a pause where nobody hears it being bought, and being a
-/// frame long is inaudible where being a frame short is a gap.
+/// With a target of one, an earpiece faster than the far end would first show
+/// its slip as an empty buffer mid-word. A frame in hand lets the slip show as
+/// a shorter queue, which the next pause stretches back. A clean path's delay
+/// is thus two or three frames.
 ///
-/// One frame in hand covers a slip of one frame in a talk spurt, which is
-/// what any real pair of clocks makes: 250 ppm slips one every eighty
-/// seconds. An earpiece fast enough to slip more than that inside one spurt
-/// takes the frame in hand and then runs dry, in the middle of a word, and
-/// only the pause before the spurt can be stretched to prevent it. So a
-/// pause leaves this many queued or, once the earpiece's pace has been
-/// measured ([`Pace::in_hand`]), the one about to be played and what it is
-/// expected to slip over a spurt as long as the recent ones ([`Spurts`]),
-/// whichever is more, and never more than [`DRIFT_BUDGET_MS`] of them.
+/// Once the pace is measured ([`Pace::in_hand`]) a pause keeps the larger of
+/// this and the expected slip over a recent spurt ([`Spurts`]), capped by
+/// [`DRIFT_BUDGET_MS`].
 const IN_HAND: u16 = 2;
 
 /// The most delay a pause may keep in hand for the earpiece's pace, in
 /// milliseconds, the one about to be played included: a hundred, which is
 /// five frames of twenty milliseconds.
 ///
-/// It covers every clock a real device runs on, with room over. Measured,
-/// a laptop's own loudspeaker ran 3 ppm off the machine's crystal and that
-/// crystal 9 ppm off true time (`docs/19-numbers.md`), and the widest a
-/// device's clock may be off by and still meet its bus's specification is
-/// 2500 ppm, a USB full-speed one's (USB 2.0 §7.1.11, ±0.25 %; ±500 ppm at
-/// high speed). What a pause keeps in hand is what the pace slips over one
-/// talk spurt, with the frame about to be played, half a frame for where
-/// the pulls land, and a frame more for an earpiece that takes two at a
-/// time; what is left of the budget carries 2500 ppm through a spurt of
-/// twenty seconds and 5000 ppm through one of ten, longer than anyone talks
-/// without a pause the buffer can stretch.
+/// The widest legal device clock is USB full speed's 2500 ppm (USB 2.0
+/// §7.1.11); measured devices are within 10 ppm (`docs/19-numbers.md`). The
+/// budget carries 2500 ppm through a twenty-second spurt.
 ///
-/// A skew past that is no pair of clocks but something broken — a device
-/// run at a rate other than the one the stream was opened at — and chasing
-/// it with delay would hide it behind a call nobody can talk over: at
-/// 500 000 ppm the frames in hand for the lab's second-long spurts came to
-/// 340 ms (`docs/19-numbers.md`), past the 150 ms of one-way delay ITU-T
-/// G.114 finds acceptable for most conversations. So the buffer keeps no
-/// more than this for the pace, runs dry for the rest, and counts every
-/// frame it played as nothing ([`Quality::underruns`]), which
-/// [`Quality::loss_rate`] takes in: the call says it is suffering rather
-/// than quietly growing half a second of delay. The delay a path's jitter
-/// calls for is another matter, and is bounded by [`BufferConfig::max_delay`]
-/// alone.
+/// A larger skew means a device at the wrong rate; following it would exceed
+/// the 150 ms of ITU-T G.114. The buffer runs dry instead and counts
+/// [`Quality::underruns`], which [`Quality::loss_rate`] includes. Jitter
+/// delay is bounded separately by [`BufferConfig::max_delay`].
 const DRIFT_BUDGET_MS: u32 = 100;
 
 /// Frames of the far end's clock the earpiece's pace is measured over before
@@ -222,12 +149,9 @@ const LATE_WORDS: usize = LATE_WINDOW as usize / 64;
 
 /// Whether the frame about to be played is speech or a pause.
 ///
-/// The buffer only changes its delay in a pause, so this decides when it is
-/// allowed to move. The detector that produces it works on decoded audio and
-/// lives with the codec, which means what a caller has to hand is the verdict
-/// on the frame it decoded last. That is the right answer nearly always, since
-/// neither speech nor silence lasts one frame, and the cost of the exception is
-/// one adjustment made a frame early or late.
+/// The buffer changes its delay only in a pause. Callers pass the verdict on
+/// the last decoded frame; being a frame off costs one early or late
+/// adjustment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     /// Someone is talking. The delay is left exactly where it is.
@@ -342,11 +266,8 @@ pub struct Quality {
     /// Packets that arrived behind the playout point.
     pub discarded_late: u64,
     /// Packets thrown out of the window before they could be played: pushed
-    /// out by newer audio because the consumer stopped pulling, belonging to
-    /// a stream that restarted underneath them, or left further back than the
-    /// target when playout started, or skipped as a backlog: held further
-    /// behind the top of the band the delay sits in than the buffer waits for
-    /// a pause to give back.
+    /// out by newer audio, orphaned by a restart, stranded at start, or
+    /// skipped as a backlog.
     pub discarded_overflow: u64,
     /// Packets whose sequence number was already held.
     pub duplicates: u64,
@@ -357,23 +278,12 @@ pub struct Quality {
     pub shrunk: u64,
     /// Frames the caller was asked to invent in a pause to push the delay up.
     pub stretched: u64,
-    /// Frames played as nothing because the buffer had run dry while the far
-    /// end was still sending: the earpiece asked for audio before it had
-    /// arrived, and a frame of silence or comfort noise was heard in its
-    /// place, wherever that fell. Counted once playout carries on with the
-    /// packet that follows the last one played on the far end's own clock,
-    /// which is what tells an under-run from a far end that stopped sending
-    /// or packets lost on the way: those are its pause, or [`Quality::lost`].
-    /// No packet is lost or discarded by an under-run, so RFC 3611's figures
-    /// do not see it; [`Quality::loss_rate`] does.
+    /// Frames played as nothing because the buffer ran dry while the far end
+    /// was still sending (its clock ran on unbroken). Not in RFC 3611's
+    /// figures; included in [`Quality::loss_rate`].
     pub underruns: u64,
-    /// Frames played as nothing because the packet due in them was lost on
-    /// the way and nothing behind it had arrived yet to conceal it from: the
-    /// other half of the silence the earpiece heard while the far end was
-    /// sending, beside [`Quality::underruns`]. Each is one of
-    /// [`Quality::lost`] as well, which also holds the lost packets that
-    /// were concealed; this is the share of them the listener heard as
-    /// silence rather than as a frame made up in their place.
+    /// Lost packets played as silence because nothing after them had arrived
+    /// to conceal from. A subset of [`Quality::lost`].
     pub silenced: u64,
     /// How far behind the newest packet received the playout point currently
     /// is: the delay the far end's voice is actually suffering.
@@ -423,10 +333,8 @@ const fn at_or_before(a: u32, b: u32) -> bool {
 }
 
 /// `now` as a wrapping 32-bit reading of a clock ticking at `clock_rate`, the
-/// same units an RTP timestamp is in. Wraps the way any RTP timestamp does,
-/// rather than saturating the way [`crate::RtpSession::ticks`] deliberately
-/// does for its own, unrelated purpose of sizing one packet's worth of
-/// samples.
+/// same units an RTP timestamp is in. Wraps, unlike
+/// [`crate::RtpSession::ticks`], which saturates.
 pub(crate) fn clock_ticks(clock_rate: u32, now: Duration) -> u32 {
     let ticks = now.as_nanos().saturating_mul(u128::from(clock_rate)) / 1_000_000_000;
     u32::try_from(ticks & 0xFFFF_FFFF).unwrap_or(0)
@@ -499,15 +407,9 @@ impl Timing {
         // The offset is unknown and constant, so it cancels in everything
         // below and only the path delay is left.
         let transit = arrival.wrapping_sub(timestamp);
-        // Constant, that is, while the sender's clock runs. One that stops it
-        // through a pause (RFC 3550 §5.1 has the timestamp increase "regardless
-        // of whether the block is transmitted in a packet or dropped as
-        // silent", and some senders do not) comes back with an offset larger
-        // by the whole pause, and every packet after reads as that much late:
-        // the target climbs to its ceiling and stays there until the fastest
-        // arrival has aged out of both windows. The first packet of a spurt is
-        // the one place that is safe to take as a new start, since its own
-        // lateness only ever lengthens a pause the sender chose to leave.
+        // Some senders stop the timestamp through a pause, against RFC 3550
+        // §5.1, and every later packet would read as late by the whole pause.
+        // The first packet of a spurt is safe to take as a new start.
         if let Some(allowed) = spurt
             && self.lateness(transit).is_some_and(|late| late > allowed)
         {
@@ -713,15 +615,9 @@ fn continues(
 /// How fast the earpiece takes frames, against how fast the far end makes
 /// them, and how many it takes at a time.
 ///
-/// The two paces are counted over the same stretches of time: the pulls
-/// made between one arrival and the next, and the frames of the far end's
-/// clock the second is on from the first, wherever [`continues`] says that
-/// clock ran unbroken between them. A pause the far end took is left out
-/// whole, so a far end suppressing silence is measured over its spurts
-/// alone. What is measured is the earpiece's clock and not the network's: a
-/// packet held up on the way is paid back by the ones that arrive behind
-/// it, and the sum over a run of arrivals is the pulls from the first to the
-/// last, off by no more than the pull either side of each end.
+/// Pulls between arrivals are compared with far-end frames wherever
+/// [`continues`] says its clock ran unbroken, so pauses are left out. Network
+/// delay cancels out over a run of arrivals.
 #[derive(Debug, Default)]
 struct Pace {
     /// Pulls since the last packet that was the newest to arrive.
@@ -735,9 +631,7 @@ struct Pace {
     runs: u32,
     /// The frames the earpiece takes at a time, less one: the fewest pulls
     /// seen between two arrivals, over the last window of [`BURST_WINDOW`].
-    /// An earpiece that takes one frame a callback pulls once between most
-    /// pairs of arrivals; one whose callback is two frames long pulls twice
-    /// at the same instant, and no packet ever arrives between the two.
+    /// A two-frame callback pulls twice with no arrival between.
     extra: u16,
     fewest: Option<u32>,
     seen: u8,
@@ -795,13 +689,9 @@ impl Pace {
         self.last = None;
     }
 
-    /// The frames to keep in hand for `frames` of the earpiece's own: those
-    /// an earpiece at this pace takes before they have arrived, when it
-    /// takes them faster than they are made, and half a frame over, rounded
-    /// up, for where in a frame its pulls land against the arrivals. One for
-    /// a pace no faster than the far end's once what the ends of the runs
-    /// can be out by is taken off, which is every pace until the measure is
-    /// long enough to say.
+    /// The frames to keep in hand for `frames` of the earpiece's own: what a
+    /// faster earpiece takes before they arrive, plus half a frame rounded
+    /// up. One until the measure shows the earpiece is faster.
     fn in_hand(&self, frames: u16) -> u16 {
         // each run's pulls are out by less than one at either end, one way
         // or the other at random, so what they add up to grows as the root
@@ -887,14 +777,8 @@ pub struct JitterBuffer {
     highest: u16,
     /// Packets accepted that the pulls have not yet caught up with: one more
     /// for each arrival, one less for each pull, never below nothing and
-    /// never more than is held. A buffer that is starving cannot stretch its
-    /// way out of it, so growth waits for evidence that audio is still
-    /// arriving. An earpiece that takes two frames at once, on a device
-    /// callback twice a packet long, pulls twice for the two packets that
-    /// arrived since its last callback, and the second pull has that
-    /// evidence as much as the first: counted since the last pull instead,
-    /// the second of the pair could never stretch, and its floor held only
-    /// on the first.
+    /// never more than is held. Growth waits for evidence that audio is still
+    /// arriving; counted this way, both pulls of a two-frame callback have it.
     arrived: u16,
     anchored: bool,
     playing: bool,
@@ -910,23 +794,12 @@ pub struct JitterBuffer {
     silent: u32,
     loss: LossWindow,
     counts: Counters,
-    /// RFC 3611 §4.7.2's burst/gap classification, fed exactly once per
-    /// sequence number as its fate is finally decided, through
-    /// `Self::resolve`: `Received` when a held packet is played (in
-    /// [`Self::pull`]) or given up in a pause (`Self::shorten`), `Lost` when
-    /// a slot comes due empty, is skipped in a pause, or is passed over, and
-    /// `Discarded` when a held-but-unplayed packet is evicted by a window
-    /// jump (`Self::slide`), passed over before playout starts
-    /// (`Self::pass_over`), or thrown out with the window by
-    /// [`Self::restart`] or [`Self::reformat`], whose empty slots are lost.
-    /// A packet that turns up after its turn ([`Insert::Late`]) was already
-    /// resolved as lost, and within [`LATE_WINDOW`] of the playout point it
-    /// is recounted as discarded, as §4.7.1 has it; one whose turn it was
-    /// played in is a duplicate, which §4.7.1 excludes outright ("excluding
-    /// duplicate packet discards"), as it does an [`Insert::Duplicate`]. A
-    /// held-and-accepted packet is not fed here either — it still awaits the
-    /// outcome [`Self::pull`] gives it later, and feeding it twice would
-    /// double the count.
+    /// RFC 3611 §4.7.2's burst/gap classification, fed once per sequence
+    /// number through `Self::resolve` when its fate is final: received
+    /// (played or given up in a pause), lost (slot empty or passed over), or
+    /// discarded (held but evicted). An [`Insert::Late`] packet within
+    /// [`LATE_WINDOW`] is recounted from lost to discarded (§4.7.1);
+    /// duplicates are excluded ("excluding duplicate packet discards").
     gmin: GminTracker,
     /// Which of the last [`LATE_WINDOW`] sequence numbers resolved were
     /// resolved as lost, one bit each, by sequence number: what a packet
@@ -937,11 +810,8 @@ pub struct JitterBuffer {
 impl JitterBuffer {
     /// A buffer for a stream at `clock_rate` ticks a second.
     ///
-    /// Every figure in `config` is clamped into what a window can be: the depth
-    /// to at most [`MAX_DEPTH`], the delay ceiling to below the depth, the
-    /// floor to at most the ceiling, and the starting delay between the two. A
-    /// nonsensical configuration therefore produces a small buffer rather than
-    /// a broken one.
+    /// `config` is clamped: depth to [`MAX_DEPTH`], ceiling below the depth,
+    /// floor to the ceiling, start between them.
     #[must_use]
     pub fn new(clock_rate: u32, config: &BufferConfig) -> Self {
         let depth = config.depth.clamp(1, MAX_DEPTH);
@@ -980,13 +850,9 @@ impl JitterBuffer {
 
     /// Offer a packet, and say when it arrived.
     ///
-    /// `arrival` is on whatever timeline the caller keeps, as long as it is
-    /// monotonic and has the same idea of a second as everyone else; nothing
-    /// here reads a clock. The first packet anchors the window; after that the
-    /// sequence number says where the packet belongs relative to what is being
-    /// played. Nothing here asks whether the packet is believable — that is
-    /// settled before it gets this far, which is what keeps a wild sequence
-    /// number from moving the window.
+    /// `arrival` is any monotonic clock. The first packet anchors the window.
+    /// Validity is checked before this, so a wild sequence number never moves
+    /// the window.
     pub fn insert(&mut self, packet: &RtpPacket<'_>, arrival: Duration) -> Insert {
         let header = packet.header();
         let sequence = header.sequence;
@@ -1074,13 +940,9 @@ impl JitterBuffer {
 
     /// Take the next frame, and say whether the one before it was speech.
     ///
-    /// One call is one frame of the device's time, whatever comes back: a
-    /// packet, a request to conceal, a request to stretch a pause, or nothing
-    /// at all while the buffer fills. In a pause the delay may move by one
-    /// frame, either by dropping a packet that will not be missed or by asking
-    /// for a frame that was never sent; during speech it does not move. The
-    /// one exception is a backlog more than two hundred milliseconds over the
-    /// top of the band, which is skipped on this pull whatever the frame is.
+    /// One call per device frame. The delay moves by at most one frame, and
+    /// only in a pause, except that a backlog over 200 ms is skipped at
+    /// once.
     pub fn pull(&mut self, activity: Activity) -> Pull<'_> {
         self.pace.pulled();
         self.spurts.hear(activity);
@@ -1089,13 +951,9 @@ impl JitterBuffer {
         if !self.anchored {
             return Pull::Empty;
         }
-        // A buffer that ran dry in the middle of a spurt played a frame of
-        // silence for it, and that is the frame the caller's verdict is on.
-        // It is no pause while the first packet held carries on from the
-        // last one played on the far end's clock: every frame waited or
-        // stretched on top of it is one more cut out of the far end's words,
-        // so it is played as the spurt it is, and the frames in hand are made
-        // up in the next real pause.
+        // After an under-run the verdict is on a frame of silence we made up.
+        // If the next packet continues the far end's clock it is still the
+        // spurt, so play it; the frames in hand are made up in a real pause.
         let activity = if activity == Activity::Silence && self.silent > 0 && self.resumes() {
             Activity::Speech
         } else {
@@ -1107,12 +965,8 @@ impl JitterBuffer {
             return Pull::Empty;
         }
 
-        // the dead band is two packets wide above the floor, as it is above
-        // any target: an earpiece whose frames land near the edge of an
-        // arrival sees the queue go one either way from one pull to the
-        // next, and a band of one would answer each of those with a stretch
-        // or a shrink. One that takes frames two at a time sees it go two,
-        // and the band is a packet wider for each
+        // the dead band is two packets wide, plus one per extra frame a pull
+        // takes, so pulls near an arrival edge do not flap
         let floor = self.floor();
         let top = floor.saturating_add(1).saturating_add(self.pace.extra());
         let backlog = self.queued().saturating_sub(top);
@@ -1176,11 +1030,8 @@ impl JitterBuffer {
     /// The packet the next [`Self::pull`] plays, when it is already held,
     /// without taking it.
     ///
-    /// After a [`Pull::Conceal`] it is the packet sent right after the lost
-    /// one, if it has arrived: a codec that carries a copy of each frame in
-    /// the packet after it (Opus's in-band FEC, RFC 7587 §3.3) rebuilds the
-    /// lost frame out of it rather than inventing one. Nothing about the
-    /// buffer moves; the next pull plays it as usual.
+    /// After a [`Pull::Conceal`] this lets Opus in-band FEC (RFC 7587 §3.3)
+    /// rebuild the lost frame from the next packet. Nothing moves.
     #[must_use]
     pub fn following(&self) -> Option<Frame<'_>> {
         if !self.anchored {
@@ -1224,12 +1075,9 @@ impl JitterBuffer {
         self.resolved_lost = [0; LATE_WORDS];
     }
 
-    /// Start RFC 3611 §4.7's figures again, for a stream that is now another
-    /// source's. §4.7.1's rates are the fraction of packets "from the source
-    /// ... since the beginning of reception", and the block names the source
-    /// it describes, so what the last source lost or had thrown out is not
-    /// the new one's to answer for. `Gmin` stays what it was (§4.7.2).
-    /// The buffer's own counters belong to the call and carry on.
+    /// Start RFC 3611 §4.7's figures again for a new source: §4.7.1's rates
+    /// count "from the source ... since the beginning of reception". `Gmin`
+    /// stays (§4.7.2); the buffer's own counters carry on.
     pub(crate) fn begin_source(&mut self) {
         self.gmin = GminTracker::new(self.gmin.gmin());
         self.resolved_lost = [0; LATE_WORDS];
@@ -1238,19 +1086,9 @@ impl JitterBuffer {
     /// Rebuild for a stream that changed codec mid-call, keeping what the call
     /// has counted.
     ///
-    /// A codec change moves the clock rate and the packet length, and those
-    /// two are the units everything measured here is in: the window is sized
-    /// in packets, the delay distribution is in packet-times, the jitter
-    /// estimate is in ticks. None of them converts, so all of them start
-    /// again.
-    ///
-    /// The cumulative counters do not, and that is the point of having this
-    /// rather than a new buffer. They belong to the call, which has not ended:
-    /// a reception report that began again from zero would tell the far end
-    /// that nothing had been lost since the beginning of a stream that is
-    /// seconds old, and the call's own statistics would lose everything before
-    /// the re-negotiation. The same goes for what RFC 3611 §4.7 reports about
-    /// the stream, which describes the RTP session rather than its format.
+    /// Everything measured in packets or ticks starts again. The cumulative
+    /// counters and the RFC 3611 §4.7 figures carry on: they describe the
+    /// call, and reports must not restart from zero.
     pub fn reformat(&mut self, clock_rate: u32, config: &BufferConfig) {
         // the same accounting `restart` does, for the same reason: what is in
         // the window belongs to the old format and cannot be played under the
@@ -1443,32 +1281,16 @@ impl JitterBuffer {
     /// Start playing, if what is held has reached the target.
     ///
     /// What is held counts from the first packet actually there, not from the
-    /// playout point. A stream that stopped can come back further on than it
-    /// left off, with the sequence numbers it spent while it was quiet never
-    /// sent at all; counted from the playout point, that gap would start
-    /// playout at once, conceal every frame of it, and then keep the whole gap
-    /// as delay for as long as nobody paused. Waiting until the packets after
-    /// the first one reach the target also gives a spurt whose first packets
-    /// arrive out of order the time to fill in.
+    /// playout point; otherwise a stream returning after unsent sequence
+    /// numbers would conceal the gap and keep it as delay.
     ///
-    /// And playout does not start on packets stranded in front of a gap
-    /// longer than the target. One left on its own there, too few to start on
-    /// and then a second older than anything after it, would otherwise be
-    /// played first and the gap concealed after it, which is the same second
-    /// of delay by another route, bought with concealment and nothing the far
-    /// end said. Nobody has heard what is dropped. Packets that are held
-    /// together, with no such gap between them, are all played, however many
-    /// there are: that is the far end talking, and a delay that is longer than
-    /// it has to be is given back in its next pause — or, when it is more than
-    /// [`EXCESS_MS`] over, on the first pull, by [`JitterBuffer::pull`].
+    /// Packets stranded before a gap longer than the target are dropped
+    /// rather than played ahead of a concealed gap. Contiguous packets are all
+    /// played; excess delay goes in the next pause, or at once past
+    /// [`EXCESS_MS`] ([`JitterBuffer::pull`]).
     ///
-    /// In a pause it waits for [`IN_HAND`] as well, which is how a spurt from
-    /// a far end that sends nothing in its pauses gets its frame in hand. The
-    /// buffer is empty at the end of every such pause, and a spurt started on
-    /// a single packet would be stretched on the very next pull, a frame the
-    /// codec conceals from the last audio it decoded — the end of the spurt
-    /// before — played just ahead of the new one. Waiting instead costs the
-    /// same frame, played as the pause it falls in.
+    /// In a pause it also waits for [`IN_HAND`], so a spurt after a silent
+    /// pause gets its frame in hand from the pause, not from concealment.
     fn start(&mut self, activity: Activity) -> bool {
         if self.held == 0 {
             return false;
@@ -1656,18 +1478,12 @@ impl JitterBuffer {
         gap
     }
 
-    /// Give up the oldest frame to bring the delay down by one. A slot that is
-    /// empty anyway costs nothing to skip, which is the cheapest shrink there
-    /// is and the reason this looks at the slot before counting anything.
+    /// Give up the oldest frame to bring the delay down by one; an empty slot
+    /// is the cheapest to skip.
     ///
-    /// For RFC 3611 §4.7 the empty slot is a packet lost like any other. The
-    /// frame given up is received: §4.7.1 names what makes a discard — "late
-    /// or early arrival, under-run or overflow" — and a frame of a pause that
-    /// arrived in time and was dropped by choice is none of them, nor is it
-    /// missed by the ear, which is what the ratings computed from the discard
-    /// rate stand for. It is still a packet expected, and leaving it out
-    /// would take one from §4.7.1's "total number of packets expected" for
-    /// every frame given up.
+    /// For RFC 3611 §4.7 an empty slot is lost. A frame given up counts as
+    /// received: it is none of §4.7.1's discard causes ("late or early
+    /// arrival, under-run or overflow"), but it is still a packet expected.
     fn shorten(&mut self) {
         let index = self.index_of(self.next);
         let filled = self.slots.get(index).is_some_and(|slot| slot.filled);
@@ -2417,10 +2233,7 @@ mod tests {
     fn a_sender_that_stops_its_clock_through_a_pause_does_not_cost_half_a_second() {
         // the pattern FreeSWITCH sent on a DTLS-SRTP call: two packets, 542
         // milliseconds of nothing, then a talk spurt whose timestamp carries on
-        // from the last packet as though no time had passed. Measured against
-        // the packets before the pause, every packet after it is half a second
-        // late, and the target used to go to its ceiling and stay there for
-        // over a minute.
+        // from the last packet as though no time had passed
         let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
         let ms = Duration::from_millis;
         insert_raw(&mut buffer, 36_099, 160, true, ms(0));
@@ -2522,9 +2335,7 @@ mod tests {
         // the pattern Asterisk sent on the resumed DTLS-SRTP call once its
         // first packet under the new keys had been refused: one packet, too
         // few to start on, a second of nothing, and the stream again fifty
-        // sequence numbers on. Playout used to start on the one packet,
-        // conceal the fifty behind it, and hold the second of delay until
-        // the far end paused.
+        // sequence numbers on
         let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
         let ms = Duration::from_millis;
         insert_raw(&mut buffer, 42_497, 320, false, ms(70));
@@ -2814,13 +2625,8 @@ mod tests {
 
     #[test]
     fn a_spurt_after_a_silent_pause_fills_its_frame_in_hand_rather_than_stretching() {
-        // a far end suppressing silence empties the buffer in every pause,
-        // and the next spurt starts it again. A spurt that started on one
-        // packet and was stretched on the next pull would buy its frame in
-        // hand with a frame of concealment built from the end of the spurt
-        // before, heard just ahead of the new one; waiting for the second
-        // packet buys it with a frame of the pause the earpiece was playing
-        // anyway
+        // with silence suppressed the buffer empties in every pause; the next
+        // spurt must wait for its second packet rather than conceal a frame
         for skew in [0, 5_000, -5_000] {
             let (buffer, played, dry) = played_against(skew, 9_000, true);
             let quality = buffer.quality();
@@ -2890,12 +2696,8 @@ mod tests {
 
     #[test]
     fn a_slow_clock_drift_does_not_look_like_jitter_forever() {
-        // the far end's clock runs fast, so transit climbs steadily: five
-        // microseconds a packet, thirty milliseconds by the end of two
-        // minutes. Measured against the fastest arrival of the whole call that
-        // is a frame and a half of lateness and the target would follow it;
-        // measured against the fastest of the last few hundred packets it is
-        // five milliseconds and nothing moves.
+        // a fast far-end clock: transit climbs 30 ms over two minutes, but
+        // only 5 ms against the recent window, so the target holds
         let mut buffer = buffer(100, 2);
         for sequence in 0..6000_u16 {
             let drift = Duration::from_micros(u64::from(sequence) * 5);
@@ -2911,12 +2713,8 @@ mod tests {
 
     #[test]
     fn an_earpiece_that_takes_two_frames_a_callback_keeps_its_frame_in_hand_on_both() {
-        // a callback twice a frame long pulls twice at one instant, for the
-        // two packets that arrived since the last one. The second pull is
-        // the one that leaves the queue short, and it has to be able to
-        // stretch a pause as much as the first; its dead band is as wide as
-        // the two frames it takes at once, or a pull either side of an
-        // arrival is answered with a stretch and then a shrink
+        // a two-frame callback: the second pull must be able to stretch too,
+        // and the dead band is two frames wider
         for skew in [2_000, 5_000] {
             let (buffer, heard) = heard_against(skew, 12_000, 2);
             let quality = buffer.quality();
@@ -2984,12 +2782,8 @@ mod tests {
 
     #[test]
     fn a_skew_past_the_drift_budget_runs_dry_rather_than_growing_the_delay() {
-        // 500 000 ppm plays three frames for every two sent, and the lab's
-        // second-long spurts would need a third of a second in hand to carry
-        // it: no device runs so, and a call carrying that much delay is one
-        // nobody can talk over. The buffer holds its frames in hand to the
-        // budget, runs dry for the rest, and counts each frame it played as
-        // nothing, so the call's loss rate says it is in trouble
+        // 500 000 ppm: the buffer stops at its budget, runs dry, and the loss
+        // rate shows it
         let budget = Duration::from_millis(u64::from(DRIFT_BUDGET_MS));
         for per_callback in [1, 2] {
             let (buffer, heard) = heard_against(500_000, 6_000, per_callback);
@@ -3015,13 +2809,8 @@ mod tests {
 
     #[test]
     fn the_detectors_hangover_leaves_a_pause_fewer_frames_to_stretch() {
-        // the facade's detector calls the first two hundred milliseconds
-        // after the tone speech still, and the buffer stretches only what is
-        // called a pause. At any skew a device runs at, the rest of the pause
-        // is ample; at one that needs every pull of a pause stretched, the
-        // start of each pause runs dry instead — frames nobody hears cut, in
-        // the far end's own quiet, and what `scripts/lab.sh drift` measured
-        // where this simulation, with exact verdicts, measured none
+        // the facade's detector keeps calling 200 ms after the tone speech,
+        // as `scripts/lab.sh drift` showed; the rest of the pause is enough
         for skew in [2_000, 5_000, 50_000] {
             let (_, exact) = heard_against(skew, 6_000, 1);
             let (_, held) = heard_through(skew, 6_000, 1, 10);

@@ -68,11 +68,7 @@ impl Gcm {
     /// Seal `buffer` in place under `iv` and `aad`, returning the tag.
     ///
     /// # Errors
-    /// [`Exhausted`] past the multi-gigabyte length bound RFC 7714 §10 states
-    /// as `P_MAX` -- named after `Counter::apply`'s error for the same
-    /// reason, since no RTP or RTCP packet this stack builds comes within
-    /// many orders of magnitude of either bound, and a caller treats the two
-    /// the same way.
+    /// [`Exhausted`] past RFC 7714 §10's `P_MAX`, which no RTP packet nears.
     pub(crate) fn seal(
         &self,
         iv: &[u8; SALT],
@@ -95,12 +91,8 @@ impl Gcm {
     /// Verify `tag` and open `buffer` in place under `iv` and `aad`.
     ///
     /// # Errors
-    /// [`TagMismatch`] when the tag does not match. `aes-gcm` 0.11 checks the
-    /// tag before it decrypts, so `buffer` is then left as it was; `Security`
-    /// offers the same datagram to a retired context after a refusal and
-    /// relies on that, which `a_packet_that_does_not_open_is_left_as_it_arrived`
-    /// in `session.rs` holds for every suite. A caller reads `buffer` back as
-    /// plaintext only on [`Ok`].
+    /// [`TagMismatch`] when the tag does not match; `buffer` is then unchanged
+    /// (`aes-gcm` 0.11 verifies first), which `Security`'s retry relies on.
     pub(crate) fn open(
         &self,
         iv: &[u8; SALT],

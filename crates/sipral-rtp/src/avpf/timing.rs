@@ -7,10 +7,9 @@
 //!
 //! The Regular RTCP interval itself is RFC 3550's to compute (§6.3, with
 //! the minimum that RFC 4585 §3.4 sets for AVPF), and the caller hands it
-//! in each time; this module decides only what AVPF adds on top. Like
-//! [`crate::RtpSession`] it reads no clock and draws no random number: time
-//! is a [`Duration`] from the caller's own epoch, and each random draw
-//! arrives as a `unit_interval` in `[0, 1)`.
+//! in each time; this module decides only what AVPF adds on top. Time is a
+//! [`Duration`] and each random draw a `unit_interval` in `[0, 1)`, both from
+//! the caller.
 
 use std::time::Duration;
 

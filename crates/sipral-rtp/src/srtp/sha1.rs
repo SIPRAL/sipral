@@ -4,15 +4,10 @@
 //! SHA-1 (RFC 3174) and HMAC-SHA-1 (RFC 2104), which is the authentication
 //! transform RFC 3711 §4.2 makes mandatory.
 //!
-//! Written here rather than taken from a crate for the same reason
-//! `sipral-core` writes MD5 and SHA-256 itself: it is a page of arithmetic
-//! with published known-answer tests, and every dependency has to be worth
-//! the notice file. SHA-1 has no data-dependent branch and no table lookup,
-//! so the straightforward implementation is already constant-time.
-//!
-//! Broken for signatures since 2017 and untouched here for that. HMAC-SHA-1
-//! is a different construction with a different security argument, and RFC
-//! 3711 §4.2 still names it as the only mandatory-to-implement transform.
+//! Written here: a page of arithmetic with published test vectors, and
+//! constant-time as written (no data-dependent branch or table). SHA-1's
+//! collision weakness does not carry over to HMAC-SHA-1, which RFC 3711 §4.2
+//! still mandates.
 
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 

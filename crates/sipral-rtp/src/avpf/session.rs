@@ -14,11 +14,9 @@
 //! next Regular one. A missing packet that turns up before its NACK goes is
 //! taken off the list, since it is no longer missing.
 //!
-//! **Nothing is sent again in answer to a NACK.** Retransmission belongs to a
-//! payload format of its own (RFC 4588), which a voice call does not
-//! negotiate, and resending a packet under its own sequence number in the
-//! same stream is not something RFC 4585 asks of a sender. What the far end
-//! asked for is counted, which is what a quality monitor reads.
+//! **Nothing is sent again in answer to a NACK.** Retransmission needs its own
+//! payload format (RFC 4588), which a voice call does not negotiate. NACKs
+//! received are only counted, for quality monitoring.
 
 use std::time::Duration;
 
@@ -185,11 +183,8 @@ impl FeedbackState {
         if self.pending.len() == before {
             return;
         }
-        // T_max_fb_delay is the application's to say (§3.4 h); a NACK for
-        // audio is worth sending for as long as it is sent, so none is
-        // given and nothing is discarded for lateness. The draw only ever
-        // scales T_dither_max, which is zero for the two members of a call
-        // (§3.4 g), so any value in [0, 1] schedules the same instant
+        // No T_max_fb_delay (§3.4 h): a late NACK is still worth sending. The
+        // draw only scales T_dither_max, zero in a two-party call (§3.4 g)
         if self.timer.feedback(now, None, 0.0) == FeedbackTiming::Discard {
             self.pending.clear();
         }

@@ -20,10 +20,8 @@
 //! - [`TextFormat`] writes and reads the SDP that negotiates all this (§6
 //!   and the SDP examples of §7).
 //!
-//! Sans-I/O, like the rest of the crate: time is a [`Duration`] the caller
-//! supplies, packets come in and go out as values.
-//!
-//! Written from RFC 4103, RFC 2198 and ITU-T T.140.
+//! Time is a [`Duration`] the caller supplies. Written from RFC 4103, RFC 2198
+//! and ITU-T T.140.
 
 mod receiver;
 mod red;

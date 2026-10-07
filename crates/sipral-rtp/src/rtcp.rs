@@ -57,11 +57,9 @@ const MUX_LAST: u8 = 223;
 
 /// Whether `datagram` is RTCP rather than RTP, for a socket carrying both
 /// (RFC 5761 §4). The RTCP packet type sits where the RTP marker bit and
-/// payload type would be, and every value in the span §4 reserves for RTCP
-/// reads as RTCP — not only what is assigned today, since a peer sending a
-/// packet type registered after this was written must still not have it
-/// parsed as audio. Keeping payload types out of that window is the other
-/// half of the bargain, and this crate does not police it.
+/// payload type would be; the whole span §4 reserves reads as RTCP, including
+/// types not yet assigned. Keeping payload types out of it is not policed
+/// here.
 #[must_use]
 pub fn is_rtcp(datagram: &[u8]) -> bool {
     matches!(datagram.get(1), Some(&byte) if (MUX_FIRST..=MUX_LAST).contains(&byte))

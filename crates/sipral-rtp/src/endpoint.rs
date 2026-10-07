@@ -37,14 +37,9 @@ use crate::wire::{
 /// What a re-negotiation onto a different codec changes about a stream that
 /// is going to carry on regardless.
 ///
-/// Deliberately not a [`StreamConfig`]. That one opens a stream and therefore
-/// carries the three fields RFC 3550 §5.1 wants drawn once and never redrawn —
-/// the synchronization source, the first sequence number, the first timestamp.
-/// A stream being re-formatted has all three already, and the whole point of
-/// [`RtpSession::reformat`] is that it must not be handed the chance to take
-/// them again: a source that restarts its counters reads as a different source
-/// (§5.1), and under SRTP it reads as a repeated packet index under a key that
-/// has already sent.
+/// Not a [`StreamConfig`]: it has no SSRC, first sequence number or first
+/// timestamp, which RFC 3550 §5.1 draws once. A source that restarted them
+/// would read as a new source, and under SRTP as a repeated packet index.
 #[derive(Clone, Debug)]
 pub struct StreamFormat {
     /// The payload type we send from here on.
@@ -96,14 +91,10 @@ pub struct StreamConfig {
     /// second (§6.2). "RECOMMENDED that the fraction of the session
     /// bandwidth added for RTCP be fixed at 5%".
     pub rtcp_bandwidth: f64,
-    /// Whether the offer/answer exchange negotiated RTCP XR VoIP Metrics
-    /// reporting for this stream: an `a=rtcp-xr` attribute carrying the
-    /// `voip-metrics` metrics token (§5.1) was in the offer and answer,
-    /// per the direction-dependent rules of §5.2. [`RtpSession::build_report`]
-    /// includes a VoIP Metrics block only when this is set: §5.1 "When
-    /// the 'rtcp-xr' attribute is present, participants SHOULD NOT send
-    /// XR blocks other than the ones indicated by the parameters", and
-    /// this stack sends no XR block this stream was never asked for.
+    /// Whether offer and answer negotiated `a=rtcp-xr` with `voip-metrics`
+    /// (§5.1, §5.2). [`RtpSession::build_report`] sends a VoIP Metrics block
+    /// only then: "participants SHOULD NOT send XR blocks other than the ones
+    /// indicated by the parameters" (§5.1).
     pub voip_metrics_xr: bool,
 }
 
@@ -131,11 +122,8 @@ pub enum Discard {
     /// The source has not yet sent two packets in a row, so its audio is not
     /// played (RFC 3550 A.1).
     ///
-    /// Its address and its SSRC are taken all the same, and deliberately: the
-    /// latch has to close on the first packet that is shaped right, or there
-    /// is a window two packets wide in which any address on the network is
-    /// still a candidate. Probation decides whether a stream is worth
-    /// listening to, not whose stream it is.
+    /// Its address and SSRC are still latched, so no other address can slip
+    /// in during probation.
     Probation,
     /// A sequence number too far from the stream to belong to it.
     BadSequence,
@@ -144,9 +132,8 @@ pub enum Discard {
     /// Behind the playout point.
     Late,
     /// SRTP refused it: a bad tag, a replay, or a packet too short to be one.
-    /// On a secured stream this is also what a plain RTP packet becomes, and
-    /// deliberately — falling back to the clear is worse than dropping the
-    /// audio.
+    /// A plain RTP packet on a secured stream ends here too; there is no
+    /// fallback to the clear.
     Insecure(SrtpError),
     /// The stream agreed to be secured and its keys have not arrived, so
     /// there is nothing to verify the packet with (see
@@ -199,18 +186,14 @@ fn feedback_failed(error: FeedbackBuildError, need: usize, got: usize) -> RtcpBu
     }
 }
 
-/// A [`Duration`] into the whole-millisecond field every RFC 3611 §4.7.3
-/// delay carries, saturating rather than wrapping a path slower than
-/// sixteen bits of milliseconds can name (65.535 seconds — no call is
-/// waiting that long for an RTCP round trip).
+/// A [`Duration`] into the whole-millisecond field of an RFC 3611 §4.7.3
+/// delay, saturating at 65.535 seconds.
 fn duration_to_field_ms(duration: Duration) -> u16 {
     u16::try_from(duration.as_millis()).unwrap_or(u16::MAX)
 }
 
 /// RFC 3611 §4.7.3's own worked conversion: "one way symmetric voice path
-/// delay = (RTD + ESD(A) + ESD(B)) / 2" — halved here because this stack
-/// only ever knows one of the two end-system delays the note assumes, its
-/// own, and the algebra collapses to a single division by the same two.
+/// delay = (RTD + ESD(A) + ESD(B)) / 2", with only this end's ESD known.
 fn one_way_symmetric_delay_ms(round_trip_delay_ms: u16, end_system_delay_ms: u16) -> u32 {
     u32::midpoint(
         u32::from(round_trip_delay_ms),
@@ -220,13 +203,10 @@ fn one_way_symmetric_delay_ms(round_trip_delay_ms: u16, end_system_delay_ms: u16
 
 /// One RTP stream in each direction, plus the RTCP that goes with it.
 ///
-/// Sans-I/O throughout: the caller reads datagrams off a socket and hands them
-/// over with the address they came from, pulls frames at whatever pace its
-/// audio device sets, and gets back bytes to send and the address to send them
-/// to. RTCP works the same way: [`RtpSession::rtcp_due`] says when to build a
-/// report, and this crate reads no clock and draws no random number to decide
-/// that, so `now`, the wall-clock NTP timestamp a sender report carries, and
-/// the random draw §6.2 asks for all arrive from the caller.
+/// Sans-I/O: the caller hands in datagrams with their source address, pulls
+/// frames at its audio device's pace and sends the bytes it gets back.
+/// [`RtpSession::rtcp_due`] says when to build a report; `now`, the NTP wall
+/// clock and the §6.2 random draw all come from the caller.
 #[derive(Debug)]
 pub struct RtpSession {
     outbound: Outbound,
@@ -254,24 +234,11 @@ pub struct RtpSession {
 
 /// Whether this stream is secured, and whether it can be yet.
 ///
-/// Two of these are the whole of SDES: a stream is either keyed from the
-/// moment it opens or it was never meant to be. The third is what DTLS-SRTP
-/// needs, and it is the reason this is an enumeration rather than an
-/// `Option`: RFC 5764 puts the key exchange on the media path, so a stream
-/// agreed on `UDP/TLS/RTP/SAVP` exists — with an address, a codec and a
-/// sequence number — for as long as a handshake takes before any key is
-/// available to it.
-///
-/// What must not happen in that window is a packet in the clear. A stream
-/// that agreed to be secured and sent one unprotected packet has leaked the
-/// audio it was asked to protect, and it has done it while looking like a
-/// working call. So the window is a state of its own rather than an absence,
-/// and every path out of this type goes through it.
-// One of these lives inside one `RtpSession` and nothing moves it, so the
-// difference between the variants costs nothing: the enumeration is exactly
-// as wide as the `Option<Security>` it replaced, which is what a session has
-// always carried. Boxing the keys to even them up would put an indirection on
-// the path every packet takes, to save nothing.
+/// SDES needs only "plain" and "keyed". DTLS-SRTP (RFC 5764) adds a stream
+/// that exists before its keys do, and no packet may go out in the clear in
+/// that window, so the window is a state of its own.
+// Not boxed: one lives in each `RtpSession`, and boxing would add an
+// indirection on every packet's path.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Protection {
@@ -280,11 +247,8 @@ enum Protection {
     /// The description agreed that this stream is secured, and the keys have
     /// not arrived.
     ///
-    /// The policy held here is not the one that will be installed — RFC 5764
-    /// §4.1.2 has the profile chosen inside the handshake rather than in the
-    /// signalling — but the most expensive one that could be, so that a
-    /// caller sizing a buffer against [`RtpSession::rtp_overhead`] before the
-    /// keys arrive sizes it for whichever profile the handshake settles on.
+    /// The policy held is the most expensive the handshake could pick (RFC
+    /// 5764 §4.1.2), so [`RtpSession::rtp_overhead`] is an upper bound.
     Awaited(Policy),
     /// Keys.
     Open(Security),
@@ -327,23 +291,14 @@ struct Inbound {
     /// The address a re-INVITE moved the far end away from
     /// ([`RtpSession::relocate`]), until the latch closes somewhere else.
     ///
-    /// A packet the far end sent from there just before it moved can still
-    /// be read after the re-INVITE was: on another thread, or behind it in
-    /// a queue. Its audio is the far end's and is played, but it does not
-    /// close the latch, which would otherwise hold the stream on an address
-    /// nobody listens at any more and refuse every packet from the one the
-    /// far end moved to. The count is how many have come from there since;
-    /// at [`STILL_THERE`] the far end is taken to be sending from there
-    /// still, as one behind a NAT that kept its mapping while its own
-    /// address changed does, and the latch closes on it after all.
+    /// Packets still in flight from there are played but do not close the
+    /// latch, or the stream would stick to an address nobody uses. After
+    /// [`STILL_THERE`] of them the far end is taken to be sending from there
+    /// still (a NAT that kept its mapping), and the latch closes on it.
     left: Option<(SocketAddr, u16)>,
     /// Whether `source` was taken from such a packet, from the address the
-    /// far end left. What sends from the address it moved to need not be
-    /// the same source: a PBX that hands a call's media to the phone at the
-    /// other end of it (Asterisk's `direct_media`) moves it to a different
-    /// sender altogether, and holding the old SSRC would refuse every packet
-    /// of the new one as a second source. So when the latch closes on the
-    /// new address under another SSRC, the stream starts again under it.
+    /// far end left. The new address may carry another SSRC (Asterisk's
+    /// `direct_media`), and then the stream restarts under it.
     source_where_left: bool,
     /// Whether the latch follows the far end rather than holding: a packet
     /// from another address is taken, and moves the latch there, once it has
@@ -359,16 +314,9 @@ struct Inbound {
     /// The SSRC an SR or RR has named itself with, latched the way
     /// `source` is but from RTCP instead of RTP.
     ///
-    /// A source that never sends RTP — recvonly, or a call on hold — is
-    /// still a member by §6.3.3's own rule ("received from a
-    /// participant" says nothing about which protocol), but `source`
-    /// never learns its SSRC, since only RTP sets that one. Kept
-    /// separately from `source` rather than merged into it because the
-    /// two answer different questions once both are known: `source` is
-    /// who §6.4.1's reception report describes and whose sequence numbers
-    /// feed the jitter buffer, while this is only ever read to match a
-    /// BYE against whichever identifier this session actually has for
-    /// the remote side.
+    /// A source that never sends RTP (recvonly, hold) is still a member by
+    /// §6.3.3, but only RTP sets `source`. This one is read only to match a
+    /// BYE.
     rtcp_source: Option<u32>,
     sequence: SequenceState,
     buffer: JitterBuffer,
@@ -383,11 +331,8 @@ struct Inbound {
     ///
     /// §6.2.1: "Entries MAY be deleted from the table when an RTCP BYE
     /// packet with the corresponding SSRC identifier is received... the
-    /// entry SHOULD be marked as having received a BYE". §6.3.4 removes a
-    /// table entry, and the count with it, only "if present" — so a second
-    /// BYE for a source already gone finds no entry left to remove and must
-    /// leave `members` and `senders` alone rather than repeat the departure
-    /// against a group that no longer includes it.
+    /// entry SHOULD be marked as having received a BYE". §6.3.4 removes an
+    /// entry only "if present", so a second BYE leaves the counts alone.
     departed: bool,
     /// Whether RFC 3611 XR VoIP Metrics reporting was negotiated for this
     /// stream. See [`StreamConfig::voip_metrics_xr`].
@@ -470,14 +415,10 @@ impl RtpSession {
     /// the offer and the answer settled; or take what a later exchange
     /// settled, for a stream already running it.
     ///
-    /// From here on RTCP is scheduled by RFC 4585 §3.5 over RFC 3550's
-    /// interval with AVPF's minimum (one second before the first report, none
-    /// after): packets this stream finds missing are reported in Generic
-    /// NACKs when `negotiated` agreed them, at once in an Early packet while
-    /// the rules allow one and otherwise in the next Regular one; `trr-int`
-    /// thins Regular packets out; and an Early packet is sent in reduced size
-    /// (RFC 5506) once a compound one has gone, when both ends said
-    /// `a=rtcp-rsize`. A reduced-size packet arriving is read only then.
+    /// RTCP is then scheduled by RFC 4585 §3.5. Missing packets go out as
+    /// Generic NACKs when `negotiated` agreed them, in an Early packet when
+    /// allowed, else the next Regular one. Early packets are reduced-size (RFC
+    /// 5506) when both ends said `a=rtcp-rsize`; only then is one accepted.
     ///
     /// `unit_interval` is a fresh draw on `[0, 1)`, for the first interval
     /// under the new minimum.
@@ -505,9 +446,7 @@ impl RtpSession {
     /// verified before any of it is believed, in the order RFC 3711 §3.3 sets
     /// out. A packet that fails is dropped as [`Discard::Insecure`]; a plain
     /// RTP packet arriving here fails too, because it cannot carry a tag.
-    ///
-    /// The keys come from the key management the signalling did — SDES, in
-    /// practice — and never from here: this crate draws no random numbers.
+    /// The keys come from the signalling (SDES).
     #[must_use]
     pub fn protected(config: &StreamConfig, unit_interval: f64, security: Security) -> Self {
         Self {
@@ -518,24 +457,13 @@ impl RtpSession {
 
     /// The same stream, secured by keys that have not arrived yet.
     ///
-    /// DTLS-SRTP (RFC 5764) agrees in the signalling that a stream is
-    /// protected and then runs the handshake that keys it on the media path,
-    /// so there is a window — a round trip at best, two minutes of
-    /// retransmissions at worst — in which the stream exists and has no key.
+    /// For DTLS-SRTP (RFC 5764), keyed on the media path after the stream
+    /// exists. Until [`RtpSession::keyed`] every builder returns
+    /// [`BuildError::NotKeyed`] and every arriving packet is
+    /// [`Discard::NotKeyed`]; nothing is ever sent in the clear.
     ///
-    /// A stream opened this way sends nothing and believes nothing until
-    /// [`RtpSession::keyed`] hands it the keys: [`BuildError::NotKeyed`]
-    /// comes back from every builder and [`Discard::NotKeyed`] from
-    /// everything that arrives. That is the point of the constructor. The
-    /// alternative — opening in the clear and turning protection on when the
-    /// handshake finishes — is a call that sends the first seconds of its
-    /// audio unencrypted and reports itself as secure.
-    ///
-    /// `most` is the most expensive policy the handshake could settle on.
-    /// RFC 5764 §4.1.2 has the profile chosen inside the handshake rather
-    /// than in the signalling, so the overhead a caller sizes a buffer
-    /// against before the keys arrive has to be an upper bound on whichever
-    /// one it settles on — see [`RtpSession::rtp_overhead`].
+    /// `most` is the most expensive policy the handshake could pick (RFC 5764
+    /// §4.1.2), used for [`RtpSession::rtp_overhead`] until then.
     #[must_use]
     pub fn awaiting(config: &StreamConfig, unit_interval: f64, most: Policy) -> Self {
         Self {
@@ -547,26 +475,14 @@ impl RtpSession {
     /// Hand a stream that was opened awaiting its keys the keys it was
     /// waiting for, and say whether it took them.
     ///
-    /// `false` for a stream that is not waiting, and that is the whole of the
-    /// safety here: this is not a path by which a plain stream becomes
-    /// secured, nor one by which a running secured stream is re-keyed behind
-    /// the caller's back. A stream in the clear stays in the clear —
-    /// encryption appearing mid-call is not something the far end agreed to —
-    /// and a stream already open re-keys through [`RtpSession::rekey_local`]
-    /// and [`RtpSession::rekey_remote`], which keep the packet index RFC 3711
-    /// §9.1 requires them to keep.
+    /// `false` for a stream that is not waiting: a plain stream never becomes
+    /// secured here, and a keyed one re-keys through
+    /// [`RtpSession::rekey_local`] and [`RtpSession::rekey_remote`], which keep
+    /// the packet index (RFC 3711 §9.1).
     ///
-    /// The index does not restart here either: nothing was ever sent under
-    /// the old state, because there was no old state to send under.
-    ///
-    /// The receiving context starts at a rollover counter of zero, which RFC
-    /// 3711 §3.3.1 would otherwise want supplied out of band for a stream
-    /// already in flight. It is right here because of what the far end is
-    /// doing while this waits: it cannot protect anything before its own half
-    /// of the same handshake finishes, and a handshake finishes in a round
-    /// trip or gives up in two minutes — either way long before the 65 536
-    /// packets a rollover takes, which at twenty milliseconds apiece is
-    /// twenty-two.
+    /// The receiving rollover counter starts at zero instead of coming out of
+    /// band (§3.3.1): the far end cannot protect anything before the
+    /// handshake ends, long before 65 536 packets.
     pub fn keyed(&mut self, security: Security) -> bool {
         if !matches!(self.security, Protection::Awaited(_)) {
             return false;
@@ -583,10 +499,7 @@ impl RtpSession {
 
     /// Whether what this stream sends is protected and what it believes was.
     ///
-    /// The state and not the negotiation: a stream that agreed to be secured
-    /// and is still waiting for its keys answers `false`, because nothing has
-    /// been encrypted yet and a padlock drawn from this would be lying for
-    /// the length of a handshake.
+    /// `false` while still waiting for keys: nothing is encrypted yet.
     #[must_use]
     pub const fn is_protected(&self) -> bool {
         matches!(self.security, Protection::Open(_))
@@ -596,9 +509,8 @@ impl RtpSession {
     /// builders produce, which is what a caller has to add to its buffer.
     /// Zero when the stream is not secured.
     ///
-    /// A stream still waiting for its keys answers with the most its
-    /// handshake could cost rather than with nothing, so that a buffer sized
-    /// once at the start of a call is still big enough after the keys land.
+    /// While waiting for keys, the most the handshake could cost, so a buffer
+    /// sized at the start stays big enough.
     #[must_use]
     pub const fn rtp_overhead(&self) -> usize {
         match &self.security {
@@ -658,23 +570,14 @@ impl RtpSession {
     /// whether its sequence number belongs to the stream. A packet only
     /// reaches the buffer once all five agree.
     ///
-    /// One of them is taken early. Once the stream has latched, a datagram
-    /// from any other address is refused before anything else looks at it,
-    /// SRTP included. That check reads nothing out of the datagram, and SRTP
-    /// records an index the moment a tag verifies, so a copy refused only
-    /// afterwards would already have spent the index of the genuine packet and
-    /// turned the genuine one into the replay.
+    /// Once latched, a datagram from another address is refused before SRTP
+    /// sees it: SRTP records an index as soon as a tag verifies, so a copy
+    /// checked later would turn the genuine packet into a replay. The address
+    /// and source are latched on the first packet that reaches them, before
+    /// probation.
     ///
-    /// The third and fourth of those also *decide* the address and the source,
-    /// on the first packet that gets that far — before probation, which is
-    /// the fifth. That order is deliberate: closing the latch late would leave
-    /// a window in which every address is still a candidate, which is wider
-    /// than the one it would close.
-    ///
-    /// `now` is this stream's own clock, on whatever timeline the caller
-    /// likes, and feeds only the interarrival jitter estimate (§6.4.1): nothing
-    /// here reads a clock of its own, so a caller that does not care about
-    /// RTCP may pass anything monotonic.
+    /// `now` is any monotonic clock; it feeds only the jitter estimate
+    /// (§6.4.1).
     pub fn receive(&mut self, datagram: &mut [u8], from: SocketAddr, now: Duration) -> Received {
         if !self.inbound.following && self.inbound.latch.is_some_and(|latched| latched != from) {
             return Received::Dropped(Discard::ForeignAddress);
@@ -704,23 +607,13 @@ impl RtpSession {
             return Received::Dropped(Discard::PayloadType(header.payload_type));
         }
 
-        // Symmetric RTP. The answer carries the address the peer believes it
-        // has, which behind a NAT is a private one nothing can reach; its
-        // packets arrive instead from whatever the NAT allocated on the way
-        // out. Sending back to that address, from the port we receive on,
-        // means our datagrams take the pinhole the peer's own packets opened,
-        // and the call works with no relay and nothing to configure. The rport
-        // parameter (RFC 3581) does the same for signalling, and between them
-        // they are why most calls need no NAT traversal at all.
-        //
-        // The other half of the rule matters as much: after latching, a packet
-        // from any other address is dropped rather than merged, which is the
-        // first thing this function does. Merging is how someone who can guess
-        // a port gets their audio into the call. A stream told to follow
-        // (`set_following`) moves an already closed latch too, but only at the
-        // very end, for a packet the stream took. Not onto the address a
-        // re-INVITE moved the far end away from, though, unless the far end
-        // turns out to be sending from there still (`Inbound::left`)
+        // Symmetric RTP: behind a NAT the answer's address is unreachable, so
+        // we send back to where packets come from, through the NAT's pinhole.
+        // After latching, other addresses are dropped (checked first above),
+        // or anyone guessing a port could inject audio. A following stream
+        // moves the latch only at the end, for a packet it took, and not onto
+        // the address a re-INVITE left unless the far end is still there
+        // (`Inbound::left`)
         let mut stale = false;
         if self.inbound.latch.is_none() {
             stale = match &mut self.inbound.left {
@@ -816,10 +709,9 @@ impl RtpSession {
     /// Take the next frame due for playout.
     ///
     /// `activity` says whether what was played a frame ago was speech or a
-    /// pause, which is what decides whether the buffer is allowed to move its
-    /// delay right now. A caller with no voice activity detector passes
-    /// [`Activity::Speech`] and gets a buffer that never adapts after it has
-    /// started, which is worse but not wrong.
+    /// pause; the buffer moves its delay only in pauses. Without a voice
+    /// activity detector pass [`Activity::Speech`]; the buffer then stops
+    /// adapting once started.
     pub fn pull(&mut self, activity: Activity) -> Pull<'_> {
         self.inbound.buffer.pull(activity)
     }
@@ -845,9 +737,7 @@ impl RtpSession {
     /// configured with that does not fit the field, and
     /// [`BuildError::NotKeyed`] on a stream still waiting for a handshake's
     /// keys. In every case nothing has been written and no sequence number
-    /// has been spent — which is why the last of them is decided here rather
-    /// than left to the protection step, where the packet would already be
-    /// sitting in the caller's buffer in the clear.
+    /// has been spent.
     pub fn send(
         &mut self,
         payload: &[u8],
@@ -904,27 +794,14 @@ impl RtpSession {
     /// Write one packet of an outgoing named telephone event into `out` and
     /// say how long it is.
     ///
-    /// `payload_type` is the one the answer settled on: the format "does not
-    /// have a static payload type number, but uses an RTP payload type number
-    /// established dynamically and out-of-band" (§2.1), so it is neither this
-    /// stream's audio payload type nor anything a configuration could have
-    /// fixed in advance.
+    /// `payload_type` is the dynamic one the answer settled on (§2.1). The
+    /// SSRC and sequence numbers are the audio stream's; retransmissions
+    /// spend sequence numbers too (§2.5.1.6).
     ///
-    /// Everything else comes from the stream, because §2.1 says it must. The
-    /// event carries the audio SSRC and spends the next sequence number, each
-    /// packet as an audio packet would — retransmissions included, "to permit
-    /// the receiver to detect lost packets" (§2.5.1.6).
-    ///
-    /// The audio timestamp does not move for the event's own packets, which
-    /// all carry the instant the event began (§2.5.1.2). It moves across the
-    /// event instead: one that began at `t` and reports a duration of `d`
-    /// ended at `t + d`, the arithmetic §2.5.1.3 does for itself when a long
-    /// event starts a new segment "with the RTP timestamp set to the time at
-    /// which the previous segment ended". That is where the audio after the
-    /// digit resumes. The two retransmissions of the final packet report the
-    /// same duration and so add nothing to it; the real time they take is
-    /// silence like any other, and [`RtpSession::suppress`] is what accounts
-    /// for that.
+    /// Event packets all carry the event's start timestamp (§2.5.1.2); audio
+    /// resumes at start plus the reported duration (§2.5.1.3). The final
+    /// packet's retransmissions add no duration; [`RtpSession::suppress`]
+    /// accounts for their time.
     ///
     /// # Errors
     /// [`BuildError::Short`] when `out` cannot hold the packet,
@@ -1005,13 +882,9 @@ impl RtpSession {
     /// time [`RtpSession::build_report`] is given: the instant its first
     /// sample was taken, as near as the caller knows it.
     ///
-    /// RFC 3550 §6.4.1 has a sender report's RTP timestamp stand for "the
-    /// same time as the NTP timestamp", "calculated from the corresponding
-    /// NTP timestamp using the relationship between the RTP timestamp counter
-    /// and real time as maintained by periodically checking the wallclock
-    /// time at a sampling instant". This is that check, and a caller that
-    /// sends a frame a tick makes it once a frame. A stream that never makes
-    /// it reports the timestamp its next packet will carry.
+    /// This is the "periodically checking the wallclock time at a sampling
+    /// instant" of RFC 3550 §6.4.1, normally once a frame. Without it a sender
+    /// report carries the next packet's timestamp.
     pub const fn clock_at(&mut self, now: Duration) {
         self.outbound.clock_at = Some((now, self.outbound.timestamp));
     }
@@ -1101,15 +974,10 @@ impl RtpSession {
 
     /// Let the latch follow the far end, or hold it again.
     ///
-    /// While following, a packet from an address other than the latched one
-    /// is not refused for that: it is checked like any other — SRTP, shape,
-    /// payload type, source, sequence, a copy already heard — and moves the
-    /// latch to its address only once the stream has taken it.
-    /// For a far end that may legitimately send from more than one address
-    /// before anything has settled which one it will keep: an ICE agent's,
-    /// which sends on any pair its checks have proved until a pair is
-    /// selected (RFC 8445 §12.1). Held again, the latch stays where the last
-    /// packet put it. A stream starts out holding.
+    /// While following, a packet from another address gets every other check
+    /// and moves the latch only once the stream has taken it. For an ICE
+    /// agent that may send on any proven pair until one is selected (RFC 8445
+    /// §12.1). A stream starts out holding.
     pub fn set_following(&mut self, following: bool) {
         self.inbound.following = following;
     }
@@ -1118,14 +986,9 @@ impl RtpSession {
     /// been told to change it. Everything held for the old one is dropped,
     /// since it belongs to a stream that has ended.
     ///
-    /// §6.3's membership bookkeeping goes with it only when the old source
-    /// left by BYE. A far end that said goodbye under its old SSRC and came
-    /// back under a new one — what a re-INVITE or an ICE restart produces —
-    /// was taken out of the count, so the source followed now is counted
-    /// afresh. A far end that changed its SSRC without a BYE is still the one
-    /// remote participant it was, already in the count; counting it again
-    /// would add a member for every change and stretch the report interval
-    /// with each one.
+    /// §6.3 membership is reset only if the old source left by BYE; otherwise
+    /// the far end is still counted, and counting it again would stretch the
+    /// report interval with every change.
     pub fn follow(&mut self, ssrc: u32) {
         self.inbound.source = Some(ssrc);
         self.inbound.rtcp_source = None;
@@ -1164,25 +1027,13 @@ impl RtpSession {
 
     /// Carry this stream on under a different codec.
     ///
-    /// Everything that belongs to the stream stays: the synchronization
-    /// source, the sequence number and timestamp it has reached, both SRTP
-    /// contexts with their rollover counter and SRTCP index, the octet and
-    /// packet totals, the reception tracker, the RTCP interval and the CNAME.
-    /// Everything measured in the old codec's units is rebuilt, because a
-    /// clock rate and a packet length are what those units are.
+    /// The SSRC, sequence number, timestamp, SRTP contexts, counters, RTCP
+    /// interval and CNAME stay; whatever is measured in codec units is
+    /// rebuilt. The sequence number must not rewind: RFC 3550 §5.1 would read
+    /// a new source, and under SRTP it reuses keystream (RFC 3711 §9.1).
     ///
-    /// Two of those are not housekeeping. RFC 3550 §5.1 has a source that
-    /// resets its counters read as a different source, so a stream whose
-    /// sequence number rewound would be heard as somebody else arriving. And
-    /// under SRTP the packet index is `2^16 · ROC + sequence`, so a rewound
-    /// sequence under an unchanged master key hands the same keystream to a
-    /// second packet — the reuse RFC 3711 §9.1 exists to forbid. Neither is
-    /// visible in a capture until it is too late to ask.
-    ///
-    /// The timestamp carries on in the new clock rate rather than being
-    /// converted (RFC 7160's case). The source has not changed, so a receiver
-    /// reads the discontinuity as one, and drawing a fresh source to signal it
-    /// would cost more than it explains.
+    /// The timestamp carries on in the new clock rate, unconverted (RFC
+    /// 7160).
     ///
     /// A peer that also moved its address is relocated and re-synchronised,
     /// for the reason [`RtpSession::relocate`] gives.
@@ -1214,12 +1065,8 @@ impl RtpSession {
     /// same timestamps, the same source. As [`Security::rekey_local`], and
     /// [`Rekeyed`] is what decides the packet index.
     ///
-    /// A stream that was never given keys is left alone. A negotiation cannot
-    /// arrive here having turned encryption on — that is a different session,
-    /// opened rather than re-keyed — so there is nothing to do and no error to
-    /// report. A stream still waiting for a handshake's keys is left alone
-    /// too: its first keys arrive through [`RtpSession::keyed`], and a
-    /// re-negotiation that reaches it before they do has nothing to move.
+    /// A plain stream, or one still waiting for [`RtpSession::keyed`], is
+    /// left alone without error.
     pub fn rekey_local(&mut self, policy: Policy, master: Master, what: Rekeyed) {
         if let Protection::Open(security) = &mut self.security {
             security.rekey_local(policy, master, what);
@@ -1258,12 +1105,9 @@ impl RtpSession {
     /// This stream's VoIP Metrics Report Block (RFC 3611 §4.7), from what
     /// its jitter buffer has classified so far and, if `codec` names one
     /// G.113 Appendix I tabulates, the simplified E-model of ITU-T G.107.
-    /// Available whenever an inbound source is known,
-    /// independent of whether RTCP XR reporting was negotiated
-    /// ([`StreamConfig::voip_metrics_xr`]) — that flag gates only whether
-    /// [`RtpSession::build_report`] puts this on the wire as an XR packet;
-    /// the same figures are what an RFC 6035 quality report sends on call
-    /// end regardless.
+    /// Available whether or not XR was negotiated
+    /// ([`StreamConfig::voip_metrics_xr`] only gates sending it); RFC 6035
+    /// reports use the same figures.
     ///
     /// `None` when this stream has not yet identified a source to report
     /// on ([`RtpSession::remote_ssrc`]).
@@ -1274,18 +1118,11 @@ impl RtpSession {
         let round_trip_delay_ms = duration_to_field_ms(self.round_trip.unwrap_or_default());
         // §4.7.3: "This value SHOULD be provided in all VoIP metrics
         // reports. If an implementation is unable to provide the data,
-        // the value 0 MUST be used." This stack has no visibility into
-        // the sending side's own accumulation and encoding delay, so it
-        // cannot assemble the end-to-end figure §4.7.3 defines and uses
-        // that fallback rather than reporting only its own jitter-buffer
-        // half of it as though it were the whole thing.
+        // the value 0 MUST be used." The sender's own delay is unknown here.
         let end_system_delay_ms = 0;
         let one_way_delay_ms = one_way_symmetric_delay_ms(round_trip_delay_ms, end_system_delay_ms);
-        // §4.7.1 keeps loss and jitter-buffer discards apart only to say
-        // where the damage was done: "Both have equal effect on the quality
-        // of the voice stream". A packet the buffer threw out is as missing
-        // from the earpiece as one the network lost, so `Ppl` is the two
-        // together.
+        // §4.7.1: loss and discard "have equal effect on the quality of the
+        // voice stream", so `Ppl` is the two together.
         let missing = u16::from(burst_gap.loss_rate) + u16::from(burst_gap.discard_rate);
         let report = emodel::evaluate(EModelInputs {
             one_way_delay_ms,
@@ -1347,18 +1184,13 @@ impl RtpSession {
     /// session's own CNAME always is (§6.1). `ntp` is the wall clock at this
     /// instant, in the 64-bit form §6.4.1 asks a sender report to carry.
     ///
-    /// `codec`, forwarded to [`RtpSession::voip_metrics`], is only read
-    /// when this stream negotiated RTCP XR VoIP Metrics reporting
-    /// ([`StreamConfig::voip_metrics_xr`]); a stream that did not never
-    /// builds the block at all, let alone spends bytes sending it.
+    /// `codec` is read only when XR VoIP Metrics was negotiated
+    /// ([`StreamConfig::voip_metrics_xr`]).
     ///
-    /// On a stream running RTP/AVPF ([`RtpSession::use_feedback`]) the packet
-    /// is what RFC 4585 §3.5 makes the slot that is due: a Regular one full,
-    /// minimal under `trr-int`, or nothing at all when `trr-int` suppressed it
-    /// with no feedback to carry; an Early one the missing packets as Generic
-    /// NACKs, in reduced size where RFC 5506 allows it, or nothing when every
-    /// packet it was for turned up after all. Nothing written is zero octets
-    /// with the next deadline, and there is nothing to send.
+    /// Under RTP/AVPF the packet is what RFC 4585 §3.5 makes the due slot:
+    /// Regular (minimal or suppressed under `trr-int`) or Early with Generic
+    /// NACKs, reduced-size where RFC 5506 allows. Zero octets means nothing
+    /// to send.
     ///
     /// # Errors
     /// [`RtcpBuildError`], for a buffer too small. Nothing is sent when this
@@ -1509,29 +1341,16 @@ impl RtpSession {
     }
 
     /// Build a BYE for this stream's own SSRC, to send on hangup, and fold
-    /// its size into the schedule (§6.3.7). Always writes the packet
-    /// immediately — nothing in this crate queues one for later — but
-    /// which bookkeeping applies depends on which of §6.3.7's two branches
-    /// a session this size is in, per [`RtpSession::bye_should_back_off`]:
+    /// its size into the schedule (§6.3.7). Always written immediately; the
+    /// bookkeeping follows [`RtpSession::bye_should_back_off`]:
     ///
-    /// * Past the fifty-member threshold, bullet one's reset applies —
-    ///   "the participant MUST execute the following algorithm" — done by
-    ///   `IntervalTimer::leaving`: `members`, `senders` and `pmembers`
-    ///   collapse to just this participant.
-    /// * At or below it, this reads the RFC's other branch — "the
-    ///   participant MAY send a BYE packet immediately" — as skipping
-    ///   that reset entirely and transmitting the BYE exactly like any
-    ///   other RTCP packet (bullet three), through
-    ///   `IntervalTimer::sent_bye`: `members` and `senders` are left as
-    ///   they were, since nothing here says a session too small to need
-    ///   the backoff algorithm should also forget who is in it.
+    /// * Past fifty members, bullet one's reset: membership collapses to this
+    ///   participant.
+    /// * At or below, "MAY send a BYE packet immediately": sent like any RTCP
+    ///   packet (bullet three), membership unchanged.
     ///
-    /// Either branch marks the session as leaving. §6.3.4's rule for a
-    /// *received* BYE carves out "the case when an RTCP BYE is to be
-    /// transmitted" without conditioning that on group size, so from here
-    /// on [`RtpSession::rtcp_receive`]'s BYE handling follows §6.3.7
-    /// bullet two instead — a BYE from someone else counts `members` up,
-    /// not down — regardless of which branch this call took.
+    /// Either way the session is leaving, and from then on a received BYE
+    /// counts `members` up (§6.3.7 bullet two), not down.
     ///
     /// # Errors
     /// [`RtcpBuildError`], for a buffer too small.
@@ -1583,20 +1402,11 @@ impl RtpSession {
     /// whichever socket it arrived on (§6.3.3, RFC 5761 for a socket shared
     /// with RTP).
     ///
-    /// The origin is checked before anything in the packet is believed, for
-    /// the same reason [`RtpSession::receive`] checks it: SSRCs travel in
-    /// the clear in every packet of the call, so anyone who can watch the
-    /// stream can name ours in a report block and move this session's
-    /// round-trip estimate and its report cadence from off to the side.
-    /// Only the parse comes first, so that a datagram that is not RTCP at
-    /// all never decides where RTCP is heard from.
-    ///
-    /// On a secured stream the refusal comes earlier still, ahead of SRTCP,
-    /// for the reason [`RtpSession::receive`] refuses a foreign address
-    /// before SRTP: SRTCP records a report's index the moment its tag
-    /// verifies, so a copy refused only afterwards would already have spent
-    /// the index of the genuine report. Only the refusal moves; the latch is
-    /// still taken after the parse.
+    /// The origin is checked before anything is believed: SSRCs are in the
+    /// clear, so an onlooker could otherwise skew the round-trip estimate and
+    /// report cadence. Only the parse comes first, so non-RTCP never latches.
+    /// On a secured stream a foreign address is refused even before SRTCP,
+    /// as in [`RtpSession::receive`].
     pub fn rtcp_receive<'a>(
         &mut self,
         datagram: &'a mut [u8],
@@ -1655,15 +1465,8 @@ impl RtpSession {
         // avg_rtcp_size is the numerator of §6.3.1's interval, so anything
         // counted here moves this session's own reporting cadence.
         self.timer.observe(wire);
-        // §6.3.3 counts a source once it is heard from at all, by RTP or
-        // RTCP, and does not require RTP to know who it was: the SSRC an
-        // SR or RR names itself with is the only identifier a recvonly
-        // peer, or a call on hold, ever gives this session, since RTP
-        // never arrives from either to set `inbound.source`. Read before
-        // the loop below so a compound naming the same source in both its
-        // report and its BYE — the common shape [`RtpSession::send_bye`]
-        // itself builds — has the identifier in hand by the time the BYE
-        // is checked, whichever order the two are in.
+        // §6.3.3: a recvonly or held peer is known only by its SR/RR SSRC.
+        // Read before the loop so a BYE in the same compound can match it.
         if let Some(reporter) = compound.packets().find_map(|packet| match packet {
             RtcpPacket::SenderReport(sr) => Some(sr.ssrc()),
             RtcpPacket::ReceiverReport(rr) => Some(rr.ssrc()),
@@ -1690,34 +1493,19 @@ impl RtpSession {
                 }
                 RtcpPacket::ReceiverReport(rr) => self.note_report(rr.reports(), ntp),
                 RtcpPacket::Goodbye(bye) => {
-                    // Matched against whichever identifier this session
-                    // actually has for the remote side — `source` when
-                    // RTP set one, `rtcp_source` when only RTCP ever has
-                    // (recvonly, or on hold). Matching `source` alone left
-                    // such a peer's BYE unmatched forever, since RTP was
-                    // never going to teach this session that SSRC.
+                    // `source` from RTP, or `rtcp_source` when only RTCP
+                    // named the peer
                     if bye.sources().any(|ssrc| {
                         Some(ssrc) == self.inbound.source || Some(ssrc) == self.inbound.rtcp_source
                     }) {
                         // §6.3.4 removes the member (and sender) table entry
-                        // "if present"; a source already marked departed has
-                        // no entry left, so a repeated BYE — a retransmission
-                        // or a duplicate on the wire — must not remove one a
-                        // second time. Left unguarded, a peer that repeats
-                        // its BYE would drive `members` past the local
-                        // participant and reverse reconsideration would pull
-                        // the next report to the instant the repeat arrived.
+                        // "if present", so a repeated BYE must not remove it
+                        // twice.
                         if !self.inbound.departed {
                             self.inbound.departed = true;
                             if self.timer.is_departing() {
-                                // §6.3.4's own removal rule excludes "the
-                                // case when an RTCP BYE is to be
-                                // transmitted": once this session has sent
-                                // its own BYE ([`RtpSession::send_bye`],
-                                // either of its branches), a BYE received
-                                // from someone else no longer shrinks
-                                // `members` — §6.3.7 bullet two counts it
-                                // up instead.
+                                // once leaving, §6.3.7 bullet two counts a
+                                // received BYE up instead
                                 self.timer.note_bye_while_departing();
                             } else {
                                 self.timer.remove_member(now);
@@ -1767,29 +1555,13 @@ impl RtpSession {
     /// Whether RTCP from `from` belongs to this call, latching onto the
     /// first sender that does.
     ///
-    /// The latch is the RTP one's counterpart and starts from the same
-    /// address [`RtpSession::destination`] does: where the audio is actually
-    /// coming from once it is coming from anywhere, and the address the
-    /// answer named until then. Only the host is compared, because the port
-    /// is the part that legitimately differs — the classic pair puts RTCP one
-    /// above the RTP port (§11) and RFC 5761 puts it on the RTP port itself.
-    /// Once a report has arrived the full address is pinned, and a later one
-    /// from anywhere else is dropped rather than merged.
+    /// The expected host is that of [`RtpSession::destination`]. Only the host
+    /// is compared, since RTCP's port differs (§11) or equals RTP's (RFC
+    /// 5761); after the first report the full address is pinned.
     ///
-    /// Falling back to the answer's address rather than to whoever speaks
-    /// first is the safe half of a trade, and not a free one. A peer behind
-    /// a NAT sends its reports from an address the answer never named, so on
-    /// a stream that receives no RTP to latch onto — one-way paging, a held
-    /// call, listen-only monitoring — its reports are refused for the whole
-    /// call, and this session goes without a round-trip estimate and counts
-    /// one member fewer. The cost is paid in statistics. The other way round
-    /// it would be paid in the call itself: those are exactly the streams
-    /// where nothing ever arrives to correct a wrong guess.
-    ///
-    /// A latch taken before RTP arrived was taken on the weaker of the two
-    /// addresses, so RTP overrules it: when the media turns out to come from
-    /// another host, that earlier latch is dropped instead of kept, or one
-    /// early report would shut the real peer out of its own call.
+    /// Trade-off: a NATed peer on a stream with no inbound RTP (paging, hold)
+    /// has its reports refused all call, costing statistics only. A latch
+    /// taken before RTP arrived is dropped if RTP comes from another host.
     fn rtcp_origin_accepted(&mut self, from: SocketAddr) -> bool {
         if !self.rtcp_origin_possible(from) {
             return false;
@@ -1843,10 +1615,8 @@ impl RtpSession {
 
     /// The fraction of this session's own packets the far end lost over the
     /// interval its last report covers, in 256ths (RFC 3550 §6.4.1's
-    /// "fraction lost"), and how many reports about them have arrived so
-    /// far — which changes with every one, so a caller that acts on each
-    /// report can tell a new one from the same one read again. `None` until
-    /// the first.
+    /// "fraction lost"), and the count of reports so far, to tell a new one
+    /// from a re-read. `None` until the first.
     #[must_use]
     pub const fn far_loss(&self) -> Option<(u8, u64)> {
         self.far_loss
@@ -1877,10 +1647,8 @@ impl RtpSession {
     /// Whether §6.3.7's BYE backoff would apply if this session left the
     /// call right now: "a participant MUST execute the following algorithm
     /// if the number of members is more than 50 when the participant
-    /// chooses to leave." [`RtpSession::send_bye`] always sends immediately
-    /// regardless, which §6.3.7 also allows below that threshold — a
-    /// two-party call never reaches it, so this is here for a caller built
-    /// on top of a session with a larger membership than this crate assumes.
+    /// chooses to leave." [`RtpSession::send_bye`] sends immediately either
+    /// way; a two-party call never reaches the threshold.
     #[must_use]
     pub fn bye_should_back_off(&self) -> bool {
         self.timer.should_back_off_bye()
@@ -2654,13 +2422,8 @@ mod tests {
 
     #[test]
     fn the_audio_after_a_digit_resumes_where_the_digit_ended() {
-        // Every packet of the event carries the instant it began (§2.5.1.2),
-        // so the audio clock cannot advance packet by packet; the event still
-        // occupies the ticks its duration counts (§2.3.5), and §2.5.1.3 does
-        // the arithmetic itself when a long event starts its next segment
-        // "with the RTP timestamp set to the time at which the previous
-        // segment ended". Either mistake is a drift of frames that nothing
-        // hears until a codec stops keeping sync.
+        // Event packets carry the start instant (§2.5.1.2), yet the event
+        // occupies its duration (§2.3.5, §2.5.1.3).
         let mut out = [0_u8; 256];
         let mut session = session();
         session.send(&[0xD5; 160], 160, &mut out).expect("room");
@@ -2839,11 +2602,8 @@ mod tests {
 
     #[test]
     fn a_far_end_that_moved_to_another_sender_is_heard_after_a_packet_from_where_it_left() {
-        // a PBX handing the call's media to the phone at the other end of it
-        // (Asterisk's direct_media): its own last packet is read after the
-        // re-INVITE, and then the phone's, under an SSRC of its own. Taking
-        // the PBX's SSRC as the stream's refused every packet of the phone's
-        // as a second source, for the rest of the call
+        // Asterisk's direct_media: one last PBX packet after the re-INVITE,
+        // then the phone under its own SSRC
         let mut session = session();
         establish(&mut session, 7, addr(PEER));
         session.relocate(addr(IMPOSTOR));
@@ -3132,14 +2892,8 @@ mod tests {
     /// SHOULD be marked as having received a BYE") has no entry left to
     /// remove.
     ///
-    /// `members` alone cannot prove this: [`IntervalTimer::remove_member`]
-    /// floors the count at the local participant regardless of `departed`,
-    /// since a two-party session never has a third member to lose. Sending
-    /// on the call too gives the far end's repeat something the floor does
-    /// not also guard — this end's own sender entry — so a bandwidth low
-    /// enough for §6.3.1's size-derived interval to set the cadence (rather
-    /// than the 2.5s/5s floor) turns a second, wrongly-taken sender entry
-    /// into a schedule that moves again.
+    /// `members` is floored, so the test sends too and uses a low bandwidth:
+    /// a wrongly removed sender entry then moves the schedule.
     #[test]
     fn a_repeated_bye_for_the_same_source_does_not_leave_the_group_twice() {
         let mut session = RtpSession::new(
@@ -3208,10 +2962,7 @@ mod tests {
 
     /// The same repeated BYE on a call this end is sending on: §6.3.4 takes
     /// the far end out of the sender table once, and a second pass would take
-    /// this end's own entry with it. With an RTCP bandwidth low enough that
-    /// §6.3.1's size-derived interval rather than the floor sets the cadence,
-    /// one sender left against none is the whole budget against a quarter of
-    /// it spent on nobody — the interval collapses to the floor.
+    /// this end's own entry with it, collapsing the interval to the floor.
     #[test]
     fn a_repeated_bye_does_not_take_this_ends_own_sending_with_it() {
         let mut session = RtpSession::new(
@@ -3258,11 +3009,8 @@ mod tests {
     }
 
     /// §6.3.2 puts this participant in its own member table for as long as
-    /// the session lasts, and no BYE from anyone else takes it out. Saying
-    /// goodbye first resets the count to that one member (§6.3.7), so the far
-    /// end's own BYE crossing ours on the wire has nobody left to remove: if
-    /// it took the count to zero, reverse reconsideration would pull the next
-    /// deadline to the instant it arrived.
+    /// the session lasts, so a BYE crossing ours must not take the count to
+    /// zero.
     #[test]
     fn a_goodbye_crossing_our_own_leaves_the_local_participant_counted() {
         let mut session = session();
@@ -3290,13 +3038,8 @@ mod tests {
         );
     }
 
-    /// (a) `follow` and `resync` used to leave `member_known`,
-    /// `sender_known` and `departed` untouched, so once a source had
-    /// departed by BYE, this session never counted it as a member or a
-    /// sender again -- not even under a fresh SSRC, the shape a
-    /// re-INVITE or an ICE restart gives a far end that comes back.
-    /// Counting has to follow whichever source is actually being
-    /// received (§6.3.3), not the one that left.
+    /// (a) after a BYE, `follow` and `resync` must count the new source
+    /// again (§6.3.3).
     #[test]
     fn a_source_that_returns_under_a_new_ssrc_after_a_bye_is_counted_again() {
         let quiet = StreamConfig {
@@ -3361,11 +3104,7 @@ mod tests {
         );
     }
 
-    /// (b) a recvonly peer, or a call put on hold, never sends RTP -- so
-    /// `inbound.source` never learns its SSRC -- yet `rtcp_receive`
-    /// already counts it as a member the moment its first report
-    /// arrives. A BYE matched only against `inbound.source` was never
-    /// recognized as that member's departure.
+    /// (b) a recvonly or held peer's BYE matches the SSRC its reports named.
     #[test]
     fn a_bye_from_a_source_known_only_through_rtcp_is_still_a_departure() {
         let mut session = session();
@@ -3396,11 +3135,7 @@ mod tests {
     }
 
     /// (c) once this session has sent its own BYE, a BYE received from the
-    /// far end no longer removes it the way §6.3.4 ordinarily would:
-    /// §6.3.4's own text excludes "the case when an RTCP BYE is to be
-    /// transmitted" from the removal it otherwise describes, handing that
-    /// case to §6.3.7 bullet two instead, which counts BYEs up rather
-    /// than down for as long as this participant is leaving.
+    /// far end is counted up (§6.3.7 bullet two), not removed (§6.3.4).
     #[test]
     fn a_bye_received_after_this_session_has_left_grows_membership_rather_than_shrinking_it() {
         let quiet = StreamConfig {

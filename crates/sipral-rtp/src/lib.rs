@@ -14,12 +14,10 @@
 //! sent from the same session, since RFC 4733 §2.1 gives them its SSRC, its
 //! sequence numbers and its timestamp base.
 //!
-//! Sans-I/O, like the rest of the tree. Nothing here opens a socket, reads a
-//! clock or draws a random number: the caller supplies datagrams and the
-//! address each arrived from, supplies the SSRC and the starting sequence
-//! number and timestamp, supplies the wall clock as an NTP timestamp and the
-//! random draw RTCP's own scheduling needs, and takes back bytes to send,
-//! the address to send them to, and when to be called again.
+//! Sans-I/O: no socket, clock or random number here. The caller supplies
+//! datagrams with their source address, the SSRC and initial sequence number
+//! and timestamp, the NTP wall clock and RTCP's random draws, and takes back
+//! bytes, a destination and when to call again.
 //!
 //! Written from RFC 3550, RFC 3551, RFC 4733 and RFC 5761; see
 //! `docs/02-clean-room.md` for why that matters here.

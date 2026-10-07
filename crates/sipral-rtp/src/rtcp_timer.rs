@@ -13,9 +13,7 @@
 use std::time::Duration;
 
 /// "It is RECOMMENDED that the fraction of the session bandwidth added for
-/// RTCP be fixed at 5%" (§6.2) — applied by the caller to a session
-/// bandwidth to get the `rtcp_bandwidth` this module is given; not used
-/// directly here.
+/// RTCP be fixed at 5%" (§6.2). The caller applies it to get `rtcp_bandwidth`.
 ///
 /// "RECOMMENDED that 1/4 of the RTCP bandwidth be dedicated to
 /// participants that are sending data" (§6.2, A.7 `RTCP_SENDER_BW_FRACTION`).
@@ -93,12 +91,8 @@ pub(crate) struct IntervalTimer {
     avg_packet_size: f64,
     initial: bool,
     /// Whether this participant has itself sent (or, backing off, begun
-    /// scheduling) its own BYE — by [`IntervalTimer::leaving`] or
-    /// [`IntervalTimer::sent_bye`], whichever branch of §6.3.7
-    /// [`IntervalTimer::should_back_off_bye`] selected. Not one of the
-    /// RFC's own named state variables; kept to know which rule a
-    /// received BYE falls under, since §6.3.4's own text excludes this
-    /// case from the removal it otherwise describes.
+    /// scheduling) its own BYE, by either branch of §6.3.7. Not an RFC state
+    /// variable: it selects the rule for a received BYE (§6.3.4).
     departing: bool,
     /// Which profile's minimum applies.
     minimum: Minimum,
@@ -314,13 +308,8 @@ impl IntervalTimer {
 
     /// Send this participant's own BYE the way §6.3.7 allows at or below
     /// the fifty-member threshold: "the participant MAY send a BYE packet
-    /// immediately," which this reads as bullet three on its own —
-    /// "transmission of the BYE packet then follows the rules for
-    /// transmitting a regular RTCP packet" — without bullet one's reset.
-    /// `members`, `senders` and `pmembers` are left exactly as they were;
-    /// only the size and the schedule move, exactly as
-    /// [`IntervalTimer::sent`] already does for any other outgoing RTCP
-    /// packet.
+    /// immediately", read as bullet three alone: like a regular RTCP packet,
+    /// without bullet one's reset. Membership counts are left as they were.
     pub(crate) fn sent_bye(
         &mut self,
         now: Duration,
@@ -335,9 +324,8 @@ impl IntervalTimer {
     /// Whether this participant has itself sent a BYE, by either branch of
     /// §6.3.7. §6.3.4's rule for a *received* BYE excludes "the case when
     /// an RTCP BYE is to be transmitted" from the removal it otherwise
-    /// describes, without conditioning that exclusion on group size — so a
-    /// caller checks this, not [`IntervalTimer::should_back_off_bye`], to
-    /// decide which rule a BYE just received falls under.
+    /// describes regardless of group size, so a caller checks this, not
+    /// [`IntervalTimer::should_back_off_bye`], for a received BYE.
     #[must_use]
     pub(crate) const fn is_departing(&self) -> bool {
         self.departing
@@ -541,12 +529,9 @@ mod tests {
     #[test]
     fn sent_bye_does_not_reset_membership_the_way_leaving_does() {
         // §6.3.7 lets a participant at or below the fifty-member threshold
-        // "send a BYE packet immediately" -- read here as transmitting it
-        // like any other RTCP packet (bullet three) rather than executing
-        // bullet one's reset to a single member. A bandwidth this large
-        // keeps the deterministic interval pinned at its floor, so the
-        // only thing that can move the schedule is whether `initial` was
-        // put back to true, which only `leaving` does.
+        // "send a BYE packet immediately", without bullet one's reset. The
+        // large bandwidth pins the interval at its floor, so only a reset
+        // `initial` could move the schedule.
         const HUGE_BANDWIDTH: f64 = 1e9;
         let mut timer = IntervalTimer::new(HUGE_BANDWIDTH, PACKET, 0.5);
         timer.note_member();
@@ -567,13 +552,8 @@ mod tests {
 
     #[test]
     fn note_bye_while_departing_counts_a_departure_up_not_down() {
-        // §6.3.7 bullet two, once this participant is itself leaving:
-        // "every time a BYE packet from another participant is received,
-        // members is incremented by 1 ... regardless of whether that
-        // participant exists in the member table or not" -- the opposite
-        // of §6.3.4's usual decrement, which the RFC excludes for exactly
-        // this case ("Except as described in Section 6.3.7 for the case
-        // when an RTCP BYE is to be transmitted").
+        // §6.3.7 bullet two: while leaving, each received BYE increments
+        // members, the opposite of §6.3.4's usual decrement.
         let mut timer = IntervalTimer::new(BANDWIDTH, PACKET, 0.5);
         timer.note_member();
         timer.sent_bye(Duration::ZERO, 40, 0.5);

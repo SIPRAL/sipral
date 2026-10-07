@@ -93,10 +93,8 @@ impl Rate {
 
 /// The master key and salt a key management protocol hands over.
 ///
-/// The length of each is whatever the suite calls for — sixteen or
-/// thirty-two octets of key, twelve or fourteen of salt — so this holds them
-/// as grown rather than as one of the fixed shapes; [`Zeroizing`] wipes each
-/// on drop exactly as the fixed arrays did.
+/// Variable width (16 or 32 octets of key, 12 or 14 of salt); [`Zeroizing`]
+/// wipes both on drop.
 pub struct Master {
     key: Zeroizing<Vec<u8>>,
     salt: Zeroizing<Vec<u8>>,
@@ -166,10 +164,8 @@ impl Master {
     ///
     /// §4.3.2 replaces the packet index with the SRTCP index. It says the
     /// substitute is 32 bits wide, which would move the label two octets to
-    /// the right of where SRTP puts it; erratum 3712 corrects that to 48 bits
-    /// so the two land in the same octet, and notes that implementations do
-    /// it the corrected way. Interoperating matters more than the printed
-    /// text, and here they agree once the erratum is applied.
+    /// the right of where SRTP puts it; erratum 3712 corrects it to 48 bits,
+    /// as implementations do.
     pub(crate) fn rtcp_session(&self, rate: Rate, index: u32, lengths: Lengths) -> Session {
         self.session(
             rate,
@@ -211,16 +207,11 @@ impl Master {
     /// the counter-mode IV is `x * 2^16` (§4.3.3).
     ///
     /// `salt_len` is the crypto context's own `n_s`: fourteen octets for
-    /// AES-CM and f8, twelve for RFC 7714's GCM suites. The PRF is defined
-    /// over RFC 3711's 112-bit salt, and §4.3.1 aligns `key_id` with it "so
-    /// that their least significant bits agree": `key_id` is seven octets
-    /// wide whatever the suite, since the packet index is 48 bits, and sits
-    /// at octets seven to fourteen, the `*2^16` step leaving the last two of
-    /// the sixteen-octet block zero. RFC 7714 §11 runs its GCM suites through
-    /// that same PRF and says nothing about widening their 96-bit salt to
-    /// it; the SRTP stacks a call meets widen it with two zero octets on the
-    /// right, so the salt starts at octet zero whatever its width, and the
-    /// fourteen-octet one lands exactly where §4.3.1 puts it either way.
+    /// AES-CM and f8, twelve for RFC 7714's GCM suites. `key_id` is aligned
+    /// with the 112-bit salt "so that their least significant bits agree"
+    /// (§4.3.1). RFC 7714 §11 does not say how to widen a 96-bit salt; deployed
+    /// stacks pad it with two zero octets on the right, so the salt always
+    /// starts at octet zero.
     fn prf(&self, label: Label, phase: u64, salt_len: usize, out: &mut [u8]) {
         debug_assert_eq!(
             self.salt.len(),
@@ -329,12 +320,8 @@ mod tests {
     }
 
     /// A GCM suite's 96-bit master salt goes through RFC 3711's 112-bit PRF
-    /// as that salt with two zero octets after it, which is how the SRTP
-    /// stacks a call meets widen it: the keys it derives are the ones a
-    /// fourteen-octet salt ending in two zeros derives, both the session key
-    /// and the twelve octets of session salt, for SRTP and SRTCP alike and
-    /// at a later derivation too. Right-aligned instead, every packet either
-    /// end protects fails the other's tag check.
+    /// as that salt with two zero octets after it, as deployed stacks do.
+    /// Right-aligned instead, every tag check would fail.
     #[test]
     fn a_twelve_octet_salt_derives_what_it_does_padded_with_two_zeros() {
         let key = unhex("e1f97a0d3e018be0d64fa32c06de4139");

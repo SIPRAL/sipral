@@ -6,13 +6,9 @@
 //! crate builds and reads, the VoIP Metrics Report Block, block type 7
 //! (§4.7).
 //!
-//! An XR packet is walked the same way [`crate::rtcp::CompoundPacket`] walks
-//! the rest of a compound packet: a block's own length field is what lets a
-//! reader step past a block type it does not know, so parsing an XR packet
-//! never has to recognise every block RFC 3611 (or a later registration)
-//! defines — "An implementation SHOULD ignore incoming blocks with types not
-//! relevant or unknown to it" (§4). Only the VoIP Metrics block is decoded
-//! here; everything else is skipped by its length.
+//! Other block types are skipped by their length field: "An implementation
+//! SHOULD ignore incoming blocks with types not relevant or unknown to it"
+//! (§4).
 
 use core::fmt;
 

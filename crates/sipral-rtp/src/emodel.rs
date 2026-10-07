@@ -5,20 +5,11 @@
 //! the mean opinion scores RFC 3611 §4.7.5 asks a VoIP Metrics block to
 //! carry, computed from what a two-party RTP endpoint can actually measure.
 //!
-//! The full E-model (G.107 §7) takes on the order of twenty transmission
-//! parameters — loudness ratings, sidetone, room noise, the echo path — none
-//! of which an RTP endpoint with no analogue tail has a way to observe.
-//! G.107 §7.7 answers this directly: "It is strongly recommended to use
-//! [the] default values for all parameters that do not vary during planning
-//! calculation. If all parameters are set to the default values, the
-//! calculation results in a very high quality with a rating factor of
-//! `R = 93.2`." That figure is `Ro - Is` at those defaults (equation 7-1's
-//! `R = Ro - Is - Id - Ie,eff + A`, with `Id = 0`, `Ie,eff = 0` and `A = 0`
-//! at the defaults), and this module takes it as its baseline rather than
-//! re-deriving `Ro` and `Is` from send/receive loudness ratings, sidetone
-//! and room noise this stack never measures — every one of those stays
-//! fixed at its G.107 Table 3 default, so recomputing them would only ever
-//! reproduce the same constant.
+//! The full E-model (G.107 §7) takes some twenty transmission parameters that an RTP endpoint
+//! with no analogue tail cannot observe. G.107 §7.7 recommends the defaults for those, which give
+//! `R = 93.2` (`Ro - Is` in equation 7-1, with `Id`, `Ie,eff` and `A` at zero). That figure is the
+//! baseline here; every input to `Ro` and `Is` stays at its Table 3 default, so recomputing them
+//! would only reproduce the same constant.
 //!
 //! What this module does compute, from what a call actually observes:
 //!
@@ -43,11 +34,8 @@
 
 use crate::rtcp_xr::UNAVAILABLE;
 
-/// `Ro - Is` at every G.107 Table 3 default value (§7.7). See the module
-/// documentation for why this is a citation, not a computation: every
-/// parameter that feeds `Ro` and `Is` stays fixed at its default here, so
-/// evaluating equations 7-2 through 7-17 could only reproduce this same
-/// constant.
+/// `Ro - Is` at every G.107 Table 3 default value (§7.7), cited rather than computed from
+/// equations 7-2 to 7-17 (see the module docs).
 const R_BASELINE: f64 = 93.2;
 
 /// Delay-sensitivity class `sT` (Table 1, "Default": "Must be used for
@@ -72,14 +60,11 @@ const ADVANTAGE_FACTOR: f64 = 0.0;
 pub struct CodecQualityModel {
     /// `Ie`: the codec's own impairment at zero packet loss.
     pub ie: f64,
-    /// `Bpl`: how gracefully the codec degrades under packet loss. Larger
-    /// is more robust.
+    /// `Bpl`: robustness to packet loss; larger is more robust.
     pub bpl: f64,
 }
 
-/// Which codec family this module has a G.113 Appendix I entry for. Not
-/// this stack's own codec catalogue — `crates/sipral` owns that — only the
-/// families Table I.4 tabulates `Ie`/`Bpl` for.
+/// A codec family with a G.113 Appendix I (Table I.4) `Ie`/`Bpl` entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodecFamily {
     /// G.711, mu-law or A-law: one quantiser design, and G.113 Table I.4
@@ -402,11 +387,8 @@ mod tests {
 
     #[test]
     fn burstier_loss_at_the_same_rate_is_rated_no_worse_than_random_loss() {
-        // Equation 7-29 divides Ppl by BurstR before weighing it against
-        // Bpl, so a higher burst ratio at the same average loss rate can
-        // only shrink or hold x, never grow it -- consistent with a
-        // codec-state PLC concealing a short burst more effectively than
-        // the same number of losses spread evenly through the stream.
+        // Equation 7-29 divides Ppl by BurstR before weighing it against Bpl, so a higher burst
+        // ratio at the same loss rate can only shrink or hold x.
         let random = evaluate(EModelInputs {
             one_way_delay_ms: 0,
             packet_loss_percent: 5.0,
