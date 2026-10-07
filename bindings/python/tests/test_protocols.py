@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""The protocols a call and an account carry beyond audio, through this
-package: real-time text and RTCP feedback agreed between two stacks on
-127.0.0.1, a focus named on an answer, L16 as the codec, and -- against
-this test's own UDP or TCP peer writing RFC text by hand -- a conference
-picture, presence published and watched, and a call recorded to a
-recording server.
+"""Protocols beyond audio: real-time text, RTCP feedback, focus, L16
+between two stacks; and, against hand-written peers, conference state,
+presence and recording to a server.
 """
 
 from __future__ import annotations
@@ -90,8 +87,7 @@ def uri(name_addr: str) -> str:
 
 
 def answer(request: str, status: str, tag: str, more: str, body: str = "") -> str:
-    """A response to ``request``, its dialog's headers copied and ``tag`` on
-    its `To`."""
+    """A response to ``request`` with ``tag`` on its `To`."""
     out = f"SIP/2.0 {status}\r\n"
     for name in ("Via", "From", "To", "Call-ID", "CSeq"):
         value = header(name, request)
@@ -118,8 +114,7 @@ def notify(subscribe: str, sender: str, package: str, content_type: str, body: s
 
 
 class Peer:
-    """A UDP socket on loopback that reads SIP as text and writes what a
-    test hands it: a notifier, a compositor, or a far end's RTP port."""
+    """A loopback UDP peer reading and writing SIP as text."""
 
     def __init__(self) -> None:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -136,8 +131,7 @@ class Peer:
         return self.sock.recv(65536)
 
     def request(self, method: str) -> str:
-        """The next request with ``method``, every other datagram -- the
-        stack's answers to NOTIFYs among them -- passed over."""
+        """The next request with ``method``, skipping everything else."""
         while True:
             text = self.datagram().decode()
             if text.startswith(method + " "):
@@ -148,8 +142,7 @@ class Peer:
 
 
 class StreamPeer:
-    """A TCP listener on loopback that takes the one connection a stack
-    signalling over TCP opens, and reads and writes SIP on it."""
+    """A loopback TCP peer for a stack signalling over TCP."""
 
     def __init__(self) -> None:
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -560,9 +553,8 @@ class Protocols(unittest.IsolatedAsyncioTestCase):
         await self.first(bob.events, EventKind.INCOMING_CALL)
 
     async def recording_offer_of_an_encrypted_call(self, *, recording_in_clear: bool) -> str:
-        """The recording session's offer for a call keyed with SDES (RFC
-        4568), from an account that does or does not let its encrypted calls
-        be recorded in the clear."""
+        """The recording offer for an SDES call (RFC 4568), with or without
+        ``recording_in_clear``."""
         server = StreamPeer()
         self.addCleanup(server.close)
         rtp = self.peer()
@@ -575,7 +567,7 @@ class Protocols(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(await asyncio.to_thread(server.connected.wait, TIMEOUT))
 
-        # thirty octets of key and salt, nobody's
+        # Throwaway key and salt.
         key = base64.b64encode(bytes(range(30))).decode()
         sdp = (
             "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"

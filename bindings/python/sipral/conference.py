@@ -3,21 +3,14 @@
 
 """``LocalConference``: any number of this stack's calls, mixed here.
 
-Every member hears everybody but itself, each call on its own codec and
-rate; this end is a member too unless it was made without
-(`docs/08-ffi.md`, "A local conference"). A call added stops carrying its
-own frames -- its :class:`sipral.media.Media` goes on reading the socket and
-sending RTCP -- and the conference carries them instead:
+Each member hears everyone but itself, each call on its own codec and rate;
+this end is a member unless made without. A member's frames are carried by
+the conference (its :class:`sipral.media.Media` still reads the socket and
+sends RTCP): by the audio engine in device mode, or in application mode by
+this class's own 20 ms thread, where :meth:`send_audio` is this end's
+microphone and :attr:`frames` what it hears.
 
-- on a stack in device mode the library's audio engine does it, and every
-  packet leaves through the stack's own transmit path, from the member's
-  own socket;
-- in application mode a thread of this class's own ticks every twenty
-  milliseconds: :meth:`send_audio` is this end's microphone, :attr:`frames`
-  what it hears, and the packets go out from each member's own socket.
-
-``SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`` arrives on ``stack.events``;
-:attr:`sipral.events.Event.local_conference` reads it.
+Changes arrive as ``SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED``.
 """
 
 from __future__ import annotations
@@ -44,12 +37,11 @@ _TICK_SECONDS = 0.02
 
 
 class LocalConference:
-    """`sipral_local_conference_create`, and what a conference is asked.
+    """A local mixing conference.
 
     ``max_members`` counts this end; ``local`` says whether this end takes
-    part, and ``sample_rate`` is the rate of its frames -- 8, 16, 32 or
-    48 kHz -- in application mode. A rate the conference cannot mix, or more
-    than 1024 members, raises :class:`sipral.errors.SipralError` with
+    part; ``sample_rate`` (8, 16, 32 or 48 kHz) is its frame rate in
+    application mode. Other rates, or more than 1024 members, raise
     ``SIPRAL_STATUS_CONFERENCE_REFUSED``.
     """
 
@@ -72,16 +64,14 @@ class LocalConference:
             lambda: lib.sipral_local_conference_create(stack.handle, config, out),
             "sipral_local_conference_create",
         )
-        #: The conference's handle, which is also this end's name as a
-        #: member: in :meth:`members`, :meth:`talkers` and every event.
+        #: The conference handle, also this end's member id.
         self.handle = int(out[0])
         info = self.info()
         #: Whether this end takes part.
         self.local = info["local"]
         self.sample_rate = info["sample_rate"]
         self.frame_samples = info["frame_samples"]
-        #: What this end hears, one frame of 16-bit mono PCM per item, in
-        #: application mode.
+        #: What this end hears (16-bit mono frames), in application mode.
         self.frames: asyncio.Queue[bytes] = asyncio.Queue()
         self._to_send: queue.Queue[bytes] = queue.Queue()
         self._pending = bytearray()
@@ -97,12 +87,10 @@ class LocalConference:
     # -- members ---------------------------------------------------------
 
     def add(self, call: "Call") -> None:
-        """`sipral_local_conference_add`: ``call`` takes part from the next
-        tick, at its own codec's rate. A full conference, a call already in
-        one, or a codec it cannot mix raises with
+        """Add ``call`` from the next tick. A full conference, a call already
+        in one, or an unmixable codec raises
         ``SIPRAL_STATUS_CONFERENCE_REFUSED``."""
-        # the call's own thread stops carrying frames before the conference
-        # starts, so that no frame is taken twice
+        # Stop the call's own pump first so no frame is taken twice.
         was = call.media.pumped if call.media is not None else None
         if call.media is not None:
             call.media.pumped = True
@@ -118,8 +106,7 @@ class LocalConference:
         self._members[call.handle] = call
 
     def remove(self, call: "Call") -> None:
-        """`sipral_local_conference_remove`: ``call`` carries its own frames
-        again from the next tick."""
+        """Remove ``call``; it pumps its own frames from the next tick."""
         _call(
             lambda: lib.sipral_local_conference_remove(self.handle, call.handle),
             "sipral_local_conference_remove",
@@ -134,8 +121,8 @@ class LocalConference:
     def set_muted(
         self, member: "Call | None", direction: AudioDirection, muted: bool = True
     ) -> None:
-        """Mute or unmute one way of a member -- ``None`` for this end:
-        ``AudioDirection.INPUT`` is what it says, ``OUTPUT`` what it hears."""
+        """Mute a member's ``INPUT`` (what it says) or ``OUTPUT`` (what it
+        hears); ``None`` is this end."""
         _call(
             lambda: lib.sipral_local_conference_set_muted(
                 self.handle, self._member(member), int(direction), int(muted)
@@ -144,8 +131,7 @@ class LocalConference:
         )
 
     def set_gain(self, member: "Call | None", direction: AudioDirection, gain: int) -> None:
-        """The level of one way of a member, in the audio engine's steps:
-        256 is unity, 1024 four times."""
+        """A member's gain in steps: 256 is unity, 1024 the maximum."""
         _call(
             lambda: lib.sipral_local_conference_set_gain(
                 self.handle, self._member(member), int(direction), gain
@@ -156,7 +142,7 @@ class LocalConference:
     # -- what it is --------------------------------------------------------
 
     def info(self) -> dict[str, int | bool]:
-        """`sipral_local_conference_info`."""
+        """Counts, rate and recording state."""
         out = ffi.new("sipral_local_conference_info_t *")
         out.size = ffi.sizeof("sipral_local_conference_info_t")
         _call(
@@ -176,9 +162,7 @@ class LocalConference:
         }
 
     def members(self) -> list[dict[str, int | bool]]:
-        """Every member, this end first: its handle (a call's, or
-        :attr:`handle` for this end), whether it is talking, its mutes and
-        its gains."""
+        """Every member, this end first, with talking, mutes and gains."""
         found = []
         for index in range(self.info()["members"]):
             out = ffi.new("sipral_local_conference_member_t *")
@@ -213,10 +197,8 @@ class LocalConference:
     # -- recording ---------------------------------------------------------
 
     def record(self, path: str, *, format: int = 0, sample_rate: int = 0) -> None:
-        """`sipral_local_conference_record_start`: the whole mix, one
-        channel, to ``path``; ``format`` a
-        :class:`sipral.enums.RecordingFormat`, ``sample_rate`` the file's
-        own (zero for the conference's)."""
+        """Record the whole mix, mono, to ``path``. ``sample_rate`` 0 for the
+        conference's."""
         encoded = path.encode("utf-8")
         options = ffi.new("sipral_recording_options_t *")
         options.size = ffi.sizeof("sipral_recording_options_t")
@@ -230,7 +212,7 @@ class LocalConference:
         )
 
     def stop_recording(self) -> None:
-        """`sipral_local_conference_record_stop`: stop, and finish the file."""
+        """Stop recording and finish the file."""
         _call(
             lambda: lib.sipral_local_conference_record_stop(self.handle),
             "sipral_local_conference_record_stop",
@@ -239,8 +221,7 @@ class LocalConference:
     # -- this end's audio, in application mode -----------------------------
 
     def send_audio(self, pcm: bytes | memoryview) -> None:
-        """What this end says, 16-bit mono PCM at :attr:`sample_rate`, in any
-        length: the conference's thread takes a frame of it every tick."""
+        """Queue this end's 16-bit mono PCM at :attr:`sample_rate`, any length."""
         self._to_send.put(bytes(pcm))
 
     def _next_chunk(self) -> bytes:
@@ -270,8 +251,7 @@ class LocalConference:
         try:
             call.media.send_to(payload, destination)
         except OSError:
-            # a socket closed by a hangup racing this send: the packet is
-            # lost, which the far end's jitter buffer already hides
+            # Socket closed by a racing hangup: one lost packet.
             pass
 
     def _run(self) -> None:
@@ -319,9 +299,8 @@ class LocalConference:
     # -- the end -------------------------------------------------------------
 
     def close(self) -> None:
-        """`sipral_local_conference_destroy`: every call still in it carries
-        its own frames again, a recording running is finished, and the
-        handle is spent."""
+        """Destroy: members pump their own frames again, a recording is
+        finished."""
         if self._closed.is_set():
             return
         self._closed.set()

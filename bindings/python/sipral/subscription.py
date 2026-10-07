@@ -25,10 +25,8 @@ __all__ = ["ConferencePicture", "Participant", "Subscription"]
 
 
 def read_text(copy: Callable[[object, int, object], int], where: str) -> str:
-    """Copy a piece of text out the way every ``*_text`` entry point copies
-    one: into a buffer with its NUL, answering
-    `SIPRAL_STATUS_BUFFER_TOO_SMALL` and the bytes it needs when the buffer
-    is short, so a second try with exactly that many always fits."""
+    """Read text from a ``*_text`` entry point, retrying with the size it
+    reports on `SIPRAL_STATUS_BUFFER_TOO_SMALL`."""
     needed = ffi.new("size_t *")
     capacity = 256
     deadline = time.monotonic() + 0.5
@@ -49,10 +47,8 @@ def read_text(copy: Callable[[object, int, object], int], where: str) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class Participant:
-    """One user of a conference: the address of record it takes part as, its
-    display text, the device its first endpoint is on and where that endpoint
-    is (RFC 4575 §5.7.2), how many endpoints it is in from, and how many
-    media streams the first of them has."""
+    """One conference user: its AOR, display text, first endpoint and its
+    status (RFC 4575 §5.7.2), endpoint count and media count."""
 
     entity: str | None
     display_text: str | None
@@ -66,10 +62,9 @@ class Participant:
 class ConferencePicture:
     """A conference as a ``conference`` subscription holds it (RFC 4575 §5).
 
-    ``user_count`` is what `conference-state` said, which may differ from
-    ``len(users)`` since a focus need not list everyone; ``active`` and
-    ``locked`` are ``None`` when it said nothing. ``users`` are in the order
-    the focus first named them."""
+    ``user_count`` is the focus's own count, which may exceed
+    ``len(users)``; ``active`` and ``locked`` are ``None`` when unsaid.
+    ``users`` keep the focus's order."""
 
     version: int
     entity: str | None
@@ -86,30 +81,23 @@ def _tristate(value: int) -> bool | None:
 
 
 class Subscription:
-    """One `sipral_handle_t` naming a subscription.
+    """A subscription handle.
 
-    Made by :meth:`sipral.account.Account.subscribe`,
-    :meth:`sipral.account.Account.watch_presence` and
-    :meth:`sipral.call.Call.subscribe_conference`. The stack refreshes it for
-    as long as it is live; what the notifier says arrives on the stack's
-    events naming :attr:`handle`: `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`
-    (:attr:`sipral.events.Event.presence`) for a presentity and
-    `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`
-    (:attr:`sipral.events.Event.conference`) for a conference, whose whole
-    picture :meth:`conference` then reads.
+    The stack refreshes it while live. Notifications arrive on the stack's
+    events naming :attr:`handle` (presence or conference changes; read a
+    conference with :meth:`conference`).
     """
 
     def __init__(self, stack: "Stack", handle: int, package: str) -> None:
         self.stack = stack
-        #: The raw handle, which the events about this subscription name.
+        #: The handle its events name.
         self.handle = handle
         #: The event package, as it went out.
         self.package = package
 
     @property
     def state(self) -> SubscriptionState:
-        """`sipral_subscription_state`, read fresh: ``UNKNOWN`` once it has
-        ended."""
+        """The state, read fresh; ``UNKNOWN`` once ended."""
         out = ffi.new("uint32_t *")
         _call(
             lambda: lib.sipral_subscription_state(self.stack.handle, self.handle, out),
@@ -118,9 +106,7 @@ class Subscription:
         return SubscriptionState(int(out[0]))
 
     def end(self) -> None:
-        """`sipral_subscription_end`: an unsubscribe goes out, and the
-        subscription is over once the notifier's closing notification is
-        answered."""
+        """Unsubscribe; it ends once the closing NOTIFY is answered."""
         _call(
             lambda: lib.sipral_subscription_end(
                 self.stack.handle, self.handle, self.stack.now_ms()
@@ -129,10 +115,8 @@ class Subscription:
         )
 
     def conference(self) -> ConferencePicture | None:
-        """The conference as this subscription holds it now, or ``None`` when
-        it holds none: a subscription to another package, one no document
-        has reached yet, or one that ended. Read it again after every
-        `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` naming :attr:`handle`."""
+        """The current conference picture, or ``None`` (other package, no
+        document yet, or ended). Re-read after each conference change."""
         out = ffi.new("sipral_conference_t *")
         out.size = ffi.sizeof("sipral_conference_t")
         deadline = time.monotonic() + 0.5
@@ -177,8 +161,7 @@ class Subscription:
         )
 
     def _text(self, which: int, index: int = 0) -> str | None:
-        """One piece of the conference's text, ``None`` for one the focus
-        did not send."""
+        """One conference text field, ``None`` if not sent."""
         text = read_text(
             lambda buffer, capacity, needed: lib.sipral_subscription_conference_text(
                 self.stack.handle, self.handle, index, int(which), buffer, capacity, needed

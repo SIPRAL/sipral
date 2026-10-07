@@ -3,13 +3,9 @@
 
 """Sipral: a SIP client stack, over its C ABI.
 
-``Stack``, ``Account`` and ``Call`` are the layer an application is meant
-to use -- built with `cffi` in ABI mode against the same declarations the
-C header, Swift, .NET, Kotlin and Dart bindings are printed from
-(`docs/08-ffi.md`), so installing this package needs no C compiler and no
-second source of truth for what the library exports. ``sipral._sipral_cffi``
-is that raw layer (``ffi``/``lib``); reach for it directly only for
-something this idiomatic layer has not grown yet.
+``Stack``, ``Account`` and ``Call`` are the application layer, over `cffi`
+in ABI mode, so installing needs no C compiler. ``sipral._sipral_cffi`` is
+the raw ``ffi``/``lib`` layer, for anything not wrapped yet.
 
 ::
 
@@ -27,12 +23,10 @@ something this idiomatic layer has not grown yet.
             event = await call.events.get()
             ...
 
-On a platform the library has an audio backend for (``features()`` has
-``Feature.AUDIO_DEVICE``: macOS, iOS, Windows) a stack opens the machine's
-own microphone and loudspeaker and pumps every call through them, so the
-code above is a whole softphone; ``stack.audio`` chooses the devices, the
-volume and the mute. ``Stack(audio=AudioMode.APPLICATION)`` hands the frames
-to the application instead: see ``examples/agent.py`` for a voice agent.
+Where ``features()`` has ``Feature.AUDIO_DEVICE`` (macOS, iOS, Windows) the
+stack drives the microphone and loudspeaker itself, so the code above is a
+softphone. ``Stack(audio=AudioMode.APPLICATION)`` hands frames to the
+application instead; see ``examples/agent.py``.
 """
 
 from __future__ import annotations

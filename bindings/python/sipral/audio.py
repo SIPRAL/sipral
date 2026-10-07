@@ -3,14 +3,10 @@
 
 """``Audio``: the library's own audio engine, for a stack in device mode.
 
-A :class:`sipral.stack.Stack` created with ``audio=AudioMode.DEVICE`` -- the
-default wherever :func:`sipral.features` has ``Feature.AUDIO_DEVICE`` --
-opens the platform's microphone and loudspeaker itself and pumps every call
-through them (`docs/08-ffi.md`, "The built-in audio engine"). This is what
-the application still decides: which device plays which role, how loud, what
-is muted, when the devices are open, and what rings. Everything here is
-``stack.audio``; on a stack in application mode each method raises
-:class:`sipral.errors.SipralError` with ``SIPRAL_STATUS_WRONG_STATE``.
+In device mode the library drives the platform's microphone and loudspeaker
+for every call; ``stack.audio`` chooses devices, gain, mute, activation and
+the ring. In application mode each method raises
+``SIPRAL_STATUS_WRONG_STATE``.
 """
 
 from __future__ import annotations
@@ -35,7 +31,7 @@ _GAIN_STEPS = 256
 #: A gain of one: what every direction starts at.
 UNITY_GAIN = 1.0
 
-#: The most a gain goes up to, four times unity; more is taken as this.
+#: Gains above this are clamped to it.
 _GAIN_MOST = 4.0
 
 
@@ -43,10 +39,9 @@ _GAIN_MOST = 4.0
 class AudioDevice:
     """One device, as `sipral_audio_device_at` lists it.
 
-    ``id`` is the engine's name for it: stable across refreshes, never
-    reused, never zero, and what :meth:`Audio.select` takes. A device that
-    was unplugged keeps its row with ``present`` false, so a selection saved
-    against it still names something and comes back when it does.
+    ``id`` is stable across refreshes, never reused, never zero. An
+    unplugged device stays listed with ``present`` false, so a saved
+    selection still names it and resumes when it returns.
     """
 
     id: int
@@ -59,26 +54,23 @@ class AudioDevice:
 
     @property
     def is_microphone(self) -> bool:
-        """Whether it captures: what ``AudioRole.MICROPHONE`` needs."""
+        """Whether it captures."""
         return self.input_channels > 0
 
     @property
     def is_speaker(self) -> bool:
-        """Whether it plays: what the speaker and the ringer need."""
+        """Whether it plays."""
         return self.output_channels > 0
 
 
 @dataclasses.dataclass(frozen=True)
 class AudioInfo:
-    """What the engine is doing, as `sipral_audio_info` says.
+    """What the engine is doing.
 
-    ``system_echo_cancellation`` is whether the platform's own processing
-    sits behind the microphone -- the voice-processing unit on Apple's
-    platforms, a Windows communications stream (which cancels only where
-    the endpoint has processing of its own) -- and ``render_delay_ms`` is
-    the loudspeaker-to-microphone delay the devices report, which the engine
-    hands every call for a canceller attached to it. The three device ids
-    are ``None`` while that role is not open.
+    ``system_echo_cancellation``: the platform's processing is in the
+    microphone path (Apple voice processing, a Windows communications
+    stream). ``render_delay_ms`` is the reported speaker-to-microphone
+    delay. Device ids are ``None`` while a role is not open.
     """
 
     active: bool
@@ -92,13 +84,10 @@ class AudioInfo:
 
 
 class Audio:
-    """``stack.audio``: devices, roles, gain, mute, the meter, activation and
-    the ring, over the `sipral_audio_*` entry points.
+    """``stack.audio``: devices, roles, gain, mute, meter, activation, ring.
 
-    Every method is safe from any thread; none waits on the stack's poll.
-    A platform call that does not answer within the stack's
-    ``audio_probe_ms`` raises ``SIPRAL_STATUS_DEVICE_TIMED_OUT`` instead of
-    hanging the caller.
+    Safe from any thread. A platform call silent past ``audio_probe_ms``
+    raises ``SIPRAL_STATUS_DEVICE_TIMED_OUT`` instead of hanging.
     """
 
     def __init__(self, stack: "Stack") -> None:
@@ -111,20 +100,17 @@ class Audio:
     # -- the list ----------------------------------------------------------
 
     def refresh(self) -> list[AudioDevice]:
-        """Ask the platform again, and return the list as it now is.
+        """Re-list devices from the platform.
 
-        The engine refreshes by itself when the platform announces a device
-        arriving or leaving (and says so with
-        `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`), so this is for a settings
-        screen opening, not for polling.
+        The engine already refreshes on platform notifications, so this is
+        for a settings screen opening, not for polling.
         """
         count = ffi.new("size_t *")
         _call(lambda: lib.sipral_audio_refresh(self._handle, count), "sipral_audio_refresh")
         return self.devices()
 
     def devices(self) -> list[AudioDevice]:
-        """Every device the engine has seen, present or not, as last listed
-        -- asking the platform first when nothing has been listed yet."""
+        """Every device seen, present or not; lists them first if needed."""
         count = ffi.new("size_t *")
         _call(
             lambda: lib.sipral_audio_device_count(self._handle, count),
@@ -154,7 +140,7 @@ class Audio:
         check(status, "sipral_audio_device_at")
         return AudioDevice(
             id=int(device.id),
-            # the length counts the trailing NUL, which is not the name
+            # The length counts the trailing NUL.
             name=ffi.buffer(name, int(needed[0]) - 1)[:].decode("utf-8", "replace"),
             input_channels=int(device.input_channels),
             output_channels=int(device.output_channels),
@@ -166,21 +152,16 @@ class Audio:
     # -- roles -------------------------------------------------------------
 
     def select(self, role: int, device: int | AudioDevice | None) -> None:
-        """Put ``role`` (an :class:`sipral.enums.AudioRole`) on ``device``,
-        or back on the system's route with ``None``.
+        """Put ``role`` (:class:`sipral.enums.AudioRole`) on ``device``, or on
+        the system route with ``None``.
 
-        Refused before any platform call: ``SIPRAL_STATUS_NO_SUCH_DEVICE`` for
-        an id the list never held, ``SIPRAL_STATUS_DEVICE_UNUSABLE`` for a
-        device with no channels in the role's direction or one not plugged
-        in, ``SIPRAL_STATUS_NOT_SUPPORTED`` where the platform cannot put the
-        role on a device of its own (iOS, for the microphone and the ringer:
-        the route is the audio session's). On macOS the microphone is chosen
-        apart from the speaker without moving the system's default input, and
-        a ringer on another device plays through an output of its own. While
-        the devices are open the role moves at once, keeping its direction's
-        gain and mute. A chosen device that is later unplugged stays the
-        choice: the role runs on the system's route meanwhile and goes back
-        when it returns.
+        Raises ``SIPRAL_STATUS_NO_SUCH_DEVICE`` for an unknown id,
+        ``SIPRAL_STATUS_DEVICE_UNUSABLE`` for a device without channels in
+        that direction or unplugged, ``SIPRAL_STATUS_NOT_SUPPORTED`` where
+        the platform owns the route (iOS microphone and ringer). On macOS the
+        system default input is not moved. Open devices switch at once,
+        keeping gain and mute. If the chosen device is unplugged, the role
+        uses the system route until it returns.
         """
         device_id = device.id if isinstance(device, AudioDevice) else (device or 0)
         _call(
@@ -189,10 +170,9 @@ class Audio:
         )
 
     def selection(self, role: int) -> tuple[int | None, int | None]:
-        """``(chosen, running)`` for ``role``: the id :meth:`select` was given
-        (``None`` for the system's route) and the id of the device the role
-        is open on (``None`` while it is not open). They differ while a
-        chosen device is unplugged."""
+        """``(chosen, running)`` device ids for ``role``; ``None`` for the
+        system route or not open. They differ while the chosen one is
+        unplugged."""
         selected = ffi.new("uint32_t *")
         running = ffi.new("uint32_t *")
         _call(
@@ -204,20 +184,13 @@ class Audio:
     # -- gain, mute and the meter -----------------------------------------
 
     def set_gain(self, direction: int, gain: float, *, call: "Call | None" = None) -> None:
-        """Set ``direction``'s gain as a ratio: ``1.0`` is unity, ``0.5``
-        halves, ``2.0`` doubles, anything above ``4.0`` is ``4.0``. The input
-        gain is the microphone gain, the output gain the volume. Applied to
-        the call's audio rather than to the operating system's control, and
-        kept across every device change.
+        """Set ``direction``'s gain as a ratio (``1.0`` unity, clamped at
+        ``4.0``). Applied in the engine, not the OS mixer, and kept across
+        device changes.
 
-        With ``call``, that call's own gain, on top of the direction's: the
-        input direction is what the microphone sends that call alone, the
-        output how loud that call is in the loudspeaker beside the others.
-        Kept while the call is held or in a local conference and back, and
-        gone when it ends; ``SIPRAL_STATUS_WRONG_STATE`` before the call's
-        media starts and after it ends. The same ``call`` keyword reads it
-        back in :meth:`gain`, mutes one call alone in :meth:`set_muted` and
-        :meth:`muted`, and reads one call's meter in :meth:`level`."""
+        With ``call``, that call's own gain on top: kept through hold and
+        local conferences, gone when the call ends;
+        ``SIPRAL_STATUS_WRONG_STATE`` outside its media's lifetime."""
         if gain < 0:
             raise ValueError(f"a gain is a ratio of zero or more, not {gain}")
         steps = round(min(gain, _GAIN_MOST) * _GAIN_STEPS)
@@ -233,8 +206,7 @@ class Audio:
         )
 
     def gain(self, direction: int, *, call: "Call | None" = None) -> float:
-        """``direction``'s gain -- ``call``'s own, with one -- as the ratio
-        :meth:`set_gain` takes."""
+        """``direction``'s gain (``call``'s own, with one) as a ratio."""
         out = ffi.new("uint32_t *")
         if call is not None:
             _call(
@@ -249,10 +221,9 @@ class Audio:
         return int(out[0]) / _GAIN_STEPS
 
     def set_muted(self, direction: int, muted: bool, *, call: "Call | None" = None) -> None:
-        """Mute ``direction`` or unmute it, kept across every device change. A
-        muted microphone still sends silence, so the far end hears a stream
-        rather than a gap. With ``call``, that call alone, while every other
-        call goes on."""
+        """Mute or unmute ``direction``, kept across device changes. A muted
+        microphone still sends silence, not a gap. With ``call``, only that
+        call."""
         if call is not None:
             _call(
                 lambda: lib.sipral_audio_call_set_muted(
@@ -267,7 +238,7 @@ class Audio:
         )
 
     def muted(self, direction: int, *, call: "Call | None" = None) -> bool:
-        """Whether ``direction`` is muted -- for ``call`` alone, with one."""
+        """Whether ``direction`` is muted (for ``call`` alone, with one)."""
         out = ffi.new("uint32_t *")
         if call is not None:
             _call(
@@ -282,13 +253,9 @@ class Audio:
         return bool(out[0])
 
     def set_system_echo_cancellation(self, on: bool) -> None:
-        """Turn the platform's own echo cancellation on or off on the running
-        stack (ABI 1.1): what ``system_echo_cancellation`` chose at creation.
-        While the devices are open they are reopened at once with or without
-        the platform's processing, on the devices they were on, with the gain
-        and the mute; a call keeps its media through a gap as long as the
-        reopen. :meth:`info` says what the platform did, and
-        ``stack.settings().system_echo_cancellation`` what is asked.
+        """Toggle the platform's echo cancellation at runtime. Open devices
+        reopen at once on the same devices, keeping gain and mute; calls
+        bridge the short gap. :meth:`info` reports what the platform did.
         ``SIPRAL_STATUS_WRONG_STATE`` in application mode."""
         toggle = lib.SIPRAL_TOGGLE_ON if on else lib.SIPRAL_TOGGLE_OFF
         _call(
@@ -297,11 +264,9 @@ class Audio:
         )
 
     def level(self, direction: int, *, call: "Call | None" = None) -> int:
-        """The meter: the loudest sample of the last tenth of a second in
-        ``direction``, 0 to 32767, held long enough that a bar drawn from it
-        neither flickers nor sticks. Cheap enough for a window's timer; zero
-        while nothing is open. With ``call``, that call's own, after its own
-        gain and mute."""
+        """Peak of the last 100 ms in ``direction``, 0 to 32767, smoothed for
+        a level bar; zero while closed. Cheap enough for a UI timer. With
+        ``call``, that call's level after its gain and mute."""
         out = ffi.new("uint32_t *")
         if call is not None:
             _call(
@@ -336,21 +301,18 @@ class Audio:
     # -- activation --------------------------------------------------------
 
     def activate(self) -> None:
-        """Open the devices and start the pump now, whatever the calls are
-        doing. Under ``AudioActivation.MANUAL`` this is the only thing that
-        does -- what CallKit's ``didActivate`` and a telecom framework's audio
-        focus are for; under automatic activation it opens them early. A
-        direction that could not be opened raises, and the engine is active
-        all the same, silent in that direction (:meth:`info` says which)."""
+        """Open the devices now. Under ``AudioActivation.MANUAL`` only this
+        does (for CallKit's ``didActivate`` or audio focus); otherwise it
+        opens them early. A direction that fails raises, but the engine stays
+        active, silent there (see :meth:`info`)."""
         _call(lambda: lib.sipral_audio_activate(self._handle), "sipral_audio_activate")
 
     def deactivate(self) -> None:
-        """Close the devices and stop the pump. The calls stay attached and
-        get their audio back on the next :meth:`activate`."""
+        """Close the devices; calls resume audio on the next :meth:`activate`."""
         _call(lambda: lib.sipral_audio_deactivate(self._handle), "sipral_audio_deactivate")
 
     def info(self) -> AudioInfo:
-        """`sipral_audio_info`."""
+        """The engine's current state."""
         out = ffi.new("sipral_audio_info_t *")
         out.size = ffi.sizeof("sipral_audio_info_t")
         _call(lambda: lib.sipral_audio_info(self._handle, out), "sipral_audio_info")
@@ -368,11 +330,9 @@ class Audio:
     # -- the ring ----------------------------------------------------------
 
     def ring(self, pcm: bytes | memoryview, sample_rate: int, *, looped: bool = True) -> None:
-        """Play a tone -- 16-bit mono PCM at ``sample_rate`` -- on the ringer's
-        device (the loudspeaker when the ringer is on none of its own) until
-        :meth:`stop_ringing`, or once through with ``looped=False``. The
-        samples are copied. Under automatic activation a ring opens the
-        devices."""
+        """Play 16-bit mono PCM on the ringer (or loudspeaker) until
+        :meth:`stop_ringing`, or once with ``looped=False``. Samples are
+        copied. Under automatic activation this opens the devices."""
         raw = bytes(pcm)
         if len(raw) % 2:
             raise ValueError("a ring tone is 16-bit samples: an even number of bytes")

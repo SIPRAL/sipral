@@ -4,18 +4,13 @@
 
 """A headless voice agent: answers, listens, talks back, hangs up on "#".
 
-Wires any model in through one function, ``respond``, which takes one
-frame of 16-bit mono PCM and returns one back -- an echo by default, so
-this runs with nothing else installed. A real agent replaces ``respond``
-with a call into whatever transcribes, thinks and synthesizes; nothing
-else here changes; a large recorded reply crosses just as well as a frame
-at a time by queuing several calls to ``call.media.send_audio``.
+A model plugs in through ``respond``, which takes one frame of 16-bit mono
+PCM and returns one; the default is an echo, so this runs with nothing else
+installed. Longer replies can be queued with ``call.media.send_audio``.
 
-The one example here that handles frames itself, because a voice agent's
-frames are its whole job: it creates its stack with
-``audio=AudioMode.APPLICATION``, which is also what a machine with no sound
-device runs. A phone that a person talks into lets the library open the
-devices instead -- see ``softphone.py``, which has no audio code at all.
+It uses ``audio=AudioMode.APPLICATION`` to handle frames itself (this also
+suits a machine with no sound device); ``softphone.py`` lets the library
+drive the devices instead.
 
     SIPRAL_AOR=sip:agent@example.invalid \\
     SIPRAL_REGISTRAR=sip:example.invalid \\
@@ -23,20 +18,16 @@ devices instead -- see ``softphone.py``, which has no audio code at all.
     SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \\
     python3 agent.py
 
-``SIPRAL_SIGNALLING`` is ``udp`` (the default), ``tcp`` or ``tls``: over
-either of the last two the agent keeps one connection to
-``SIPRAL_REGISTRAR_ADDRESS`` and signals on it, and over TLS checks the
-server's certificate against ``SIPRAL_TLS_SERVER_NAME`` (the address's host
-when unset) with ``SIPRAL_TLS_CA`` as the only authority it trusts (the
-platform's when unset). A connection that fails is printed as
-``transport failed error=<...> tls=<...>`` with the TLS library's words, and
-tried again. ``SIPRAL_INVITE_LIMIT=voice-agent`` takes a trunk's rush of
-calls the default rate floor would answer 480.
+``SIPRAL_SIGNALLING`` is ``udp`` (default), ``tcp`` or ``tls``, on one
+connection to ``SIPRAL_REGISTRAR_ADDRESS``. TLS checks the certificate
+against ``SIPRAL_TLS_SERVER_NAME`` (default: the address's host) with
+``SIPRAL_TLS_CA`` as the only trusted authority (default: the platform's).
+Failures print ``transport failed error=<...> tls=<...>`` and are retried.
+``SIPRAL_INVITE_LIMIT=voice-agent`` accepts a trunk's burst of calls.
 
-``SIPRAL_TEXT=1`` answers every call with a real-time text stream beside
-the audio (RFC 4103) where the caller offered one, and types back whatever
-the caller types. ``SIPRAL_PRESENCE=1`` publishes the agent as open, "Agent
-ready", once it starts (RFC 3903), and prints what the compositor made of it.
+``SIPRAL_TEXT=1`` answers with real-time text (RFC 4103) when offered and
+echoes what the caller types. ``SIPRAL_PRESENCE=1`` publishes "Agent ready"
+(RFC 3903) and prints the result.
 """
 
 from __future__ import annotations
@@ -61,13 +52,10 @@ from sipral.errors import SipralError
 
 
 def route_to(address: str) -> str:
-    """Which of this host's addresses a datagram to ``address`` leaves from.
+    """The local address a datagram to ``address`` leaves from.
 
-    That address goes in the ``Contact`` and in every answer's SDP, so it
-    has to be one the far end can send to: a stack bound to ``0.0.0.0``
-    advertises it, and a registrar or a phone handed ``0.0.0.0`` has
-    nowhere to send anything back. Connecting a datagram socket sends
-    nothing; it only asks the system which route it would take.
+    It goes in the ``Contact`` and SDP, so it must be reachable; ``0.0.0.0``
+    is not. A UDP `connect` sends nothing.
     """
     host, _, port = address.rpartition(":")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
@@ -83,21 +71,12 @@ def respond(pcm: bytes) -> bytes:
 async def run_call(
     call: Call, *, patience: float | None = None, dwell: float | None = None
 ) -> bool:
-    """Talk for the life of one call. `False` when it ended before its
-    media ever started -- the lab's own TURN-blocked run
-    (`run_direct_call`) needs to tell that apart from an ordinary hangup
-    rather than wait here forever for a `Media` that is never coming, and
-    ``patience`` is what stops that wait itself running forever: a call
-    under `Ice.REQUIRED` with every path blocked is not refused by the
-    library on any timer of its own -- `IceRequired` is only for a peer
-    that answered with no ICE attributes at all -- so the application is
-    what has to give up.
+    """Talk for the life of one call; `False` if media never started.
 
-    ``dwell``, given only by `run_direct_call`, is how long this end
-    waits once media has started before it hangs up on its own: the
-    peer there is a lab harness with nothing of its own that would ever
-    send "#" or hang up first, unlike the far end `respond` is written
-    against, which always does one or the other.
+    ``patience`` bounds the wait for media: under `Ice.REQUIRED` with every
+    path blocked the library sets no timer, so the application gives up.
+    ``dwell`` hangs up that long after media starts, for a peer that never
+    sends "#" or hangs up itself.
     """
     print(f"answered {call.handle:x}")
 
@@ -137,18 +116,8 @@ async def run_call(
     stats: dict[str, object] = {}
 
     async def poll_statistics() -> None:
-        # Kept fresh at a steady interval, not read once after the call is
-        # seen to have ended: once the far end's BYE is answered the stack
-        # tears this call's media down on its own poll thread, so by the
-        # time either task below notices the call is over,
-        # `call.media.statistics()` can already answer with the ABI's
-        # WRONG_STATE (bindings/c/include/sipral.h: `sipral_media_statistics`'s
-        # end-of-call record "arrives instead as
-        # SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream
-        # is gone"). A read that lands mid-teardown is skipped, not fatal --
-        # `stats` just keeps its last good reading, at most one interval
-        # stale. Cheap enough for this rate: the same doc calls it fit "at
-        # the frame rate of a user interface".
+        # Sampled periodically: after the call ends the stream may already
+        # be gone (WRONG_STATE), so keep the last good reading.
         nonlocal stats
         while True:
             try:
@@ -163,8 +132,7 @@ async def run_call(
             digit = await call.dtmf.get()
             print("dtmf", digit)
             if digit == "#":
-                # One last read while the call is still certainly up, for
-                # the freshest number this path can give.
+                # One last read while the call is surely up.
                 try:
                     stats = call.media.statistics()
                 except SipralError:
@@ -173,10 +141,7 @@ async def run_call(
                 return
 
     async def wait_for_remote_hangup() -> None:
-        # The far end can end the call itself, with no "#" ever sent; a
-        # peer that hangs up first is the ordinary case, not the
-        # exception, and this is what keeps that call's own thread and
-        # media socket from running forever with nobody listening.
+        # The far end usually hangs up first.
         while not call.ended:
             await call.events.get()
 
@@ -189,10 +154,7 @@ async def run_call(
         except SipralError:
             pass
         call.hangup()
-        # Polled rather than read off `call.events`:
-        # `wait_for_remote_hangup` reads that same queue concurrently, and
-        # the one `CALL_ENDED` on it is only ever delivered to whichever
-        # of the two calls `get()` first.
+        # Polled: `wait_for_remote_hangup` may consume the CALL_ENDED event.
         while not call.ended:
             await asyncio.sleep(0.05)
 
@@ -217,15 +179,8 @@ async def run_call(
         if dwelling is not None:
             dwelling.cancel()
         if call.ended:
-            # A relayed call's farewell -- the TURN Refresh that gives its
-            # allocation back, not only the RTCP BYE -- can be queued a
-            # poll after `CALL_ENDED` (`Stack._drain_farewells`, on the poll
-            # thread), and one that finds the call already closed is
-            # dropped. Waited out here, where every way the call ends
-            # passes: `wait_for_remote_hangup` sees the end of a call this
-            # end hung up as soon as the dwell does, and wins as often.
-            # `Stack.close`'s own docstring gives the same reasoning for
-            # the same sleep.
+            # The farewell (RTCP BYE, TURN Refresh) may be queued a poll
+            # after CALL_ENDED and is dropped if the call is already closed.
             await asyncio.sleep(0.2)
         call.close()
         print(f"ended {call.handle:x}: {stats}")
@@ -233,38 +188,22 @@ async def run_call(
 
 
 def report_failure(task: asyncio.Task) -> None:
-    """Say why a call's task ended, if it ended by raising.
-
-    An exception in a task nobody awaits is otherwise only mentioned when
-    the task is garbage collected, which for a process that is stopped
-    rather than left to exit is never.
-    """
+    """Print a call task's exception, which nobody awaits."""
     if not task.cancelled() and task.exception() is not None:
         print(f"call failed: {task.exception()!r}")
 
 
 async def run_direct_call() -> bool:
-    """Dial a peer straight at its address, no registrar between them --
-    the lab's own two-NAT pair (`scripts/lab.sh`'s ``ice_turn_flow``),
-    where the far end is the harness's own ``iceanswer`` role rather
-    than a server. ``SIPRAL_PEER_HOST``/``SIPRAL_PEER_PORT`` name it, and
-    the account this end adds is one `Account.add`'s own docstring
-    describes: "an account that never registers", ``registrar`` left
-    unset so `sipral_account_config_t::registrar_len` is zero.
+    """Dial ``SIPRAL_PEER_HOST``/``SIPRAL_PEER_PORT`` directly, with an
+    account that never registers (the lab's two-NAT pair).
 
-    ``SIPRAL_STUN_SERVER`` turns on `Nat.STUN` the same way
-    :class:`sipral.stack.Stack` already offers any application;
-    ``SIPRAL_TURN_SERVER``/``SIPRAL_TURN_USER``/``SIPRAL_TURN_PASSWORD``
-    ride on it. ``SIPRAL_TURN_TRANSPORT`` is ``udp``, ``tcp`` or ``tls``
-    (RFC 8656 Section 3.1); over TLS the server's certificate is checked
-    against ``SIPRAL_TURN_NAME`` and trusted if it chains to the PEM file
-    ``SIPRAL_TURN_CA`` names, the platform's roots otherwise -- the lab's
-    own coturn presents a certificate made for the run, and this is how the
-    run tells the agent to trust it. ``SIPRAL_ICE=required`` asks `Ice.REQUIRED` of every
-    call this account places, which is what makes a call that cannot
-    find a path fail outright rather than fall back to the address this
-    end bound to -- the one thing that would let a run through a blocked
-    NAT pair pass by accident.
+    ``SIPRAL_STUN_SERVER`` turns on `Nat.STUN`; ``SIPRAL_TURN_SERVER``,
+    ``SIPRAL_TURN_USER`` and ``SIPRAL_TURN_PASSWORD`` add TURN over
+    ``SIPRAL_TURN_TRANSPORT`` (``udp``, ``tcp``, ``tls``; RFC 8656 Section
+    3.1). TLS checks against ``SIPRAL_TURN_NAME``, trusting
+    ``SIPRAL_TURN_CA`` or the platform roots. ``SIPRAL_ICE=required`` makes
+    a pathless call fail instead of falling back to the bound address,
+    which would let a blocked NAT pair pass by accident.
     """
     loop = asyncio.get_running_loop()
     peer_host = os.environ["SIPRAL_PEER_HOST"]
@@ -314,17 +253,12 @@ async def run_direct_call() -> bool:
     )
     stack.close()
     if ok and turn_server and turn_transport:
-        # the relay was made and given back on its connection, as the
-        # server's own log shows; this is what the agent itself saw
         print(f"relay over {over.upper()} to {turn_server}: the call ran through it")
     return ok
 
 
 async def main() -> None:
-    # The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead
-    # of the registrar-and-listen one below: `SIPRAL_PEER_HOST` is what
-    # tells the two apart, since a real registrar address never doubles
-    # as one.
+    # `SIPRAL_PEER_HOST` selects the direct-dial mode.
     if os.environ.get("SIPRAL_PEER_HOST"):
         if not await run_direct_call():
             raise SystemExit(1)

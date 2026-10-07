@@ -4,11 +4,9 @@
 """A call in progress moves with the network under it, and a call's media
 says which SRTP transform it runs.
 
-Alice starts on loopback and moves to this machine's own address on its
-default route: ``Stack.move_to`` binds signalling there and reports the
-change, the call asks to be moved (`SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`),
-``Call.readdress`` offers it at a socket on the new address, and audio
-crosses both ways from that socket once the far end answers.
+Alice moves from loopback to the default-route address; the call asks to
+move (`SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`), ``Call.readdress`` re-offers
+it, and audio flows both ways on the new socket.
 """
 
 from __future__ import annotations
@@ -26,8 +24,7 @@ from sipral.enums import AudioMode, EventKind, Recovery, SrtpSuite, Status
 
 
 def _routable_address() -> str | None:
-    """This host's address on its default route: `connect` on a UDP socket
-    picks a source address and sends nothing."""
+    """This host's default-route address; a UDP `connect` sends nothing."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         probe.connect(("203.0.113.1", 80))  # RFC 5737 TEST-NET-3: never dialled
@@ -45,8 +42,7 @@ def _loud(pcm: bytes) -> bool:
 
 class _Pair(unittest.IsolatedAsyncioTestCase):
     srtp = 0
-    #: Where alice's signalling socket is bound; ``None`` for every
-    #: interface.
+    #: Alice's signalling bind; ``None`` for every interface.
     alice_host: str | None = None
 
     async def asyncSetUp(self) -> None:
@@ -85,9 +81,8 @@ class _Pair(unittest.IsolatedAsyncioTestCase):
 
 
 class ACallMovesWithTheNetwork(_Pair):
-    # bound at one address, which a move binds again at the next: a stack on
-    # every interface keeps advertising the route toward its server, loopback
-    # here (TheSignallingPortSurvivesAMove below)
+    # Bound to one address so the move rebinds; a wildcard stack would keep
+    # advertising loopback here.
     alice_host = "127.0.0.1"
 
     async def asyncSetUp(self) -> None:
@@ -95,8 +90,7 @@ class ACallMovesWithTheNetwork(_Pair):
         if self.host is None or self.host.startswith("127."):
             self.skipTest("no address besides loopback on this machine to move to")
         if sys.platform == "win32":
-            # Windows routes no datagram between a socket bound to loopback
-            # and one bound to the machine's own LAN address
+            # Windows routes nothing between loopback and the LAN address.
             self.skipTest("a far end on loopback cannot reach the LAN address on Windows")
         await super().asyncSetUp()
 
@@ -113,10 +107,7 @@ class ACallMovesWithTheNetwork(_Pair):
         return False
 
     def speak(self, media) -> None:
-        # a tone, not a constant: Opus rejects DC, so a constant comes out
-        # loud only for the few milliseconds of its onset, and a call whose
-        # buffer skipped those frames heard nothing loud at all. Forty
-        # samples a period is 200 Hz at 8 kHz and 1.2 kHz at 48 kHz
+        # A tone, not DC, which Opus filters out. 40-sample period.
         count = media.frame_samples * 100
         tone = array.array(
             "h", (int(8000 * math.sin(2 * math.pi * n / 40)) for n in range(count))
@@ -139,14 +130,11 @@ class ACallMovesWithTheNetwork(_Pair):
         call.readdress(self.host)
         self.assertNotEqual(call.media_address, before)
         self.assertTrue(call.media_address.startswith(f"{self.host}:"))
-        # the media reads and sends on the new socket, and the old one is
-        # gone: on a real network its address no longer exists, and a far
-        # end that latches onto where packets come from must not be led back
+        # The old socket is closed: a latching far end must not be led back.
         self.assertEqual(call.media.local_address, call.media_address)
         self.assertEqual(old.fileno(), -1)
         await self.until(call, EventKind.SESSION_CHANGED)
 
-        # drain what was heard before the move, then listen at the new socket
         while not call.media.frames.empty():
             call.media.frames.get_nowait()
         self.speak(answered.media)
@@ -177,9 +165,8 @@ def _free_port(host: str) -> int:
 
 
 class TheSignallingPortSurvivesAMove(unittest.TestCase):
-    """``move_to`` binds the UDP signalling socket again on the port chosen
-    at creation, or the one in use when none was, and only a port another
-    socket holds at the new address falls back to one the system picks."""
+    """``move_to`` keeps the signalling port unless another socket holds
+    it at the new address."""
 
     def setUp(self) -> None:
         self.host = _routable_address()
@@ -218,11 +205,10 @@ class TheSignallingPortSurvivesAMove(unittest.TestCase):
         with Stack(audio=AudioMode.APPLICATION) as stack:
             before = stack.bind_address
             port = before.rsplit(":", 1)[1]
-            # TEST-NET-1 (RFC 5737): on no interface of this machine
+            # TEST-NET-1 (RFC 5737): not local.
             with self.assertRaises(OSError):
                 stack.move_to("192.0.2.77")
             self.assertEqual(stack.bind_address, before)
-            # the socket it had still holds the port, and moves with it
             stack.move_to(self.host)
             self.assertEqual(stack.bind_address, f"{self.host}:{port}")
             self.assertTrue(stack.kept_signalling_port)

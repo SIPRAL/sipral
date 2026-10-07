@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""Where a stack is reached and where its server is, through the Python
-layer: the address a stack advertises when the application names none, a
-server named by a URI and located by RFC 3263, the account's keep-alive, a
-certificate trusted by its fingerprint, and the diagnostic trace.
-
-The registrar here is this test's own, a UDP socket on loopback that answers
-every REGISTER 200 and records what arrived, keep-alives included.
+"""The advertised address, RFC 3263 location, the account keep-alive,
+certificate pins, and the diagnostic trace, against a fake UDP registrar.
 """
 
 from __future__ import annotations
@@ -51,8 +46,7 @@ def _header(name: str, message: str) -> str | None:
 
 
 class _Registrar:
-    """A registrar on a loopback UDP port: every REGISTER is answered 200,
-    and :attr:`received` holds every datagram, as text."""
+    """Answers every REGISTER 200; :attr:`received` holds every datagram."""
 
     def __init__(self) -> None:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -257,8 +251,7 @@ class AnAccountKeepsItsFlowOpen(_Case):
 
 class ACertificateIsTrustedByItsFingerprint(unittest.TestCase):
     def test_every_form_an_administrator_copies_is_read(self) -> None:
-        """Every line of ``bindings/fixtures/pin-forms.txt``, the list each
-        layer's parser is held to."""
+        """Every line of ``bindings/fixtures/pin-forms.txt``."""
         listed = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / "pin-forms.txt"
         digest = b""
         checked = 0

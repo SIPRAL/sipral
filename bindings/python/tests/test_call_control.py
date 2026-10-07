@@ -3,12 +3,9 @@
 
 """Ringing, header fields and transfer through this package's ``Call``.
 
-Stacks on 127.0.0.1 with no registrar, as in ``test_call``: a call placed
-with header fields of its own, rung with a 180 and then answered, ended by
-a BYE that carries a field the other side reads off ``CALL_ENDED``; a REFER
-refused, which the transferor hears as ``TRANSFER_DONE``; and a REFER taken
-with a call the transferee placed itself, whose answer reaches the
-transferor as the transfer's success.
+Custom headers through 180, answer and BYE; a refused REFER ends as
+``TRANSFER_DONE``; a REFER accepted with an application-placed call reports
+success to the transferor.
 """
 
 from __future__ import annotations

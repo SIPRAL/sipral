@@ -3,12 +3,9 @@
 
 """``Counters``: a stack's health counters, `sipral_counters_t` as Python.
 
-Read with :meth:`sipral.Stack.counters`. Every field only ever grows, except
-``active_calls``, which is a gauge. Sampled on a timer, the difference
-between two readings is the rate an application ships as telemetry: over UDP,
-``requests_retransmitted`` and ``responses_retransmitted`` climbing while
-calls still connect is a path losing packets before it loses calls
-(`docs/08-ffi.md`, "Limits, and what went out twice").
+Read with :meth:`sipral.Stack.counters`. All fields only grow except the
+``active_calls`` gauge; diff two samples for rates. Over UDP, rising
+retransmissions while calls still connect signal a lossy path early.
 """
 
 from __future__ import annotations

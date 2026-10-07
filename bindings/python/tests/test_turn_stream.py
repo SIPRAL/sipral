@@ -4,25 +4,15 @@
 """``turn_transport``: a TURN server reached over TCP, or over TLS, from a
 network that lets no UDP through to it (RFC 8656 Section 3.1).
 
-The server here is this test's own, on loopback, and it listens on a TCP
-port alone: nothing about the relay can reach it as a datagram. It frames
-what arrives the way RFC 8656 Section 12.5 and RFC 8489 Section 6.2.2
-describe -- a STUN message is twenty octets and its length, a channel
-message four and its length padded to whole words -- answers an
-unauthenticated Allocate with the 401 of the long-term mechanism and a
-signed one with a relay, and records every request with the connection it
-came on. The STUN Binding request that maps the media socket still goes
-over UDP, to the fake server `test_nat.py` already has: the mapping is the
-socket's own, and a stream's would describe another binding.
+The fake server listens on TCP only, frames per RFC 8656 Section 12.5 and
+RFC 8489 Section 6.2.2, runs the long-term 401 round and records each
+request with its connection. The Binding request still goes over UDP: the
+mapping belongs to the media socket, not to a stream.
 
-`TurnOverTcp` proves the connection is opened when the stack asks, carries
-the Allocate and its answer, carries the Refresh with a lifetime of zero
-when the stack closes -- on the connection the allocation was made on,
-since the server knows it by that connection -- and is closed after.
-`TurnOverTls` proves the handshake checks the server's certificate: a
-context that trusts the test's own self-signed certificate reaches the
-server and gets a relay, and the platform's default trust, which does not
-know that certificate, gets none -- and the call goes ahead without one.
+`TurnOverTcp`: the connection opens on request, carries the Allocate and,
+on close, the zero-lifetime Refresh on the same connection. `TurnOverTls`:
+a context trusting the self-signed certificate gets a relay; default trust
+gets none, and the call proceeds without it.
 """
 
 from __future__ import annotations
@@ -170,7 +160,7 @@ class _FakeTurnOverStream:
             return None
         msg_type = struct.unpack("!H", frame[0:2])[0]
         if msg_type & 0x0110 != 0x0000:
-            # an indication -- the keepalive -- or anything but a request
+            # An indication (keep-alive) or other non-request.
             return None
         method = _method(msg_type)
         transaction_id = frame[8:20]
@@ -233,9 +223,8 @@ class _FakeTurnOverStream:
 
 
 class _TwoStacks(unittest.IsolatedAsyncioTestCase):
-    """Alice behind a TURN server reached over ``TRANSPORT``, Bob with no
-    NAT handling at all; both on a routable address so that ICE has a host
-    candidate to gather."""
+    """Alice uses TURN over ``TRANSPORT``, Bob no NAT handling; both on a
+    routable address so ICE has a host candidate."""
 
     TRANSPORT = Transport.TCP
     PUBLIC = ("203.0.113.21", 40021)
@@ -251,9 +240,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
         if host is None:
             self.skipTest("no routable address on this machine for ICE to gather a host candidate from")
         self.host = host
-        # before any server exists: a TLS case skips here on a machine with
-        # no openssl, and a cleanup already registered would then close a
-        # server that was never made
+        # Before any server exists: a TLS case may skip here without openssl.
         certificate = self.certificate()
         self.stun = _FakeStunServer(*self.PUBLIC, host=host)
         self.turn = _FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate)
@@ -285,8 +272,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
         self.bob_stack.close()
 
     async def place(self):
-        """Alice calls Bob, and Bob answers: Alice's call, and what her
-        socket's `SIPRAL_EVENT_KIND_NAT_RELAY` said."""
+        """Connect the call; return it and Alice's NAT_RELAY event."""
         alice_account = self.alice_stack.add_account(
             "sip:alice@sipral.invalid", registrar_address=self.bob_stack.bind_address
         )
@@ -330,8 +316,7 @@ class TurnOverTcp(_TwoStacks):
             "an Allocate went as a datagram",
         )
 
-        # the call is closed and forgotten while the stack runs on: its relay
-        # still goes back on the connection, which then has nothing left
+        # The relay still goes back after the call is closed and forgotten.
         call.close()
         await self.until(lambda: any(lifetime == struct.pack("!I", 0) for _, lifetime in self.turn.refreshes()))
         given_back = [number for number, lifetime in self.turn.refreshes() if lifetime == struct.pack("!I", 0)]
@@ -341,8 +326,7 @@ class TurnOverTcp(_TwoStacks):
 
 
 def _self_signed(directory: str) -> tuple[str, str] | None:
-    """A certificate and key for :data:`_SERVER_NAME`, made with the
-    `openssl` command, or `None` where there is none."""
+    """A self-signed certificate and key via `openssl`, or `None`."""
     openssl = shutil.which("openssl")
     if openssl is None:
         return None
@@ -403,10 +387,8 @@ class TurnOverTls(_OverTls):
     async def test_a_server_the_context_vouches_for_gives_a_relay(self) -> None:
         started = asyncio.get_running_loop().time()
         _call, relay = await self.place()
-        # TLS 1.3 sends its session tickets after the handshake, and a
-        # read that waited on them for more would hold the poll thread --
-        # every timer, every datagram, every event of the stack -- for as
-        # long as the socket's timeout
+        # TLS 1.3 session tickets after the handshake must not block the
+        # poll thread for the socket timeout.
         self.assertLess(asyncio.get_running_loop().time() - started, 3.0, "the poll thread stalled on the connection")
         self.assertEqual(relay.fields["outcome"], NatRelay.ALLOCATED, relay.fields)
         self.assertEqual(self.turn.allocations(), [1])

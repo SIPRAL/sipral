@@ -3,13 +3,10 @@
 
 """``Stack``: one SIP endpoint, headless and in-process.
 
-This is the object an application actually reaches for. It owns the UDP
-socket signalling travels on, a background thread that drains
-`sipral_stack_poll` and the transport queues around it, and the
-`asyncio.Queue` events land on -- the layer `_sipral_cffi.py` (the raw
-`ffi`/`lib` pair, printed by `tools/abi-gen` from `crates/sipral-ffi`) is
-written against directly, the way `SipralAbi.swift` is the base the Swift
-package is written by hand against (`docs/08-ffi.md`, "Swift").
+It owns the signalling socket, a background thread that drains
+`sipral_stack_poll` and the transport queues, and the `asyncio.Queue`
+events land on. It is written directly against the raw `ffi`/`lib` pair
+in `_sipral_cffi.py`.
 """
 
 from __future__ import annotations
@@ -41,9 +38,8 @@ from .signalling import InviteLimit, TlsTrust, classify, connect
 
 __all__ = ["TRACE", "Stack", "features", "route_host"]
 
-#: The :mod:`logging` level a ``LogLevel.TRACE`` line is logged at: below
-#: ``logging.DEBUG``, which ``LogLevel.DEBUG`` takes, since a trace line holds
-#: a whole SIP message and wants turning on apart from the debug lines.
+#: The :mod:`logging` level for ``LogLevel.TRACE``, below ``logging.DEBUG``:
+#: a trace line holds a whole SIP message and is turned on separately.
 TRACE = 5
 
 _PYTHON_LEVELS = {
@@ -70,41 +66,34 @@ def _log_level_for(python_level: int) -> LogLevel:
 
 
 def features() -> Feature:
-    """What this build of the library has compiled in:
-    `sipral_capabilities_t::features`, as :class:`sipral.enums.Feature` bits.
+    """What this build of the library has compiled in, as
+    :class:`sipral.enums.Feature` bits.
 
-    ``Feature.AUDIO_DEVICE`` is set where the library can open the
-    platform's own audio devices (macOS, iOS, Windows) and clear where it
-    cannot (Linux, Android); a :class:`Stack` is created in device mode by
-    default exactly where it is set.
+    ``Feature.AUDIO_DEVICE`` is set on macOS, iOS and Windows, clear on
+    Linux and Android; a :class:`Stack` defaults to device mode where it is
+    set.
     """
     out = ffi.new("sipral_capabilities_t *")
     out.size = ffi.sizeof("sipral_capabilities_t")
     check(lib.sipral_capabilities(out), "sipral_capabilities")
     return Feature(int(out.features))
 
-#: `sipral_transmit_t` and `sipral_media_packet_t` both bound a single
-#: datagram at this many bytes (`SIPRAL_MEDIA_PACKET_BYTES`); a signalling
-#: message can be larger, so the transmit buffer below is a comfortable
-#: multiple of it rather than that same bound.
+#: A signalling message can exceed one media datagram, so the transmit
+#: buffer is larger than `SIPRAL_MEDIA_PACKET_BYTES`.
 _TRANSMIT_BYTES = 1 << 16
 _ADDRESS_BYTES = 128
-#: How long a write on a connection to the TURN server may wait for room
-#: before the connection is given up as dead, which loses the relay on it.
+#: How long a TURN write may wait for room before the connection, and the
+#: relay on it, is given up.
 _TURN_WRITE_PATIENCE = 5.0
-#: How long one attempt at the signalling connection may take, the TLS
-#: handshake included, and how long a write on it may wait for room.
+#: Bound on one signalling connect (TLS handshake included) and on a write.
 _SIGNALLING_PATIENCE = 5.0
-#: The wait before the first attempt to connect again after the signalling
-#: connection was lost, doubled after every attempt that fails, up to the
-#: second number: soon enough for a server restarting, not so often that a
-#: server refusing the certificate is asked every second for ever.
+#: Reconnect backoff, doubled per failure: quick for a restarting server,
+#: not every second for one that refuses the certificate.
 _RECONNECT_FIRST = 1.0
 _RECONNECT_MOST = 30.0
-#: The first number a connection this class opens for
-#: `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is bound at (``stream_fallback``), one
-#: more for each destination after it: well clear of `SIPRAL_TRANSPORT_MAIN`
-#: and of the small numbers an application driving `lib` itself would pick.
+#: First transport number for `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
+#: connections, clear of `SIPRAL_TRANSPORT_MAIN` and of small numbers an
+#: application driving `lib` itself would pick.
 _FIRST_STREAM = 1024
 
 
@@ -127,8 +116,7 @@ def parse_address(text: str) -> tuple[str, int]:
 
 
 def _is_address(text: str) -> bool:
-    """Whether ``text`` is ``host:port`` with an IP address for its host,
-    rather than a name."""
+    """Whether ``text`` is ``host:port`` with an IP address for its host."""
     try:
         host, _port = parse_address(text)
         ipaddress.ip_address(host.strip("[]"))
@@ -138,12 +126,10 @@ def _is_address(text: str) -> bool:
 
 
 def route_host(peer: str | None) -> str:
-    """The address of this machine's route toward ``peer`` (``host:port``),
-    the one a socket bound on every interface is reached at from there:
-    `sipral_advertised_address` for a wildcard bind. ``127.0.0.1`` when
-    there is no peer yet, it is a name rather than an address, or no route
-    reaches it -- the address that works for a peer on this machine and
-    that the library refuses to advertise to any other."""
+    """The address of this machine's route toward ``peer`` (``host:port``).
+
+    ``127.0.0.1`` when there is no peer, it is a name, or no route reaches
+    it; the library refuses to advertise that to any other machine."""
     if not peer or not _is_address(peer):
         return "127.0.0.1"
     wildcard = "[::]:0" if peer.startswith("[") else "0.0.0.0:0"
@@ -167,10 +153,9 @@ def _verdict(error: int) -> str:
 class _TurnStream:
     """One media socket's TCP or TLS connection to the TURN server.
 
-    Read by the poll thread alone, and written by it and by the call's
-    :class:`sipral.media.Media` thread: every operation on the socket holds
-    :attr:`lock`, since one TLS session read and written from two threads
-    at once is a session whose records interleave.
+    Written by the poll thread and the call's media thread, so every socket
+    operation holds :attr:`lock`: two threads on one TLS session interleave
+    its records.
     """
 
     def __init__(self, local: str, sock: socket.socket) -> None:
@@ -183,9 +168,8 @@ class _SipStream:
     """One TCP connection opened because a request was too large for a
     datagram (RFC 3261 Section 18.1.1), bound at :attr:`transport`.
 
-    Read and written by the poll thread; :attr:`lock` is still held for
-    every operation, since the thread that opened it hands it over while
-    the poll thread may already be writing to it.
+    :attr:`lock` is held for every operation: the opening thread hands it
+    over while the poll thread may already be writing.
     """
 
     def __init__(self, transport: int, destination: str, sock: socket.socket) -> None:
@@ -198,12 +182,9 @@ class _SipStream:
 class Stack:
     """One `sipral_stack_create` handle, its socket and its poll thread.
 
-    Built and torn down like the handle it wraps: :meth:`close` (also
-    reached through ``with Stack(...) as stack:``) calls
-    `sipral_stack_destroy` exactly once, and a stack a caller lets go of
-    without closing still does at garbage collection -- the deterministic
-    path is the one to prefer, since a stack still bound to a socket is a
-    port nothing else can use until Python's collector gets around to it.
+    :meth:`close` (or leaving ``with Stack(...) as stack:``) calls
+    `sipral_stack_destroy` exactly once; garbage collection does it for a
+    stack never closed. Prefer closing: until then the port stays bound.
     """
 
     def __init__(
@@ -258,223 +239,149 @@ class Stack:
         system_echo_cancellation: bool | None = None,
         held_audio: int = 0,
     ) -> None:
-        """See the class docstring for the socket and thread this owns.
+        """Create the stack, bind or connect its signalling, start polling.
 
-        ``bind_host`` is the address the signalling socket is bound at, and
-        the one this stack advertises. Left out, the socket listens on every
-        interface and the stack advertises the address of the operating
-        system's route toward the server of its first account
-        (`sipral_advertised_address`): the address a PBX on the network
-        reaches this machine at, and ``127.0.0.1`` for a server on this
-        machine. Each account the stack adds is reached at the route toward
-        its own server, and a call's media socket, when ``media_host`` is
-        left out, at the route toward the far end or the account's server.
-        A loopback address is never advertised to a peer that is not on this
-        machine: the library refuses that with
-        ``SIPRAL_STATUS_UNREACHABLE_ADDRESS``.
+        ``bind_host`` is where the signalling socket binds and what the stack
+        advertises. Left out, it listens on every interface and advertises
+        the route toward its first account's server
+        (`sipral_advertised_address`); each account, and each call's media
+        socket without ``media_host``, uses the route toward its own peer. A
+        loopback address is never advertised off this machine: the library
+        refuses with ``SIPRAL_STATUS_UNREACHABLE_ADDRESS``.
 
-        ``signalling`` is what SIP travels over, a
-        :class:`sipral.enums.Transport`: ``UDP`` (``0``, the default) on a
-        socket bound at ``bind_host``, or ``TCP`` or ``TLS`` on one
-        connection to ``signalling_server`` (``host:port`` -- the registrar
-        or the outbound proxy, 5061 for TLS by convention), which every
-        account and every call on this stack then shares, and on which the
-        server's own requests arrive. Over TLS the server's certificate is
-        checked against ``tls_server_name`` (the host part of
-        ``signalling_server`` when left out) with ``tls_trust``, a
-        :class:`sipral.signalling.TlsTrust`: the platform's authorities
-        when left out, a private authority beside them, or only one
-        authority -- `docs/22-tls.md` says what each checks. Nothing here
-        turns the check off.
+        ``signalling`` (:class:`sipral.enums.Transport`) is ``UDP`` (``0``,
+        default) on ``bind_host``, or ``TCP``/``TLS`` on one connection to
+        ``signalling_server`` (``host:port``, the registrar or outbound proxy)
+        shared by every account and call. Over TLS the certificate is checked
+        against ``tls_server_name`` (default: the host of
+        ``signalling_server``) with ``tls_trust``
+        (:class:`sipral.signalling.TlsTrust`, default the platform's
+        authorities; `docs/22-tls.md`). The check cannot be turned off.
 
-        The first connection is made here, before this returns. When it
-        fails, or later breaks, the stack is told why
-        (`sipral_stack_transport_failed_with`) and says so as
-        `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` on :attr:`events` -- untrusted,
-        a name that does not match, expired, a handshake refused, a server
-        that refused the connection -- and this class connects again, one
-        second after the loss and twice as long after each attempt that
-        fails, up to thirty seconds. Once connected again every account is
-        pointed at the new connection and registered again if it was
-        registering. :meth:`sipral.account.Account.register` asked while it
-        is down is kept for then; a call placed meanwhile raises
+        The first connection is made before this returns. When it fails or
+        breaks, the stack reports it as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`
+        on :attr:`events` and this class reconnects after one second,
+        doubling up to thirty. On reconnect every account is re-pointed and
+        re-registered if it was registering. :meth:`sipral.account.Account.register`
+        while down is deferred; a call placed meanwhile raises
         ``SIPRAL_STATUS_TRANSPORT_DOWN``.
 
-        ``invite_limit`` is how fast one address may ring this stack, an
-        :class:`sipral.signalling.InviteLimit`: ``InviteLimit.DEFAULT``
-        (what every stack starts with, ten INVITEs at once then one every
-        two seconds, past which a call is answered 480) or
-        ``InviteLimit.VOICE_AGENT`` for a service taking a trunk's calls.
+        ``invite_limit`` (:class:`sipral.signalling.InviteLimit`) is how fast
+        one address may ring this stack: ``DEFAULT`` (ten at once, then one
+        every two seconds, 480 past that) or ``VOICE_AGENT`` for a trunk.
 
-        ``audio`` is who pumps the calls' audio, an
-        :class:`sipral.enums.AudioMode`. ``AudioMode.DEVICE`` has the library
-        open the platform's own microphone and loudspeaker and run every
-        call through them -- the application writes no audio code at all,
-        and chooses devices, volume, mute and the ring through
-        :attr:`audio` -- and the packets it encodes still leave from each
-        call's own media socket, which this class sends for it.
-        ``AudioMode.APPLICATION`` leaves the frames to
-        :class:`sipral.media.Media` (:attr:`sipral.media.Media.frames` in,
-        :meth:`sipral.media.Media.send_audio` out): a voice agent, a
-        recorder, a machine with no sound device. Left out, it is
-        ``DEVICE`` where :func:`features` has ``Feature.AUDIO_DEVICE`` and
-        ``APPLICATION`` elsewhere; :attr:`audio_mode` says which this stack
-        got. Asking for ``DEVICE`` on a build without it raises
+        ``audio`` (:class:`sipral.enums.AudioMode`): ``DEVICE`` has the library
+        drive the platform microphone and loudspeaker for every call
+        (controlled through :attr:`audio`), the packets still leaving from
+        each call's media socket; ``APPLICATION`` leaves frames to
+        :class:`sipral.media.Media`. Default: ``DEVICE`` where :func:`features`
+        has ``Feature.AUDIO_DEVICE``, else ``APPLICATION``; :attr:`audio_mode`
+        says which. ``DEVICE`` on a build without it raises
         ``SIPRAL_STATUS_NOT_SUPPORTED``.
 
-        ``audio_activation`` (an :class:`sipral.enums.AudioActivation`) is
-        when device mode opens the devices: ``AUTOMATIC`` (``0``) with the
-        first call's media or the first ring, closed with the last;
-        ``MANUAL`` only between :meth:`sipral.audio.Audio.activate` and
-        :meth:`sipral.audio.Audio.deactivate`, whatever the calls do.
+        ``audio_activation`` (:class:`sipral.enums.AudioActivation`):
+        ``AUTOMATIC`` (``0``) opens the devices with the first call's media or
+        ring and closes them with the last; ``MANUAL`` only between
+        :meth:`sipral.audio.Audio.activate` and ``deactivate``.
         ``audio_probe_ms`` bounds every platform call (``0`` for three
-        seconds): a driver that does not answer is
-        ``SIPRAL_STATUS_DEVICE_TIMED_OUT``, not a hang.
-        ``audio_device_rate_hz`` is the rate the devices are asked for
-        (``0`` for 48 000).
+        seconds); a silent driver is ``SIPRAL_STATUS_DEVICE_TIMED_OUT``.
+        ``audio_device_rate_hz`` is the rate asked of the devices (``0`` for
+        48 000).
 
-        ``max_dialogs`` is the most calls the stack holds at once, either
-        way (``0`` for 128): one that arrives past it is answered 503, and
-        one placed past it raises ``SIPRAL_STATUS_LIMIT_REACHED``.
-        ``max_server_transactions`` is the most requests from other ends it
-        works on at once (``0`` for 256). ``diagnostic_decisions`` and
-        ``diagnostic_records`` bound the diagnostic record: decisions kept
-        per call (``0`` for 64) and calls kept (``0`` for 32).
+        ``max_dialogs`` (``0`` for 128): a call arriving past it is answered
+        503, one placed past it raises ``SIPRAL_STATUS_LIMIT_REACHED``.
+        ``max_server_transactions`` (``0`` for 256) bounds concurrent incoming
+        requests. ``diagnostic_decisions`` (``0`` for 64 per call) and
+        ``diagnostic_records`` (``0`` for 32 calls) bound the diagnostic record.
 
         ``ice`` and ``nat`` are :class:`sipral.enums.Ice` /
-        :class:`sipral.enums.Nat` values, or ``0`` for this build's own
-        default (`SIPRAL_ICE_OFF`, `SIPRAL_NAT_OFF` -- exactly today's
-        behaviour). ``Ice.LITE`` is for a server reachable at the address
-        it advertises and nowhere else: it answers a full ICE peer's checks
-        and never sends its own (`docs/06-nat.md`, "ICE-lite").
+        :class:`sipral.enums.Nat`, ``0`` for off. ``Ice.LITE`` suits a server
+        reachable only at its advertised address: it answers a full ICE
+        peer's checks and sends none (`docs/06-nat.md`, "ICE-lite").
 
-        ``referrals=True`` hands a REFER outside any dialog -- click-to-dial
-        from a switchboard -- to the application as
-        `SIPRAL_EVENT_KIND_REFERRAL`, to take with :meth:`accept_referral`
-        or refuse with :meth:`reject_referral`. Off by default, when every
-        one is refused 403: a peer that can make a phone dial is a
-        toll-fraud vector, so each one is the application's decision.
+        ``referrals=True`` delivers an out-of-dialog REFER (click-to-dial) as
+        `SIPRAL_EVENT_KIND_REFERRAL`, to :meth:`accept_referral` or
+        :meth:`reject_referral`. Off by default, refused 403: a peer that can
+        make the phone dial is a toll-fraud vector.
 
-        ``registrar_keepalive`` keeps the registrar's flow open behind a
-        NAT: every account ``stun_server`` showed to be behind one sends its
-        registrar a double CRLF every ``registrar_keepalive_ms`` (``0`` for
-        25 seconds, 1 000 to 120 000), so that a NAT filtering by address
-        and port still lets the registrar's INVITE in minutes after the
-        REGISTER. On by default; ``False`` turns it off, and an interval
-        with it off is refused. Nothing is sent while the stack is
-        suspended.
+        ``registrar_keepalive`` (on by default): each account found behind a
+        NAT via ``stun_server`` sends its registrar a double CRLF every
+        ``registrar_keepalive_ms`` (``0`` for 25 s, 1 000 to 120 000), so a
+        port-filtering NAT still lets the registrar's INVITE in. An interval
+        with it off is refused. Nothing is sent while suspended.
 
-        ``stun_fallbacks`` are the STUN servers to turn to, in order, when
-        ``stun_server`` does not answer in five and a half seconds or answers
-        without an address, each ``host:port``: every socket asking the one
-        that failed moves to the next at once, the one that failed is passed
-        over for thirty seconds and twice as long each time it fails again,
-        up to ten minutes, and `SIPRAL_EVENT_KIND_STUN_SERVER` says when the
-        server in use moves or every one has failed.
+        ``stun_fallbacks`` (``host:port``, in order) are used when
+        ``stun_server`` gives no address within 5.5 s. A failed server is
+        skipped for 30 s, doubling up to ten minutes;
+        `SIPRAL_EVENT_KIND_STUN_SERVER` reports each move or total failure.
 
-        ``nat=Nat.STUN`` needs ``stun_server`` as ``host:port``;
-        ``turn_server`` rides on it and needs ``turn_username`` and
-        ``turn_password`` with it (`docs/06-nat.md`, `docs/08-ffi.md`
-        "Behind a NAT"). The TURN credentials are copied into the library
-        and kept out of every log, event and error this package raises --
-        neither is in `repr(stack)` (there is none) or anywhere else this
-        module writes text.
+        ``nat=Nat.STUN`` needs ``stun_server``; ``turn_server`` needs it plus
+        ``turn_username`` and ``turn_password`` (`docs/06-nat.md`). The TURN
+        credentials are copied into the library and never appear in any log,
+        event or error.
 
-        ``turn_transport`` is a :class:`sipral.enums.Transport` --
-        ``Transport.TCP`` for a network that lets no UDP out,
-        ``Transport.TLS`` for one that lets one port out (5349 is TURN's) --
-        or ``0`` for UDP (RFC 8656 Section 3.1). Over either this stack opens
-        one connection per media socket, when
-        `SIPRAL_EVENT_KIND_TURN_STREAM` asks, and carries everything for the
-        relay on it. Over TLS the server's certificate is checked against
-        ``turn_server_name`` -- the host part of ``turn_server`` when left
-        out, which for an address is an IP-address certificate -- with
-        ``turn_tls_context``, or with the platform's default trust when none
-        is given: a context built with ``cafile=`` trusts a private CA or a
-        self-signed certificate, and nothing here ever turns checking off.
+        ``turn_transport`` (:class:`sipral.enums.Transport`): ``TCP`` for a
+        network without UDP out, ``TLS`` for one open port (5349), ``0`` for
+        UDP (RFC 8656 Section 3.1). Streamed, one connection per media socket
+        is opened when `SIPRAL_EVENT_KIND_TURN_STREAM` asks. Over TLS the
+        certificate is checked against ``turn_server_name`` (default: the host
+        of ``turn_server``, so an IP certificate for an address) with
+        ``turn_tls_context`` or the platform trust; checking cannot be off.
 
-        ``rtp_port_min`` and ``rtp_port_max`` are the range a firewall in
-        front of this machine was opened for: every media socket this class
-        opens without an explicit port then binds an even port from it,
-        reserved with `sipral_stack_rtp_port_reserve`, with the odd one above
-        it kept for RTCP (RFC 3550 Section 11), and a call is refused a port
-        outside it. Both ``0`` -- the default -- leaves the ports to the
-        operating system. Every pair taken raises
-        ``SIPRAL_STATUS_EXHAUSTED`` rather than binding outside the range.
+        ``rtp_port_min``/``rtp_port_max`` restrict media sockets without an
+        explicit port to even ports from that range
+        (`sipral_stack_rtp_port_reserve`), the odd one above kept for RTCP
+        (RFC 3550 Section 11). Both ``0`` (default) leaves ports to the OS.
+        An exhausted range raises ``SIPRAL_STATUS_EXHAUSTED``.
 
-        ``stream_fallback`` is what a stack signalling over UDP does when a
-        request is too large for a datagram -- nearly always the answer to a
-        challenge, whose ``Authorization`` takes a call offering two SRTP
-        suites past RFC 3261 Section 18.1.1's 1300 bytes. On (the default),
-        `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered by opening a TCP
-        connection to the address it names -- the registrar or proxy the
-        request was going to, on the same port -- and binding it
-        (`sipral_stack_transport_bind`): the request the stack was holding
-        goes on it, and the call or registration carries on over it. When
-        that connection is refused or times out, or with ``False``, the
-        stack is told at once (`sipral_stack_transport_failed_with`, whose detail
-        names where the connection was going and whether it was refused,
-        timed out or not tried), and what
-        was waiting ends rather than hanging: a call as unreachable, its
-        `cause_sip` 513 and its `cause_text` naming the size and the limit.
-        The event reaches :attr:`events` either way. ``stream_server``
-        (``host:port``) is where that connection goes instead, for a server
-        that takes TCP on another port than UDP -- a PBX on 5060 for one and
-        5160 for the other: the connection stands for the address the event
-        named, and everything the stack sends there goes on it.
+        ``stream_fallback`` handles a request too large for a UDP datagram
+        (RFC 3261 Section 18.1.1, typically a challenge answer with two SRTP
+        suites). On (default), `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` opens a
+        TCP connection to the named address and binds it
+        (`sipral_stack_transport_bind`); the held request goes on it. When the
+        connection fails, or with ``False``, the stack is told at once
+        (`sipral_stack_transport_failed_with`) and the waiting call ends as
+        unreachable with `cause_sip` 513 and a `cause_text` naming size and
+        limit. The event reaches :attr:`events` either way. ``stream_server``
+        (``host:port``) redirects that connection, for a server with TCP on
+        another port than UDP.
 
-        ``dtmf_detection`` (a :class:`sipral.enums.DtmfDetection`) is when a
-        call listens for keypad digits in the far end's audio: ``AUTO``
-        (``0``) on the calls that negotiated no telephone event, ``ALWAYS``
-        or ``OFF``; :meth:`sipral.call.Call.set_dtmf_detection` changes it
-        for one call.
+        ``dtmf_detection`` (:class:`sipral.enums.DtmfDetection`): ``AUTO``
+        (``0``) listens for in-band digits on calls without telephone events,
+        or ``ALWAYS``/``OFF``; :meth:`sipral.call.Call.set_dtmf_detection`
+        overrides per call.
 
-        ``srtp`` may be ``SIPRAL_SRTP_BEST_EFFORT`` (:class:`sipral.enums.Srtp`):
-        SDES offered on plain ``RTP/AVP``, the call encrypted when the answer
-        takes a key and plain when it takes none, for a PBX that answers an
-        ``RTP/SAVP`` offer with 488. ``srtp_suites`` are the SRTP suites
-        every call offers and accepts unless its account names its own, most
-        preferred first, by their RFC 4568 and RFC 7714 names.
+        ``srtp=SIPRAL_SRTP_BEST_EFFORT`` (:class:`sipral.enums.Srtp`) offers
+        SDES on plain ``RTP/AVP``, for a PBX that answers ``RTP/SAVP`` with
+        488. ``srtp_suites`` are offered and accepted unless an account names
+        its own, most preferred first, by RFC 4568 / RFC 7714 names.
 
-        ``path_mtu`` is the MTU of the path toward the server when the
-        deployment knows it (``0`` for unknown, else 576 or more): RFC 3261
-        Section 18.1.1 moves a request to a stream within 200 bytes of it.
-        ``datagram_without_stream_bytes`` is a deliberate deviation from
-        that section, for a server that takes SIP over UDP alone: once no
-        stream to it can be had -- ``stream_fallback`` off, or the
-        connection refused -- a request up to this many bytes goes over UDP
-        anyway (``0`` for never, at most 65 507), and the call's diagnostic
-        record says so as ``transport.kept.datagram``.
+        ``path_mtu`` (``0`` unknown, else 576 or more): RFC 3261 Section 18.1.1
+        moves a request to a stream within 200 bytes of it.
+        ``datagram_without_stream_bytes`` deliberately deviates from that
+        section for UDP-only servers: when no stream can be had, requests up to
+        this size still go over UDP (``0`` never, at most 65 507), recorded as
+        ``transport.kept.datagram``.
 
-        ``pseudonym_salt`` (16 bytes or more, kept by the installation) keys
-        the pseudonyms the log and :meth:`state` write, so that two runs'
-        traces compare line by line; a secret, like a key. ``diagnostic_trace``
-        writes whole SIP messages at the trace level, peers included and
-        credentials and keys taken out, for a diagnosis;
-        :meth:`set_diagnostic_trace` turns it on and off later.
+        ``pseudonym_salt`` (16+ bytes, a secret) keys the pseudonyms in logs
+        and :meth:`state` so traces from two runs compare.
+        ``diagnostic_trace`` logs whole SIP messages at trace level,
+        credentials and keys removed; :meth:`set_diagnostic_trace` toggles it.
 
-        ``system_echo_cancellation`` ``False`` opens the devices of a stack in
-        device mode past the platform's echo cancellation, gain control and
-        noise suppression, for a headset, which has no echo to cancel, or an
-        application that cancels it on each call itself; Linux has none to
-        turn off. :meth:`sipral.audio.Audio.info` says what the platform did.
+        ``system_echo_cancellation=False`` opens devices without the platform's
+        echo cancellation, gain control and noise suppression (headset, or the
+        application cancels itself); Linux has none.
+        :meth:`sipral.audio.Audio.info` says what the platform did.
 
-        ``held_audio`` is a :class:`sipral.enums.HeldAudio`: what a party
-        this end holds is sent while the hold lasts. ``DEFAULT`` and
-        ``SILENCE`` are silence in either mode, since in application mode too
-        the frames sent may be a microphone's; ``APPLICATION`` sends the
-        frames the application sends -- hold music, an announcement, a voice
-        agent's own speech.
+        ``held_audio`` (:class:`sipral.enums.HeldAudio`) is what a party this
+        end holds hears. ``DEFAULT``/``SILENCE`` send silence in either mode,
+        since application frames may be a microphone; ``APPLICATION`` sends
+        the application's frames (music, announcement, agent speech).
 
-        ``resolver`` answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
-        accounts added with ``server_uri``, on a thread of its own, one per
-        lookup: a callable taking the name and the record type
-        (:class:`sipral.enums.DnsRecordType`) and returning a
-        :class:`sipral.enums.DnsAnswer` and the records
-        (:data:`sipral.locate.Resolver`). Left out, it is
-        :func:`sipral.locate.lookup`, the platform's own address lookup,
-        which has no SRV or NAPTR: an application whose server publishes SRV
-        records passes a resolver that reads them (dnspython's, say).
+        ``resolver`` (:data:`sipral.locate.Resolver`) answers
+        `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for ``server_uri`` accounts, one
+        thread per lookup. Default :func:`sipral.locate.lookup` has no SRV or
+        NAPTR; pass one that does (dnspython's) for servers that publish SRV.
         """
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
@@ -491,58 +398,45 @@ class Stack:
         #: Every media socket's open connection to the TURN server, by the
         #: socket's `host:port`, under :attr:`_nat_lock`.
         self._turn_streams: dict[str, _TurnStream] = {}
-        #: What `SIPRAL_EVENT_KIND_TURN_STREAM` asked for during the poll
-        #: that raised it -- nothing may call back into the stack from
-        #: inside its own callback -- acted on right after that poll.
+        #: `SIPRAL_EVENT_KIND_TURN_STREAM` requests, acted on after the poll:
+        #: nothing may call back into the stack from inside its callback.
         self._turn_asked: list[tuple[int, str, str, int]] = []
-        #: Every call's media socket, by the call's handle, for as long as
-        #: the socket's connection to the TURN server stands: a call's last
-        #: farewell -- the Refresh that gives its relay back -- can come
-        #: after the :class:`Call` was closed and forgotten, and still goes
-        #: on that connection. Under :attr:`_nat_lock`.
+        #: Media socket per call handle while its TURN connection stands: the
+        #: Refresh that frees the relay can come after the :class:`Call` is
+        #: closed. Under :attr:`_nat_lock`.
         self._turn_sockets: dict[int, str] = {}
         self._turn_streamed = turn_transport in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS)
         #: Whether a request too large for a datagram gets a connection.
         self._stream_fallback = stream_fallback
         #: Where such a connection goes, when not to the address asked for.
         self._stream_server = parse_address(stream_server) if stream_server else None
-        #: Where `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for a stream,
-        #: during the poll that raised it, acted on right after that poll.
+        #: Stream requests and failed transports from one poll, acted on
+        #: right after it.
         self._streams_asked: list[dict] = []
-        #: The transport numbers `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` named
-        #: during that same poll, acted on at the same moment.
         self._streams_let_go: list[int] = []
-        #: Whether that same poll named the main transport of a stack that
-        #: signals over TCP or TLS: the stack retires a connection that stopped
-        #: answering keep-alives (RFC 5626 Section 4.4.1) with its socket still
-        #: open here, and nothing is sent on it again until a new one is bound.
+        #: The stack retired the main TCP/TLS connection (keep-alives
+        #: unanswered, RFC 5626 Section 4.4.1): nothing goes on it until a
+        #: new one is bound.
         self._main_let_go = False
-        #: Every connection opened for one, by the transport number it is
-        #: bound at, and the destinations a connection is being opened to;
-        #: both under :attr:`_stream_lock`.
+        #: Open stream connections by transport number, and destinations
+        #: being connected; both under :attr:`_stream_lock`.
         self._stream_lock = threading.Lock()
         self._sip_streams: dict[int, _SipStream] = {}
         self._streams_opening: set[str] = set()
         self._next_stream = _FIRST_STREAM
 
-        #: Media sockets currently named with `sipral_stack_nat_map`, keyed
-        #: by their own `host:port` text -- from that call until either
-        #: `SIPRAL_EVENT_KIND_MEDIA_STARTED` hands the socket to
-        #: :class:`sipral.media.Media` or the call gives up on it. Written
-        #: from the calling thread (:meth:`_map_media_socket`,
-        #: :meth:`_release_stun_socket`) and read from the poll thread
-        #: (:meth:`_run`, :meth:`_drain_stun`); :attr:`_nat_lock` covers
+        #: Media sockets named with `sipral_stack_nat_map`, by `host:port`,
+        #: until `SIPRAL_EVENT_KIND_MEDIA_STARTED` hands them to
+        #: :class:`sipral.media.Media` or the call drops them. Written by the
+        #: caller's thread, read by the poll thread; :attr:`_nat_lock` covers
         #: this and the two dicts below.
         self._nat_lock = threading.Lock()
         self._stun_sockets: dict[str, socket.socket] = {}
         #: The probe socket of every network test under way, by its number.
         self._probes: dict[int, tuple[str, socket.socket]] = {}
-        #: Per socket, one `threading.Event` for `SIPRAL_EVENT_KIND_NAT_MAPPING`
-        #: and one for `SIPRAL_EVENT_KIND_NAT_RELAY` -- a stack built with
-        #: `turn_server` waits out both before a call may be placed or
-        #: answered on the socket (`sipral_call_place`'s own
-        #: `SIPRAL_STATUS_WRONG_STATE` for one that has not), a stack
-        #: without it only the first.
+        #: Per socket, events for the NAT mapping and (with TURN) the relay:
+        #: a call on the socket waits for them, or the library answers
+        #: `SIPRAL_STATUS_WRONG_STATE`.
         self._nat_waiters: dict[str, dict[str, threading.Event]] = {}
 
         signalling = signalling or lib.SIPRAL_TRANSPORT_UDP
@@ -554,22 +448,17 @@ class Stack:
         self.signalling = signalling
         self._streamed = signalling != lib.SIPRAL_TRANSPORT_UDP
         self._bind_host = bind_host
-        #: Whether this class picks the address peers reach this stack at --
-        #: no ``bind_host`` was given, and it keeps picking across every
-        #: :meth:`move_to` -- and whether it has picked it yet: the route
-        #: toward the first server an account names, since creation or since
-        #: the network last moved it.
+        #: No ``bind_host``: this class picks the advertised address (the
+        #: route toward the first account's server), again after each
+        #: :meth:`move_to`.
         self._routes = bind_host is None
         self._route_chosen = not self._routes or self._streamed or stream_server is not None
         self._resolver = resolver or lookup
-        #: What `SIPRAL_EVENT_KIND_LOOKUP_WANTED` asked during the poll that
-        #: raised it, and what `SIPRAL_EVENT_KIND_LOCATED` found, acted on
-        #: right after that poll.
+        #: Lookups asked and locations found during a poll, acted on after it.
         self._lookups_asked: list[tuple[int, str, int]] = []
         self._located: list[tuple[int, str]] = []
-        #: The signalling connection, when there is one, and the lock every
-        #: read and write on it holds: one TLS session read and written from
-        #: two threads at once is a session whose records interleave.
+        #: The signalling connection; every read and write holds the lock
+        #: so TLS records from two threads do not interleave.
         self._link: socket.socket | None = None
         self._link_lock = threading.Lock()
         self._reconnecting = False
@@ -581,9 +470,8 @@ class Stack:
             else None
         )
         self._tls_pin = tls_trust.pin if tls_trust is not None else None
-        #: What a TLS connection of an account's own trusts when the account
-        #: pins nothing, and the name it is opened under (the server's host
-        #: when ``None``).
+        #: Trust and server name for an account's own TLS connection when the
+        #: account pins nothing.
         self._tls_trust = tls_trust or TlsTrust.platform()
         self._given_tls_server_name = tls_server_name
         self._first_failure: tuple[int, int, str] | None = None
@@ -603,12 +491,10 @@ class Stack:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.bind((bind_host if bind_host is not None else "0.0.0.0", bind_port))
         self._chosen_port = bind_port
-        #: Whether the last :meth:`move_to` that bound the UDP signalling
-        #: socket again kept its port -- ``bind_port``, or the port in use
-        #: when that was 0. ``False`` when another socket held that port at
-        #: the new address and the system chose one instead, which
-        #: :attr:`bind_address` then names: a peer or a firewall rule that
-        #: only knows the old port has to be told. ``True`` before any move.
+        #: Whether the last :meth:`move_to` kept the UDP signalling port.
+        #: ``False`` when it was taken at the new address and the system chose
+        #: another (see :attr:`bind_address`); a peer or firewall rule knowing
+        #: only the old port has to be told. ``True`` before any move.
         self.kept_signalling_port = True
         if not self._streamed:
             self._socket.setblocking(False)
@@ -619,10 +505,8 @@ class Stack:
 
         self._origin = time.monotonic()
 
-        # Kept alive on the instance: cffi frees a callback's trampoline
-        # once nothing in Python still references it, and C would be
-        # calling into freed memory on the very next event if this were a
-        # local instead.
+        # Kept on the instance: cffi frees a callback's trampoline once
+        # Python drops it, and C would call freed memory.
         self._callback = ffi.callback("void(const sipral_event_t *, void *)")(
             self._on_event
         )
@@ -631,25 +515,18 @@ class Stack:
             audio = AudioMode.DEVICE if Feature.AUDIO_DEVICE in features() else AudioMode.APPLICATION
         #: Who pumps this stack's audio, an :class:`sipral.enums.AudioMode`.
         self.audio_mode = AudioMode(audio)
-        #: The library's audio engine: devices, roles, gain, mute, the meter,
-        #: activation and the ring (device mode; see :class:`sipral.audio.Audio`).
+        #: The library's audio engine in device mode (:class:`sipral.audio.Audio`).
         self.audio = Audio(self)
-        #: Connections to the TURN server a write from the engine's thread
-        #: found broken, told to the stack from the poll thread: the engine's
-        #: thread must not call back into the stack.
+        #: TURN connections the engine's thread found broken, reported from
+        #: the poll thread: the engine's thread must not call into the stack.
         self._turn_lost: list[str] = []
-        # Kept alive on the instance for the same reason as the event
-        # callback; the engine calls it from its own thread, once per packet.
+        # Kept alive like the event callback; called on the engine's thread.
         self._audio_transmit = ffi.callback("void(const sipral_audio_transmit_t *, void *)")(
             self._on_audio_transmit
         )
 
-        # Everything else here is read once, inside `sipral_stack_create`,
-        # and never touched again (`docs/08-ffi.md` calls a struct like
-        # this one "versioned" precisely because the library copies what
-        # it needs out of it before answering) -- so a local `char[]`/
-        # `uint8_t[]` that outlives the call and nothing longer is enough;
-        # nothing here has to be kept on `self`.
+        # The library copies the config during `sipral_stack_create`, so
+        # these buffers need only outlive the call.
         bind_address = ffi.new("char[]", self.bind_address.encode("utf-8"))
         user_agent_buf = ffi.new("char[]", user_agent.encode("utf-8")) if user_agent else None
         codecs_buf = ffi.new("char[]", codecs.encode("utf-8")) if codecs else None
@@ -741,16 +618,14 @@ class Stack:
         config.held_audio = int(held_audio)
         #: The RTP port range media sockets are bound in, or ``None``.
         self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
-        #: Every callback `sipral_stack_log` was given, kept alive here for
-        #: the reason the event callback is.
+        #: Callbacks given to `sipral_stack_log`, kept alive.
         self._log_callbacks: list = []
 
         out_stack = ffi.new("sipral_handle_t *")
         try:
             check(lib.sipral_stack_create(config, out_stack), "sipral_stack_create")
         except Exception:
-            # refused -- device mode on a build with no backend for this
-            # platform, say -- so the socket bound above has nothing to serve
+            # e.g. device mode without a backend here: release the socket
             if self._socket is not None:
                 self._socket.close()
             if self._link is not None:
@@ -798,26 +673,18 @@ class Stack:
         self.close()
 
     def __del__(self) -> None:
-        # A safety net, not the intended path: see the class docstring.
         try:
             self.close()
         except Exception:  # noqa: BLE001 -- never raise out of __del__
             pass
 
     def now_ms(self) -> int:
-        """Elapsed milliseconds since this stack was created.
-
-        `sipral_stack_create` fixed its own origin at that same moment
-        (`crates/sipral-ffi/src/stack.rs`), so a reading taken from here
-        a few milliseconds later is exactly the figure every entry point
-        below expects `now_ms` to be.
-        """
+        """Milliseconds since creation: the `now_ms` every entry point takes."""
         return int((time.monotonic() - self._origin) * 1000)
 
     def settings(self) -> Settings:
-        """What the stack runs with, every default filled in
-        (`sipral_stack_settings`), with the SRTP suites its calls offer in
-        order (`sipral_stack_srtp_suite_order`)."""
+        """The settings in effect, defaults filled in, with the SRTP suites
+        in offer order."""
         raw = ffi.new("sipral_stack_settings_t *")
         raw.size = ffi.sizeof("sipral_stack_settings_t")
         _retry(lambda: lib.sipral_stack_settings(self.handle, raw), "sipral_stack_settings")
@@ -831,21 +698,17 @@ class Stack:
         return Settings.read(raw, [int(suites[i]) for i in range(count)])
 
     def set_diagnostic_trace(self, on: bool) -> None:
-        """`sipral_stack_diagnostic_trace`: whether the trace level writes
-        every SIP message whole, with its peer, from now on -- credentials
-        and keys taken out either way -- or pseudonymised, as it does by
-        default. Nothing is written unless the log is at
-        ``LogLevel.TRACE``."""
+        """Whether trace-level logging writes SIP messages whole, with peers,
+        instead of pseudonymised (the default). Credentials and keys are
+        removed either way; needs the log at ``LogLevel.TRACE``."""
         _retry(
             lambda: lib.sipral_stack_diagnostic_trace(self.handle, _toggle(on)),
             "sipral_stack_diagnostic_trace",
         )
 
     def _advertise_toward(self, peer: str) -> str:
-        """The ``host:port`` an account whose server is ``peer`` is reached
-        at, on a stack that picks its own address: the route toward the
-        server, on this stack's port. The first server named also becomes
-        the address the stack's `Via` carries."""
+        """The route toward ``peer`` on this stack's port; the first one
+        also becomes the stack's `Via` address."""
         port = parse_address(self.bind_address)[1]
         address = format_address(route_host(peer), port)
         if not self._route_chosen:
@@ -855,8 +718,7 @@ class Stack:
         return address
 
     def _advertise_main(self, address: str) -> None:
-        """The UDP transport the stack writes in its `Via` named ``address``
-        from now on, on a stack that picks its own address."""
+        """Make ``address`` the one the stack's `Via` carries."""
         local = address.encode("utf-8")
         _retry(
             lambda: lib.sipral_stack_transport_bind(
@@ -909,85 +771,62 @@ class Stack:
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
 
-        ``realms`` are the realms the password answers (RFC 3261 Section
-        22.1). Left out, the account answers the realm its server first
-        challenges it with and every realm its REGISTERs are challenged
-        with, and no other; an SBC or outbound proxy at the server's address
-        that challenges calls under a realm of its own needs both named. A
-        challenge the password is not for is not answered, and
-        `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` says who asked and why:
-        ``fields["refusal"]`` (a :class:`sipral.enums.ChallengeRefusal`),
-        ``fields["server"]`` and ``fields["realms"]``.
+        ``realms`` the password answers (RFC 3261 Section 22.1). Left out: the
+        realm the server first challenges with plus every REGISTER realm; an
+        SBC challenging calls under its own realm needs both named. Other
+        challenges go unanswered, reported as
+        `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` with ``fields["refusal"]``
+        (:class:`sipral.enums.ChallengeRefusal`), ``"server"`` and ``"realms"``.
 
-        ``srtp`` is a `SIPRAL_SRTP_*` every call of this account is held to,
-        over the stack's own -- a call may ask for more and never for less
-        -- and ``srtp_suites`` the suites those calls run, most preferred
-        first, by their RFC 4568 and RFC 7714 names. ``stir_verification`` is
-        a :class:`sipral.enums.StirVerification`: what the account does with
-        the `Identity` of the calls it receives, once :meth:`stir` gave the
-        stack trust anchors. ``stir_key`` (a P-256 key: the bare 32 bytes, or
-        SEC1 or PKCS #8 in DER or PEM) with ``stir_certificate_url`` signs
-        every call the account places (RFC 8224), as ``stir_orig`` or the
-        number in ``aor``, claiming ``stir_attestation`` (a
-        :class:`sipral.enums.Attestation`, ``NONE`` for A) and
-        ``stir_origid``. A PASSporT carries the time, which :meth:`stir`
-        gives the stack: call it first, with ``None`` for anchors on a stack
-        that only signs. ``recording_in_clear`` lets the account's encrypted
-        calls be recorded to a recording server as plain RTP; left off, their
-        copies go as SRTP or not at all (RFC 7866 §12.2).
+        ``srtp`` is a floor over the stack's own (a call may ask for more,
+        never less); ``srtp_suites`` by RFC 4568 / RFC 7714 name, most
+        preferred first. ``stir_verification``
+        (:class:`sipral.enums.StirVerification`) applies to incoming
+        `Identity` once :meth:`stir` set anchors. ``stir_key`` (P-256: bare 32
+        bytes, or SEC1/PKCS #8 in DER or PEM) with ``stir_certificate_url``
+        signs every outgoing call (RFC 8224) as ``stir_orig`` or the number in
+        ``aor``, with ``stir_attestation`` (:class:`sipral.enums.Attestation`,
+        ``NONE`` for A) and ``stir_origid``. Call :meth:`stir` first (anchors
+        ``None`` to only sign): it gives the stack the clock.
+        ``recording_in_clear`` lets encrypted calls be recorded as plain RTP;
+        otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
 
-        ``session_timer`` is an :class:`sipral.enums.SessionTimer`: ``0`` for
-        the stack's default, ``OFF``, or ``INTERVAL`` with
-        ``session_interval_seconds`` (90 or more, RFC 4028). ``privacy`` is
-        :class:`sipral.enums.Privacy` bits every call this account places
-        asks for (RFC 3323) -- ``Privacy.ID`` places them anonymous in
-        `From`. ``trusted_peers`` are the addresses (IP literals, a list or
-        one comma-separated string) whose `P-Asserted-Identity` this account
-        believes and toward which alone it asserts its own (RFC 3325): an
-        incoming call from anywhere else carries no asserted identity, and
-        :attr:`sipral.events.Event.identity` says which it was.
+        ``session_timer`` (:class:`sipral.enums.SessionTimer`): ``0`` default,
+        ``OFF``, or ``INTERVAL`` with ``session_interval_seconds`` (90+,
+        RFC 4028). ``privacy`` (:class:`sipral.enums.Privacy`, RFC 3323):
+        ``Privacy.ID`` places calls anonymous in `From`. ``trusted_peers`` (IP
+        literals, list or comma-separated) are the only peers whose
+        `P-Asserted-Identity` is believed and to whom ours is sent (RFC 3325);
+        :attr:`sipral.events.Event.identity` tells which.
 
-        ``registrar`` left out makes an account that never registers --
-        `docs/08-ffi.md`'s "An account with no registrar never registers"
-        -- with ``registrar_address`` as the outbound proxy every request
-        it places still goes to; two stacks on loopback that want to call
-        each other directly, with no registrar between them at all, each
-        add one account this way, pointed at the other's own
-        :attr:`bind_address`.
+        Without ``registrar`` the account never registers; ``registrar_address``
+        is still its outbound proxy. Two loopback stacks calling directly each
+        add such an account pointed at the other's :attr:`bind_address`.
 
-        ``server_uri`` names the server by a URI whose host RFC 3263 locates
-        -- ``sip:pbx.example.com``, ``sips:example.com:5061`` -- in place of
-        ``registrar_address``: exactly one of the two is given. The lookups
-        are answered with this stack's ``resolver``;
-        `SIPRAL_EVENT_KIND_LOCATED` says where the server was found, and
-        `SIPRAL_EVENT_KIND_LOCATE_FAILED` why not. A REGISTER waits for the
-        first answer, and a call placed before it with no ``destination``
-        raises ``SIPRAL_STATUS_WRONG_STATE``. ``server_naptr`` asks the
-        domain for NAPTR records before SRV (RFC 3263 Section 4.1).
+        ``server_uri`` (``sip:pbx.example.com``, ``sips:example.com:5061``) is
+        located per RFC 3263 with the stack's ``resolver``, instead of
+        ``registrar_address``: give exactly one. `SIPRAL_EVENT_KIND_LOCATED`
+        and `SIPRAL_EVENT_KIND_LOCATE_FAILED` report the result. A REGISTER
+        waits for it; a call without ``destination`` before then raises
+        ``SIPRAL_STATUS_WRONG_STATE``. ``server_naptr`` queries NAPTR before
+        SRV (RFC 3263 Section 4.1).
 
-        ``keepalive_ms`` keeps the account's flow to its server open at that
-        interval whatever STUN found -- a double CRLF on UDP, a ping on a
-        stream -- for a NAT that forgets a flow sooner than the REGISTER
-        refresh comes round: 1 000 to 120 000, ``0`` for never.
+        ``keepalive_ms`` (1 000 to 120 000, ``0`` never) keeps the flow open
+        regardless of STUN (CRLF on UDP, ping on a stream), for a NAT that
+        forgets sooner than the REGISTER refresh.
 
-        ``tls_pin`` is the SHA-256 fingerprint of the one TLS certificate
-        the account trusts, in the forms :meth:`TlsTrust.pinned` takes, for
-        an application that runs the account's TLS itself:
-        :meth:`sipral.account.Account.check_certificate` is its verdict on a
-        certificate a server presented.
+        ``tls_pin`` is the SHA-256 fingerprint of the one certificate trusted
+        (forms as :meth:`TlsTrust.pinned`), for an application running the
+        account's TLS itself; :meth:`sipral.account.Account.check_certificate`
+        judges a presented certificate.
 
-        ``stream_protocol`` (``Transport.TCP`` or ``Transport.TLS``) puts the
-        account on a connection of its own to its server, beside accounts on
-        this stack's UDP socket to other servers, in one stack with one
-        audio engine: the stack asks for the connection
-        (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, nothing outgrown), this stack
-        opens it to the account's server whatever ``stream_fallback`` says
-        and binds it, and the REGISTER and every call of the account go over
-        it. A TLS one is held to ``tls_pin`` when the account has one, to the
-        stack's ``tls_trust`` otherwise, under ``tls_server_name`` or the
-        server's host. One that closes is opened again. Until it is open a
-        call the account places raises ``SIPRAL_STATUS_TRANSPORT_DOWN``. Only
-        on a stack that signals over UDP.
+        ``stream_protocol`` (``Transport.TCP``/``TLS``, UDP stacks only) gives
+        the account its own connection to its server, beside UDP accounts on
+        the same stack. This class opens it on
+        `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` regardless of ``stream_fallback``
+        and reopens it when it closes; TLS is checked against ``tls_pin`` or
+        the stack's ``tls_trust``. Until open, a call raises
+        ``SIPRAL_STATUS_TRANSPORT_DOWN``.
         """
         if (registrar_address is None) == (server_uri is None):
             raise ValueError("an account names its server by registrar_address or by server_uri, one of the two")
@@ -1042,19 +881,15 @@ class Stack:
         unix_seconds: int | None = None,
         accept_service_provider_codes: bool = False,
     ) -> None:
-        """`sipral_stack_stir`: verify the callers of the calls this stack's
-        accounts receive against ``anchors`` (PEM or DER certificates, the
-        STI-PA's roots in a SHAKEN deployment) from now on (RFC 8224).
+        """Verify incoming callers against ``anchors`` (PEM or DER, the STI-PA
+        roots under SHAKEN) from now on (RFC 8224).
 
-        ``unix_seconds`` is the wall clock now, which a PASSporT is signed
-        and judged by, and defaults to this machine's; a stack whose
-        accounts only sign calls this too, with ``None`` for ``anchors``,
-        before adding them. The certificate a call names
-        is wanted through `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`
-        (:attr:`sipral.events.Event.verification`) and handed over with
-        :meth:`stir_certificate`. ``accept_service_provider_codes`` lets a
-        certificate that names a service provider code rather than numbers
-        vouch for any caller, as a SHAKEN deployment's do; left off, a
+        ``unix_seconds`` is the wall clock PASSporTs are signed and judged by
+        (default: this machine's); a signing-only stack calls this with
+        ``None`` anchors before adding accounts. A wanted certificate arrives
+        as `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` and is supplied with
+        :meth:`stir_certificate`. ``accept_service_provider_codes`` lets an
+        SPC certificate vouch for any caller, as in SHAKEN; otherwise a
         certificate covers only the numbers it names.
         """
         raw = anchors.encode("utf-8") if isinstance(anchors, str) else anchors
@@ -1074,10 +909,9 @@ class Stack:
         )
 
     def stir_certificate(self, call: int, chain: bytes | None) -> None:
-        """`sipral_call_stir_certificate`: the chain the certificate URL a
-        verification wanted yielded -- PEM or DER, the signing certificate
-        first -- or ``None`` for one that could not be had. ``call`` is the
-        handle the event named: the call has not been announced yet."""
+        """Supply the chain a verification asked for (PEM or DER, signing
+        certificate first), or ``None`` if it could not be fetched. ``call``
+        is the handle from the event; the call is not announced yet."""
         chain_buf = ffi.new("uint8_t[]", chain) if chain else None
         _retry(
             lambda: lib.sipral_call_stir_certificate(
@@ -1107,41 +941,30 @@ class Stack:
         headers=None,
         follow_redirects: bool = False,
     ) -> Call:
-        """`sipral_call_place`, with this stack running the call's audio.
+        """Place a call, this stack running its audio.
 
-        A media socket is opened here, before the INVITE goes out, and its
-        `host:port` is what `media_address` in `sipral_call_config_t`
-        offers: the stack writes the offer from its own codec order and
-        reads the answer, and :class:`sipral.media.Media` starts once
-        `SIPRAL_EVENT_KIND_MEDIA_STARTED` says the session is up
-        (`docs/08-ffi.md`, "A call is described one way or the other").
+        A media socket is opened before the INVITE and offered as the call's
+        media address; :class:`sipral.media.Media` starts on
+        `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
 
-        ``ice`` is a :class:`sipral.enums.Ice` value, or ``0`` for the
-        stack's own default. On a stack built with ``nat=Nat.STUN``, the
-        socket is named with `sipral_stack_nat_map` first and this call
-        blocks the calling thread -- never the poll thread -- until its
-        `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives, exactly as
-        `sipral_stack_nat_map`'s own doc comment requires: placing a call
-        on the socket any sooner is `SIPRAL_STATUS_WRONG_STATE`.
+        ``ice`` is a :class:`sipral.enums.Ice`, ``0`` for the stack default.
+        With ``nat=Nat.STUN`` this blocks the calling thread (never the poll
+        thread) until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING`; sooner
+        would be `SIPRAL_STATUS_WRONG_STATE`.
 
-        ``text`` opens a second socket and offers a real-time text stream on
-        it (RFC 4103), which :meth:`sipral.call.Call.send_text` writes to and
-        ``call.text`` reads; it is not offered on a call keyed by SRTP or
-        gathering ICE, the stream having no key or candidates of its own.
-        ``feedback`` offers RTP/AVPF (RFC 4585) with Generic NACKs and
-        reduced-size RTCP (RFC 5506), off by default since a far end that
-        knows only RTP/AVP refuses the profile. ``focus`` says this end is
-        the focus of a conference (RFC 4579): `isfocus` on its `Contact`.
-        ``codecs`` -- ``"PCMA,PCMU"`` -- is what this call offers and in what
-        order, in place of the stack's (`sipral_call_config_t::codecs`).
-        ``headers`` -- ``(name, value)`` pairs or a mapping -- go on the
-        INVITE (`sipral_call_config_t::headers`). ``follow_redirects`` sends
-        the call on to the targets a 3xx names (RFC 3261 §8.1.3.4); left off,
-        a 3xx ends the call with its status, and the `Contact` it named is the
+        ``text`` offers real-time text (RFC 4103) on a second socket
+        (:meth:`sipral.call.Call.send_text`, ``call.text``); not offered with
+        SRTP or ICE, which the stream lacks. ``feedback`` offers RTP/AVPF
+        (RFC 4585) with NACK and reduced-size RTCP (RFC 5506); off by default
+        because an AVP-only peer refuses it. ``focus`` marks this end a
+        conference focus (RFC 4579, `isfocus`). ``codecs`` (``"PCMA,PCMU"``)
+        replaces the stack's offer order. ``headers`` (pairs or a mapping) go
+        on the INVITE. ``follow_redirects`` follows a 3xx's targets (RFC 3261
+        §8.1.3.4); otherwise a 3xx ends the call and its `Contact` is the
         application's to act on.
 
-        ``media_host`` left out binds the media socket at the address of the
-        route toward ``destination``, or toward the account's server.
+        ``media_host`` defaults to the route toward ``destination`` or the
+        account's server.
         """
         media_host = self._media_host(media_host, account, destination)
         media_socket = self.open_media_socket(media_host, media_port)
@@ -1218,27 +1041,16 @@ class Stack:
     ) -> Call:
         """Open a media socket for an incoming call and answer it there.
 
-        ``event`` is the `SIPRAL_EVENT_KIND_INCOMING_CALL` a listener read
-        off :attr:`events`: an incoming call has no :class:`Call` of its
-        own until the application decides what to do with it, which is
-        exactly what this builds -- `sipral_call_answer_media` under it,
-        the other half of :meth:`place_call`. Call :meth:`Call.reject`
-        instead when the application does not want it; that needs no
-        socket, so it takes the call handle straight off ``event.call``.
+        ``event`` is the `SIPRAL_EVENT_KIND_INCOMING_CALL`; the :class:`Call`
+        is built here. To refuse, :meth:`reject_call` needs no socket.
 
-        On a stack built with ``nat=Nat.STUN`` this blocks the calling
-        thread until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives,
-        the same wait :meth:`place_call` makes.
+        With ``nat=Nat.STUN`` this blocks like :meth:`place_call`.
 
-        With ``text``, ``feedback``, ``focus`` or ``codecs`` -- as
-        :meth:`place_call` takes them -- the call is answered through
-        `sipral_call_answer_with`, a text socket opened for the real-time text
-        stream the offer carried. An answer keeps the offer's order (RFC 3264
-        §6.1), so ``codecs`` chooses which codecs this call takes rather than
-        which comes first.
+        ``text``, ``feedback``, ``focus``, ``codecs`` are as for
+        :meth:`place_call`. An answer keeps the offer's order (RFC 3264
+        §6.1), so ``codecs`` picks which codecs, not which comes first.
 
-        ``media_host`` left out binds the media socket at the address of the
-        route toward the server of the account the call came to.
+        ``media_host`` defaults to the route toward the account's server.
         """
         rung = self.call_for(event.call)
         if rung is not None:
@@ -1267,8 +1079,7 @@ class Stack:
     def _incoming(
         self, event: _events.Event, media_host: str | None, media_port: int, text: bool
     ) -> Call:
-        """The :class:`Call` of an incoming one, with its media socket open
-        and mapped, registered and not yet answered."""
+        """The registered, unanswered :class:`Call` with its socket mapped."""
         media_host = self._media_host(media_host, self._account_for(event.account), None)
         media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
@@ -1290,14 +1101,11 @@ class Stack:
     ) -> Call:
         """Say an incoming call is ringing, and build its :class:`Call`.
 
-        ``event`` is the `SIPRAL_EVENT_KIND_INCOMING_CALL`. The media socket
-        is opened as :meth:`answer_call` opens it, and the call is not
-        answered: :meth:`answer_call` with the same event, or
-        :meth:`Call.answer`, does that later on the same socket. Without
-        ``media`` this sends a 180 Ringing (`sipral_call_ring`); with it a
-        183 whose answer this stack writes, so the caller hears what the
-        application plays before anybody answers (`sipral_call_ring_media`,
-        ``srtp`` and ``codecs`` as :meth:`place_call` takes them).
+        The media socket is opened now; :meth:`answer_call` with the same
+        event, or :meth:`Call.answer`, answers later on it. Without ``media``
+        this sends 180 Ringing; with it a 183 with an answer, so the caller
+        hears what the application plays before anyone answers (``srtp`` and
+        ``codecs`` as for :meth:`place_call`).
         """
         call = self._incoming(event, media_host, media_port, False)
         try:
@@ -1313,10 +1121,9 @@ class Stack:
         return call
 
     def accept_transfer_placed(self, event: _events.Event, placed: Call) -> None:
-        """Take the REFER of a `SIPRAL_EVENT_KIND_TRANSFER_REQUESTED` with a
-        call this application placed itself: `sipral_call_accept_transfer_placed`.
-        The REFER is answered 202 and ``placed``'s progress goes to the far
-        end in NOTIFYs, as though the stack had placed it for the REFER."""
+        """Accept a `SIPRAL_EVENT_KIND_TRANSFER_REQUESTED` REFER with a call
+        the application placed itself: 202, then ``placed``'s progress is
+        reported to the far end in NOTIFYs."""
         _retry(
             lambda: lib.sipral_call_accept_transfer_placed(
                 self.handle, event.call, placed.handle, self.now_ms()
@@ -1325,9 +1132,7 @@ class Stack:
         )
 
     def _close_socket(self, sock: socket.socket) -> None:
-        """Close a socket :meth:`open_media_socket` opened beside a call's
-        media one -- its text socket, a recording server's two -- and give
-        its port back to the RTP range."""
+        """Close a secondary media socket and give its port back to the range."""
         try:
             port = sock.getsockname()[1]
         except OSError:
@@ -1338,12 +1143,10 @@ class Stack:
     def open_media_socket(self, host: str, port: int = 0) -> socket.socket:
         """A non-blocking UDP socket for a call's media, bound at ``host``.
 
-        At ``port`` when one is named. Otherwise, on a stack built with an
-        RTP port range, at an even port reserved from it
-        (`sipral_stack_rtp_port_reserve`) -- one another process already
-        holds is given back and the next tried, round the range -- and on a
-        stack without one wherever the operating system puts it.
-        ``SIPRAL_STATUS_EXHAUSTED`` once every pair is taken.
+        At ``port`` when given; else at an even port reserved from the RTP
+        range (a port another process holds is skipped), or wherever the OS
+        puts it without a range. ``SIPRAL_STATUS_EXHAUSTED`` when every pair
+        is taken.
         """
         if port or self.rtp_ports is None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1372,9 +1175,8 @@ class Stack:
         raise failure
 
     def _give_back_port(self, port: int) -> None:
-        """`sipral_stack_rtp_port_release` for a port no call took, on a
-        stack with a range; best effort, since a port a call did take comes
-        back by itself when the call ends."""
+        """Release a reserved port no call took; best effort, since a call's
+        port comes back when the call ends."""
         if self.rtp_ports is None:
             return
         try:
@@ -1386,17 +1188,14 @@ class Stack:
             pass
 
     def set_log(self, level: int, handler=None) -> None:
-        """Send this stack's log to ``handler`` at ``level`` and louder, a
-        :class:`sipral.enums.LogLevel`; ``LogLevel.OFF`` or no handler turns
-        it off (`sipral_stack_log`).
+        """Send the log at ``level`` (:class:`sipral.enums.LogLevel`) and
+        louder to ``handler``; ``LogLevel.OFF`` or no handler turns it off.
 
-        ``handler(level, target, message, suppressed)`` is called on
-        whichever thread has just finished a call into the stack -- the
-        poll thread, usually -- with the stack let go, so it may call back
-        into it. Every line is already redacted: no user part, number, IP
-        address or credential reaches it (`docs/17-observability.md`).
-        ``suppressed`` counts the lines a flood had turned away before this
-        one.
+        ``handler(level, target, message, suppressed)`` runs on the thread
+        that just left the stack (usually the poll thread), outside the
+        stack's lock, so it may call back in. Lines are redacted: no user
+        part, number, IP address or credential (`docs/17-observability.md`).
+        ``suppressed`` counts lines dropped by flood control before this one.
         """
         if handler is None or level == LogLevel.OFF:
             _retry(
@@ -1415,15 +1214,12 @@ class Stack:
             lambda: lib.sipral_stack_log(self.handle, int(level), callback, ffi.NULL),
             "sipral_stack_log",
         )
-        # every one is kept for the stack's life: the one this replaced may
-        # still be delivering a batch on the poll thread after this returns
+        # The replaced callback may still be delivering on the poll thread.
         self._log_callbacks.append(callback)
 
     def state(self) -> str:
-        """Everything this stack is holding, as the redacted text
-        `sipral_stack_state_text` writes for a crash report: accounts, calls,
-        transports, media sessions, the last refused calls, the queues, the
-        RTP range and the counters. Safe from any thread, and never waits."""
+        """The stack's state as redacted text for a crash report. Safe from
+        any thread; never waits."""
         buffer = ffi.new(f"char[{lib.SIPRAL_STATE_TEXT_MAX}]")
         length = ffi.new("size_t *")
         check(
@@ -1433,11 +1229,8 @@ class Stack:
         return ffi.string(buffer, int(length[0]) - 1).decode("utf-8")
 
     def diagnostics_json(self) -> str:
-        """`sipral_stack_diagnostics_json`: the diagnostic record of every
-        call the stack keeps, as JSON -- each decision the stack made and
-        why, ``transport.kept.datagram`` among them for a request that went
-        over UDP past RFC 3261 Section 18.1.1's line because
-        ``datagram_without_stream_bytes`` let it."""
+        """The diagnostic record of every kept call as JSON: each decision
+        the stack made and why."""
         needed = ffi.new("size_t *")
         capacity = 4096
         while True:
@@ -1455,18 +1248,12 @@ class Stack:
     def log_to(self, logger: logging.Logger | None = None, level: int | None = None) -> None:
         """Send this stack's log to the standard :mod:`logging` module.
 
-        Each line goes to ``logger.getChild(target)`` -- ``sipral.call``,
-        ``sipral.sip``, ``sipral.api`` and so on under the default ``sipral``
-        logger (`docs/17-observability.md` lists the targets) -- so an application filters by the part of the stack that wrote it
-        the way it filters any library. The levels map as ``ERROR`` to
-        ``logging.ERROR``, ``WARN`` to ``logging.WARNING``, ``INFO`` to
-        ``logging.INFO``, ``DEBUG`` to ``logging.DEBUG`` and ``TRACE`` to
-        :data:`TRACE` (5, below ``DEBUG``). ``level`` is the stack's own
-        :class:`sipral.enums.LogLevel`; left out, it follows the logger's
-        effective level when this is called, so lines the logger would drop
-        are never formatted. A line that follows a flood carries the count
-        of lines turned away before it as ``record.sipral_suppressed``.
-        ``log_to`` replaces whatever :meth:`set_log` installed, and
+        Each line goes to ``logger.getChild(target)`` (``sipral.call``,
+        ``sipral.sip``, ...; `docs/17-observability.md`). Levels map to the
+        same-named :mod:`logging` levels, ``TRACE`` to :data:`TRACE`.
+        ``level`` defaults to the logger's effective level now, so dropped
+        lines are never formatted. ``record.sipral_suppressed`` counts lines
+        lost to flood control. Replaces :meth:`set_log`'s handler;
         ``set_log(LogLevel.OFF)`` turns it off.
         """
         logger = logger if logger is not None else logging.getLogger("sipral")
@@ -1485,31 +1272,21 @@ class Stack:
         self.set_log(level, deliver)
 
     def counters(self) -> Counters:
-        """This stack's health counters since it was created
-        (`sipral_stack_counters`): registrations, how calls ended, what was
-        screened, what went out again, what timed out and what was refused
-        at a limit. One struct copy -- cheap enough to sample on a timer."""
+        """Health counters since creation; one struct copy, cheap enough to
+        sample on a timer."""
         out = ffi.new("sipral_counters_t *")
         out.size = ffi.sizeof("sipral_counters_t")
         _retry(lambda: lib.sipral_stack_counters(self.handle, out), "sipral_stack_counters")
         return Counters.from_raw(out)
 
     def set_stun_servers(self, servers: Sequence[str]) -> None:
-        """Ask these STUN servers from now on, in order of preference, each
-        ``host:port`` -- what ``stun_server`` and ``stun_fallbacks`` would
-        have named -- without creating the stack again
-        (`sipral_stack_stun_servers`).
+        """Replace the STUN servers (``host:port``, preferred first) in place.
 
-        Every socket the stack keeps mapped is asked again of the new list
-        at once; ``EventKind.STUN_SERVER`` says the server in use moved and
-        ``EventKind.NAT_MAPPING`` what the new one answers. On a stack
-        created without a STUN server the signalling socket starts being
-        kept mapped, and every media socket opened from then on is asked
-        where it appears from before its call is described. An empty list
-        asks nobody any more: accounts a STUN answer moved register their
-        own address again, and calls are described by their sockets' own
-        addresses. A stack with a TURN server keeps asking STUN, so an empty
-        list there raises :class:`SipralError` with
+        Every mapped socket is asked again at once; ``EventKind.STUN_SERVER``
+        and ``EventKind.NAT_MAPPING`` report the result. On a stack created
+        without STUN, mapping starts now for signalling and new media
+        sockets. An empty list stops STUN: moved accounts re-register their
+        own address. With a TURN server an empty list raises
         ``SIPRAL_STATUS_INVALID_ARGUMENT``.
         """
         text = ",".join(servers).encode("utf-8")
@@ -1521,8 +1298,7 @@ class Stack:
         self._nat = lib.SIPRAL_NAT_STUN if text else lib.SIPRAL_NAT_OFF
 
     def reject_call(self, event: _events.Event, code: int = 486) -> None:
-        """`sipral_call_reject` for an incoming call nothing has answered,
-        so no :class:`Call` -- and no media socket -- was ever needed."""
+        """Reject an unanswered incoming call; no :class:`Call` or socket needed."""
         _retry(
             lambda: lib.sipral_call_reject(self.handle, event.call, code, self.now_ms()),
             "sipral_call_reject",
@@ -1539,16 +1315,12 @@ class Stack:
     ) -> Call:
         """Take a REFER outside any dialog and place the call it asks for.
 
-        ``event`` is the `SIPRAL_EVENT_KIND_REFERRAL` a listener read off
-        :attr:`events`, with ``event.fields["status_code"]`` zero. This is
-        `sipral_call_accept_transfer` on the referral's handle: the stack
-        answers 202, reports on the call to whoever asked, and places it
-        from the account the event names -- to ``event.fields["target"]``,
-        which is the REFER's and never the caller's. A media socket is
-        opened for it here, the way :meth:`place_call` opens one, and the
-        :class:`Call` returned is that placed call. Taking one is a decision
-        with a bill attached -- whoever sent it can make this line dial
-        anything -- so it is never made on the application's behalf.
+        ``event`` is a `SIPRAL_EVENT_KIND_REFERRAL` with
+        ``fields["status_code"]`` zero. The stack answers 202, places the call
+        from the event's account to ``fields["target"]`` (the REFER's, never
+        the caller's) and reports progress to the referrer. Returns the
+        placed :class:`Call`. Never automatic: whoever sends a REFER can make
+        this line dial anything.
         """
         media_host = self._media_host(media_host, self._account_for(event.account), None)
         media_socket = self.open_media_socket(media_host, media_port)
@@ -1580,8 +1352,7 @@ class Stack:
         return call
 
     def reject_referral(self, event: _events.Event, code: int = 603) -> None:
-        """Refuse a REFER outside any dialog with ``code``, 300 to 699:
-        `sipral_call_reject_transfer` on the referral's handle."""
+        """Refuse an out-of-dialog REFER with ``code`` (300 to 699)."""
         _retry(
             lambda: lib.sipral_call_reject_transfer(
                 self.handle, event.call, code, self.now_ms()
@@ -1597,13 +1368,11 @@ class Stack:
         status_code: int = 302,
         reason: str | None = None,
     ) -> None:
-        """Answer an incoming call nothing has answered with a redirection
-        (`sipral_call_redirect`): ``status_code`` 300 to 399, 302 Moved
-        Temporarily by default, with ``targets`` (URIs, a list or one
-        comma-separated string) in `Contact`. With ``reason`` -- RFC 5806's
-        ``unconditional``, ``user-busy``, ``no-answer``... -- a `Diversion`
-        names the address that was called, so the next phone says the call
-        was forwarded and why."""
+        """Redirect an unanswered incoming call: ``status_code`` 300 to 399
+        (302 default), ``targets`` (list or comma-separated URIs) in
+        `Contact`. With ``reason`` (RFC 5806: ``unconditional``,
+        ``user-busy``, ``no-answer``...) a `Diversion` names the called
+        address, so the next phone shows why it was forwarded."""
         listed = targets if isinstance(targets, str) else ", ".join(targets)
         targets_bytes = listed.encode("utf-8")
         reason_bytes = (reason or "").encode("utf-8")
@@ -1622,11 +1391,10 @@ class Stack:
         )
 
     def call_identity(self, call: int | _events.Event, which: int) -> list[str]:
-        """Every entry of one identity list a call's INVITE carried --
-        ``which`` an :class:`sipral.enums.IdentityText` -- for a call that
-        has no :class:`sipral.call.Call` yet (``call`` its
-        `SIPRAL_EVENT_KIND_INCOMING_CALL` event, or its handle).
-        :meth:`sipral.call.Call.identity` is the same for one that has."""
+        """One identity list from the INVITE (``which``: an
+        :class:`sipral.enums.IdentityText`) for a call without a
+        :class:`sipral.call.Call` yet; ``call`` is its incoming event or
+        handle. See :meth:`sipral.call.Call.identity` otherwise."""
         handle = call.call if isinstance(call, _events.Event) else call
         count = ffi.new("size_t *")
         _retry(
@@ -1651,29 +1419,19 @@ class Stack:
         return texts
 
     def move_to(self, host: str, *, link: int = Link.WIRED) -> Recovery:
-        """The network under this stack changed, and ``host`` is this
-        machine's address on the new one.
+        """The network changed; ``host`` is this machine's new address.
 
-        The signalling socket is bound again at ``host`` -- over TCP or TLS,
-        the connection made again from it -- and the main transport told
-        (`sipral_stack_transport_bind`), the change reported
-        (`sipral_stack_network_changed`, with ``link`` an
-        :class:`sipral.enums.Link`), and every account added without a
-        `Contact` of its own pointed at the new address
-        (`sipral_account_rebind`). What the stack decided comes back as a
-        :class:`sipral.enums.Recovery`. On ``Recovery.REBUILD`` every call
-        whose media was described at the old address gets
-        `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`, which
-        :meth:`sipral.call.Call.readdress` answers -- the far end is still
-        sending to an address this machine no longer has. An account added
-        with an explicit ``contact`` is the application's to rebind with
-        :meth:`sipral.account.Account.rebind`.
+        Signalling is rebound (or reconnected over TCP/TLS) at ``host``, the
+        change reported with ``link`` (:class:`sipral.enums.Link`), and every
+        account without its own `Contact` rebound. Returns the stack's
+        :class:`sipral.enums.Recovery`. On ``REBUILD`` each call described at
+        the old address gets `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`, to answer
+        with :meth:`sipral.call.Call.readdress`. Accounts with an explicit
+        ``contact`` are the application's to :meth:`sipral.account.Account.rebind`.
 
-        A stack created with no ``bind_host`` keeps its socket on every
-        interface, and its port, and keeps picking its own address: it
-        advertises the route toward its first account's server again, as when
-        it was created -- ``host`` only when no account names a server by its
-        address -- and each account is reached at the route toward its own.
+        A stack without ``bind_host`` keeps its wildcard socket and port and
+        re-picks routes: toward the first account's server (``host`` only
+        when no server is an address), each account toward its own.
         """
         previous = parse_address(self.bind_address)[0]
         picks = self._routes and not self._streamed
@@ -1712,8 +1470,6 @@ class Stack:
         for account in accounts:
             if account.contact_given:
                 continue
-            # on a stack that picks its own address, each account is reached
-            # at the route toward its own server, as when it was added
             if picks and _is_address(account.registrar_address):
                 advertised = self._advertise_toward(account.registrar_address)
                 account.rebind(
@@ -1725,13 +1481,8 @@ class Stack:
         return Recovery(int(recovery[0]))
 
     def _advertise_again(self, host: str) -> None:
-        """What a stack bound on every interface advertises after a move,
-        chosen again as it was at creation: the route toward its first
-        account's server, or with no server to route toward, ``host`` -- the
-        new network's own address -- on the same port. The socket on every
-        interface already receives there, on the port it had, and stays; an
-        address this machine lacks raises, as binding the socket there
-        would."""
+        """Re-pick the advertised address of a wildcard-bound stack after a
+        move; the socket stays. Raises if ``host`` is not on this machine."""
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         with socket.socket(family, socket.SOCK_DGRAM) as probe:
             probe.bind((host, 0))
@@ -1749,9 +1500,7 @@ class Stack:
 
 
     def _move_link(self, host: str) -> None:
-        """The signalling connection made again from ``host``: the old one
-        belongs to a network this machine has left. When the new one cannot
-        be made, the stack hears why and this class keeps trying."""
+        """Reconnect signalling from ``host``; on failure, report and retry."""
         self._bind_host = host
         with self._link_lock:
             old, self._link = self._link, None
@@ -1771,15 +1520,12 @@ class Stack:
             self._reconnect_later()
 
     def _signalling_socket(self, host: str) -> socket.socket:
-        """The UDP signalling socket bound again at ``host``, on the port
-        chosen at creation or, when that was 0, the port in use now; on a
-        port the system picks only when that one is held there by another
-        socket, which :attr:`kept_signalling_port` then says. The old socket
-        holds the port itself when it is bound on every interface or at
-        ``host`` already, so it is let go of before the port is tried a
-        second time -- once ``host`` is known to be an address this machine
-        has, so that a move to one it lacks raises with the old socket still
-        open."""
+        """A UDP signalling socket at ``host`` on the same port, or a system
+        port if another socket holds it (:attr:`kept_signalling_port`).
+
+        The old socket may hold the port itself, so it is closed before a
+        second try, but only once ``host`` is known to be local: a move to a
+        foreign address raises with the old socket still open."""
         in_use = self._socket.getsockname()[1] if self._socket is not None else 0
         wanted = self._chosen_port or in_use
 
@@ -1815,8 +1561,7 @@ class Stack:
         return made
 
     def _move_socket(self, host: str) -> None:
-        """The UDP signalling socket bound again at ``host``, and the main
-        transport told."""
+        """Rebind UDP signalling at ``host`` and tell the main transport."""
         sock = self._signalling_socket(host)
         sock.setblocking(False)
         bound = format_address(*sock.getsockname())
@@ -1856,13 +1601,7 @@ class Stack:
             return self._calls.get(handle)
 
     def register_call(self, call: Call) -> None:
-        """Track a call this ``Stack`` did not place itself.
-
-        Used for a call `SIPRAL_EVENT_KIND_INCOMING_CALL` reports: the
-        application answers it and only then does a :class:`Call` exist
-        to dispatch that event's own delivery to, since the constructor
-        is what would have to send it.
-        """
+        """Track a :class:`Call` so events for its handle reach it."""
         with self._lock:
             self._calls[call.handle] = call
         if self._turn_streamed:
@@ -1870,8 +1609,7 @@ class Stack:
                 self._turn_sockets[call.handle] = call.media_address
 
     def forget_account(self, account: Account) -> None:
-        """Stop tracking an account :meth:`sipral.account.Account.remove`
-        removed."""
+        """Stop tracking a removed account."""
         with self._lock:
             if account in self._accounts:
                 self._accounts.remove(account)
@@ -1883,28 +1621,19 @@ class Stack:
     # -- the poll thread --------------------------------------------------
 
     def _on_event(self, raw, _user_data: object) -> None:
-        """The C callback. Runs on the poll thread, with nothing held.
+        """The C callback, on the poll thread with nothing held.
 
-        `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` is delivered and not answered
-        here. A dialog keeps the flow its INVITE went out on -- the
-        registrar or outbound proxy the account names, the only path that
-        survives a NAT -- and the event only says that the far end's
-        `Contact` names some other address. This package has no resolver to
-        answer it with, and answering with that `Contact` as a literal
-        address moves the rest of the call onto it: behind a registrar
-        reached through a port mapping or a NAT, the BYE then goes to an
-        address nothing answers on. An application with a real lookup
-        answers the event itself, through `sipral_stack_resolved`
-        (`sipral._sipral_cffi.lib`).
+        `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` is delivered but not answered: the
+        dialog keeps the flow its INVITE used (the only path through a NAT),
+        and answering with the far `Contact` as a literal would send the BYE
+        where nothing answers. An application with a real lookup answers it
+        via `sipral_stack_resolved`.
         """
         self._deliver(_events.decode(raw[0]))
 
     def _deliver(self, event: _events.Event) -> None:
-        # The call's own side effects (minting `Call.media`, marking it
-        # ended) happen before `event` reaches any queue, for the same
-        # reason `Call.deliver` orders its own steps that way: a consumer
-        # of `self.events` may look up `self.call_for(event.call)` and
-        # read its state, and that state has to already be current.
+        # Call state is updated before the event is queued, so a consumer
+        # reading `call_for(event.call)` sees it current.
         if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED and not self._streamed:
             self._streams_asked.append(event.fields)
         if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:
@@ -1934,15 +1663,9 @@ class Stack:
 
         call = self.call_for(event.call) if event.call else None
         if call is not None and event.kind == lib.SIPRAL_EVENT_KIND_CALL_ENDED:
-            # What the call still owes -- its RTCP BYE, and the Refresh that
-            # gives its relay back -- was queued by the poll delivering this
-            # event, and goes out through the call's own socket before
-            # anything can hear that the call ended: an application that
-            # closes the call the moment it does would otherwise forget it
-            # and close that socket ahead of the drain after the poll, and
-            # the relay would lapse on its server instead. Nothing is held
-            # while the callback runs, so the library may be re-entered
-            # from inside it (`docs/08-ffi.md`, "The shape").
+            # Send the RTCP BYE and relay Refresh now, before anyone hears the
+            # call ended and closes its socket; otherwise the relay lapses on
+            # the server. Re-entering the library here is allowed.
             self._drain_farewells()
         if call is not None:
             call.deliver(event)
@@ -1963,21 +1686,15 @@ class Stack:
         echo_ms: int = 0,
         timeout_ms: int = 0,
     ) -> int:
-        """`sipral_stack_network_test`: test the network before a call,
-        without placing one of its own. Returns the test's number; what it
-        found arrives as `SIPRAL_EVENT_KIND_NETWORK_TEST` on :attr:`events`,
-        whose ``fields["test"]`` is that number and ``fields["verdict"]`` a
-        :class:`sipral.enums.NetworkVerdict`.
+        """Test the network before a call. Returns the test number; the
+        result is `SIPRAL_EVENT_KIND_NETWORK_TEST` with ``fields["test"]`` and
+        ``fields["verdict"]`` (:class:`sipral.enums.NetworkVerdict`).
 
-        ``account`` has its server asked with an ``OPTIONS`` on its own
-        transport. With ``probe`` on a stack built with ``nat=Nat.STUN``, a
-        socket is opened for the test, asked about as a call's would be --
-        STUN, and a relay from the TURN server when there is one -- and
-        closed when the test ends. ``echo_call`` is a call this stack placed
-        to an echo service: its audio is measured for ``echo_ms`` (8000 by
-        default) once its media starts, and the test hangs it up. A part
-        that has not answered within ``timeout_ms`` (30000 by default)
-        counts as failed.
+        ``account``'s server gets an ``OPTIONS``. With ``probe`` and
+        ``nat=Nat.STUN`` a temporary socket goes through STUN (and TURN if
+        configured). ``echo_call``, a call to an echo service, is measured
+        for ``echo_ms`` (8000 default) after media starts, then hung up. Parts
+        silent past ``timeout_ms`` (30000 default) fail.
         """
         probe_socket = None
         probe_address = ""
@@ -2015,8 +1732,7 @@ class Stack:
         return test
 
     def _network_tested(self, test: int) -> None:
-        """A test is over: the Refresh that gives its relay back goes out
-        from the probe socket before the socket is closed."""
+        """Send the probe's relay Refresh, then close the probe socket."""
         with self._nat_lock:
             probe = self._probes.pop(test, None)
         if probe is None:
@@ -2027,12 +1743,9 @@ class Stack:
         self._close_socket(sock)
 
     def _on_audio_transmit(self, raw, _user_data: object) -> None:
-        """`audio_transmit_callback`, in device mode: one packet the engine
-        encoded from the microphone, sent from its call's media socket -- or,
-        marked TCP or TLS, written on that socket's connection to the TURN
-        server. Runs on the engine's own thread, once per frame per call, and
-        calls nothing in the library: an entry point reached from here could
-        wait on the engine that is waiting on this callback."""
+        """Device mode: send one encoded packet from its call's media socket,
+        or on its TURN connection. Runs on the engine's thread and must not
+        call the library, which could wait on the engine waiting on us."""
         try:
             transmit = raw[0]
             call = self.call_for(int(transmit.call))
@@ -2046,22 +1759,15 @@ class Stack:
             host, port = parse_address(destination.decode("utf-8"))
             call.media_socket.sendto(payload, (host, port))
         except (OSError, ValueError):
-            # a socket closed by a readdress or a hangup racing this send, or
-            # a destination that is not host:port: the packet is lost, which
-            # the far end's jitter buffer already knows how to hide
+            # Socket closed by a racing readdress or hangup: one lost packet.
             pass
 
     def _drain_transmit(self) -> None:
         """`sipral_stack_poll_transmit`, until nothing is left to send.
 
-        `SIPRAL_STATUS_BUSY` here means another thread -- an application
-        thread answering or placing a call while this one is between two
-        polls -- holds this stack's lock right now, not that anything is
-        wrong (`docs/08-ffi.md`, "Signalling on one stack is one thread at
-        a time"). This is the poll thread: nothing here may raise on it,
-        because a `SipralError` that reached the top would end the thread
-        for good and this stack would never poll again. Whatever is still
-        queued is drained on the next pass instead.
+        `SIPRAL_STATUS_BUSY` only means another thread holds the stack. Nothing
+        may raise here: it would end the poll thread for good. What is left
+        drains on the next pass.
         """
         transmit = self._transmit
         while True:
@@ -2082,8 +1788,7 @@ class Stack:
                 self._write_sip_stream(int(transmit.transport), payload)
                 continue
             if self._socket is None:
-                # one connection carries everything, whatever it names:
-                # the server it reaches is the outbound proxy
+                # One connection to the outbound proxy carries everything.
                 self._write_link(payload)
                 continue
             destination = ffi.string(transmit.destination, transmit.destination_len)
@@ -2091,22 +1796,15 @@ class Stack:
             try:
                 self._socket.sendto(payload, (host, port))
             except OSError:
-                # a destination this socket cannot reach from where it is
-                # bound: the datagram is lost, as on the wire, and the
-                # transaction's own retransmissions and timeout say so --
-                # the poll thread carries on for every other one
+                # Unreachable from this bind: lost as on the wire; the
+                # transaction's retransmissions and timeout handle it.
                 continue
 
     def _drain_farewells(self) -> None:
-        """`sipral_stack_poll_farewell`: what a call that just ended still
-        owes -- its RTCP BYE, and with a TURN server the Refresh that gives
-        its relay back -- sent through that call's own media socket to the
-        address the stack names. Under ICE that is the path ICE chose or
-        the TURN server, not necessarily the last address media came from,
-        which is only the fallback for a packet that names none. A call
-        whose :class:`sipral.call.Call` was already closed, or that named
-        no destination and never heard from the far end at all, is
-        skipped: there is nothing left here that could still reach it.
+        """Send what ended calls still owe (RTCP BYE, TURN relay Refresh)
+        from each call's media socket to the address the stack names (the
+        ICE path or TURN server; the last media source only as fallback).
+        Calls already closed, or with nowhere to send, are skipped.
         """
         out_call = ffi.new("sipral_handle_t *")
         packet = self._farewell
@@ -2122,8 +1820,7 @@ class Stack:
             if packet.len == 0:
                 return
             if packet.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
-                # given back on the relay's connection, which is the
-                # stack's and not the call's, and outlives it
+                # The relay connection is the stack's and outlives the call.
                 with self._nat_lock:
                     local = self._turn_sockets.get(int(out_call[0]))
                 if local is not None:
@@ -2145,22 +1842,13 @@ class Stack:
     # -- STUN/TURN on a media socket, before it has a call's media handle -
 
     def _map_media_socket(self, sock: socket.socket, address: str, *, timeout: float = 7.0) -> None:
-        """`sipral_stack_nat_map`, and the wait its own doc comment
-        requires before a call may be described on ``sock``.
+        """Map ``sock`` through STUN and wait until a call may use it.
 
-        A no-op when this stack was not built with `nat=Nat.STUN`: exactly
-        today's behaviour for every other stack. Otherwise ``sock`` is
-        registered with the poll thread's own selector under the
-        ``("stun", address)`` tag -- :meth:`_run` then hands what arrives
-        on it to `sipral_stack_receive_stun` instead of treating it as
-        ordinary media, and :meth:`_drain_stun` sends what
-        `sipral_stack_poll_stun` hands out for it -- and this call blocks
-        the *calling* thread, never the poll thread, until
-        `SIPRAL_EVENT_KIND_NAT_MAPPING` names this socket. `docs/06-nat.md`
-        and `docs/08-ffi.md` ("Behind a NAT") put that within five and a
-        half seconds whatever the server does; ``timeout`` leaves
-        comfortable room over that before raising `TimeoutError`, which
-        should not happen unless the poll thread itself has stopped.
+        No-op without `nat=Nat.STUN`. Otherwise the poll thread routes the
+        socket's traffic to the STUN entry points, and the *calling* thread
+        blocks until `SIPRAL_EVENT_KIND_NAT_MAPPING`. The library answers
+        within 5.5 s; ``timeout`` above that only trips if the poll thread
+        stopped.
         """
         if self._nat != lib.SIPRAL_NAT_STUN:
             return
@@ -2184,19 +1872,15 @@ class Stack:
         if not waiters["mapping"].wait(timeout):
             self._release_stun_socket(address)
             raise TimeoutError(f"no NAT mapping answer for {address} within {timeout}s")
-        # `turn_server` rides the same socket: `sipral_call_place` and
-        # `sipral_call_answer_media` both refuse a socket named here until
-        # its `SIPRAL_EVENT_KIND_NAT_RELAY` has arrived too, allocated or
-        # not (`docs/08-ffi.md`, "Behind a NAT").
+        # With TURN, the library also refuses the socket until
+        # `SIPRAL_EVENT_KIND_NAT_RELAY`, allocated or not.
         if self._turn and not waiters["relay"].wait(timeout):
             self._release_stun_socket(address)
             raise TimeoutError(f"no TURN allocation answer for {address} within {timeout}s")
 
     def _release_stun_socket(self, address: str) -> None:
-        """Stop treating ``address`` as a pre-media-handle STUN/TURN
-        socket: called once `SIPRAL_EVENT_KIND_MEDIA_STARTED` hands it to
-        :class:`sipral.media.Media` (which reads it from then on) or once
-        a call gives up on it before that ever happens."""
+        """Stop routing ``address`` to STUN: :class:`sipral.media.Media` owns
+        it now, or the call dropped it."""
         with self._nat_lock:
             sock = self._stun_sockets.pop(address, None)
             self._nat_waiters.pop(address, None)
@@ -2207,13 +1891,8 @@ class Stack:
                 pass
 
     def _forget_media_socket(self, address: str) -> None:
-        """`sipral_stack_nat_unmap` for a media socket named with
-        `sipral_stack_nat_map` that will carry no call after all --
-        `sipral_call_place` or `sipral_call_answer_media` refused it, or
-        :meth:`close` is tearing the stack down with it still named. A
-        no-op for a socket this stack never mapped (no `nat=Nat.STUN`,
-        or the socket already reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`
-        and belongs to `Media` now).
+        """Unmap a mapped media socket that will carry no call (refused, or
+        the stack closing). No-op for unmapped sockets or ones `Media` owns.
         """
         self._give_back_port(parse_address(address)[1])
         with self._nat_lock:
@@ -2232,23 +1911,15 @@ class Stack:
         except Exception:  # noqa: BLE001 -- best effort on the way out
             pass
         else:
-            # A relayed socket owes the server a Refresh with a lifetime
-            # of zero, waiting in `sipral_stack_poll_stun` now
-            # (`docs/08-ffi.md`, "sipral_stack_nat_unmap"); one drain
-            # sends it from the socket while it is still registered and
-            # still open.
+            # Send the zero-lifetime Refresh while the socket is still open.
             self._drain_stun()
         self._release_stun_socket(address)
 
     def _drain_stun(self) -> None:
         """`sipral_stack_poll_stun`, until nothing is left to send.
 
-        `transmit.source` names which media socket to send from --
-        exactly the point of this queue being separate from
-        `_drain_transmit`'s: a STUN request for one socket sent from
-        another would teach the server the wrong socket's mapping,
-        silently (`docs/08-ffi.md`, "Three entry points rather than a
-        second use of the two signalling ones").
+        `transmit.source` names the socket to send from: sent from another,
+        a STUN request would silently learn the wrong mapping.
         """
         transmit = self._stun_transmit
         while True:
@@ -2266,8 +1937,7 @@ class Stack:
             destination = ffi.string(transmit.destination, transmit.destination_len).decode("utf-8")
             source_text = ffi.string(transmit.source, transmit.source_len).decode("utf-8")
             if transmit.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
-                # for the TURN server, on the socket's connection to it:
-                # never a datagram, which a network that blocks UDP drops
+                # Never as a datagram: the network may block UDP.
                 self.write_turn(source_text, payload)
                 continue
             with self._nat_lock:
@@ -2283,12 +1953,11 @@ class Stack:
     # -- the TURN server over TCP or TLS -----------------------------------
 
     def write_turn(self, local: str, payload: bytes, *, from_engine: bool = False) -> None:
-        """Write ``payload`` on media socket ``local``'s connection to the
-        TURN server, whole: what `sipral_stack_poll_stun`,
-        `sipral_stack_poll_farewell` and a call's media hand out marked TCP
-        or TLS. Thread-safe; a connection that fails here is closed and the
-        stack is told, which loses the relay on it -- from the poll thread
-        when the write came from the audio engine's (``from_engine``)."""
+        """Write ``payload`` whole on ``local``'s TURN connection.
+
+        Thread-safe. On failure the connection is closed and the stack told,
+        losing the relay; from the engine thread (``from_engine``) the report
+        is deferred to the poll thread."""
         with self._nat_lock:
             stream = self._turn_streams.get(local)
         if stream is None:
@@ -2304,10 +1973,8 @@ class Stack:
             self._lose_turn_stream(local, tell=True)
 
     def _act_on_turn_streams(self) -> None:
-        """Open or close what `SIPRAL_EVENT_KIND_TURN_STREAM` asked for in
-        the poll that just ran. A connection is opened on a thread of its
-        own -- a TLS handshake is round trips the poll thread does not wait
-        out -- and closed here, after this round's queues were written."""
+        """Act on this poll's TURN stream requests. Opening runs on its own
+        thread so the poll thread never waits out a TLS handshake."""
         asked, self._turn_asked = self._turn_asked, []
         for state, local, server, protocol in asked:
             if state == lib.SIPRAL_TURN_STREAM_OPEN:
@@ -2325,12 +1992,8 @@ class Stack:
                 self._lose_turn_stream(local, tell=False)
 
     def _open_turn_stream(self, local: str, server: str, protocol: int) -> None:
-        """Connect to the TURN server for media socket ``local``, over TLS
-        when ``protocol`` says so with the certificate checked against
-        :attr:`_turn_server_name`, and say how that went:
-        `sipral_stack_turn_connected`, or `sipral_stack_turn_closed` for a
-        connection that could not be made -- a refused port, a handshake
-        that failed, a certificate nobody vouches for."""
+        """Connect ``local`` to the TURN server (TLS checked against
+        :attr:`_turn_server_name`) and report connected or closed."""
         local_bytes = local.encode("utf-8")
         host, port = parse_address(server)
         try:
@@ -2359,8 +2022,7 @@ class Stack:
         self._say_turn(lib.sipral_stack_turn_connected, local_bytes)
 
     def _say_turn(self, entry_point, local_bytes: bytes) -> None:
-        """`sipral_stack_turn_connected` or `sipral_stack_turn_closed`,
-        from whichever thread knows; never raising on the way out."""
+        """Report a TURN connection state; never raises."""
         local_buf = ffi.new("char[]", local_bytes)
         try:
             _retry(
@@ -2371,23 +2033,18 @@ class Stack:
             pass
 
     def _read_turn_stream(self, local: str) -> None:
-        """What media socket ``local``'s connection to the TURN server
-        carried, to `sipral_stack_turn_receive` -- every byte, in order,
-        since a stream that loses one never finds its place again: a busy
-        stack is waited for rather than skipped. The connection closing is
-        `sipral_stack_turn_closed`; one the stack found broken
-        (`SIPRAL_STATUS_STREAM_BROKEN`) is closed and needs no word."""
+        """Feed what ``local``'s TURN connection carried to the stack.
+
+        Every byte must arrive in order, so a busy stack is waited for, never
+        skipped. A stream the stack reports broken is closed silently."""
         with self._nat_lock:
             stream = self._turn_streams.get(local)
         if stream is None:
             return
         try:
             with stream.lock:
-                # read without waiting: the selector said bytes arrived, not
-                # that they make application data -- TLS 1.3's session
-                # tickets come after the handshake and hold none, and a
-                # read waiting on the rest would hold this, the poll
-                # thread, for the socket's whole timeout
+                # Non-blocking: readable may be only a TLS 1.3 session ticket,
+                # and a blocking read would stall the poll thread.
                 stream.sock.settimeout(0.0)
                 try:
                     data = stream.sock.recv(_TRANSMIT_BYTES)
@@ -2416,9 +2073,8 @@ class Stack:
             self._lose_turn_stream(local, tell=False)
 
     def _lose_turn_stream(self, local: str, *, tell: bool) -> None:
-        """Close media socket ``local``'s connection, and when ``tell``, say
-        so with `sipral_stack_turn_closed` -- not for one the stack itself
-        asked to close or found broken."""
+        """Close ``local``'s TURN connection; ``tell`` reports it, unless the
+        stack itself closed or broke it."""
         with self._nat_lock:
             stream = self._turn_streams.pop(local, None)
         if stream is None:
@@ -2442,13 +2098,8 @@ class Stack:
             return next((account for account in self._accounts if account.handle == handle), None)
 
     def _act_on_lookups(self) -> None:
-        """Answer what `SIPRAL_EVENT_KIND_LOOKUP_WANTED` asked in the poll
-        that just ran, each lookup on a thread of its own -- a resolver may
-        take seconds, and the poll thread may not wait for it -- and act on
-        what `SIPRAL_EVENT_KIND_LOCATED` found: an account whose server was
-        located at an address it has not been told of is pointed at it, and,
-        on a stack that picks its own address, reached at the route toward
-        it."""
+        """Run this poll's lookups, each on its own thread (a resolver may
+        take seconds), and point accounts at newly located servers."""
         asked, self._lookups_asked = self._lookups_asked, []
         for account, name, record in asked:
             threading.Thread(
@@ -2472,14 +2123,12 @@ class Stack:
                     contact=_default_contact(account.aor, advertised, account.contact_parameters),
                 )
             except SipralError:
-                # the account was removed meanwhile, or the stack is busy
-                # past patience: the next location says it again
+                # Removed meanwhile, or busy; the next location retries.
                 pass
 
     def _look_up(self, account: int, name: str, record: int) -> None:
-        """One lookup through the resolver, and its answer handed back
-        (`sipral_account_looked_up`); a resolver that raised is an answer
-        that failed, since the procedure waits for every one."""
+        """Run one lookup and hand back the answer; a raising resolver is a
+        failed answer, since the procedure waits for every one."""
         try:
             answer, records = self._resolver(name, record)
         except Exception:  # noqa: BLE001 -- the resolver's failure is an answer
@@ -2505,14 +2154,12 @@ class Stack:
                 "sipral_account_looked_up",
             )
         except SipralError:
-            # the account was removed while the resolver ran
+            # The account was removed while the resolver ran.
             pass
 
     def _media_host(self, media_host: str | None, account: Account | None, destination: str | None) -> str:
-        """The address a call's media socket is bound at: ``media_host``
-        when one was given, else the route toward where the media will come
-        from -- ``destination``, the account's server, or the address this
-        stack is reached at."""
+        """``media_host``, else the route toward ``destination`` or the
+        account's server, else this stack's address."""
         if media_host is not None:
             return media_host
         for peer in (destination, account.registrar_address if account else None):
@@ -2521,16 +2168,11 @@ class Stack:
         return parse_address(self.bind_address)[0]
 
     def _act_on_streams_wanted(self) -> None:
-        """Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the
-        poll that just ran: a connection to each destination not already
-        connected or being connected to, opened on a thread of its own, or
-        -- with ``stream_fallback`` off -- the word that none is coming.
+        """Open a connection per newly wanted destination on its own thread,
+        or refuse when ``stream_fallback`` is off.
 
-        First the connections the stack let go of in that poll: one that
-        stopped answering keep-alives (RFC 5626 Section 4.4.1) is retired by
-        the stack while its socket is still open here, and a connection kept
-        open that the stack will never write to again would stand in for the
-        new one it asks for."""
+        Retired connections (RFC 5626 Section 4.4.1) are closed first, or
+        they would stand in for the new one the stack asks for."""
         let_go, self._streams_let_go = self._streams_let_go, []
         for transport in let_go:
             self._lose_sip_stream(transport, tell=False)
@@ -2541,8 +2183,7 @@ class Stack:
             if destination in seen:
                 continue
             seen.add(destination)
-            # an account on a connection of its own asks with nothing
-            # outgrown; that one is opened whatever stream_fallback says
+            # An account's own connection (nothing outgrown) always opens.
             opens = self._stream_fallback or (wanted["request_bytes"] == 0 and wanted["limit_bytes"] == 0)
             over = (
                 lib.SIPRAL_TRANSPORT_TLS
@@ -2573,9 +2214,7 @@ class Stack:
             ).start()
 
     def _stream_trust(self, destination: str) -> TlsTrust:
-        """What a TLS connection to ``destination`` trusts: the pin of an
-        account on a connection of its own to that server when it has one,
-        the stack's ``tls_trust`` otherwise."""
+        """The pin of a TLS account on ``destination``, else the stack's trust."""
         with self._lock:
             accounts = list(self._accounts)
         for account in accounts:
@@ -2588,11 +2227,9 @@ class Stack:
         return self._tls_trust
 
     def _open_sip_stream(self, transport: int, destination: str, over: int = lib.SIPRAL_TRANSPORT_TCP) -> None:
-        """Connect over TCP -- or TLS, for an account whose connection speaks
-        it -- to ``destination``, or to ``stream_server`` when one was given
-        for TCP, and bind the connection at ``transport`` as the stream to
-        ``destination``; a connection that cannot be made is told to the
-        stack on that same number, which ends what was waiting for it."""
+        """Connect to ``destination`` (or ``stream_server`` for TCP) and bind
+        it at ``transport``; a failure is reported on that number, ending
+        what waited for it."""
         tls = over == lib.SIPRAL_TRANSPORT_TLS
         try:
             host, port = parse_address(destination) if tls else self._stream_server or parse_address(destination)
@@ -2658,8 +2295,7 @@ class Stack:
                 f"to {destination} connected, and the stack would not bind it: {refused}",
             )
             return
-        # read from here on: nothing arrives before the request the bind
-        # just released, and a selector reports what is already waiting
+        # Nothing arrives before the request the bind released.
         self._selector.register(sock, selectors.EVENT_READ, data=("sip", transport))
 
     def _say_no_stream(
@@ -2671,10 +2307,8 @@ class Stack:
         over: int = lib.SIPRAL_TRANSPORT_TCP,
         tls: int = lib.SIPRAL_TLS_FAILURE_NONE,
     ) -> None:
-        """`sipral_stack_transport_failed_with` for a connection that was not
-        made; never raising on the way out. ``what`` finishes a sentence
-        that begins with the protocol, "TCP" or "TLS" -- where the connection
-        was going and what became of it -- carried to the event's detail."""
+        """Report a connection not made; never raises. ``what`` completes a
+        detail sentence starting "TCP" or "TLS"."""
         text = f"{'TLS' if over == lib.SIPRAL_TRANSPORT_TLS else 'TCP'} {what}"
         text = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in text)
         encoded = text.encode("utf-8")[: lib.SIPRAL_TRANSPORT_DETAIL_BYTES].decode("utf-8", "ignore")
@@ -2696,8 +2330,7 @@ class Stack:
             pass
 
     def _write_sip_stream(self, transport: int, payload: bytes) -> None:
-        """One message on the connection bound at ``transport``, whole; a
-        write that fails loses the connection."""
+        """Write one message whole; a failed write loses the connection."""
         with self._stream_lock:
             stream = self._sip_streams.get(transport)
         if stream is None:
@@ -2709,17 +2342,15 @@ class Stack:
             self._lose_sip_stream(transport, tell=True)
 
     def _read_sip_stream(self, transport: int) -> None:
-        """What the connection bound at ``transport`` carried, to
-        `sipral_stack_receive_stream`, every byte and in order; the far end
-        closing it is `sipral_stack_stream_closed`."""
+        """Feed the connection's bytes to the stack, in order; a close by the
+        far end is reported."""
         with self._stream_lock:
             stream = self._sip_streams.get(transport)
         if stream is None:
             return
         try:
             with stream.lock:
-                # read without waiting: over TLS the selector said bytes
-                # arrived, not that they make application data
+                # Non-blocking: readable TLS may hold no application data.
                 stream.sock.settimeout(0.0)
                 try:
                     data = stream.sock.recv(_TRANSMIT_BYTES)
@@ -2743,12 +2374,11 @@ class Stack:
                 break
             time.sleep(0.001)
         if status != lib.SIPRAL_STATUS_OK and status not in _PASSING:
-            # the framing is lost: the stack retired the transport itself
+            # Framing lost: the stack retired the transport itself.
             self._lose_sip_stream(transport, tell=False)
 
     def _lose_sip_stream(self, transport: int, *, tell: bool) -> None:
-        """Close the connection bound at ``transport`` and, when ``tell``,
-        say so with `sipral_stack_stream_closed`."""
+        """Close the connection; ``tell`` reports it to the stack."""
         with self._stream_lock:
             stream = self._sip_streams.pop(transport, None)
         if stream is None:
@@ -2775,9 +2405,8 @@ class Stack:
 
     @property
     def contact_parameters(self) -> str:
-        """What goes after the address in a `Contact` this package writes:
-        ``;transport=tcp`` or ``;transport=tls`` for a stack signalling over
-        a connection (RFC 3261 Section 19.1.1), nothing over UDP."""
+        """``;transport=tcp``/``;transport=tls`` for a `Contact` over a
+        connection (RFC 3261 Section 19.1.1), empty over UDP."""
         if self.signalling == lib.SIPRAL_TRANSPORT_TLS:
             return ";transport=tls"
         if self.signalling == lib.SIPRAL_TRANSPORT_TCP:
@@ -2786,8 +2415,8 @@ class Stack:
 
     @property
     def connected(self) -> bool:
-        """Whether SIP can go out now: always over UDP, and over TCP or TLS
-        while the connection to the server stands."""
+        """Whether SIP can go out now: always over UDP, over TCP/TLS while
+        connected."""
         return not self._streamed or self._link is not None
 
     def _connect(self, bind_host: str | None) -> socket.socket:
@@ -2803,9 +2432,8 @@ class Stack:
         )
 
     def _install_link(self, sock: socket.socket, remote: str) -> None:
-        """Tell the stack a connection is open (`sipral_stack_transport_bind`
-        naming both ends) and start reading it. Raises what the bind said,
-        with the connection closed."""
+        """Bind the connection in the stack and start reading it; on error
+        the socket is closed and the error raised."""
         local = self.bind_address.encode("utf-8")
         far = remote.encode("utf-8")
         try:
@@ -2832,8 +2460,7 @@ class Stack:
         self._selector.register(sock, selectors.EVENT_READ, data="signalling")
 
     def _report_failure(self, error: int, tls: int, detail: str) -> None:
-        """`sipral_stack_transport_failed_with`, from whichever thread found out;
-        never raising on the way out."""
+        """Report a signalling failure to the stack; never raises."""
         failure = ffi.new("sipral_transport_failure_t *")
         failure.size = ffi.sizeof("sipral_transport_failure_t")
         failure.transport = lib.SIPRAL_TRANSPORT_MAIN
@@ -2852,10 +2479,8 @@ class Stack:
             pass
 
     def _lose_link(self, error: int, tls: int, detail: str, *, closed: bool = False, tell: bool = True) -> None:
-        """Close the signalling connection, tell the stack how it ended --
-        `sipral_stack_stream_closed` for an orderly close,
-        `sipral_stack_transport_failed_with` otherwise, nothing for one the
-        stack itself found broken -- and connect again."""
+        """Close signalling, report how it ended (nothing if the stack broke
+        it) and reconnect."""
         with self._link_lock:
             sock, self._link = self._link, None
         if sock is None:
@@ -2891,9 +2516,7 @@ class Stack:
         threading.Thread(target=self._reconnect, name="sipral-reconnect", daemon=True).start()
 
     def _reconnect(self) -> None:
-        """Connect again, backing off, until it works or the stack closes;
-        then point every account at the new connection and register again
-        the ones that were registering."""
+        """Reconnect with backoff until it works or the stack closes."""
         delay = _RECONNECT_FIRST
         try:
             while not self._closed.wait(delay):
@@ -2920,9 +2543,8 @@ class Stack:
                 self._reconnecting = False
 
     def _after_reconnect(self) -> None:
-        """Every account added without a `Contact` of its own moves to the
-        new connection's address, and every one that was registering
-        registers again now rather than at its next back-off."""
+        """Rebind accounts without their own `Contact`; re-register now
+        rather than at the next back-off."""
         with self._lock:
             accounts = list(self._accounts)
         for account in accounts:
@@ -2935,8 +2557,7 @@ class Stack:
                 pass
 
     def _write_link(self, payload: bytes) -> None:
-        """Write one message on the signalling connection, whole; a write
-        that fails loses the connection."""
+        """Write one message whole; a failed write loses the connection."""
         with self._link_lock:
             sock = self._link
             if sock is None:
@@ -2949,18 +2570,14 @@ class Stack:
         self._lose_link(*classify(failed))
 
     def _read_link(self) -> None:
-        """What the signalling connection carried, to
-        `sipral_stack_receive_stream` -- every byte, in order: a busy stack
-        is waited for rather than skipped, since a stream that loses a byte
-        never finds its place again."""
+        """Feed signalling bytes to the stack in order; a busy stack is
+        waited for, since a stream that loses a byte cannot resync."""
         with self._link_lock:
             sock = self._link
             if sock is None:
                 return
             try:
-                # read without waiting: the selector said bytes arrived, not
-                # that they make application data (a TLS 1.3 session ticket
-                # holds none)
+                # Non-blocking: a TLS 1.3 session ticket holds no data.
                 sock.settimeout(0.0)
                 try:
                     data = sock.recv(_TRANSMIT_BYTES)
@@ -2990,20 +2607,15 @@ class Stack:
                 break
             time.sleep(0.001)
         if status != lib.SIPRAL_STATUS_OK and status not in _PASSING:
-            # the framing is lost: the stack has retired the transport and
-            # said so itself
+            # Framing lost: the stack retired the transport and reported it.
             self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, "", tell=False)
 
     def _wait_for_sockets(self, timeout: float) -> list:
         """What the selector has ready within ``timeout`` seconds.
 
-        A stack signalling over TCP or TLS has no socket to watch while its
-        connection is down -- refused at creation, or lost and not yet made
-        again -- and Windows' ``select()`` refuses three empty sets with
-        WinError 10022 instead of waiting, which would end the poll thread
-        and with it every retry and event. With nothing registered, or with
-        the last socket taken away while this was about to wait, the wait
-        is the timeout itself."""
+        With TCP/TLS down there may be nothing to watch, and Windows'
+        ``select()`` fails on empty sets (WinError 10022), which would kill
+        the poll thread. Then this just waits out the timeout."""
         if self._selector.get_map():
             try:
                 return self._selector.select(timeout)
@@ -3042,14 +2654,8 @@ class Stack:
                         self.now_ms(),
                     )
                 else:
-                    # A media socket `_map_media_socket` named, still
-                    # waiting for `SIPRAL_EVENT_KIND_NAT_MAPPING` or a
-                    # call, or already described but with no media handle
-                    # yet: everything arriving on it still goes to
-                    # `sipral_stack_receive_stun` (`docs/08-ffi.md`,
-                    # "Behind a NAT" -- "Until the call's media handle
-                    # exists, everything arriving on its socket still
-                    # goes to sipral_stack_receive_stun").
+                    # A mapped media socket without a media handle yet:
+                    # everything on it goes to the STUN entry point.
                     _tag, address = key.data
                     sock = key.fileobj
                     try:
@@ -3087,25 +2693,11 @@ class Stack:
                 self._lose_turn_stream(local, tell=True)
 
     def close(self) -> None:
-        """`sipral_stack_destroy`, and everything this wrapper opened.
+        """Destroy the stack and everything this wrapper opened.
 
-        Whatever calls are still open are hung up first, while the poll
-        thread can still send what that queues, and while each call is
-        still tracked and its media socket still open: `sipral_call_hangup`
-        only enqueues the BYE and, once it is answered, the RTCP BYE
-        `sipral_stack_poll_farewell` owes the far end
-        (`docs/08-ffi.md`, "A call that ends owes the far end an RTCP
-        BYE") -- `_drain_transmit` and `_drain_farewells` are what
-        actually write those, and that only happens from inside this
-        thread's own loop, through `Stack.call_for` and the call's own
-        `Media`. Calling `Call.close` on each call before that poll has
-        had a chance to run would forget the call and close its media
-        socket first, and a farewell drained afterwards would find
-        nothing left to send it through -- a clean call reaching for the
-        door on its way out and finding it already locked. So hanging up
-        happens first, `Call.close` -- which releases the media handle
-        and forgets the call -- only after the poll thread has had this
-        round to drain both queues.
+        Open calls are hung up first and closed only after the poll thread
+        has had a round to send their BYE and RTCP BYE: closing a call first
+        would close the socket those go out on.
         """
         if self._closed.is_set():
             return
@@ -3118,22 +2710,12 @@ class Stack:
                 except Exception:  # noqa: BLE001 -- best effort on the way out
                     pass
         if calls:
-            # One more round of polling for the hangups just queued to go
-            # out and, on loopback, for their answers to come back and be
-            # read, and for the farewell each one then owes to be drained
-            # and sent while the call is still tracked and its media
-            # socket still open -- 200ms is comfortably more than a direct
-            # call over a local network needs and still bounded.
+            # Time for BYEs, their answers and farewells; ample on a LAN.
             time.sleep(0.2)
         for call in calls:
             call.close()
-        # Every media socket still named with `sipral_stack_nat_map` and
-        # never reached by a call's own media handle -- `sipral_stack_destroy`
-        # sends nothing, and a relay left allocated stays on the server
-        # until its lifetime runs out (`docs/08-ffi.md`,
-        # "sipral_stack_nat_unmap"). `Call.close` above already did this
-        # for every socket a call still owned; this catches one mapped
-        # and then abandoned before any call was ever placed on it.
+        # Unmap sockets mapped but never used by a call: destroy sends
+        # nothing, and a relay would stay allocated until it lapses.
         with self._nat_lock:
             leftover = list(self._stun_sockets)
         for address in leftover:
@@ -3141,8 +2723,6 @@ class Stack:
         self._closed.set()
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=5.0)
-        # and every connection to the TURN server still open: what it
-        # carried was given back through it above, or lapses with it
         with self._nat_lock:
             streams = list(self._turn_streams)
         for local in streams:

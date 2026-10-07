@@ -3,12 +3,9 @@
 
 """What ``Stack`` puts on ``stack.events`` and on each ``Call.events``.
 
-`sipral_event_t` and the arm its `kind` names are handed to the C callback
-as a pointer valid for the length of that one call and no longer
-(`docs/08-ffi.md`, "Signalling across the boundary"). So decoding happens
-once, synchronously, inside the callback in :mod:`sipral.stack`, and what
-crosses into asyncio afterwards is a plain :class:`Event` holding Python
-`bytes` and `int`, never a `cffi` pointer.
+The event pointer is valid only during the C callback, so it is decoded
+there, and what reaches asyncio is a plain :class:`Event` with no `cffi`
+pointers.
 """
 
 from __future__ import annotations
@@ -98,19 +95,10 @@ def _statistics(pointer) -> dict[str, object] | None:
 class Event:
     """One event, decoded whole out of ``sipral_event_t`` while it was live.
 
-    ``kind`` is always the raw `sipral_event_kind_t` number, never
-    `sipral.enums.EventKind`: a kind this build's generated bindings do not
-    know about yet -- because it was spent by another task after this
-    package was regenerated against -- must still come through rather than
-    raising on the way into an enum with no member for it. ``kind_name`` is
-    `sipral_event_kind_name`'s own answer for it, which the library keeps
-    current even when this binding's `enums.py` has not been regenerated.
-
-    ``fields`` carries whatever :func:`_decode_payload` could read out of
-    the union arm ``kind`` names; a kind this module has no decoder for
-    yet -- the same situation as an unknown ``kind`` -- leaves it empty
-    rather than raising, so a listener sees a generic event instead of an
-    exception it did not ask for.
+    ``kind`` is the raw number, not `sipral.enums.EventKind`, so a kind newer
+    than this package still comes through; ``kind_name`` is the library's
+    name for it. ``fields`` holds the decoded payload, empty for a kind this
+    module cannot decode.
     """
 
     kind: int
@@ -123,8 +111,7 @@ class Event:
 
     @property
     def identity(self) -> "CallerIdentity | None":
-        """Who is calling, beyond `From`, on every event of an incoming call
-        -- ``None`` on an event that is not about a call."""
+        """Who is calling, beyond `From`; ``None`` off call events."""
         if self.kind not in _CALL_KINDS:
             return None
         f = self.fields
@@ -145,11 +132,10 @@ class Event:
 
     @property
     def verification(self) -> "Verification | None":
-        """`SIPRAL_EVENT_KIND_CALLER_VERIFICATION`, typed: the certificate
-        this stack's verification service wants (``stage`` is
-        ``CERTIFICATE_WANTED``; fetch ``certificate_url`` and hand it to
-        :meth:`sipral.stack.Stack.stir_certificate`), or its verdict on the
-        caller. ``None`` on any other event."""
+        """`SIPRAL_EVENT_KIND_CALLER_VERIFICATION`, typed: a wanted
+        certificate (``CERTIFICATE_WANTED``: fetch ``certificate_url`` and
+        pass it to :meth:`sipral.stack.Stack.stir_certificate`) or the
+        verdict. ``None`` on other events."""
         if self.kind != lib.SIPRAL_EVENT_KIND_CALLER_VERIFICATION:
             return None
         f = self.fields
@@ -169,9 +155,7 @@ class Event:
 
     @property
     def protection(self) -> "Protection | None":
-        """How the call's media is protected, on the media events that
-        start, change or secure it -- the encryption report as it stood.
-        ``None`` on any other event."""
+        """Media protection on start, change and secured events; else ``None``."""
         if self.kind not in _PROTECTION_KINDS:
             return None
         f = self.fields
@@ -184,8 +168,7 @@ class Event:
 
     @property
     def answering(self) -> "Answering | None":
-        """How an incoming call asked to be answered and announced -- ``None``
-        on an event that is not about a call."""
+        """How an incoming call asked to be answered; ``None`` off call events."""
         if self.kind not in _CALL_KINDS:
             return None
         f = self.fields
@@ -201,9 +184,8 @@ class Event:
 
     @property
     def cause(self) -> "EndCause | None":
-        """Why the far end ended the call: the `Reason` (RFC 3326) of the BYE,
-        the CANCEL or the refusal, on `SIPRAL_EVENT_KIND_CALL_ENDED`. ``None``
-        on any other event, and on an end that carried no `Reason`."""
+        """The `Reason` (RFC 3326) of the BYE, CANCEL or refusal on
+        `SIPRAL_EVENT_KIND_CALL_ENDED`; ``None`` otherwise or without one."""
         if self.kind != lib.SIPRAL_EVENT_KIND_CALL_ENDED:
             return None
         f = self.fields
@@ -291,12 +273,11 @@ class Event:
 
 @dataclasses.dataclass(frozen=True)
 class AudioNotice:
-    """What changed among the audio devices, in device mode, and who changed
-    it. An application notes ``AudioOrigin.SYSTEM`` changes (a headset
-    plugged in, the default moved) and never answers an ``ENGINE`` one by
-    selecting again: that is the engine doing what was asked, or falling back
-    after a loss, and re-applying a choice on it loops. ``device`` is the id
-    :meth:`sipral.audio.Audio.devices` lists, or ``None``."""
+    """An audio device change in device mode, and its origin.
+
+    Never answer an ``AudioOrigin.ENGINE`` change by selecting again: it is
+    the engine obeying or falling back, and re-applying loops. ``device`` is
+    an id from :meth:`sipral.audio.Audio.devices`, or ``None``."""
 
     change: "AudioChange"
     origin: "AudioOrigin"
@@ -309,12 +290,10 @@ class AudioNotice:
 class CallerIdentity:
     """What an incoming INVITE said about who is calling, beyond its `From`.
 
-    ``asserted_uri``, ``asserted_display`` and ``verstat`` come only from a
-    peer the account names in ``trusted_peers`` (RFC 3325 Section 8):
-    ``trusted`` says whether this call came from one. ``privacy`` is what the
-    caller's `Privacy` asked for. ``diverted_from`` and ``diversion_reason``
-    are the top-most `Diversion` (RFC 5806); the full lists, and every
-    `History-Info` entry (RFC 7044), are read with
+    ``asserted_uri``, ``asserted_display`` and ``verstat`` come only from
+    ``trusted_peers`` (RFC 3325 Section 8); ``trusted`` says if this call
+    did. ``diverted_from``/``diversion_reason`` are the top `Diversion`
+    (RFC 5806); full lists and `History-Info` (RFC 7044) via
     :meth:`sipral.call.Call.identity` or
     :meth:`sipral.stack.Stack.call_identity`.
     """
@@ -328,8 +307,7 @@ class CallerIdentity:
     diversion_reason: str | None
     diversion_count: int
     history_count: int
-    #: This stack's own verdict on the caller (RFC 8224), for an account that
-    #: verifies: unlike ``verstat``, what this end checked itself.
+    #: This end's own verdict (RFC 8224), unlike the network's ``verstat``.
     verification: "VerificationOutcome" = VerificationOutcome.NONE
     attestation: "Attestation" = Attestation.NONE
     verification_failure: "VerificationFailure" = VerificationFailure.NONE
@@ -337,10 +315,8 @@ class CallerIdentity:
 
 @dataclasses.dataclass(frozen=True)
 class Verification:
-    """One half of a caller's verification (RFC 8224 Section 6.2): the
-    certificate wanted, or the verdict. ``refused`` says a strict account
-    refused the call with ``response_code``, and it ends rather than
-    rings."""
+    """A certificate wanted, or the verdict (RFC 8224 Section 6.2).
+    ``refused``: a strict account rejected the call with ``response_code``."""
 
     stage: "VerificationStage"
     outcome: "VerificationOutcome"
@@ -357,12 +333,10 @@ class Verification:
 
 @dataclasses.dataclass(frozen=True)
 class Protection:
-    """How one stream is protected: the encryption report's entry, on a
-    media event or from :meth:`sipral.media.Media.encryption`. ``suite`` is a
+    """How one stream is protected. ``suite`` is a
     :class:`sipral.enums.SrtpSuite` number, zero while none runs;
-    ``authenticated`` is set for a DTLS-SRTP stream whose handshake checked
-    the far end's certificate against its signalled fingerprint, and never
-    for SDES."""
+    ``authenticated`` only for DTLS-SRTP with the fingerprint checked,
+    never for SDES."""
 
     key_exchange: "KeyExchange"
     encrypted: bool
@@ -374,9 +348,8 @@ class Protection:
 @dataclasses.dataclass(frozen=True)
 class Answering:
     """How an incoming call asked to be answered (RFC 5373) and rung
-    (`Alert-Info`, RFC 7462). ``answer_after_ms`` is not ``None`` when the
-    call asked to be answered without the user -- whether to do so is the
-    application's policy, never the stack's (RFC 5373 Section 4.2)."""
+    (`Alert-Info`, RFC 7462). ``answer_after_ms`` set means auto-answer was
+    asked; obeying is the application's policy (RFC 5373 Section 4.2)."""
 
     answer_mode: "AnswerMode"
     answer_mode_required: bool
@@ -399,10 +372,9 @@ class EndCause:
 
 @dataclasses.dataclass(frozen=True)
 class LocalConferenceNotice:
-    """What a local conference did (`sipral.LocalConference`): who joined
-    or left and why, who is talking, or a recording that stopped by itself.
-    ``member`` and ``loudest`` are call handles, or the conference's own
-    handle for this end; ``members`` and ``talkers`` how it stands now."""
+    """A local conference change. ``member`` and ``loudest`` are call
+    handles, or the conference handle for this end; ``members`` and
+    ``talkers`` are current counts."""
 
     conference: int
     change: LocalConferenceChange
@@ -415,11 +387,9 @@ class LocalConferenceNotice:
 
 @dataclasses.dataclass(frozen=True)
 class ConferenceNotice:
-    """What a conference subscription learnt: a document merged into its
-    picture (``ConferenceUpdate.APPLIED``) or the conference deleted by its
-    focus (``ENDED``, after which the subscription is being given up), the
-    version the picture is at and how many users it holds.
-    :meth:`sipral.subscription.Subscription.conference` reads the picture."""
+    """A conference document applied, or the conference ``ENDED`` (the
+    subscription then ends). Read the picture with
+    :meth:`sipral.subscription.Subscription.conference`."""
 
     subscription: int
     update: "ConferenceUpdate"
@@ -429,10 +399,8 @@ class ConferenceNotice:
 
 @dataclasses.dataclass(frozen=True)
 class TypedText:
-    """What the far end typed on the call's real-time text stream (RFC
-    4103), in order: an erasure as BACKSPACE (U+0008), a new line as LINE
-    SEPARATOR (U+2028), a REPLACEMENT CHARACTER (U+FFFD) where a block was
-    lost for good, and ``missing`` counting those."""
+    """Real-time text received (RFC 4103): erasure is U+0008, new line
+    U+2028, a lost block U+FFFD, counted in ``missing``."""
 
     text: str
     missing: int
@@ -440,12 +408,10 @@ class TypedText:
 
 @dataclasses.dataclass(frozen=True)
 class Presence:
-    """Presence moved. ``PresenceKind.WATCHED``: the ``subscription`` that
-    was told, and what the PIDF document said -- open or closed, the first
-    RPID activity, the presentity and the first note. ``PUBLICATION``, about
-    the event's ``account``: what became of its published presence, why it
-    failed, the SIP status the compositor answered with, the lifetime granted
-    and when the stack refreshes it."""
+    """``WATCHED``: what a subscription's PIDF said (basic, first RPID
+    activity, entity, first note). ``PUBLICATION``: the state of the
+    account's own published presence, failure, status, lifetime and next
+    refresh."""
 
     kind: "PresenceKind"
     subscription: int
@@ -461,7 +427,6 @@ class Presence:
 
 
 def _decode_payload(kind: int, payload) -> dict[str, object]:
-    # Registration.
     if kind == lib.SIPRAL_EVENT_KIND_REGISTRATION_CHANGED:
         registration = payload.registration
         return {
@@ -473,7 +438,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "retry_in_ms": int(registration.retry_in_ms),
         }
 
-    # Every call kind shares `payload.call` (`sipral_call_event_t`).
     if kind in _CALL_KINDS:
         call = payload.call
         return {
@@ -515,8 +479,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "verification_failure": int(call.verification_failure),
         }
 
-    # Who is calling, as a signature says: the certificate wanted, or the
-    # verdict (`Stack.stir`, `Stack.stir_certificate`).
     if kind == lib.SIPRAL_EVENT_KIND_CALLER_VERIFICATION:
         verification = payload.verification
         return {
@@ -535,8 +497,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "detail": _text(verification.detail, verification.detail_len),
         }
 
-    # The audio engine's own news, in device mode: a device arrived or left,
-    # a default moved, a role was put on a device or reopened elsewhere.
     if kind == lib.SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED:
         audio = payload.audio
         return {
@@ -547,7 +507,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "device": int(audio.device),
         }
 
-    # Every media kind shares `payload.media` (`sipral_media_event_t`).
     if kind in _MEDIA_KINDS:
         media = payload.media
         return {
@@ -670,8 +629,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "reason": _text(relay.reason, relay.reason_len),
         }
 
-    # The STUN server in use moved to another in the list, or every one of
-    # them failed (`Stack(stun_fallbacks=...)`).
     if kind == lib.SIPRAL_EVENT_KIND_STUN_SERVER:
         server = payload.stun_server
         return {
@@ -680,8 +637,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "previous": _text(server.previous, server.previous_len),
         }
 
-    # A local conference changed: a member joined or left, who is talking
-    # changed, or its recording stopped (`sipral.LocalConference`).
     if kind == lib.SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED:
         changed = payload.local_conference
         return {
@@ -694,8 +649,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "loudest": int(changed.loudest),
         }
 
-    # A request too large for a datagram (RFC 3261 Section 18.1.1), and the
-    # stream it asks for; `Stack(stream_fallback=True)` opens it itself.
     if kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED:
         wanted = payload.transport_wanted
         return {
@@ -705,8 +658,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "limit_bytes": int(wanted.limit_bytes),
         }
 
-    # The signalling connection failed or closed, with the TLS library's
-    # reason when TLS refused it (`Stack(signalling=Transport.TLS)`).
     if kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:
         lost = payload.transport_failed
         return {
@@ -717,8 +668,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "detail": _text(lost.detail, lost.detail_len),
         }
 
-    # A media socket's connection to a TURN server reached over TCP or TLS:
-    # open it, or close it (`Stack` does both itself).
     if kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
         stream = payload.turn_stream
         return {
@@ -728,8 +677,7 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "server": _text(stream.server, stream.server_len),
         }
 
-    # A REFER outside any dialog (`Stack.accept_referral`), or -- with
-    # `status_code` set and nothing else -- the word that one lapsed.
+    # `status_code` set and nothing else: the referral lapsed.
     if kind == lib.SIPRAL_EVENT_KIND_REFERRAL:
         referral = payload.referral
         return {
@@ -739,9 +687,7 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "referred_by": _text(referral.referred_by, referral.referred_by_len),
         }
 
-    # What a call told to listen heard: a network's tone, who answered, or
-    # the beep (`Call.detect_progress`). `what` says which members mean
-    # anything; the rest are zero.
+    # `what` says which members are meaningful; the rest are zero.
     if kind == lib.SIPRAL_EVENT_KIND_PROGRESS_DETECTED:
         progress = payload.progress
         return {
@@ -759,8 +705,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "sit_ms": (int(progress.sit_ms_1), int(progress.sit_ms_2), int(progress.sit_ms_3)),
         }
 
-    # A conference subscription's picture changed, or the conference ended
-    # (`Subscription.conference` reads the picture).
     if kind == lib.SIPRAL_EVENT_KIND_CONFERENCE_CHANGED:
         conference = payload.conference
         return {
@@ -770,7 +714,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "users": int(conference.users),
         }
 
-    # What the far end typed on the call's real-time text stream.
     if kind == lib.SIPRAL_EVENT_KIND_TEXT_RECEIVED:
         typed = payload.text
         return {
@@ -778,7 +721,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "missing": int(typed.missing),
         }
 
-    # A watched presentity, or this account's own publication.
     if kind == lib.SIPRAL_EVENT_KIND_PRESENCE_CHANGED:
         presence = payload.presence
         return {
@@ -795,8 +737,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "refresh_in_ms": int(presence.refresh_in_ms),
         }
 
-    # A subscription moved (`SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED`), or a
-    # NOTIFY arrived on it (`SIPRAL_EVENT_KIND_NOTIFIED`).
     if kind in (lib.SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED, lib.SIPRAL_EVENT_KIND_NOTIFIED):
         subscription = payload.subscription
         return {
@@ -811,8 +751,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "forked_from": int(subscription.forked_from),
         }
 
-    # The stack's own recovery after a network loss or a resume: which rung
-    # of the ladder it reached, and how it settled.
     if kind == lib.SIPRAL_EVENT_KIND_RECOVERY:
         recovery = payload.recovery
         return {
@@ -822,7 +760,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "unverified": int(recovery.unverified),
         }
 
-    # A call announced by a push, and one that never came.
     if kind in (lib.SIPRAL_EVENT_KIND_CALL_ANNOUNCED, lib.SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING):
         announce = payload.announce
         return {
@@ -830,7 +767,6 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "waited_ms": int(announce.waited_ms),
         }
 
-    # A MESSAGE received or answered, and a message-summary's counts.
     if kind in (
         lib.SIPRAL_EVENT_KIND_MESSAGE_RECEIVED,
         lib.SIPRAL_EVENT_KIND_MESSAGE_SENT,
@@ -851,8 +787,7 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "message_account": _text(message.message_account, message.message_account_len),
         }
 
-    # Unknown to this version of the layer: the caller still has `message`
-    # and the raw `kind`/`kind_name`, which is what a generic event is for.
+    # Unknown kind: the listener still has `message`, `kind` and `kind_name`.
     return {}
 
 
@@ -902,9 +837,7 @@ _MEDIA_KINDS = frozenset(
 def decode(raw) -> Event:
     """Copy one ``sipral_event_t*`` out into a standalone :class:`Event`.
 
-    Called from inside the C callback, and nowhere else: ``raw`` points at
-    memory the callback's caller owns, and every field this reads is read
-    before this function returns.
+    Only from inside the C callback: ``raw`` is valid only until it returns.
     """
     return Event(
         kind=int(raw.kind),

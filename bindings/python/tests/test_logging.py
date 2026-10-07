@@ -3,11 +3,8 @@
 
 """The log, the state snapshot and the RTP port range, through this package.
 
-`crates/sipral-ffi/src/log.rs` and `ports.rs` prove the C ABI itself; what
-runs here is the same three things carried through :class:`sipral.Stack`:
-a log handler that hears a refused call with nobody named in it, a state
-text for a crash report, and two stacks on loopback whose call is carried
-on media ports out of the range each was given.
+A log handler hears a refused call without names in it, the state text is
+produced, and a call uses media ports from each stack's range.
 """
 
 from __future__ import annotations
@@ -94,8 +91,7 @@ class LogToTheLoggingModule(unittest.TestCase):
         return lib.sipral_stack_rtp_port_reserve(self.stack.handle, ffi.new("uint32_t *"))
 
     def _state_says(self, line: str) -> None:
-        """The state text names the level the stack logs at -- once a poll
-        has kept a snapshot, if the poll thread held the stack when asked."""
+        """The state text names the log level (possibly after a poll)."""
         deadline = time.monotonic() + 3
         text = self.stack.state()
         while line not in text and time.monotonic() < deadline:

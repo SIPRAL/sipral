@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""A server reached at one address whose answer names another in its
-`Contact` -- the lab's Asterisk, published on a mapped port and naming the
-port it listens on inside its container, or any registrar behind a NAT.
-The dialog's requests have to stay on the path the INVITE took: the ACK did
-all along, and the BYE has to follow it rather than go to an address
-nothing answers on.
+"""A server whose `Contact` names an unreachable address (a mapped port, a
+NAT): the ACK and BYE must stay on the INVITE's path.
 """
 
 from __future__ import annotations

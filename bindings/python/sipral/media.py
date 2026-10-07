@@ -3,11 +3,9 @@
 
 """``Media``: one call's audio, paced at its own frame rate.
 
-A call's media has a handle of its own and never takes the stack's lock
-(`docs/08-ffi.md`, "A call's media has a handle of its own"), so it runs on
-a thread of its own too: this is the one place in the package where audio
-crosses as `bytes`/`memoryview`, paced by `sipral_media_info_t::frame_ms`
-rather than by whatever rate the application happens to call in at.
+Media has its own handle and never takes the stack's lock, so it runs on
+its own thread, paced by the negotiated frame length rather than by the
+application.
 """
 
 from __future__ import annotations
@@ -46,10 +44,10 @@ def _parse_address(text: str) -> tuple[str, int]:
 
 
 class Media:
-    """`sipral_call_media`, and the four calls that carry the packets.
+    """A call's media handle and packet pump.
 
-    Not built directly: :class:`sipral.call.Call` mints one from its own
-    `SIPRAL_EVENT_KIND_MEDIA_STARTED` and hands it over as ``call.media``.
+    Not built directly: it appears as ``call.media`` on
+    `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
     """
 
     def __init__(
@@ -64,15 +62,12 @@ class Media:
         self.stack = stack
         self.call_handle = call_handle
         self._final_statistics: dict[str, object] | None = None
-        #: Whether the library's own audio engine pumps this call (device
-        #: mode): then no frame crosses here -- :attr:`frames` stays empty and
-        #: :meth:`send_audio` is refused -- and this thread only reads the
-        #: socket and sends what RTCP and DTMF owe.
+        #: Device mode: the engine pumps audio, :attr:`frames` stays empty and
+        #: :meth:`send_audio` is refused; this thread only carries packets.
         self.pumped = pumped
         self._socket = sock
         self._socket.setblocking(False)
-        #: The socket's own `host:port`, which names its connection to a
-        #: TURN server reached over TCP or TLS (:meth:`Stack.write_turn`).
+        #: The socket's `host:port`, which also names its TURN connection.
         self.local_address = _format_address(*sock.getsockname())
 
         out_media = ffi.new("sipral_handle_t *")
@@ -88,11 +83,8 @@ class Media:
         self._frame_seconds = max(info["frame_ms"], 1) / 1000.0
         self._silence = bytes(self.frame_samples * 2)
 
-        #: Where the last datagram this call's media received came from --
-        #: the address `sipral_stack_poll_farewell`'s goodbye is sent to,
-        #: since nothing in this ABI hands that back as a struct member
-        #: (media is described in SDP, not carried as an address of its
-        #: own). `None` until at least one packet has arrived.
+        #: Source of the last datagram received, the fallback for the
+        #: farewell RTCP BYE; `None` until a packet arrives.
         self.remote_address: str | None = None
 
         #: Decoded 16-bit mono PCM, one frame per item, on the stack's
@@ -100,8 +92,7 @@ class Media:
         self.frames: asyncio.Queue[bytes] = asyncio.Queue()
         self._to_send: queue.Queue[bytes] = queue.Queue()
         self._pending = bytearray()
-        #: Held for one frame's playback and capture, and while
-        #: :meth:`set_app_rate` moves the frame's length under them.
+        #: Held per frame, and while :meth:`set_app_rate` changes its length.
         self._frame_lock = threading.Lock()
         self._active = True
         self._closed = threading.Event()
@@ -110,14 +101,10 @@ class Media:
         self._socket_lock = threading.Lock()
         self._selector = selectors.DefaultSelector()
         self._selector.register(self._socket, selectors.EVENT_READ)
-        #: The socket real-time text arrives on and leaves from, when the
-        #: call was built with one.
         self._text_socket = text_socket
         if text_socket is not None:
             text_socket.setblocking(False)
-        #: The two sockets a recording server's copies leave from -- this
-        #: end's audio, then the far end's -- while
-        #: :meth:`sipral.call.Call.record_to` records.
+        #: Recording sockets (this end, far end) while recording.
         self._recording: tuple[socket_module.socket, socket_module.socket] | None = None
 
         self._thread = threading.Thread(
@@ -126,14 +113,8 @@ class Media:
         self._thread.start()
 
     def send_to(self, payload: bytes, address: str) -> None:
-        """Write ``payload`` straight to this call's own RTP socket.
-
-        Used by :class:`sipral.stack.Stack` to send the RTCP BYE
-        `sipral_stack_poll_farewell` hands back once the signalling that
-        owned it has already ended, and by
-        :class:`sipral.conference.LocalConference` for the audio it encodes
-        for this call while the call is a member; a call's own audio goes
-        through :meth:`send_audio`.
+        """Write ``payload`` straight from this call's RTP socket (farewells,
+        local conference audio); a call's own audio uses :meth:`send_audio`.
         """
         host, _, port = address.rpartition(":")
         try:
@@ -168,9 +149,7 @@ class Media:
         }
 
     def encryption(self) -> list[_events.Protection]:
-        """The encryption report: how each stream of this call is protected,
-        now (`sipral_media_encryption_count`, `sipral_media_encryption_at`).
-        One entry per stream, which for this library is the call's audio."""
+        """How each stream (here: the audio) is protected now."""
         count = ffi.new("size_t *")
         _call(
             lambda: lib.sipral_media_encryption_count(self.handle, count),
@@ -196,27 +175,20 @@ class Media:
         return report
 
     def ended_with(self, record: dict[str, object]) -> None:
-        """The end-of-call record arrived: what :meth:`statistics` answers
-        from now on, when the library no longer can."""
+        """Keep the end-of-call record for :meth:`statistics`."""
         self._final_statistics = record
 
     def statistics(self) -> dict[str, object]:
         """`sipral_media_statistics`, as a plain `dict`.
 
-        ``frames_underrun`` counts frames the earpiece played as nothing
-        because the jitter buffer had run dry while the far end was still
-        sending; ``loss_rate``, ``score`` and ``suffering`` take them in.
-        ``feedback`` is what RTP/AVPF (RFC 4585) did on the stream, or
-        ``None`` while it does not run it: the agreed ``trr_interval_ms``,
-        the Generic NACKs sent and received and the packets they asked for,
-        the early and the reduced-size (RFC 5506) RTCP packets sent, and the
-        feedback held back for want of RTCP bandwidth.
+        ``frames_underrun`` counts frames played empty because the jitter
+        buffer ran dry while the far end still sent; ``loss_rate``, ``score``
+        and ``suffering`` include them. ``feedback`` holds RTP/AVPF (RFC
+        4585, RFC 5506) counters, or ``None`` when not in use.
 
-        Once the call has ended the stream is gone and the library raises
-        ``WRONG_STATE``; from the moment the end-of-call record has arrived
-        this answers with that record instead
-        (:attr:`sipral.call.Call.final_statistics`), which counts everything
-        up to the end and has no ``feedback``.
+        After the call ends this returns the end-of-call record
+        (:attr:`sipral.call.Call.final_statistics`, no ``feedback``) instead
+        of raising ``WRONG_STATE``.
         """
         out = ffi.new("sipral_stream_stats_t *")
         out.size = ffi.sizeof("sipral_stream_stats_t")
@@ -258,11 +230,8 @@ class Media:
         }
 
     def path_candidates(self) -> list[dict[str, object]]:
-        """Every path this call's ICE agent tried -- the candidate pairs its
-        checklist held, then the relays it held -- and what became of each
-        (`sipral_media_path_candidate_count`/`_at`; D5's transport and NAT
-        half, `docs/05-media.md`), each as a plain `dict`. Empty for a call
-        not using ICE."""
+        """Every ICE pair and relay tried, and its outcome, as dicts. Empty
+        without ICE."""
         count = ffi.new("size_t *")
         _call(
             lambda: lib.sipral_media_path_candidate_count(self.handle, count),
@@ -297,17 +266,13 @@ class Media:
         return paths
 
     def set_app_rate(self, hz: int) -> None:
-        """`sipral_media_set_app_rate`: the rate :attr:`frames` hands out
-        and :meth:`send_audio` takes, whatever rate the codec runs at.
+        """The rate of :attr:`frames` and :meth:`send_audio`, independent of
+        the codec.
 
-        8000, 16000, 24000 or 48000, or 0 for the codec's own, which is
-        where every call starts. The library converts both ways with its
-        own resampler; the frame keeps the call's duration, so
-        :attr:`sample_rate` and :attr:`frame_samples` say the new rate and
-        its length from here on. Audio queued with :meth:`send_audio` and
-        not yet sent was at the old rate, and is dropped. Any other rate is
-        `SipralError` with ``INVALID_ARGUMENT``, and device mode is
-        ``WRONG_STATE``.
+        8000, 16000, 24000 or 48000, or 0 for the codec's own (the start).
+        The library resamples both ways; :attr:`sample_rate` and
+        :attr:`frame_samples` update. Unsent queued audio is dropped. Other
+        rates raise ``INVALID_ARGUMENT``; device mode ``WRONG_STATE``.
         """
         with self._frame_lock:
             _call(
@@ -328,16 +293,9 @@ class Media:
     def send_audio(self, pcm: bytes | memoryview) -> None:
         """Queue 16-bit mono PCM to go out, one frame at a time.
 
-        Cut to whatever :attr:`frame_samples` this call negotiated, at
-        :attr:`sample_rate` (:meth:`set_app_rate` chooses it), as it is
-        sent, not as it is queued: a chunk shorter or longer than one frame
-        is accepted here and split across as many capture calls as it
-        takes. Thread-safe -- called from whatever thread the application
-        runs its own audio loop or voice-agent callback on, not from
-        :attr:`stack`'s poll thread.
-
-        Refused with `RuntimeError` in device mode, where the microphone is
-        the call's audio and nothing else is.
+        Any length is accepted, at :attr:`sample_rate`, and cut into
+        :attr:`frame_samples` frames as it is sent. Thread-safe. Raises
+        `RuntimeError` in device mode, where the microphone is the audio.
         """
         if self.pumped:
             raise RuntimeError(
@@ -357,15 +315,14 @@ class Media:
         bitrate: int = 0,
         checkpoint_ms: int = 0,
     ) -> None:
-        """`sipral_media_record_start_with`: record both directions to
-        ``path``. ``format`` is a :class:`sipral.enums.RecordingFormat`
-        (WAV, or Ogg Opus where the build has Opus), ``layout`` a
-        :class:`sipral.enums.RecordingLayout` (one channel, or this end on
-        the left and the far end on the right), ``sample_rate`` the file's
-        own (zero for the call's), ``bitrate`` Ogg Opus's, and
-        ``checkpoint_ms`` how often the file is made to survive a crash
-        (zero for every five seconds). The file is finished by
-        :meth:`stop_recording`, by the call ending, or by the stack going."""
+        """Record both directions to ``path``.
+
+        ``format``: :class:`sipral.enums.RecordingFormat` (WAV, or Ogg Opus
+        where built). ``layout``: :class:`sipral.enums.RecordingLayout` (mono,
+        or this end left, far end right). ``sample_rate`` 0 for the call's;
+        ``bitrate`` for Opus; ``checkpoint_ms`` how often the file is made
+        crash-safe (0 for 5 s). Finished by :meth:`stop_recording`, the call
+        ending, or the stack closing."""
         encoded = path.encode("utf-8")
         options = ffi.new("sipral_recording_options_t *")
         options.size = ffi.sizeof("sipral_recording_options_t")
@@ -382,13 +339,12 @@ class Media:
         )
 
     def stop_recording(self) -> None:
-        """`sipral_media_record_stop`: stop, and finish the file."""
+        """Stop recording and finish the file."""
         _call(lambda: lib.sipral_media_record_stop(self.handle), "sipral_media_record_stop")
 
     @property
     def recording(self) -> tuple[bool, int]:
-        """`sipral_media_record_state`: whether a recording is running, and
-        how many milliseconds of audio it has taken."""
+        """Whether recording runs, and milliseconds recorded."""
         running = ffi.new("uint32_t *")
         taken = ffi.new("uint64_t *")
         _call(
@@ -398,7 +354,7 @@ class Media:
         return bool(running[0]), int(taken[0])
 
     def send_text(self, text: str) -> None:
-        """`sipral_media_send_text`: see :meth:`sipral.call.Call.send_text`."""
+        """See :meth:`sipral.call.Call.send_text`."""
         encoded = text.encode("utf-8")
         check(
             lib.sipral_media_send_text(self.handle, encoded, len(encoded)),
@@ -408,17 +364,14 @@ class Media:
     def attach_recording(
         self, this_end: socket_module.socket, far_end: socket_module.socket
     ) -> None:
-        """Start sending a recording server's copies from ``this_end`` and
-        ``far_end``: what :meth:`sipral.call.Call.record_to` does once the
-        recording session is placed."""
+        """Send recording copies from these two sockets."""
         this_end.setblocking(False)
         far_end.setblocking(False)
         with self._socket_lock:
             self._recording = (this_end, far_end)
 
     def detach_recording(self) -> None:
-        """Close the two sockets :meth:`attach_recording` took, once the
-        recording stopped."""
+        """Close the recording sockets."""
         with self._socket_lock:
             taken, self._recording = self._recording, None
         if taken is not None:
@@ -426,9 +379,7 @@ class Media:
                 self.stack._close_socket(sock)
 
     def _carry_text(self) -> None:
-        """Every datagram waiting on the text socket to
-        `sipral_media_receive_text`, then every one `sipral_media_poll_text`
-        has due, sent from it."""
+        """Receive and send pending real-time text packets."""
         sock = self._text_socket
         if sock is None:
             return
@@ -448,9 +399,7 @@ class Media:
         )
 
     def _carry_recording(self) -> None:
-        """Every copy `sipral_media_poll_recording` has waiting, each from
-        the socket it names; what the server sends back to those sockets --
-        its own RTCP -- is read and let go."""
+        """Send pending recording copies; the server's RTCP back is discarded."""
         with self._socket_lock:
             sockets = self._recording
         if sockets is None:
@@ -477,9 +426,7 @@ class Media:
             self._send(packet, sockets[1] if far_end[0] else sockets[0])
 
     def rebind(self, sock: socket_module.socket) -> None:
-        """Carry this call's media on ``sock`` from now on, and close the
-        socket it had: what :meth:`sipral.call.Call.readdress` does once the
-        call was offered at ``sock``'s address. Thread-safe."""
+        """Switch media to ``sock`` and close the old socket. Thread-safe."""
         sock.setblocking(False)
         with self._socket_lock:
             old = self._socket
@@ -493,9 +440,8 @@ class Media:
         old.close()
 
     def close(self) -> None:
-        """Stop the frame-rate thread, `sipral_media_release`, close the
-        socket. Called by :meth:`sipral.call.Call.close`, not usually by
-        an application directly."""
+        """Stop the thread, release the handle, close the sockets. Normally
+        called by :meth:`sipral.call.Call.close`."""
         if self._closed.is_set():
             return
         self._closed.set()
@@ -556,10 +502,8 @@ class Media:
             self._send(packet, sock)
 
     def _send(self, packet, sock: socket_module.socket | None = None) -> None:
-        """One packet out where it says: a datagram from this call's
-        socket -- or from ``sock``, the text or a recording socket -- or,
-        marked TCP or TLS, bytes on the socket's connection to the TURN
-        server, which the stack holds."""
+        """Send one packet from this call's socket (or ``sock``), or on the
+        TURN connection when marked TCP/TLS."""
         payload = bytes(ffi.buffer(packet.data, packet.len))
         if sock is None and packet.protocol in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS):
             self.stack.write_turn(self.local_address, payload)
@@ -572,9 +516,7 @@ class Media:
             pass
 
     def _capture_once(self, samples) -> None:
-        """One `sipral_media_capture` call, not a drain: it consumes one
-        frame of input and produces at most one packet, unlike
-        `poll_rtcp`/`poll_transmit`, which may have several queued."""
+        """Capture one frame; yields at most one packet, so no drain loop."""
         packet = ffi.new("sipral_media_packet_t *")
         data = ffi.new(f"uint8_t[{_PACKET_BYTES}]")
         destination = ffi.new(f"char[{_ADDRESS_BYTES}]")
@@ -610,8 +552,8 @@ class Media:
 
             if self._active:
                 status = lib.SIPRAL_STATUS_OK
-                # in device mode the engine plays and captures; this thread
-                # still carries what RTCP and DTMF owe, which are not frames
+                # In device mode the engine handles frames; RTCP and DTMF
+                # still go out below.
                 if not self.pumped:
                     with self._frame_lock:
                         playback = ffi.new(f"int16_t[{self.frame_samples}]")
@@ -640,10 +582,8 @@ class Media:
                 if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
                     self._active = False
 
-            # on a schedule, not a sleep after each frame: a wait ends late,
-            # and a frame clock that loses what it overslept sends and plays
-            # fewer frames a second than the far end's clock expects, which
-            # its buffer then fills with silence
+            # A fixed schedule, not a sleep per frame: oversleeping would
+            # send fewer frames than the far end expects.
             due += self._frame_seconds
             remaining = due - time.monotonic()
             if remaining > 0:

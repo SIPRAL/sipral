@@ -24,9 +24,8 @@ __all__ = ["Call", "header_array"]
 
 
 def header_array(fields) -> tuple[object, list[object]]:
-    """``fields`` -- ``(name, value)`` pairs, or a mapping -- as a
-    `sipral_header_t` array, and the buffers it points into, which have to
-    outlive the call it is handed to."""
+    """``fields`` (pairs or a mapping) as a `sipral_header_t` array, plus the
+    buffers it points into, which must outlive the call it is passed to."""
     pairs = list(fields.items()) if hasattr(fields, "items") else list(fields)
     array = ffi.new("sipral_header_t[]", max(len(pairs), 1))
     kept: list[object] = [array]
@@ -40,13 +39,11 @@ def header_array(fields) -> tuple[object, list[object]]:
 
 
 class Call:
-    """A `sipral_handle_t` naming one call, and the actions it takes.
+    """One call handle and its actions.
 
-    Built by :meth:`sipral.stack.Stack.place_call` for one this stack
-    placed, and by :meth:`sipral.stack.Stack.answer_call` for one that
-    came in; either way it is registered with its stack before the
-    caller ever sees it, so :meth:`deliver` always has somewhere to put
-    an event that names this call.
+    Built by :meth:`sipral.stack.Stack.place_call` or
+    :meth:`sipral.stack.Stack.answer_call`, already registered with its
+    stack so no event for it is lost.
     """
 
     def __init__(
@@ -63,55 +60,37 @@ class Call:
         self._media_address = media_address
         self.media: Media | None = None
         self.ended = False
-        #: What the call's media cost in the end: the record
-        #: `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries, kept from the moment
-        #: it arrives -- right after `SIPRAL_EVENT_KIND_CALL_ENDED` -- and
-        #: ``None`` before that or for a call whose media never started.
-        #: :meth:`sipral.media.Media.statistics` answers with it too once
-        #: the stream is gone.
+        #: The final media statistics, which arrive right after
+        #: `SIPRAL_EVENT_KIND_CALL_ENDED`; ``None`` before, or if media never
+        #: started.
         self.final_statistics: dict[str, object] | None = None
         self._suite: SrtpSuite | None = None
 
         #: Every event this call's handle names, decoded whole.
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
-        #: Just the digits: `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`'s and
-        #: `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`'s own `fields["digit"]`, so a
-        #: voice agent that only cares about DTMF does not have to filter
-        #: `events` itself, nor care which way the far end sent the key.
+        #: Just the DTMF digits, whether sent as events or in band.
         self.dtmf: asyncio.Queue[str] = asyncio.Queue()
-        #: Just the real-time text (RFC 4103):
-        #: `SIPRAL_EVENT_KIND_TEXT_RECEIVED`'s own text, in the order the far
-        #: end typed it, with the control characters
-        #: :class:`sipral.events.TypedText` names left in.
+        #: Just the real-time text (RFC 4103), control characters as in
+        #: :class:`sipral.events.TypedText`.
         self.text: asyncio.Queue[str] = asyncio.Queue()
         self._text_socket = text_socket
-        #: The socket this call's real-time text arrives on, as
-        #: ``host:port``, when it was placed or answered with ``text=True``.
+        #: ``host:port`` of the text socket, with ``text=True``.
         self.text_address: str | None = (
             "{}:{}".format(*text_socket.getsockname()) if text_socket is not None else None
         )
-        #: The recording session :meth:`record_to` placed, while it records:
-        #: a call handle of its own, whose events arrive on the stack's.
+        #: The recording session's call handle while :meth:`record_to` runs;
+        #: its events arrive on the stack's queue.
         self.recording_session: int | None = None
 
     def deliver(self, event: _events.Event) -> None:
-        """Called by :class:`sipral.stack.Stack` on its own poll thread.
+        """Called on the poll thread.
 
-        Every side effect below -- minting :attr:`media`, marking
-        :attr:`ended` -- happens before ``event`` is ever queued for a
-        consumer. Queued first and updated after would let a coroutine
-        that was already waiting on :attr:`events` wake, on the asyncio
-        loop's own thread, and read ``call.media`` before this thread had
-        actually set it: `call_soon_threadsafe` only schedules the queue
-        put, it does not wait for the loop to run it, so this thread runs
-        on regardless of when that happens.
+        State (:attr:`media`, :attr:`ended`) is updated before the event is
+        queued, so a waiting coroutine never sees it stale.
         """
         if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_STARTED and self.media is None:
-            # From here the socket is `Media`'s own to read
-            # (`docs/08-ffi.md`, "From the media handle on, the socket's
-            # datagrams go to sipral_media_receive and nowhere else") --
-            # `Stack` stops treating it as a pre-media-handle STUN/TURN
-            # socket first, so the two never race to read the same fd.
+            # The socket becomes `Media`'s; the stack stops reading it first
+            # so the two never race on one fd.
             self.stack._release_stun_socket(self._media_address)
             self.media = Media(
                 self.stack,
@@ -122,8 +101,7 @@ class Call:
             )
 
         if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_SECURED:
-            # a suite a newer library names and this binding does not is
-            # still a secured call, whose transform this build cannot name
+            # A suite newer than this binding is still secured.
             try:
                 self._suite = SrtpSuite(int(event.fields.get("suite", 0)))
             except ValueError:
@@ -167,8 +145,7 @@ class Call:
 
     @property
     def state(self) -> CallState:
-        """`sipral_call_state`, read fresh -- not cached from the last
-        event, which a status query between events would otherwise miss."""
+        """The call state, read fresh rather than cached from events."""
         out_state = ffi.new("uint32_t *")
         _call(
             lambda: lib.sipral_call_state(self.stack.handle, self.handle, out_state),
@@ -179,8 +156,7 @@ class Call:
     # -- actions --------------------------------------------------------
 
     def answer(self) -> None:
-        """`sipral_call_answer_media`: accept, with this stack running the
-        audio through the media socket this call already opened."""
+        """Accept, the stack running audio on this call's media socket."""
         address = self._media_address.encode("utf-8")
         _call(
             lambda: lib.sipral_call_answer_media(
@@ -190,8 +166,7 @@ class Call:
         )
 
     def ring(self, sdp: bytes | None = None) -> None:
-        """`sipral_call_ring`: 180 Ringing, or with ``sdp`` a 183 Session
-        Progress carrying that description of the application's own."""
+        """180 Ringing, or with ``sdp`` a 183 carrying that description."""
         body = ffi.from_buffer(sdp) if sdp else ffi.NULL
         _call(
             lambda: lib.sipral_call_ring(
@@ -201,10 +176,9 @@ class Call:
         )
 
     def ring_media(self, *, srtp: int = 0, codecs: str | None = None) -> None:
-        """`sipral_call_ring_media`: a 183 whose answer this stack writes
-        against this call's media socket, so the caller hears what the
-        application plays before :meth:`answer`, which reuses that session.
-        ``srtp`` and ``codecs`` mean what they do on
+        """A 183 with an answer on this call's media socket, so the caller
+        hears the application before :meth:`answer`, which reuses the
+        session. ``srtp`` and ``codecs`` as for
         :meth:`sipral.stack.Stack.place_call`."""
         address = self._media_address.encode("utf-8")
         address_buf = ffi.new("char[]", address)
@@ -227,10 +201,9 @@ class Call:
         )
 
     def set_headers(self, fields) -> None:
-        """`sipral_call_set_headers`: header fields -- ``(name, value)`` pairs
-        or a mapping -- on what this call sends at the application's request
-        from now on (the 180, the 200, a refusal, the BYE of :meth:`hangup`),
-        in place of any set before; empty takes them all off."""
+        """Header fields (pairs or a mapping) for what the call sends at the
+        application's request from now on (180, 200, refusal, BYE),
+        replacing earlier ones; empty clears them."""
         array, kept = header_array(fields)
         count = len(kept) // 2
         _call(
@@ -241,10 +214,9 @@ class Call:
         )
 
     def transfer(self, target: str) -> None:
-        """`sipral_call_transfer`: REFER the far end to ``target`` (RFC 3515).
-        ``TRANSFER_PROGRESS`` and then ``TRANSFER_DONE`` follow on
-        :attr:`events`; a REFER the far end refuses is a ``TRANSFER_DONE``
-        carrying the refusal's status."""
+        """REFER the far end to ``target`` (RFC 3515). ``TRANSFER_PROGRESS``
+        then ``TRANSFER_DONE`` follow; a refused REFER is a ``TRANSFER_DONE``
+        with the refusal's status."""
         encoded = target.encode("utf-8")
         _call(
             lambda: lib.sipral_call_transfer(
@@ -254,8 +226,7 @@ class Call:
         )
 
     def reject(self, code: int = 486) -> None:
-        """`sipral_call_reject`: 486 Busy Here, 603 Decline, or whatever
-        response code fits."""
+        """Reject with ``code`` (486 Busy Here, 603 Decline, ...)."""
         _call(
             lambda: lib.sipral_call_reject(
                 self.stack.handle, self.handle, code, self.stack.now_ms()
@@ -285,10 +256,8 @@ class Call:
         )
 
     def restart_ice(self) -> None:
-        """`sipral_call_restart_ice`: offer the call again with new ICE
-        credentials (RFC 8445 §9) and check every pair again once the far
-        end answers, while the path it has carries the audio. The new path
-        arrives as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`."""
+        """Re-offer with new ICE credentials (RFC 8445 §9); audio stays on
+        the current path until a new `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`."""
         _call(
             lambda: lib.sipral_call_restart_ice(
                 self.stack.handle, self.handle, self.stack.now_ms()
@@ -303,9 +272,8 @@ class Call:
         via: int = int(DtmfVia.RTP),
         duration_ms: int = 100,
     ) -> None:
-        """`sipral_call_send_dtmf`. ``via`` is a :class:`sipral.enums.DtmfVia`:
-        ``RTP`` sends named events, or the tones in the audio on a call that
-        negotiated none; ``IN_BAND`` sends the tones on any call."""
+        """Send DTMF. ``via`` (:class:`sipral.enums.DtmfVia`): ``RTP`` sends
+        events, or tones if none were negotiated; ``IN_BAND`` always tones."""
         encoded = digits.encode("ascii")
         _call(
             lambda: lib.sipral_call_send_dtmf(
@@ -321,10 +289,8 @@ class Call:
         )
 
     def set_dtmf_detection(self, mode: int) -> None:
-        """`sipral_call_dtmf_detection`: when this call listens for digits
-        in the far end's audio, a :class:`sipral.enums.DtmfDetection`. A
-        digit heard there is a `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`, and lands
-        in :attr:`dtmf` like any other."""
+        """When to detect digits in the far end's audio
+        (:class:`sipral.enums.DtmfDetection`); they land in :attr:`dtmf`."""
         _call(
             lambda: lib.sipral_call_dtmf_detection(self.stack.handle, self.handle, int(mode)),
             "sipral_call_dtmf_detection",
@@ -349,12 +315,10 @@ class Call:
         beep_max_ms: int = 0,
         tone_cycles: int = 0,
     ) -> None:
-        """`sipral_call_detect_progress`: listen for the network's tones
-        (``region``, a :class:`sipral.enums.ToneRegion`), decide who answered
-        and listen for the machine's beep. Call it straight after
-        :meth:`sipral.stack.Stack.place_call`, before the far end answers.
-        Each thing heard is a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`. Every
-        limit left at zero is the library's default."""
+        """Listen for network tones (``region``:
+        :class:`sipral.enums.ToneRegion`), detect who answered and the
+        machine's beep. Call right after placing, before the answer. Results
+        are `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`; zero limits mean defaults."""
         config = ffi.new("sipral_progress_config_t *")
         config.size = ffi.sizeof("sipral_progress_config_t")
         config.listen = lib.SIPRAL_TOGGLE_ON
@@ -379,7 +343,7 @@ class Call:
         )
 
     def stop_progress(self) -> None:
-        """`sipral_call_detect_progress` with ``listen`` off: stop listening."""
+        """Stop progress detection."""
         config = ffi.new("sipral_progress_config_t *")
         config.size = ffi.sizeof("sipral_progress_config_t")
         config.listen = lib.SIPRAL_TOGGLE_OFF
@@ -397,14 +361,12 @@ class Call:
         interval_ms: int = 0,
         local: bool = True,
     ) -> None:
-        """`sipral_call_consent_tone`: beep while this call is recorded,
-        every value left at zero the library's default (1400 Hz, 18 dB below
-        0 dBm0, 200 ms every fifteen seconds); ``local`` has this end hear it
-        too."""
+        """Beep while recorded; zeros mean 1400 Hz, -18 dBm0, 200 ms every
+        15 s. ``local`` plays it here too."""
         self._consent(lib.SIPRAL_TOGGLE_ON, frequency_hz, attenuation_db, length_ms, interval_ms, local)
 
     def clear_consent_tone(self) -> None:
-        """`sipral_call_consent_tone` with ``enabled`` off: no tone."""
+        """Turn the consent tone off."""
         self._consent(lib.SIPRAL_TOGGLE_OFF, 0, 0, 0, 0, True)
 
     def _consent(
@@ -436,11 +398,9 @@ class Call:
         q850_cause: int = 0,
         text: str | None = None,
     ) -> None:
-        """`sipral_call_hangup_for`: end the call saying why, as a `Reason`
-        (RFC 3326) on the BYE or the CANCEL -- ``sip_cause`` a SIP status,
-        ``q850_cause`` a Q.850 cause (16 is normal clearing), either or both,
-        with ``text`` beside them. The refusal of an incoming call nothing
-        answered carries only the Q.850 value (RFC 6432)."""
+        """End the call with a `Reason` (RFC 3326): ``sip_cause``,
+        ``q850_cause`` (16 is normal clearing) or both, plus ``text``. Refusing
+        an unanswered incoming call carries only the Q.850 value (RFC 6432)."""
         said = (text or "").encode("utf-8")
         _call(
             lambda: lib.sipral_call_hangup_for(
@@ -456,22 +416,16 @@ class Call:
         )
 
     def identity(self, which: int) -> list[str]:
-        """Every entry of one identity list the INVITE of this call carried --
-        ``which`` an :class:`sipral.enums.IdentityText`: every asserted party,
-        every `Diversion` and its reason, every `History-Info` target and
-        index, every `Alert-Info` URI. :attr:`sipral.events.Event.identity`
-        has the first of each; this is the rest."""
+        """All entries of one identity list from the INVITE (``which``:
+        :class:`sipral.enums.IdentityText`);
+        :attr:`sipral.events.Event.identity` has only the first of each."""
         return self.stack.call_identity(self.handle, which)
 
     @property
     def srtp_suite(self) -> SrtpSuite | None:
-        """The SRTP transform a DTLS-SRTP handshake settled this call's media
-        on, as the last `SIPRAL_EVENT_KIND_MEDIA_SECURED` said -- from
-        ``AES_CM80`` to RFC 7714's ``AEAD_AES256_GCM``, which two ends of
-        this stack agree on -- or ``None`` before the handshake and for a
-        call not keyed by one. A call keyed by SDES agreed its suite in the
-        SDP and raises no such event: ``media.info()["secured"]`` says it is
-        encrypted."""
+        """The SRTP suite DTLS-SRTP settled on, or ``None`` before the
+        handshake or without DTLS. SDES calls raise no such event; check
+        ``media.info()["secured"]``."""
         return self._suite
 
     def readdress(
@@ -481,21 +435,15 @@ class Call:
         media_port: int = 0,
         public_address: str | None = None,
     ) -> None:
-        """Move this call's audio to a new network: what
-        `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for once
-        :meth:`sipral.stack.Stack.move_to` changed the stack's address.
+        """Move the call's audio to a new network, answering
+        `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`.
 
-        A media socket is bound at ``media_host:media_port`` and the call
-        offered at it (`sipral_call_media_readdress`): a re-INVITE with the
-        call's last description, only `c=` and the `m=` port moved, and
-        ``public_address`` (``host:port``) in their place when the socket
-        sits behind a NAT whose mapping the application knows. The new
-        socket is the call's from here, whatever the far end answers --
-        `SIPRAL_EVENT_KIND_SESSION_CHANGED`, or
-        `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` -- and the old one is
-        closed. ``SIPRAL_STATUS_WRONG_STATE`` for a call running ICE, which
-        :meth:`restart_ice` moves instead, or one with a change already on
-        its way.
+        Binds a socket at ``media_host:media_port`` and re-INVITEs with only
+        `c=` and the `m=` port changed (``public_address`` instead when a
+        known NAT sits in front). The new socket is kept whatever the answer
+        (`SESSION_CHANGED` or `SESSION_CHANGE_FAILED`); the old one closes.
+        ``SIPRAL_STATUS_WRONG_STATE`` under ICE (use :meth:`restart_ice`) or
+        with a change already pending.
         """
         sock = self.stack.open_media_socket(media_host, media_port)
         host, port = sock.getsockname()
@@ -529,10 +477,8 @@ class Call:
     def answer_with(
         self, *, feedback: bool = False, focus: bool = False, codecs: str | None = None
     ) -> None:
-        """`sipral_call_answer_with`: accept as :meth:`answer` does, with the
-        real-time text stream this call was built with a socket for, RTCP
-        feedback, this end named the focus of a conference, or ``codecs`` --
-        ``"PCMA,PCMU"`` -- in place of the stack's."""
+        """Accept like :meth:`answer`, plus real-time text (if built with a
+        text socket), RTCP feedback, conference focus, or ``codecs``."""
         address = self._media_address.encode("utf-8")
         address_buf = ffi.new("char[]", address)
         config = ffi.new("sipral_call_config_t *")
@@ -563,12 +509,11 @@ class Call:
     # -- real-time text ---------------------------------------------------
 
     def send_text(self, text: str) -> None:
-        """`sipral_media_send_text`: queue text the user typed for the far
-        end (RFC 4103). It goes in the next 300 ms interval; a line break
-        goes as a new line and BACKSPACE (U+0008) erases the far end's last
-        character. `SIPRAL_STATUS_NOT_NEGOTIATED` on a call that agreed no
-        text stream, `SIPRAL_STATUS_EXHAUSTED` when more is waiting unsent
-        than a stream holds, and `RuntimeError` before media starts."""
+        """Queue typed text (RFC 4103), sent in the next 300 ms interval;
+        U+0008 erases the far end's last character.
+        `SIPRAL_STATUS_NOT_NEGOTIATED` without a text stream,
+        `SIPRAL_STATUS_EXHAUSTED` when the backlog is full, `RuntimeError`
+        before media starts."""
         if self.media is None:
             raise RuntimeError("the call has no media yet; wait for MEDIA_STARTED")
         self.media.send_text(text)
@@ -576,9 +521,8 @@ class Call:
     # -- conferences ------------------------------------------------------
 
     def set_focus(self, focus: bool) -> None:
-        """`sipral_call_set_focus`: say, or stop saying, that this end is the
-        focus of a conference the call belongs to (RFC 4579): `isfocus` on
-        the `Contact` of everything the call sends from here on."""
+        """Set or clear `isfocus` on this call's `Contact` from now on
+        (RFC 4579)."""
         _call(
             lambda: lib.sipral_call_set_focus(self.stack.handle, self.handle, 1 if focus else 0),
             "sipral_call_set_focus",
@@ -586,9 +530,8 @@ class Call:
 
     @property
     def conference_uri(self) -> str | None:
-        """`sipral_call_conference_uri`: the URI of the conference this call
-        belongs to, when its far end said it is a focus (`isfocus`, RFC 4579
-        Section 4.2), or ``None`` when it did not."""
+        """The conference URI when the far end is a focus (RFC 4579 Section
+        4.2), else ``None``."""
         try:
             return read_text(
                 lambda buffer, capacity, needed: lib.sipral_call_conference_uri(
@@ -602,12 +545,10 @@ class Call:
             raise
 
     def subscribe_conference(self) -> Subscription:
-        """`sipral_call_subscribe_conference`: watch the conference of this
-        call's focus (RFC 4579 Section 3.4) from the call's own account. The
-        subscription outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`
-        says what it learns and
-        :meth:`sipral.subscription.Subscription.conference` reads the
-        picture. `SIPRAL_STATUS_NOT_A_FOCUS` when the far end is not one."""
+        """Subscribe to the focus's conference (RFC 4579 Section 3.4). The
+        subscription outlives the call; updates are
+        `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`.
+        `SIPRAL_STATUS_NOT_A_FOCUS` when the far end is not a focus."""
         out = ffi.new("sipral_handle_t *")
         _call(
             lambda: lib.sipral_call_subscribe_conference(
@@ -620,21 +561,14 @@ class Call:
     # -- recording to a server (SIPREC) -----------------------------------
 
     def record_to(self, server: str, *, destination: str | None = None) -> int:
-        """`sipral_call_record_to`: record this call to a recording server
-        (RFC 7866).
+        """Record this call to a recording server (RFC 7866).
 
-        Two sockets are opened beside the call's media socket -- the copy of
-        what this end sends leaves from one, labelled ``1``, and the far
-        end's audio from the other, labelled ``2`` -- and a recording session
-        is placed to ``server`` (its URI) from the call's account, where the
-        account sends or at ``destination`` (``host:port``), with the
-        metadata beside the offer. That INVITE is too large for a datagram,
-        so the stack must reach the server over a stream: a stack signalling
-        over TCP or TLS to it. Once the server answers, the copies leave from
-        the two sockets as the call's media runs. Needs media started
-        (`SIPRAL_STATUS_WRONG_STATE` before that, and while a recording
-        already runs). Returns the recording session's handle, as
-        :attr:`recording_session` keeps it.
+        Two extra sockets carry this end's audio (label ``1``) and the far
+        end's (label ``2``). The session goes to ``server`` from the call's
+        account, or to ``destination`` (``host:port``). Its INVITE exceeds a
+        datagram, so the stack must reach the server over TCP or TLS. Needs
+        media started and no recording running, else
+        `SIPRAL_STATUS_WRONG_STATE`. Returns the session handle.
         """
         if self.media is None:
             raise SipralError(lib.SIPRAL_STATUS_WRONG_STATE, "sipral_call_record_to")
@@ -671,9 +605,8 @@ class Call:
         return self.recording_session
 
     def stop_recording_to(self) -> None:
-        """`sipral_call_stop_recording_to`: the copies stop at once, the
-        recording session is hung up and its two sockets closed.
-        `SIPRAL_STATUS_WRONG_STATE` when nothing records the call."""
+        """Stop recording at once and hang up the session.
+        `SIPRAL_STATUS_WRONG_STATE` when not recording."""
         _call(
             lambda: lib.sipral_call_stop_recording_to(
                 self.stack.handle, self.handle, self.stack.now_ms()
@@ -687,8 +620,7 @@ class Call:
     def close(self) -> None:
         """Hang up if this call is still up, release its media, forget it.
 
-        Idempotent, and safe to call from a `finally` or a context
-        manager's `__exit__` regardless of how the call ended.
+        Idempotent.
         """
         if not self.ended:
             try:
@@ -698,11 +630,7 @@ class Call:
         if self.media is not None:
             self.media.close()
         else:
-            # Never reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`: refused,
-            # failed before answer, or hung up while still ringing. A
-            # socket `Stack._map_media_socket` named for it (`nat=Nat.STUN`)
-            # is still the stack's to give back (`sipral_stack_nat_unmap`)
-            # before the socket closes under it.
+            # Media never started: unmap the socket before closing it.
             self.stack._forget_media_socket(self._media_address)
             self._media_socket.close()
             if self._text_socket is not None:
@@ -711,15 +639,13 @@ class Call:
 
     @property
     def media_socket(self) -> socket_module.socket:
-        """This call's media socket: where device mode's encoded packets
-        leave from, and what :meth:`readdress` replaces."""
+        """This call's media socket; :meth:`readdress` replaces it."""
         return self._media_socket
 
     @property
     def media_address(self) -> str:
-        """This call's media socket, as ``host:port``: the name
-        `sipral_stack_nat_map` gave it, and so of its connection to a TURN
-        server reached over TCP or TLS."""
+        """The media socket as ``host:port``, which also names its TURN
+        connection."""
         return self._media_address
 
     def __enter__(self) -> "Call":

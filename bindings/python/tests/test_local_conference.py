@@ -20,9 +20,8 @@ from sipral.enums import AudioDirection, AudioMode, EventKind, LocalConferenceCh
 
 TIMEOUT = 10.0
 
-# Above this, a frame of _square that came through PCMU whole: it decodes at
-# 7900. A frame concealed in place of one that never came fades from the last
-# one heard and stays under it, so it is not counted as heard.
+# A whole _square frame decodes to 7900 through PCMU; concealed frames stay
+# below this and are not counted.
 WHOLE_FRAME = 7500
 
 
@@ -94,8 +93,8 @@ class ALocalConferenceOnItsOwn(unittest.IsolatedAsyncioTestCase):
 
 
 class TwoCallsBridged(unittest.IsolatedAsyncioTestCase):
-    """Alice calls Bob and Carol and bridges the two calls, taking no part
-    herself: what Bob says, Carol hears, and Bob does not hear himself."""
+    """Alice bridges Bob and Carol without joining: Carol hears Bob, Bob
+    does not hear himself."""
 
     async def asyncSetUp(self) -> None:
         loop = asyncio.get_running_loop()
@@ -109,8 +108,7 @@ class TwoCallsBridged(unittest.IsolatedAsyncioTestCase):
             stack.close()
 
     async def _call(self, far: Stack, user: str):
-        """Alice calls ``far`` directly, through an account of her own that
-        names it as the next hop, and it answers."""
+        """Alice calls ``far`` directly and it answers."""
         account = self.alice.add_account(
             f"sip:alice-to-{user}@sipral.invalid", registrar_address=far.bind_address
         )
@@ -148,15 +146,9 @@ class TwoCallsBridged(unittest.IsolatedAsyncioTestCase):
                 loudest = max(loudest, _loudness(frame))
                 whole += _loudness(frame) > WHOLE_FRAME
             self.assertGreater(loudest, 2000, "Carol never heard Bob")
-            # and in full, ninety-five of Bob's hundred frames at least: a
-            # call whose own thread still carried frames beside the
-            # conference would have every other frame taken from under it,
-            # and a frame clock slower than the conference's overflows the
-            # buffers and drops them. Counted whenever they arrive rather
-            # than as an unbroken run: on a machine with more work than
-            # cores, the threads of all three stacks are held up together for
-            # a hundred milliseconds and more, Carol's buffer runs dry, and
-            # the frames play late but all play.
+            # At least 95 of 100: a call still pumping its own frames would
+            # lose every other one. Counted whenever they arrive, since a
+            # loaded machine can stall all three stacks at once.
             while whole < 95 and asyncio.get_running_loop().time() < deadline:
                 try:
                     frame = await asyncio.wait_for(carol_call.media.frames.get(), timeout=TIMEOUT)

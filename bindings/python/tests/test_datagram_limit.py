@@ -4,19 +4,13 @@
 """RFC 3261 Section 18.1.1 through the Python layer: a call whose answer to
 a challenge is too large for a datagram.
 
-The PBX here is this test's own, on loopback: a UDP socket that answers every
-INVITE without credentials with a 401 whose nonce is long enough that the
-`Authorization` answering it takes the INVITE past 1300 bytes, and -- when
-asked for -- a TCP listener on the same port that frames what arrives on
-`Content-Length` and answers the INVITE that carries credentials with a 486.
-The account offers both SDES suites, the stronger first, which is the offer
-that crossed the line against a real PBX.
+A fake PBX challenges with a nonce long enough to push the authenticated
+INVITE (two SDES suites) past 1300 bytes, optionally with a TCP listener
+answering 486.
 
-What is proved: with a TCP listener there, the stack opens a connection by
-itself, the INVITE with credentials goes on it with a `Via` that names TCP,
-and the call carries on over it to the PBX's answer and the ACK; with none,
-or with ``stream_fallback=False``, the call ends at once as unreachable with
-a 513 whose text names the size and the limit, never hanging.
+With TCP the stack opens a connection itself and the call continues over it
+with a TCP `Via`; without, or with ``stream_fallback=False``, the call ends
+at once as unreachable with a 513 naming size and limit.
 """
 
 from __future__ import annotations
@@ -32,14 +26,12 @@ from sipral._sipral_cffi import lib
 from sipral.events import Event
 from sipral.enums import AudioMode, CallEndReason, EventKind, Status, TransportError
 
-#: How long the nonce is: enough that the retry is over the line even with
-#: one suite fewer, so no trimmed offer fits a datagram either.
+#: Long enough that even a one-suite retry exceeds the limit.
 _NONCE_BYTES = 700
 
 
-#: RFC 3261 Section 7.3.3's compact names for the fields this PBX reads: a
-#: request over the line is written compact before it is weighed against it,
-#: and a server reads either form.
+#: Compact header names (RFC 3261 Section 7.3.3): an oversized request is
+#: compacted before it is measured.
 _COMPACT = {"via": "v", "from": "f", "to": "t", "call-id": "i", "content-length": "l"}
 
 
@@ -63,9 +55,8 @@ def _response(request: str, status: str, extra: str = "") -> bytes:
 
 
 class _Pbx:
-    """A PBX that challenges INVITEs over UDP, with a TCP listener on the same
-    port when ``tcp``. :attr:`over_tcp` holds every request that arrived on a
-    connection, in order."""
+    """Challenges INVITEs over UDP; with ``tcp``, also listens on TCP.
+    :attr:`over_tcp` holds requests received on connections."""
 
     def __init__(self, *, tcp: bool, apart: bool = False) -> None:
         self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -76,8 +67,7 @@ class _Pbx:
         self._listener: socket.socket | None = None
         if tcp:
             self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # ``apart``: TCP on a port of its own, as a PBX that takes UDP on
-            # 5060 and TCP on 5160 has it
+            # ``apart``: TCP on its own port, like 5060/5160.
             self._listener.bind(("127.0.0.1", 0 if apart else port))
             self._listener.listen()
             self._listener.settimeout(0.05)
@@ -86,8 +76,7 @@ class _Pbx:
             f"127.0.0.1:{self._listener.getsockname()[1]}" if self._listener is not None else None
         )
         self.over_tcp: list[str] = []
-        #: Every INVITE carrying credentials that arrived over UDP, and its
-        #: size in bytes.
+        #: Sizes of authenticated INVITEs received over UDP.
         self.answered_over_udp: list[tuple[str, int]] = []
         self.connections = 0
         #: How many of those connections the stack closed.
@@ -208,8 +197,7 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(invites), 1, pbx.over_tcp)
         self.assertIsNotNone(_header("Authorization", invites[0]))
         self.assertTrue((_header("Via", invites[0]) or "").startswith("SIP/2.0/TCP "), invites[0])
-        # the dialog carries on over the connection: the 486 is acknowledged
-        # on it (RFC 3261 Section 17.1.1.3)
+        # The 486 is ACKed on the connection (RFC 3261 Section 17.1.1.3).
         deadline = time.monotonic() + 2.0
         while not any(m.startswith("ACK ") for m in pbx.over_tcp) and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
@@ -226,7 +214,6 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         lost = [event.fields for event in seen if event.kind == EventKind.TRANSPORT_FAILED]
         self.assertTrue(lost, seen)
         self.assertEqual(lost[0]["error"], TransportError.CONNECTION_REFUSED)
-        # where the connection was going and what became of it, for a log
         self.assertTrue(lost[0]["detail"].startswith(f"TCP to {pbx.address} refused"), lost[0]["detail"])
         ended = seen[-1]
         self.assertEqual(ended.fields["end_reason"], CallEndReason.UNREACHABLE)
@@ -249,8 +236,7 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(_header("Authorization", invites[0]))
 
     async def test_a_pbx_on_udp_alone_takes_the_request_over_udp_up_to_the_stacks_limit(self) -> None:
-        # a deliberate deviation from Section 18.1.1: no stream is coming, and
-        # the stack was told the server takes a large request over UDP
+        # Deliberate deviation from Section 18.1.1: large UDP allowed.
         pbx = self.pbx(tcp=False)
         stack = self.stack(datagram_without_stream_bytes=4000, path_mtu=1500)
         self.call(stack, pbx)
@@ -261,7 +247,6 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(size, 1300)
         diagnostics = stack.diagnostics_json()
         self.assertIn("transport.kept.datagram", diagnostics)
-        # written compact first, and still over the line
         self.assertIn("transport.compacted.size", diagnostics)
 
     def test_a_limit_past_one_datagram_and_a_path_under_the_ipv4_floor_are_refused(self) -> None:
@@ -283,10 +268,8 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lost[0]["detail"], f"TCP to {pbx.address} not tried: stream_fallback is off")
 
     async def test_a_connection_the_stack_let_go_of_is_closed_here_too(self) -> None:
-        # RFC 5626 Section 4.4.1: the stack retires a stream that stopped
-        # answering keep-alives and says so with a TRANSPORT_FAILED; the socket
-        # is this layer's, and one kept open would stand in for the new
-        # connection the stack asks for next time
+        # RFC 5626 Section 4.4.1: a retired stream must be closed here, or it
+        # would stand in for the next connection the stack asks for.
         pbx = self.pbx(tcp=True)
         stack = self.stack()
         self.call(stack, pbx)

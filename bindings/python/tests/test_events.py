@@ -3,10 +3,8 @@
 
 """Every event the C ABI raises reaches Python with its payload read.
 
-`crates/sipral-ffi/src/event.rs`'s `EVENT_KIND_ARMS` names the union arm
-each kind writes; an event whose arm this layer never reads would reach the
-application as a kind and nothing else, so a new kind or a kind left out
-fails here rather than in an application.
+Checked against `EVENT_KIND_ARMS` in `crates/sipral-ffi/src/event.rs`, so a
+new kind without a decoder fails here.
 """
 
 from __future__ import annotations

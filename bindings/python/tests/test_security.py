@@ -5,15 +5,10 @@
 through this package: two stacks on 127.0.0.1 with no registrar between
 them, one signing the call it places and the other verifying it.
 
-A certificate chain cannot be made here without a cryptography package this
-binding does not depend on, so a valid signature is verified against the
-chain the C ABI's tests keep in `bindings/fixtures/stir-provider-709J`, whose
-signing certificate names a service provider code and no number. Beside
-that, what this proves is the plumbing every half of it runs through: the
-account's signing key and URL reach the INVITE, the verifying stack asks for
-the certificate by `SIPRAL_EVENT_KIND_CALLER_VERIFICATION`,
-:meth:`Stack.stir_certificate` answers it, and a strict account refuses what
-does not verify.
+Without a cryptography dependency, valid signatures use the fixture chain
+in `bindings/fixtures/stir-provider-709J` (an SPC certificate, no number).
+The rest checks the plumbing: key and URL reach the INVITE, the certificate
+is requested and supplied, and a strict account refuses a failure.
 """
 
 from __future__ import annotations
@@ -34,16 +29,12 @@ from sipral.enums import (
     VerificationStage,
 )
 
-#: short, and the stacks below offer one codec: a signed INVITE is some
-#: five hundred octets longer than an unsigned one, and past RFC 3261
-#: Section 18.1.1's 1300 it needs a stream transport this test does not open
+#: Short, with one codec: a signed INVITE must stay under RFC 3261 Section
+#: 18.1.1's 1300 octets, as no stream transport is open.
 _URL = "https://c.test/p"
-#: a P-256 private key as the bare scalar: any 32 octets below the group
-#: order are one, and these are nobody's
+#: A throwaway P-256 private scalar.
 _KEY = bytes([0x2B]) * 32
-#: the credentials `sipral_stir::testing` issues for the service provider
-#: code 709J, checked against it by the C ABI's own tests: a root, a chain
-#: whose signing certificate names that code and no number, and its key
+#: Test credentials for SPC 709J: root, chain and signing key.
 _PROVIDER = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / "stir-provider-709J"
 #: a moment inside every certificate of that chain
 _WITHIN = 1_790_000_000
@@ -68,7 +59,7 @@ class ACallerIsVerifiedBeforeThePhoneRings(_TwoStacks):
     async def test_a_signed_call_asks_for_its_certificate_and_a_strict_account_refuses_it(
         self,
     ) -> None:
-        # a stack that only signs is given the time, and no anchors
+        # A signing-only stack gets the time and no anchors.
         self.caller.stir(None)
         self.callee.stir(None)
         signing = self.caller.add_account(
@@ -92,7 +83,7 @@ class ACallerIsVerifiedBeforeThePhoneRings(_TwoStacks):
         self.assertEqual(asked.stage, VerificationStage.CERTIFICATE_WANTED)
         self.assertEqual(asked.certificate_url, _URL)
 
-        # a certificate that could not be had: RFC 8224's 436, sent
+        # An unobtainable certificate: RFC 8224's 436.
         self.callee.stir_certificate(wanted.call, None)
         verdict = (await self.next_event(self.callee, EventKind.CALLER_VERIFICATION)).verification
         self.assertEqual(verdict.stage, VerificationStage.VERIFIED)

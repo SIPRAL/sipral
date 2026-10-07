@@ -21,10 +21,8 @@ __all__ = ["Account", "PinnedCertificate"]
 
 
 class PinnedCertificate(NamedTuple):
-    """What `sipral_account_check_certificate` found in a certificate the
-    account pins: its dates, in seconds since 1970 (zero when its DER could
-    not be read that far), and whether the clock is past or before them.
-    Accepted either way; an expired one is worth a warning."""
+    """A pinned certificate's validity dates (Unix seconds, zero if
+    unreadable). Accepted either way; an expired one is worth a warning."""
 
     not_before: int
     not_after: int
@@ -37,19 +35,11 @@ def _optional(text: str | None) -> bytes | None:
 
 
 def _default_contact(aor: str, bind_address: str, parameters: str = "") -> str:
-    """Where this account can actually be reached, for a caller who gave
-    no `Contact` of its own.
+    """The AOR's user part (RFC 3261 §19.1.1) at the address this stack
+    listens on, plus ``parameters`` such as ``;transport=tls``.
 
-    The AOR itself is never a usable default: `sip:alice@example.invalid`
-    names who this is, not a socket anything can write to, and a `Contact`
-    that says so sends every dialog this account opens straight back to
-    `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` asking this package to resolve a
-    name that was never meant to resolve to anything. The user part is
-    kept -- it is what a `sip:` URI's own grammar (RFC 3261 §19.1.1) calls
-    `userinfo`, up to the first unescaped `@` -- and the host becomes the
-    address this stack is actually listening on. ``parameters`` is what
-    follows it, ``;transport=tls`` on a stack signalling over TLS: a
-    server reaching this end names the transport it reaches it over.
+    The AOR itself is no default: its host names an identity, not a socket,
+    and every dialog would come back as `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`.
     """
     scheme, _, rest = aor.partition(":")
     user, sep, _host = rest.partition("@")
@@ -59,8 +49,7 @@ def _default_contact(aor: str, bind_address: str, parameters: str = "") -> str:
 
 
 def _contact_parameters(stack: "Stack", stream_protocol: int) -> str:
-    """``;transport=tcp`` or ``;transport=tls`` for an account on a
-    connection of its own, the stack's own parameters otherwise."""
+    """The account's own transport parameter, else the stack's."""
     if stream_protocol == lib.SIPRAL_TRANSPORT_TLS:
         return ";transport=tls"
     if stream_protocol == lib.SIPRAL_TRANSPORT_TCP:
@@ -69,13 +58,10 @@ def _contact_parameters(stack: "Stack", stream_protocol: int) -> str:
 
 
 class Account:
-    """`sipral_account_add`, and the entry points that take its handle.
+    """An account handle and its operations.
 
-    Built through :meth:`sipral.stack.Stack.add_account`, never directly:
-    the handle only means something on the stack that minted it
-    (`docs/08-ffi.md`, "A handle names something only on the stack that
-    minted it"), so keeping the two together is what makes every method
-    here safe to call with nothing further to pass.
+    Built through :meth:`sipral.stack.Stack.add_account`: a handle means
+    something only on the stack that minted it.
     """
 
     def __init__(
@@ -92,37 +78,30 @@ class Account:
         tls_pin: str | None = None,
     ) -> None:
         self.stack = stack
-        #: The protocol of the connection of its own the account's requests
-        #: go over, ``Transport.TCP`` or ``Transport.TLS``, or ``0`` for the
-        #: stack's own transport.
+        #: ``Transport.TCP``/``TLS`` for the account's own connection, ``0``
+        #: for the stack's transport.
         self.stream_protocol = stream_protocol
-        #: The certificate pin it was added with, which a TLS connection of
-        #: its own is held to.
+        #: Certificate pin for its own TLS connection.
         self.tls_pin = tls_pin
         self.handle = handle
         self.aor = aor
-        #: Where this account's requests go, ``host:port``: the registrar or
-        #: the outbound proxy it was added with, or -- for one added with
-        #: ``server_uri`` -- the address it was last located at, empty until
-        #: then.
+        #: Where requests go (``host:port``); with ``server_uri``, the last
+        #: located address, empty until then.
         self.registrar_address = registrar_address
-        #: The server named by a URI RFC 3263 locates, or ``None``.
+        #: The server URI located per RFC 3263, or ``None``.
         self.server_uri = server_uri
         #: The ``host:port`` its `Contact` names, when the stack chose it.
         self.advertised = advertised
-        #: Whether it was added with a `Contact` of its own, which
-        #: :meth:`sipral.stack.Stack.move_to` then leaves to the application.
+        #: Added with its own `Contact`; :meth:`sipral.stack.Stack.move_to`
+        #: leaves it to the application.
         self.contact_given = contact_given
-        #: Whether it was asked to register and not to unregister since: the
-        #: accounts a stack signalling over TCP or TLS registers again once
-        #: its connection is made again.
+        #: Registration wanted; re-registered after a TCP/TLS reconnect.
         self.wants_registration = False
 
     @property
     def contact_parameters(self) -> str:
-        """What goes after the address in the `Contact` this package derives
-        for it: the parameter naming its own connection's protocol (RFC 3261
-        Section 19.1.1), or the stack's."""
+        """The transport parameter for its derived `Contact` (RFC 3261
+        Section 19.1.1)."""
         return _contact_parameters(self.stack, self.stream_protocol)
 
     @classmethod
@@ -172,8 +151,7 @@ class Account:
         auth_user_bytes = _optional(auth_user)
         auth_password_bytes = _optional(auth_password)
 
-        # Local `char[]` buffers: read once by `sipral_account_add` and
-        # never again, so nothing here needs to outlive this call.
+        # The library copies these during `sipral_account_add`.
         aor_buf = ffi.new("char[]", aor_bytes)
         registrar_address_buf = ffi.new("char[]", registrar_address_bytes)
         registrar_buf = ffi.new("char[]", registrar_bytes) if registrar_bytes else None
@@ -233,8 +211,6 @@ class Account:
             config.trusted_peers_len = len(peers_bytes)
         config.srtp = int(srtp)
         suites = srtp_suites if isinstance(srtp_suites, str) else ",".join(srtp_suites or ())
-        # every buffer below is kept alive by a name until `sipral_account_add`
-        # has read it, and not a moment longer is needed
         suites_buf = ffi.new("char[]", suites.encode("utf-8")) if suites else None
         if suites_buf is not None:
             config.srtp_suites = suites_buf
@@ -285,15 +261,12 @@ class Account:
         )
 
     def check_certificate(self, certificate: bytes, unix_seconds: int | None = None) -> PinnedCertificate | None:
-        """`sipral_account_check_certificate`: the verdict of this account's
-        ``tls_pin`` on ``certificate``, the DER bytes of the leaf a TLS
-        server presented, from inside the application's certificate check.
+        """Judge a server's leaf ``certificate`` (DER) against ``tls_pin``.
 
-        A :class:`PinnedCertificate` when it is the pinned one -- accept the
-        handshake whoever signed it, its dates reported, an expired one
-        included; ``None`` when the account pins nothing and the platform's
-        own checks decide; ``SipralError`` with
-        ``SIPRAL_STATUS_CERTIFICATE_REFUSED`` when it pins another."""
+        A :class:`PinnedCertificate` when it matches: accept it whoever
+        signed it, even expired. ``None`` when nothing is pinned and the
+        platform decides. Raises ``SIPRAL_STATUS_CERTIFICATE_REFUSED`` when
+        another certificate is pinned."""
         out = ffi.new("sipral_pinned_certificate_t *")
         out.size = ffi.sizeof("sipral_pinned_certificate_t")
         now = int(time.time()) if unix_seconds is None else unix_seconds
@@ -313,12 +286,9 @@ class Account:
         )
 
     def rebind(self, *, remote: str | None = None, contact: str | None = None) -> None:
-        """`sipral_account_rebind`: point this account at ``remote``
-        (``host:port``; the address it was added with when left out) and be
-        reachable at ``contact`` (the AOR's user at the stack's current
-        address when left out). What a network change asks for; the next
-        REGISTER -- sent at once when the stack is waiting for it -- uses
-        both."""
+        """After a network change: send to ``remote`` (default: the current
+        server) and be reached at ``contact`` (default: derived from the
+        stack's address). The next REGISTER uses both."""
         remote_bytes = (remote or self.registrar_address).encode("utf-8")
         contact_bytes = (
             contact
@@ -339,12 +309,10 @@ class Account:
         )
 
     def register(self) -> None:
-        """`sipral_account_register`. A no-op account refuses this.
+        """Register. An account without a registrar refuses.
 
-        On a stack signalling over TCP or TLS whose connection is down
-        (``SIPRAL_STATUS_TRANSPORT_DOWN``, which the stack has already
-        reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`) this is kept, and
-        the REGISTER goes the moment the connection is made again."""
+        With the TCP/TLS connection down, the request is kept and sent on
+        reconnect instead of raising ``SIPRAL_STATUS_TRANSPORT_DOWN``."""
         self.wants_registration = True
         try:
             _call(
@@ -358,17 +326,13 @@ class Account:
                 raise
 
     def set_access_token(self, token: Optional[str]) -> None:
-        """`sipral_account_set_access_token`: the OAuth 2.0 access token the
-        account's server asked for (RFC 8898), in place of any it had;
-        ``None`` takes it away.
+        """Set the OAuth 2.0 access token (RFC 8898); ``None`` clears it.
 
-        The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, whose fields name
-        the ``authz_server`` to fetch one from and the ``scope`` it has to
-        carry; check the server against the ones the application trusts
-        first. From the next request on, the server's ``Bearer`` challenge is
-        answered with it; a registration that failed for want of one starts
-        again with `register`. ``SIPRAL_STATUS_INVALID_ARGUMENT`` for a token
-        that is not RFC 6750's ``b64token``, with nothing changed."""
+        Answers `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, which names the
+        ``authz_server`` and ``scope``; check the server is trusted first.
+        Later ``Bearer`` challenges use it; a failed registration restarts
+        with `register`. A token that is not an RFC 6750 ``b64token`` raises
+        ``SIPRAL_STATUS_INVALID_ARGUMENT`` and changes nothing."""
         raw = (token or "").encode("utf-8")
         _call(
             lambda: lib.sipral_account_set_access_token(
@@ -378,13 +342,11 @@ class Account:
         )
 
     def unregister(self) -> None:
-        """`sipral_account_unregister`.
+        """Send a REGISTER with Expires: 0.
 
-        Gives the binding up: a REGISTER with Expires: 0. The registration state
-        reads unregistered as soon as this returns, before the registrar answers;
-        the answer is the registration-changed event that follows. Wait for that
-        event before closing the stack, which otherwise cannot answer a challenge
-        to the un-REGISTER.
+        The state reads unregistered at once; the registrar's answer is the
+        following registration event. Wait for it before closing the stack,
+        or a challenge to the un-REGISTER goes unanswered.
         """
         self.wants_registration = False
         _call(
@@ -396,7 +358,7 @@ class Account:
 
     @property
     def registration_state(self) -> RegistrationState:
-        """`sipral_account_registration_state`."""
+        """The current registration state."""
         out_state = ffi.new("uint32_t *")
         _call(
             lambda: lib.sipral_account_registration_state(
@@ -415,14 +377,11 @@ class Account:
         expires_seconds: int = 0,
         destination: str | None = None,
     ) -> Subscription:
-        """`sipral_account_subscribe`: watch ``target`` (a SIP URI) through
-        the event package ``package`` -- ``presence``, ``conference``,
-        ``dialog``... -- sent where this account sends, or to ``destination``
-        (``host:port``). ``accept`` is the body type wanted when it is not the
-        package's default; ``expires_seconds`` how long to ask for, zero for
-        an hour. Nothing has happened when this returns: the SUBSCRIBE is on
-        its way, and what the notifier says arrives on the stack's events
-        naming :attr:`sipral.subscription.Subscription.handle`."""
+        """Subscribe to ``target`` (SIP URI) for event ``package``
+        (``presence``, ``conference``, ``dialog``...), optionally via
+        ``destination``. ``accept`` overrides the body type;
+        ``expires_seconds`` 0 means an hour. Returns at once; notifications
+        arrive on the stack's events."""
         keep = []
 
         def text(value: str) -> tuple[object, int]:
@@ -451,10 +410,8 @@ class Account:
     def watch_presence(
         self, target: str, *, expires_seconds: int = 0, destination: str | None = None
     ) -> Subscription:
-        """Watch a presentity's presence (RFC 3856): :meth:`subscribe` to the
-        ``presence`` package. Each document it sends arrives as
-        `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`, whose
-        :attr:`sipral.events.Event.presence` has it decoded."""
+        """Watch presence (RFC 3856); each document arrives as
+        `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`."""
         return self.subscribe(
             target, "presence", expires_seconds=expires_seconds, destination=destination
         )
@@ -462,15 +419,11 @@ class Account:
     def publish_presence(
         self, basic: int, activity: int = Activity.NONE, note: str | None = None
     ) -> None:
-        """`sipral_account_publish_presence`: publish this account's presence
-        (RFC 3903) -- ``basic`` a :class:`sipral.enums.Basic`, open or closed
-        (required), an RPID ``activity`` (``Activity.NONE`` publishes no
-        person; ``Activity.OTHER`` is refused, having no name to publish
-        under) and a one-line ``note``. The first call publishes and every
-        later one modifies the same publication, which the stack keeps
-        refreshed until :meth:`unpublish_presence`.
-        `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with ``PresenceKind.PUBLICATION``
-        says what the compositor did with it."""
+        """Publish presence (RFC 3903): ``basic`` (required), an RPID
+        ``activity`` (``NONE`` publishes no person; ``OTHER`` is refused) and
+        a one-line ``note``. Later calls modify the same publication, kept
+        refreshed until :meth:`unpublish_presence`. The outcome is a
+        ``PresenceKind.PUBLICATION`` event."""
         presence = ffi.new("sipral_presence_t *")
         presence.size = ffi.sizeof("sipral_presence_t")
         presence.basic = int(basic)
@@ -489,9 +442,8 @@ class Account:
         )
 
     def unpublish_presence(self) -> None:
-        """`sipral_account_unpublish_presence`: take the published presence
-        away (RFC 3903 Section 4.5); ``PublicationState.REMOVED`` says when it
-        is gone. `SIPRAL_STATUS_WRONG_STATE` when nothing was published."""
+        """Remove the published presence (RFC 3903 Section 4.5);
+        `SIPRAL_STATUS_WRONG_STATE` when nothing was published."""
         _call(
             lambda: lib.sipral_account_unpublish_presence(
                 self.stack.handle, self.handle, self.stack.now_ms()
@@ -500,7 +452,7 @@ class Account:
         )
 
     def remove(self) -> None:
-        """`sipral_account_remove`. Every call this account placed ends."""
+        """Remove the account; every call it placed ends."""
         _call(
             lambda: lib.sipral_account_remove(self.stack.handle, self.handle),
             "sipral_account_remove",

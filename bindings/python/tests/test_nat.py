@@ -3,38 +3,17 @@
 
 """``nat=Nat.STUN`` and ``stun_server`` on :class:`sipral.stack.Stack`.
 
-Two things this proves, each with a server this test runs itself rather
-than a real one: no lab, no coturn, no network beyond loopback.
+Every server here is a fake run by the test, on loopback only.
 
-`TwoStacksTalkThroughStun` answers a STUN Binding request the way RFC 5389
-Section 15.2 describes -- `XOR-MAPPED-ADDRESS` set to a made-up public
-address this loopback pair could never actually route to -- and checks
-that a stack pointed at it both raises `SIPRAL_EVENT_KIND_NAT_MAPPING`
-(`Stack.events`, not a call's own) for its *signalling* socket with no
-application code beyond the constructor, and, once it places a call, waits
-for its *media* socket's own mapping (`sipral.stack.Stack._map_media_socket`,
-the `sipral_stack_nat_map` / `sipral_stack_receive_stun` exchange
-`bindings/python/sipral/stack.py` drives from the poll thread) and offers
-that address in `c=` -- `docs/06-nat.md`'s "With ICE on" is what a peer
-would read it as if the call went on to use ICE, and this is the offer
-before any of that, which is where the address has to be for a peer with
-no NAT helper of its own to work at all.
+`TwoStacksTalkThroughStun` answers Binding requests (RFC 5389 Section 15.2)
+with a made-up public address and checks the stack maps its signalling
+socket unprompted, then waits for its media socket's mapping and offers
+that address in `c=`.
 
-`TurnAllocateRequestLeaves` is what the brief calls "at least as far as the
-allocation request leaving": a `turn_server` naming a fake server that
-never answers still gets `sipral_stack_nat_map`'s Binding request out
-(taken by this test's fake STUN responder, which this one also is) and,
-once that is answered, an unauthenticated TURN Allocate request, read off
-the wire this test listens on directly -- RFC 8656 Section 9's mandatory
-401 challenge round, and the credentialed retry it would prompt, needs a
-server that actually sends the 401, which this fake one deliberately does
-not (checked directly: this test's own server sees nothing but identical
-retransmits of that first request over several seconds of retrying, never
-a second one with `labuser`/`labpass` attached). Proving that leg needs a
-server that actually answers -- `_FakeStunServer(credential=...)` below,
-the same shape `bindings/swift/Tests/SipralTests/NatTests.swift` and
-`bindings/kotlin/.../NatCheck.kt`'s own fake servers are -- which
-`TurnAllocationIsGivenBackWhenTheCallEnds` uses for a real, if fake, relay.
+`TurnAllocateRequestLeaves` checks only that an Allocate leaves, against a
+server that never answers; the 401 round (RFC 8656 Section 9) needs
+`_FakeStunServer(credential=...)`, which
+`TurnAllocationIsGivenBackWhenTheCallEnds` uses.
 """
 
 from __future__ import annotations
@@ -81,16 +60,10 @@ _REFRESH_REQUEST = 0x0004
 
 
 def _routable_address() -> str | None:
-    """This host's own address on whatever interface its default route
-    uses, or ``None`` on a machine with none to find.
+    """This host's default-route address, or ``None``.
 
-    RFC 8445 Section 5.1.1.1 rules loopback out as a host candidate --
-    `docs/06-nat.md`, "Gathering" -- so `TwoStacksTalkThroughIce` needs an
-    address that is not `127.0.0.1` even though both stacks it binds stay
-    on this one machine. `connect` on a UDP socket asks the kernel to pick
-    a source address for a destination without ever sending a packet
-    (there is no three-way handshake to complete, the way there would be
-    over TCP), so this reads the routing table and nothing else.
+    ICE excludes loopback host candidates (RFC 8445 Section 5.1.1.1). A UDP
+    `connect` picks a source address without sending anything.
     """
     probe = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
     try:
@@ -103,10 +76,8 @@ def _routable_address() -> str | None:
 
 
 def _xor_address(transaction_id: bytes, host: str, port: int) -> bytes:
-    """One RFC 8489 Section 14.2 `XOR-MAPPED-ADDRESS`/`XOR-RELAYED-ADDRESS`
-    value, IPv4 only -- the transaction id is what `XOR-RELAYED-ADDRESS`
-    (RFC 8656 Section 14.5) XORs the address octets with too, same as
-    `XOR-MAPPED-ADDRESS` does; the two share this one encoding."""
+    """An IPv4 XOR address value (RFC 8489 Section 14.2, RFC 8656 Section
+    14.5); mapped and relayed share the encoding."""
     ip_bytes = socket_module.inet_aton(host)
     xport = port ^ (_MAGIC_COOKIE >> 16)
     xaddr = bytes(a ^ b for a, b in zip(ip_bytes, _COOKIE))
@@ -174,25 +145,16 @@ def _signed(msg_type: int, transaction_id: bytes, attributes: list[tuple[int, by
 
 
 class _FakeStunServer:
-    """A UDP socket that answers every STUN Binding request it reads with
-    the same made-up public address.
+    """Answers every Binding request with the same made-up public address.
 
-    Without ``credential``, every other message -- a TURN Allocate among
-    them -- is recorded in :attr:`other_requests` and never answered, the
-    way :class:`TurnAllocateRequestLeaves` needs it. With one, it is a real,
-    if fake, TURN server too: an unauthenticated Allocate (RFC 8656 Section
-    7) gets the mandatory 401 with a REALM and a NONCE, a signed one is
-    checked against the long-term key and answered with a relay on
-    ``relay_host``, and a Refresh -- among them the one with a lifetime of
-    zero that gives an allocation back -- is recorded in
-    :attr:`requests` the same way every request is, signed or not, answered
-    or not (`bindings/swift/Tests/SipralTests/NatTests.swift`'s
-    `FakeStunServer` and `bindings/kotlin/.../NatCheck.kt`'s own).
+    Without ``credential`` other messages are recorded and ignored. With
+    one it also acts as a TURN server: 401 for an unsigned Allocate (RFC
+    8656 Section 7), a relay for a correctly signed one. Every request is
+    recorded in :attr:`requests`.
 
-    It listens on ``host``, which a stack bound at this machine's routable
-    address has to be given as its own: Windows sends by the strong host
-    model, and a datagram from a socket bound there to ``127.0.0.1`` is
-    refused with WinError 10049 rather than looped back.
+    ``host`` must match a stack bound at a routable address: under the
+    Windows strong host model, sending from there to ``127.0.0.1`` fails
+    with WinError 10049.
     """
 
     REALM = "sipral.test"
@@ -242,10 +204,7 @@ class _FakeStunServer:
                 if answer is not None:
                     self._socket.sendto(answer, from_address)
                 continue
-            # Without a credential, an Allocate (or its authenticated retry);
-            # a Refresh (with or without a lifetime of zero) with one; and
-            # anything else: recorded above already, answered to nobody -- a
-            # farewell neither waits for nor retries on one.
+            # Unanswered: a farewell Refresh neither waits nor retries.
             self.other_requests.append(data)
 
     def _answer_allocate(
@@ -293,16 +252,13 @@ class _FakeStunServer:
 
 
 def _moved(port: int, distance: int) -> int:
-    """A port well away from ``port`` -- never the port itself, so an
-    address naming the socket's own port cannot pass for the mapped or
-    relayed one."""
+    """A port far from ``port``, so the socket's own cannot pass for it."""
     return port - distance if port > 40000 else port + distance
 
 
 class ASilentFirstServerHandsOver(unittest.IsolatedAsyncioTestCase):
-    """``stun_fallbacks``: the first server named never answers, and the
-    signalling socket is asked of the next one once five and a half seconds
-    have gone by, with `SIPRAL_EVENT_KIND_STUN_SERVER` saying so."""
+    """``stun_fallbacks``: after 5.5 s of silence the next server is asked,
+    and `SIPRAL_EVENT_KIND_STUN_SERVER` says so."""
 
     PUBLIC_HOST = "203.0.113.7"  # RFC 5737 TEST-NET-3: never a real route
     PUBLIC_PORT = 40010
@@ -341,10 +297,7 @@ class ASilentFirstServerHandsOver(unittest.IsolatedAsyncioTestCase):
 
 
 class StunServersNamedOnARunningStack(unittest.IsolatedAsyncioTestCase):
-    """:meth:`Stack.set_stun_servers` on a stack created with nobody to
-    ask: the signalling socket is mapped at once, a call placed afterwards
-    is offered at the address the server handed out, and an empty list
-    stops the asking again."""
+    """:meth:`Stack.set_stun_servers` on a stack created without STUN."""
 
     PUBLIC_HOST = "203.0.113.7"  # RFC 5737 TEST-NET-3: never a real route
     PUBLIC_PORT = 40020
@@ -405,8 +358,7 @@ class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
         self.bob_stack.close()
 
     async def test_signalling_socket_learns_the_mapping_on_its_own(self) -> None:
-        """No call, no account: the stack's own signalling socket asks the
-        moment it is built (`docs/08-ffi.md`, "Behind a NAT")."""
+        """The signalling socket is mapped with no call or account."""
         event = None
         while event is None or event.kind != EventKind.NAT_MAPPING:
             event = await asyncio.wait_for(self.alice_stack.events.get(), timeout=5)
@@ -414,10 +366,7 @@ class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.fields["mapped"], f"{self.PUBLIC_HOST}:{self.PUBLIC_PORT}")
 
     async def test_call_offers_the_mapped_media_address(self) -> None:
-        """`Stack.place_call` waits out its own media socket's mapping
-        (`Stack._map_media_socket`) before the offer is ever written, so
-        the public address this test's fake server handed out is already
-        in `c=`/`m=` the moment the far end reads the INVITE."""
+        """The offer already carries the mapped media address."""
         alice_account = self.alice_stack.add_account(
             "sip:alice@sipral.invalid",
             registrar_address=self.bob_stack.bind_address,
@@ -432,12 +381,7 @@ class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
         )
         self.addAsyncCleanup(alice_call.close)
 
-        # `sipral_call_event_t::local_sdp`/`remote_sdp` are only ever set on
-        # `SIPRAL_EVENT_KIND_SESSION_CHANGED` (a hold, a re-INVITE -- neither
-        # happens here); the offer itself is read the way any SIP listener
-        # would, off the raw INVITE `SIPRAL_EVENT_KIND_INCOMING_CALL`
-        # attaches as `event.message` (`crates/sipral-ffi/src/event.rs`'s
-        # `attach`).
+        # The SDP fields are set only on SESSION_CHANGED; read the raw INVITE.
         event = None
         while event is None or event.kind != EventKind.INCOMING_CALL:
             event = await asyncio.wait_for(self.bob_stack.events.get(), timeout=5)
@@ -446,11 +390,8 @@ class TwoStacksTalkThroughStun(unittest.IsolatedAsyncioTestCase):
 
 
 class RegistrarFlowKeptOpenBehindTheNat(unittest.IsolatedAsyncioTestCase):
-    """`registrar_keepalive`/`registrar_keepalive_ms`: an account the STUN
-    answer showed behind a NAT sends its registrar a double CRLF, alone in a
-    datagram, so that a NAT filtering by address and port keeps letting the
-    registrar's INVITE in (`docs/06-nat.md`, "Refresh"); none goes with it
-    off."""
+    """Behind a NAT the registrar gets a lone double CRLF per interval;
+    none with the keep-alive off."""
 
     PUBLIC_HOST = "203.0.113.7"
     PUBLIC_PORT = 40000
@@ -501,8 +442,7 @@ class RegistrarFlowKeptOpenBehindTheNat(unittest.IsolatedAsyncioTestCase):
 
 
 class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
-    """`turn_server`/`turn_username`/`turn_password`: proof bounded by what
-    a unit test can see without a real relay (module docstring)."""
+    """The Allocate leaves for the configured TURN server."""
 
     PUBLIC_HOST = "203.0.113.8"
     PUBLIC_PORT = 40001
@@ -530,16 +470,8 @@ class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
         self.bob_stack.close()
 
     async def test_allocate_leaves_for_the_configured_server(self) -> None:
-        # `sipral_call_place` itself refuses a socket named with
-        # `sipral_stack_nat_map` until both `SIPRAL_EVENT_KIND_NAT_MAPPING`
-        # and `SIPRAL_EVENT_KIND_NAT_RELAY` have answered for it
-        # (`Stack._map_media_socket` waits out both once `turn_server` is
-        # set) -- and this fake server, true to the module docstring,
-        # never answers the Allocate its own `SIPRAL_EVENT_KIND_NAT_RELAY`
-        # would need. So this reaches into `Stack._map_media_socket`
-        # directly, on a thread of its own, with a short timeout: what it
-        # proves is that the Allocate left, not that a call could be
-        # placed on the socket.
+        # This server never answers the Allocate, so no call could be
+        # placed; map a socket directly and expect the timeout.
         media_socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
         media_socket.bind(("127.0.0.1", 0))
         media_socket.setblocking(False)
@@ -569,22 +501,9 @@ class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
 
 
 class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase):
-    """A call that allocated a TURN relay gives it back when it ends:
-    ``Stack._drain_farewells`` must
-    send what ``sipral_stack_poll_farewell`` hands out to the destination
-    it names -- the TURN server, for the Refresh with a lifetime of zero
-    that gives a relay back (``crates/sipral/src/relay.rs``, "gives it
-    back when the call ends") -- and only fall back to the last address
-    media was heard from when it names none.
-
-    ``crates/sipral/src/relay.rs`` also says: "A call whose peer does no
-    ICE never uses it, and gives it back the same way" -- so this needs
-    nothing more than a call that reaches ``bob``, an ordinary stack with
-    no NAT handling of its own, and is then closed. Were the destination
-    ignored in favour of the far end's own address, as it once was, this
-    fake TURN server would never see the Refresh at all -- and if
-    ``call.media.remote_address`` was still ``None`` at that point, the
-    farewell used to be dropped outright rather than sent anywhere.
+    """The zero-lifetime Refresh goes to the TURN server the farewell
+    names, not to the peer's media address. A peer without ICE (``bob``)
+    is enough: the relay is unused and still given back.
     """
 
     PUBLIC_HOST = "203.0.113.9"
@@ -602,11 +521,8 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
         )
         self.addAsyncCleanup(self._close_server)
         loop = asyncio.get_running_loop()
-        # `codecs="PCMU"` keeps the offer's `m=`/`a=rtpmap` short: with three
-        # ICE candidates (host, server-reflexive, relayed) added on top of
-        # every codec this build has by default, the INVITE clears RFC
-        # 3261 Section 18.1.1's 1300-byte line and this loopback pair has no
-        # stream transport open to fall back to.
+        # One codec keeps the INVITE under RFC 3261 Section 18.1.1's 1300
+        # bytes with three ICE candidates; there is no stream to fall back to.
         self.alice_stack = Stack(
             bind_host=host,
             loop=loop, audio=AudioMode.APPLICATION,
@@ -658,20 +574,12 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
                 bob_call = self.bob_stack.answer_call(event, media_host=self.host)
         self.addAsyncCleanup(bob_call.close)
 
-        # The session has to actually open -- and the relay actually become
-        # the call's -- before there is anything for a farewell to give
-        # back; a call hung up before its media ever starts leaves the
-        # relay to `Stack._forget_media_socket` instead
-        # (`bindings/python/sipral/call.py`'s `Call.close`).
+        # Media must start for the relay to become the call's.
         while alice_call.media is None:
             await asyncio.wait_for(alice_call.events.get(), timeout=8)
 
-        # `Stack.close`, not `Call.close`: hanging up and forgetting the
-        # call right here would race the poll thread's own drain of the
-        # farewell it leaves behind (`Stack.close`'s own doc comment).
-        # `Stack.close` hangs up, gives the poll thread a round to drain
-        # both queues while the call is still tracked, and only then
-        # forgets it.
+        # `Stack.close` lets the poll thread drain the farewell before
+        # forgetting the call.
         self.alice_stack.close()
 
         deadline = asyncio.get_running_loop().time() + 5
@@ -693,24 +601,12 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
 
 
 class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyncioTestCase):
-    """The relay a call held is given back even when the application
-    closes the call the instant it hears the call ended.
+    """The relay is given back even when the call is closed the instant
+    `SIPRAL_EVENT_KIND_CALL_ENDED` is delivered.
 
-    The Refresh with a lifetime of zero is queued in the same poll that
-    raises `SIPRAL_EVENT_KIND_CALL_ENDED`, and used to be sent only after
-    that poll's events had all been delivered. An application that closed
-    the call as soon as it saw `Call.ended` -- `examples/agent.py`'s
-    `run_call`, whose wait for the far end's hangup and whose own hangup
-    both end on it -- could forget the call and close its socket before
-    the poll thread got to the farewell, and the relay was left to lapse
-    on its server: the lab's TURN step counted one allocation fewer given
-    back than made, now and then. Here the close happens on the poll
-    thread itself, inside the delivery of the event, which is the order
-    that race could only sometimes produce.
-
-    Both ends run full ICE, so the relay stays the call's until it ends
-    rather than going back as soon as a peer without ICE answers
-    (`TurnAllocationIsGivenBackWhenTheCallEnds`).
+    The close runs on the poll thread inside the event's delivery, forcing
+    the order that otherwise races. Both ends run full ICE so the relay is
+    held until the end.
     """
 
     PUBLIC_HOST = "203.0.113.9"
@@ -780,7 +676,7 @@ class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyn
         while not chosen:
             event = await asyncio.wait_for(alice_call.events.get(), timeout=10)
             chosen = event.kind == EventKind.MEDIA_PATH_CHOSEN
-        # the relay event is the stack's, not the call's
+        # The relay event is on the stack's queue, not the call's.
         relay = None
         while relay is None:
             event = await asyncio.wait_for(self.alice_stack.events.get(), timeout=8)
@@ -791,8 +687,7 @@ class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyn
         )
         self.assertEqual(self._refreshes(), 0, "the relay went back while the call still held it")
 
-        # the application closing the call the moment it is told the call
-        # ended: on the poll thread, inside the delivery of the event itself
+        # Close inside the delivery of CALL_ENDED, on the poll thread.
         deliver = alice_call.deliver
 
         def close_at_the_end(event) -> None:
@@ -816,14 +711,9 @@ class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyn
 
 
 class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
-    """`ice=Ice.REQUIRED`, no NAT and no server at all: two stacks bound to
-    this host's own routable address (never `127.0.0.1` -- RFC 8445
-    Section 5.1.1.1, `docs/06-nat.md` "Gathering") gather one host
-    candidate each, run a full checklist and nominate it, and media
-    starts, both ways, only once that agent's own `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`
-    says so -- the ICE plumbing `Stack.place_call`'s and
-    `Stack.answer_call`'s ``ice=``/`nat=Nat.STUN`` never touch, since
-    nothing here is behind a NAT.
+    """Full ICE with host candidates only, on the routable address (RFC
+    8445 Section 5.1.1.1 excludes loopback); media flows both ways after
+    `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`.
     """
 
     async def asyncSetUp(self) -> None:
@@ -848,10 +738,8 @@ class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bob_call.media.info()["receiving"])
 
     async def test_the_call_says_which_paths_it_tried_and_restarts_its_ice(self) -> None:
-        """D5's path half and a restart this end starts, through the
-        idiomatic layer: the agent names the one pair that carries the call,
-        and `restart_ice()` checks again under new credentials until a
-        second path is chosen."""
+        """One selected pair is reported, and `restart_ice()` chooses a path
+        again."""
         alice_call, _ = await self._connect()
         paths = alice_call.media.path_candidates()
         chosen = [
@@ -899,9 +787,7 @@ class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
         while bob_call.media is None:
             await asyncio.wait_for(bob_call.events.get(), timeout=8)
 
-        # `MEDIA_PATH_CHOSEN` is the agent's own nomination, on each side
-        # (`docs/08-ffi.md`); reaching it, rather than `MEDIA_FAILED`, is
-        # what tells this from a call ICE never got to run on.
+        # MEDIA_PATH_CHOSEN on each side proves ICE actually ran.
         for call in (alice_call, bob_call):
             event = None
             while event is None or event.kind != EventKind.MEDIA_PATH_CHOSEN:

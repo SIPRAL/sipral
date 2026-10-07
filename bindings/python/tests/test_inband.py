@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""What a call carries inside its audio, and how it is recorded, through
-this package: two stacks on 127.0.0.1 that offer no telephone event, so a
-digit can only cross as its two tones, a caller told to listen for who
-answered, the beep that says a call is recorded, and the files a recording
-writes.
+"""In-band DTMF (no telephone event offered), answering-machine detection,
+the consent beep, and recording files.
 """
 
 from __future__ import annotations
@@ -32,9 +29,7 @@ from sipral.enums import (
 
 
 def _voiced(n: int, rate: int) -> int:
-    """A voice-like sample: a 180 Hz fundamental whose level a 700 Hz
-    component moves, which the answering-machine detector hears as
-    speech."""
+    """A voice-like signal the answering-machine detector takes as speech."""
     t = n / rate
     value = 6_000.0 * math.sin(2 * math.pi * 180 * t) * (1 + 0.5 * math.sin(2 * math.pi * 700 * t))
     return int(round(value))
@@ -43,8 +38,7 @@ def _voiced(n: int, rate: int) -> int:
 class InBandAndRecording(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         loop = asyncio.get_running_loop()
-        # no telephone event offered either way: a key can only cross in
-        # the audio, and by default the far end listens for it there
+        # No telephone event: digits cross in the audio, detected by default.
         self.alice_stack = Stack(
             loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU", offer_dtmf=False
         )
@@ -99,7 +93,7 @@ class InBandAndRecording(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_digit_crosses_in_the_audio_where_no_telephone_event_was_offered(self) -> None:
         alice_call, bob_call = await self._place_and_answer()
-        # past the far end's probation, so the first frame of the tone counts
+        # Past the far end's RTP probation.
         await asyncio.sleep(0.2)
         alice_call.send_dtmf("7")
         digit = await asyncio.wait_for(bob_call.dtmf.get(), timeout=5)
@@ -153,8 +147,7 @@ class InBandAndRecording(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"OpusTags", data)
 
     async def test_a_greeting_that_runs_on_is_reported_as_a_machine(self) -> None:
-        # a short greeting limit, so the decision comes in a second rather
-        # than in the default's four words and a second and a half
+        # A short greeting limit for a quick decision.
         alice_call, bob_call = await self._place_and_answer(
             before_answer=lambda call: call.detect_progress(max_greeting_ms=600, beep=False)
         )

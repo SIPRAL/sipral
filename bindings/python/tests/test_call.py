@@ -3,14 +3,8 @@
 
 """Two stacks on 127.0.0.1, talking directly, with no registrar between them.
 
-This is the proof the lab is not: `scripts/lab.sh` exercises this package
-against FreeSWITCH, on a machine that runs it, and is the integrator's to
-run. What runs here instead is what `interop/harness-c/main.c` already
-does for the C ABI directly -- an account with no registrar
-(`sipral_account_config_t::registrar_len` left at zero), pointed at the
-other stack's own address as its outbound proxy -- carried through this
-package's idiomatic layer: place a call, answer it, exchange audio, send
-one DTMF digit, and read back what the call cost.
+Each account has no registrar and uses the other stack as its outbound
+proxy: place, answer, exchange audio, send a DTMF digit, read statistics.
 """
 
 from __future__ import annotations
@@ -107,8 +101,7 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(stats["packets_sent"], 0)
         self.assertIn("score", stats)
 
-        # the dict copies frames_underrun, not a neighbour of it: the
-        # library's own count, read either side, brackets it
+        # The library's count read on either side brackets the copy.
         def raw() -> int:
             out = ffi.new("sipral_stream_stats_t *")
             out.size = ffi.sizeof("sipral_stream_stats_t")
@@ -121,9 +114,8 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(read, raw())
 
     async def test_the_end_of_call_record_is_kept_and_still_readable(self) -> None:
-        """The record `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries is kept on
-        the call, and is what the media answers once the library has nothing
-        left and says ``WRONG_STATE``."""
+        """After the stream is gone, statistics come from the end-of-call
+        record instead of ``WRONG_STATE``."""
         alice_call, bob_call = await self._place_and_answer()
         self.addAsyncCleanup(self._close_calls, alice_call, bob_call)
         media = alice_call.media
@@ -151,9 +143,8 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media.statistics()["packets_sent"], record["packets_sent"])
 
     async def test_frames_cross_at_the_rate_the_application_chose(self) -> None:
-        """`Media.set_app_rate`: both ends at 24 kHz hand out and take
-        480-sample frames whatever the codec, a rate outside the four is
-        refused and changes nothing, and 0 is the codec's own again."""
+        """`Media.set_app_rate`: 24 kHz gives 480-sample frames, other rates
+        are refused unchanged, 0 restores the codec's."""
         alice_call, bob_call = await self._place_and_answer()
         self.addAsyncCleanup(self._close_calls, alice_call, bob_call)
         codec_rate = bob_call.media.sample_rate
@@ -178,8 +169,7 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bob_call.media.sample_rate, codec_rate)
 
     def test_an_under_run_count_crosses_into_the_events_record(self) -> None:
-        """The end-of-call record a MEDIA_STATISTICS event carries copies
-        `frames_underrun` under its own name, the member beside it untouched."""
+        """The end-of-call record copies `frames_underrun` correctly."""
         native = ffi.new("sipral_stream_stats_t *")
         native.size = ffi.sizeof("sipral_stream_stats_t")
         native.frames_underrun = 7
@@ -195,9 +185,8 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
 
 
 class WhatAHeldPartyHears(unittest.IsolatedAsyncioTestCase):
-    """A party this end holds hears silence by default, in application mode
-    too, and what the application sends -- hold music, an announcement, a
-    voice agent -- on a stack told ``held_audio=HeldAudio.APPLICATION``."""
+    """A held party hears silence by default, even in application mode, and
+    the application's frames with ``held_audio=HeldAudio.APPLICATION``."""
 
     async def _loudest_heard_on_hold(self, held_audio: int) -> int:
         loop = asyncio.get_running_loop()
@@ -260,7 +249,7 @@ class TheRealmsAPasswordAnswers(unittest.IsolatedAsyncioTestCase):
             auth_password="open sesame",
             realms=["registrar.example", "sbc, inc."],
         )
-        # a control byte inside a realm reaches the stack, which refuses it
+        # The stack refuses a control byte inside a realm.
         with self.assertRaises(SipralError) as raised:
             stack.add_account(
                 "sip:bob@sipral.invalid",
@@ -295,9 +284,8 @@ class ACeilingOnCalls(unittest.IsolatedAsyncioTestCase):
 
 
 class ACallsOwnCodecs(unittest.IsolatedAsyncioTestCase):
-    """`codecs` on place_call and answer_call, in place of the stack's. An
-    answer keeps the offer's order, so each case makes the stack's own order
-    alone settle on PCMU and the call's settle on PCMA."""
+    """Per-call `codecs` override the stack's: the stack order alone gives
+    PCMU, the call's gives PCMA."""
 
     async def _codec_of_a_call(self, alice_codecs, bob_codecs, place, answer):
         loop = asyncio.get_running_loop()

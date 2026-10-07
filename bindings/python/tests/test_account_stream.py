@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""ABI 0.35 through the Python layer.
-
-An account on a connection of its own (``add_account(stream_protocol=...)``)
-beside one on the stack's UDP socket, each registered with its own loopback
-registrar and each placing a call through it; a call's own gain and mute on
-a stack in device mode, the devices left closed; and the settings read back
-(``Stack.settings()``), the echo switch among them.
+"""Per-account stream connections beside UDP accounts, per-call gain and
+mute in device mode (devices closed), and ``Stack.settings()``.
 """
 
 from __future__ import annotations
@@ -73,8 +68,7 @@ class AnAccountOnAConnectionOfItsOwn(_Case):
             der = ssl.PEM_cert_to_DER_cert(pem.read())
         pin = "sha256 Fingerprint=" + ":".join(f"{byte:02X}" for byte in hashlib.sha256(der).digest())
 
-        # stream_fallback off: the account's own connection is opened all
-        # the same, since nothing outgrew a datagram
+        # The account's own connection opens even with stream_fallback off.
         stack = self.stack(stream_fallback=False)
         over_udp = stack.add_account(
             "sip:alice@udp.sipral.test", registrar="sip:udp.sipral.test", registrar_address=udp_registrar.address

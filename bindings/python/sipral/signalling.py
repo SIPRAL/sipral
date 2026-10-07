@@ -1,16 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""SIP over TCP or TLS: which authorities a TLS connection trusts, the one
-connection a :class:`sipral.stack.Stack` signals on, and what a refused
-connection is called.
+"""SIP over TCP or TLS: trust, connecting, and classifying failures.
 
-Sipral links no TLS library (`docs/22-tls.md`), so the connection is
-Python's own `ssl`, checked by OpenSSL against the name the server is
-expected to have. Nothing here turns that check off: a certificate that
-fails is a connection that is not made, and the stack hears why
-(`sipral_stack_transport_failed_with`), which it passes on to the application
-as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
+Sipral links no TLS library (`docs/22-tls.md`), so TLS is Python's `ssl`.
+The certificate check cannot be turned off; a failure is reported to the
+stack and reaches the application as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
 """
 
 from __future__ import annotations
@@ -26,16 +21,12 @@ from ._sipral_cffi import lib
 
 __all__ = ["InviteLimit", "PinRefused", "TlsTrust", "classify", "parse_pin"]
 
-#: What OpenSSL calls the verification failures that are an expired or a
-#: not-yet-valid certificate, and one that names another host
-#: (`X509_V_ERR_CERT_HAS_EXPIRED`, `X509_V_ERR_CERT_NOT_YET_VALID`,
-#: `X509_V_ERR_HOSTNAME_MISMATCH`, `X509_V_ERR_IP_ADDRESS_MISMATCH`). Every
-#: other verification failure is a chain that reaches no trusted authority.
+#: OpenSSL codes for expired/not-yet-valid (9, 10) and host/IP mismatch
+#: (62, 64); any other verification failure counts as untrusted.
 _EXPIRED = frozenset({9, 10})
 _NAME_MISMATCH = frozenset({62, 64})
 
-#: The errnos that are a network with no way through, rather than a server
-#: that said no.
+#: Errnos meaning no route, as opposed to a refusal.
 _UNREACHABLE = frozenset(
     {
         getattr(errno, name)
@@ -48,14 +39,10 @@ _UNREACHABLE = frozenset(
 class TlsTrust:
     """Which authorities a TLS connection to the SIP server trusts.
 
-    Three answers, the three `docs/22-tls.md` describes for every platform:
-    :meth:`platform` (the machine's own store, what a public server's
-    certificate is checked against), :meth:`private_authority` (a private
-    CA beside the platform's), and :meth:`only_authority` (that one
-    authority and nothing else: pinning it). :meth:`pinned` trusts one
-    certificate by its SHA-256 fingerprint, for a PBX that signed its own.
-    :meth:`from_context` takes a context the application built itself, for
-    anything the others do not say. None of them turns the check off.
+    :meth:`platform` (the system store), :meth:`private_authority` (a
+    private CA beside it), :meth:`only_authority` (that CA alone),
+    :meth:`pinned` (one certificate by SHA-256, for a self-signed PBX) and
+    :meth:`from_context` (the application's own). None disables checking.
     """
 
     def __init__(
@@ -63,33 +50,24 @@ class TlsTrust:
     ) -> None:
         self._build = build
         self.description = description
-        #: The SHA-256 digest of the one certificate :meth:`pinned` trusts,
-        #: or ``None``.
+        #: The pinned SHA-256 digest, or ``None``.
         self.pin = pin
 
     @classmethod
     def pinned(cls, fingerprint: str) -> "TlsTrust":
-        """The one certificate whose SHA-256 fingerprint is ``fingerprint``,
-        and nothing else: for a PBX serving a certificate it signed itself.
+        """Trust only the certificate with this SHA-256 fingerprint.
 
-        ``fingerprint`` is written the way ``openssl x509 -fingerprint
-        -sha256`` (``sha256 Fingerprint=``, or ``SHA256 Fingerprint=``
-        before OpenSSL 3) or RFC 8122 prints it: 64 hexadecimal digits,
-        either case, colons and spaces between them ignored, optionally
-        after ``sha-256 ``, ``SHA256=`` or ``SHA256 Fingerprint=``, in any
-        case; anything else raises ``ValueError``
-        (``bindings/fixtures/pin-forms.txt`` lists what every layer takes).
-        The fingerprint is
-        the whole verdict: no authority, host name or date is consulted, and
-        a certificate with any other fingerprint is refused as untrusted
-        (`docs/22-tls.md`). It is compared in constant time, over the DER
-        bytes of the certificate the server presented first."""
+        Accepts the forms ``openssl x509 -fingerprint -sha256`` and RFC 8122
+        print: 64 hex digits, any case, colons and spaces ignored, optionally
+        after ``sha-256 ``, ``SHA256=`` or ``SHA256 Fingerprint=``; else
+        ``ValueError`` (``bindings/fixtures/pin-forms.txt``). The match is
+        the whole verdict: no authority, name or date is checked. Compared
+        in constant time over the leaf's DER."""
         digest = parse_pin(fingerprint)
 
         def build() -> ssl.SSLContext:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            # the pin replaces the chain and the name: both are checked
-            # below, against the digest, once the handshake is done
+            # The pin replaces chain and name checks; see `connect`.
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             return context
@@ -114,9 +92,7 @@ class TlsTrust:
 
     @classmethod
     def only_authority(cls, cafile: str) -> "TlsTrust":
-        """The authorities in the PEM file ``cafile`` and no others: a
-        certificate any other authority signed is refused, the platform's
-        included."""
+        """Only the authorities in ``cafile``; the platform's are not trusted."""
         return cls(lambda: ssl.create_default_context(cafile=cafile), f"only {cafile}")
 
     @classmethod
@@ -140,8 +116,7 @@ _PIN_PREFIXES = ("sha256 fingerprint=", "sha-256 ", "sha256=")
 
 
 def parse_pin(fingerprint: str) -> bytes:
-    """The 32 bytes a SHA-256 fingerprint names, in any of the forms
-    :meth:`TlsTrust.pinned` takes; ``ValueError`` for anything else."""
+    """Parse a fingerprint as :meth:`TlsTrust.pinned` accepts; 32 bytes."""
     text = fingerprint.strip()
     for prefix in _PIN_PREFIXES:
         if text.lower().startswith(prefix):
@@ -167,14 +142,10 @@ class PinRefused(ssl.SSLCertVerificationError):
 
 
 class InviteLimit(tuple):
-    """How fast one address may ring a stack: ``burst`` INVITEs at once,
-    then one more every ``every_ms`` (`sipral_stack_invite_limit`).
+    """Per-address INVITE rate: ``burst`` at once, then one per ``every_ms``.
 
-    :attr:`DEFAULT` is what every stack starts with, ten then one every two
-    seconds, past which an INVITE is answered 480; :attr:`VOICE_AGENT` is
-    the preset for a headless service taking a trunk's calls, a hundred and
-    twenty-eight at once and then twenty a second (`docs/08-ffi.md`, "How
-    fast one address may ring this stack").
+    :attr:`DEFAULT`: ten, then one every two seconds, 480 past that.
+    :attr:`VOICE_AGENT`: 128, then twenty a second, for a trunk.
     """
 
     __slots__ = ()
@@ -198,8 +169,7 @@ InviteLimit.VOICE_AGENT = InviteLimit(
 
 
 def _sentence(error: BaseException) -> str:
-    """The platform's words for ``error``, as one line of at most
-    `SIPRAL_TRANSPORT_DETAIL_BYTES` bytes of UTF-8."""
+    """``error`` as one line within `SIPRAL_TRANSPORT_DETAIL_BYTES`."""
     if isinstance(error, ssl.SSLCertVerificationError) and error.verify_message:
         text = f"{error.reason or 'certificate verify failed'}: {error.verify_message}"
     else:
@@ -210,15 +180,8 @@ def _sentence(error: BaseException) -> str:
 
 
 def classify(error: BaseException) -> tuple[int, int, str]:
-    """What a failed connection was, as the stack names it: a
-    `SipralTransportError`, a `SipralTlsFailure` and the platform's own
-    sentence.
-
-    A certificate OpenSSL refused is untrusted, a name mismatch or expired
-    by its verification code; any other TLS error during the handshake is
-    a handshake refused. A server nothing answered for is refused, a
-    network with no way through unreachable, silence timed out.
-    """
+    """A failed connection as (`SipralTransportError`, `SipralTlsFailure`,
+    detail sentence)."""
     detail = _sentence(error)
     if isinstance(error, ssl.SSLCertVerificationError):
         code = error.verify_code
@@ -251,10 +214,8 @@ def connect(
     timeout: float,
     pin: bytes | None = None,
 ) -> socket.socket:
-    """One connection to ``server`` from ``bind_host`` (from the address of
-    the route toward it when ``None``), over TLS when ``context`` is given
-    with the certificate checked against ``server_name`` -- or, with
-    ``pin``, against that SHA-256 digest alone; raises what refused it, for
+    """Connect to ``server``, over TLS when ``context`` is given (checked
+    against ``server_name``, or ``pin`` alone). Raises the failure for
     :func:`classify`."""
     raw = socket.socket(socket.AF_INET6 if ":" in server[0] else socket.AF_INET, socket.SOCK_STREAM)
     try:

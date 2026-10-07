@@ -3,19 +3,13 @@
 
 """SIP over TCP and TLS through the Python layer: ``Stack(signalling=...)``.
 
-The registrar here is this test's own, on loopback: a TCP listener, over TLS
-when given a certificate, that frames what arrives on `Content-Length`
-(RFC 3261 Section 18.3) and answers every REGISTER 200. Its certificates are
-made for each run with the `openssl` command, for :data:`_SERVER_NAME`, and
-one of them expired before the run began.
+A fake TCP/TLS registrar frames on `Content-Length` (RFC 3261 Section 18.3)
+and answers 200; certificates (one already expired) come from `openssl`.
 
-What is proved: a stack registers over the one connection it opened, with a
-`Via` and a `Contact` that name TLS; a certificate refused for each of the
-reasons `SipralTlsFailure` names arrives as
-`SIPRAL_EVENT_KIND_TRANSPORT_FAILED` carrying that reason and OpenSSL's own
-sentence; a registrar that closes the connection is connected to again and
-the account registers again on the new one; and the INVITE rate floor's
-voice-agent preset lets through a burst the default answers 480.
+Checked: registration over one TLS connection with TLS in `Via`/`Contact`;
+each `SipralTlsFailure` reason arrives in TRANSPORT_FAILED; a closed
+connection is reopened and re-registered; the voice-agent INVITE limit
+passes a burst the default answers 480.
 """
 
 from __future__ import annotations
@@ -48,8 +42,7 @@ def _header(name: str, message: str) -> str | None:
 
 
 def _certificate(directory: str, name: str, *extra: str) -> tuple[str, str] | None:
-    """A self-signed certificate and key for :data:`_SERVER_NAME`, made with
-    the `openssl` command, or `None` where it cannot make one."""
+    """A self-signed certificate and key via `openssl`, or `None`."""
     openssl = shutil.which("openssl")
     if openssl is None:
         return None
@@ -69,11 +62,9 @@ def _certificate(directory: str, name: str, *extra: str) -> tuple[str, str] | No
 
 
 class _Registrar:
-    """A registrar on a TCP port, over TLS when given a certificate, or one
-    that answers a TLS client in plain text when ``plain_to_tls``.
+    """A TCP or TLS registrar; ``plain_to_tls`` answers TLS in plain text.
 
-    :attr:`requests` holds ``(connection, message)`` for every request, in
-    order, ``connection`` counting from one.
+    :attr:`requests` holds ``(connection, message)``, connections from one.
     """
 
     def __init__(self, certificate: tuple[str, str] | None = None, *, plain_to_tls: bool = False) -> None:
@@ -158,8 +149,7 @@ class _Registrar:
         return "\r\n".join(lines) + "\r\n\r\n"
 
     def drop(self) -> None:
-        """Close every connection from this end, the way a registrar that
-        restarted does."""
+        """Close every connection, like a restarting registrar."""
         open_now, self._open = self._open, []
         for conn in open_now:
             try:
@@ -389,9 +379,8 @@ class AConnectionLostIsMadeAgain(_OverAConnection):
         self.assertIn(";transport=tcp", _header("Contact", again[0]))
 
     async def test_a_connection_the_stack_let_go_of_is_made_again(self) -> None:
-        # the stack retires the main connection on its own when a flow that
-        # answered keep-alives stops answering them (RFC 5626 Section 4.4.1),
-        # with the socket still open here; said here the way it says it
+        # Simulate the stack retiring the main connection (RFC 5626 Section
+        # 4.4.1) while the socket is still open here.
         registrar = self.registrar()
         stack = self.stack(registrar.address, signalling=Transport.TCP)
         account = stack.add_account(
@@ -418,8 +407,7 @@ class AConnectionLostIsMadeAgain(_OverAConnection):
 
 
 class AClockBehindIsRetriedLikeABusy(unittest.TestCase):
-    """A clock reading the poll thread overtook is read again, as a
-    collision with it is; anything else goes straight through."""
+    """CLOCK_BEHIND is retried like BUSY; other statuses are not."""
 
     def test_both_are_waited_out_and_nothing_else(self) -> None:
         for status in (lib.SIPRAL_STATUS_BUSY, lib.SIPRAL_STATUS_CLOCK_BEHIND):
@@ -439,9 +427,7 @@ class AClockBehindIsRetriedLikeABusy(unittest.TestCase):
 
 class TheInviteRateFloor(unittest.IsolatedAsyncioTestCase):
     async def burst(self, **options) -> int:
-        """Twenty INVITEs from one address at once: how many of them were
-        answered 480 -- each counted once, however often its refusal is
-        sent again for want of an ACK."""
+        """How many of twenty simultaneous INVITEs got 480, each counted once."""
         stack = Stack(loop=asyncio.get_running_loop(), audio=AudioMode.APPLICATION, **options)
         self.addAsyncCleanup(asyncio.to_thread, stack.close)
         stack.add_account("sip:bob@sipral.invalid", registrar_address="127.0.0.1:9")

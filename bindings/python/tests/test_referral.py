@@ -3,16 +3,12 @@
 
 """A REFER outside any dialog, and ICE-lite, through this package.
 
-The referrer is a plain UDP socket writing RFC 3515 §4.1's own REFER by
-hand -- a switchboard asking Bob's line to ring Carol -- so what is proved
-is the wire: 403 while the stack has not been told to take referrals, and
-with it told, the application asked, a 202, `NOTIFY`s carrying
-`message/sipfrag`, and the call placed from Bob's account to a second stack
-that answers it.
+A raw UDP socket sends RFC 3515 §4.1's REFER. Without ``referrals`` it gets
+403; with it, the application is asked, then 202, `message/sipfrag`
+NOTIFYs, and the call placed to a second stack.
 
-The ICE-lite case is two stacks on loopback: Alice a full agent that
-requires ICE, Bob `Ice.LITE`, both choosing the one pair and audio crossing
-it both ways.
+ICE-lite: Alice requires full ICE, Bob is `Ice.LITE`; audio crosses the one
+pair both ways.
 """
 
 from __future__ import annotations
@@ -73,8 +69,7 @@ class AReferralOutsideAnyDialog(unittest.IsolatedAsyncioTestCase):
         self.referrer.close()
 
     async def _read(self, seconds: float, until) -> list[str]:
-        """Everything the referrer's socket receives, answering each NOTIFY
-        with a 200, until ``until`` holds for what arrived or time runs out."""
+        """Collect what arrives, answering NOTIFYs 200, until ``until`` holds."""
         loop = asyncio.get_running_loop()
         seen: list[str] = []
         deadline = loop.time() + seconds
@@ -172,10 +167,8 @@ class AReferralOutsideAnyDialog(unittest.IsolatedAsyncioTestCase):
 
 
 class ALiteStackAnsweringAFullOne(unittest.IsolatedAsyncioTestCase):
-    """On this host's own routable address, never `127.0.0.1`, for the reason
-    `test_nat.TwoStacksTalkThroughIce` gives: RFC 8445 §5.1.1.1 keeps a
-    loopback address out of every candidate list, and a lite end has one
-    candidate to offer and nothing else."""
+    """On the routable address: RFC 8445 §5.1.1.1 excludes loopback, and a
+    lite end has only one candidate."""
 
     async def test_the_pair_the_full_end_nominates_carries_audio_both_ways(self) -> None:
         host = _routable_address()

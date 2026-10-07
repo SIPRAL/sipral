@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""Two ways `_sipral_cffi.py` could quietly stop matching the ABI it was
-printed for, that a call placed between two stacks never exercises.
-
-Both files -- `bindings/c/include/sipral.h` and
-`bindings/python/sipral/_sipral_cffi.py` -- are printed from the same
-`sipral_ffi::abi::SURFACE` by `tools/abi-gen` (`docs/08-ffi.md`, "One
-declaration, and four files printed from it"), so in an honest build they
-cannot disagree; what these tests catch is this package answering from a
-stale `_sipral_cffi.py` that was not regenerated after the header moved.
+"""Catches a stale `_sipral_cffi.py` that no longer matches the header both
+are generated from.
 """
 
 from __future__ import annotations
@@ -26,20 +19,17 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _HEADER = _REPO_ROOT / "bindings" / "c" / "include" / "sipral.h"
 _ABI_SIZES = _REPO_ROOT / "bindings" / "c" / "abi-sizes.txt"
 
-# The structs that carry their own size, as `bindings/c/abi-sizes.txt` lists
-# them: the ones `sipral_abi_struct_size` answers for.
+# Size-prefixed structs, as listed in `bindings/c/abi-sizes.txt`.
 _VERSIONED = (
     [line.split()[0] for line in _ABI_SIZES.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
     if _ABI_SIZES.is_file()
     else []
 )
 
-# `#define NAME ((TYPE)VALUE)`, as `tools/abi-gen/src/c.rs`'s `values`
-# prints every published constant.
+# `#define NAME ((TYPE)VALUE)`
 _DEFINE = re.compile(r"^#define\s+(SIPRAL_\w+)\s+\(\([\w\s]+\)(-?\d+)\)\s*$", re.MULTILINE)
 
-# `SIPRAL_NAME = 123,` inside one of the header's anonymous `enum { ... }`
-# blocks, as `tools/abi-gen/src/c.rs`'s `enumerations` prints one.
+# `SIPRAL_NAME = 123,` inside an anonymous `enum { ... }`.
 _ENUMERATOR = re.compile(r"^\s*(SIPRAL_\w+)\s*=\s*(-?\d+),?\s*$", re.MULTILINE)
 
 
@@ -70,9 +60,8 @@ class ConstantsMatchTheHeader(unittest.TestCase):
 
 
 def _layout() -> int:
-    """Which of the three layouts `RECORD_LAYOUTS` lists this process is on:
-    64-bit pointers, or 32-bit ones with a 64-bit integer aligned to four
-    (i386) or to eight (ARM, Windows x86) inside a struct."""
+    """This process's layout: 64-bit, or 32-bit with 64-bit integers
+    aligned to four (i386) or eight (ARM, Windows x86)."""
     if ffi.sizeof("void *") == 8:
         return 0
     probe = FFI()
@@ -81,15 +70,10 @@ def _layout() -> int:
 
 
 class StructSizesMatchTheLayouts(unittest.TestCase):
-    """`ffi.sizeof` for every record, held to the length tools/abi-gen
-    worked out for the layout this process is on, and to what the library
-    itself says.
+    """`ffi.sizeof` matches both the generated table and the library.
 
-    cffi's ABI mode lays a struct out for itself from the `cdef` text --
-    nothing here links against a compiled definition -- so this is the one
-    check that would catch the `cdef` silently drifting from what a real C
-    compiler makes of the header, which `bindings/c/abi-layout.c` holds to
-    the same table on six targets (`docs/08-ffi.md`, "Versioning").
+    cffi's ABI mode lays out structs from the `cdef` text alone, so only
+    this catches it drifting from a real compiler's layout.
     """
 
     def test_every_record_is_as_long_as_the_layout_says(self) -> None:
@@ -113,11 +97,8 @@ class StructSizesMatchTheLayouts(unittest.TestCase):
 
 
 class TheAbiCheckKeepsTheOneXRule(unittest.TestCase):
-    """The check `_sipral_cffi.py` makes at import, asked of the library it
-    loaded about other versions than its own: within one major a binding
-    built against an earlier or equal minor is served, and one built against
-    a later minor, another major or any 0.x is refused, naming the caller's
-    version."""
+    """The import-time version check: same major and an equal or earlier
+    minor is served; a later minor, another major or any 0.x is refused."""
 
     def _library(self) -> tuple[int, int]:
         version = ffi.new("sipral_abi_version_t *")
@@ -143,8 +124,7 @@ class TheAbiCheckKeepsTheOneXRule(unittest.TestCase):
         self.assertEqual(status, lib.SIPRAL_STATUS_OK)
 
     def test_a_binding_built_against_an_earlier_minor_is_served(self) -> None:
-        """A library newer than its binding: every earlier minor of this
-        major is a binding the library in hand is newer than."""
+        """A library newer than its binding serves every earlier minor."""
         major, library_minor = self._library()
         for minor in range(library_minor + 1):
             with self.subTest(minor=minor):
@@ -160,8 +140,7 @@ class TheAbiCheckKeepsTheOneXRule(unittest.TestCase):
 
 
 class SrtpSuitesHaveNames(unittest.TestCase):
-    """`SrtpSuite` names every transform the stack runs, RFC 6188's and
-    RFC 7714's included, so a MEDIA_SECURED event's `suite` reads as one."""
+    """`SrtpSuite` names every transform, RFC 6188's and RFC 7714's included."""
 
     def test_every_suite_the_stack_runs_is_a_member(self) -> None:
         from sipral.enums import SrtpSuite
@@ -182,8 +161,7 @@ class SrtpSuitesHaveNames(unittest.TestCase):
 
 
 class Abi29SpacesHaveNames(unittest.TestCase):
-    """Every numbered space ABI 0.29 added is read off `lib` whole, and none
-    swallows a neighbour that shares its start."""
+    """Enum spaces sharing a prefix do not swallow each other."""
 
     def test_each_space_holds_exactly_its_own_values(self) -> None:
         from sipral import enums

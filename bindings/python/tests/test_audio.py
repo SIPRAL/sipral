@@ -1,17 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
-"""The library's own audio engine through ``Stack(audio=...)`` and
-``stack.audio``: which mode a stack gets, the device list, roles, gain,
-mute, the meter, activation, the ring, and the packets the engine hands
-back to be sent.
+"""The audio engine through ``Stack(audio=...)`` and ``stack.audio``.
 
-Everything here that touches a device stays on the manual activation, so
-no microphone is ever opened on the machine the gate runs on: a stack in
-device mode that is never activated lists and configures devices, and the
-engine opens nothing until it is told to. Where the build has no backend
-(Linux), the tests check the other half of the contract: the default is
-application mode and asking for device mode is refused.
+Device tests use manual activation so no microphone is opened on the gate
+machine. Without a backend (Linux) they check the default is application
+mode and device mode is refused.
 """
 
 from __future__ import annotations
@@ -37,16 +31,12 @@ from sipral.enums import (
 
 _HAS_DEVICES = Feature.AUDIO_DEVICE in features()
 
-# The virtual loopback device a test that opens the devices plays and records
-# on when the machine has one: it plays nowhere and hands back what it was
-# given, so that a run never sounds through the machine's loudspeaker.
-# Without it the test runs on the system's route, as it always did.
+# A virtual loopback device, used when present so tests stay silent.
 QUIET_DEVICE = "BlackHole 2ch"
 
 
 def quiet_device(devices: list[AudioDevice], role: int) -> AudioDevice | None:
-    """The device ``role`` goes on in a test that opens the devices: the
-    quiet one when the machine has it and it serves the role, else None."""
+    """The loopback device for ``role`` if present, else None."""
     for device in devices:
         serves = device.is_microphone if role == AudioRole.MICROPHONE else device.is_speaker
         if device.present and device.name == QUIET_DEVICE and serves:
@@ -80,8 +70,7 @@ class AStackPicksWhoPumpsItsAudio(unittest.TestCase):
             with self.assertRaises(SipralError) as raised:
                 stack.audio.devices()
             self.assertEqual(raised.exception.status, Status.WRONG_STATE)
-            # the library counts the trailing NUL in the length it reports;
-            # the message is the text before it
+            # The reported length counts the trailing NUL.
             self.assertNotIn("\0", str(raised.exception))
             self.assertTrue(str(raised.exception).endswith("pumps its own frames"), str(raised.exception))
 
@@ -113,7 +102,7 @@ class TheDevicesAreTheLibrarys(unittest.TestCase):
             self.assertIsInstance(device, AudioDevice)
             self.assertGreater(device.id, 0)
             self.assertTrue(device.name)
-            # the library counts the name's trailing NUL, which is not the name's
+            # The reported length counts the trailing NUL.
             self.assertNotIn("\0", device.name)
             self.assertTrue(device.is_microphone or device.is_speaker, device)
         again = self.audio.refresh()
@@ -154,7 +143,7 @@ class TheDevicesAreTheLibrarys(unittest.TestCase):
             try:
                 self.audio.select(role, device)
             except SipralError as refused:
-                # a platform whose route is the audio session's (iOS)
+                # iOS: the audio session owns the route.
                 self.assertEqual(refused.status, Status.NOT_SUPPORTED)
                 continue
             self.assertEqual(self.audio.selection(role), (device.id, None))
@@ -182,23 +171,20 @@ class TheDevicesAreTheLibrarys(unittest.TestCase):
         self.assertIsNone(info.speaker)
         self.assertEqual(self.audio.level(AudioDirection.INPUT), 0)
         self.assertEqual(self.audio.level(AudioDirection.OUTPUT), 0)
-        # deactivating what was never activated changes nothing
         self.audio.deactivate()
         self.assertFalse(self.audio.info().active)
 
     def test_a_ring_tone_is_whole_samples(self) -> None:
         with self.assertRaises(ValueError):
             self.audio.ring(b"\x00\x01\x02", 8000)
-        # under manual activation a ring opens nothing, and stopping it
-        # needs nothing open
+        # Under manual activation a ring opens nothing.
         self.audio.stop_ringing()
         self.assertFalse(self.audio.info().active)
 
 
 class TheEnginesPacketsLeaveFromTheCallsSocket(unittest.IsolatedAsyncioTestCase):
-    """`audio_transmit_callback`, the way the engine calls it: a packet naming
-    a call and a destination leaves from that call's own media socket. The
-    record is built here, so this runs on every platform and opens nothing."""
+    """A transmit callback packet leaves from its call's media socket. The
+    record is built by hand, so this runs everywhere."""
 
     async def asyncSetUp(self) -> None:
         loop = asyncio.get_running_loop()
@@ -238,7 +224,6 @@ class TheEnginesPacketsLeaveFromTheCallsSocket(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(received, payload)
         self.assertEqual("%s:%d" % sender, call.media_address)
 
-        # a call this stack does not know is nobody's packet
         record.call = call.handle + 1000
         self.alice._on_audio_transmit(record, ffi.NULL)
         self.far.settimeout(0.3)
@@ -278,11 +263,10 @@ class ACallInDeviceModeIsTheEnginesToPump(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(answered.media.pumped)
         with self.assertRaises(RuntimeError):
             call.media.send_audio(bytes(320))
-        # the far end's audio is the engine's to play, not a frame here
+        # In device mode the engine plays the far end; no frames here.
         answered.media.send_audio(bytes([0x00, 0x10]) * 800)
         await asyncio.sleep(0.3)
         self.assertTrue(call.media.frames.empty())
-        # parked until activated: nothing is open
         self.assertFalse(self.alice.audio.info().active)
 
 
@@ -291,11 +275,8 @@ class ACallInDeviceModeIsTheEnginesToPump(unittest.IsolatedAsyncioTestCase):
     "opens the machine's real devices: set SIPRAL_AUDIO_DEVICES=1 where a test may",
 )
 class ACallOnRealDevicesCarriesAudioBothWays(unittest.IsolatedAsyncioTestCase):
-    """One end of the call runs on the machine's real devices: activated, the
-    engine opens them, the far end's audio reaches the loudspeaker's meter and
-    the microphone's packets reach the far end through the transmit
-    callback. Opt-in, for a machine whose devices a test may open (the
-    Windows lab's virtual cable)."""
+    """One end on real devices: the far end reaches the speaker meter and the
+    microphone's packets reach the far end. Opt-in (e.g. a virtual cable)."""
 
     async def test_the_far_end_is_heard_and_hears(self) -> None:
         loop = asyncio.get_running_loop()
@@ -343,8 +324,8 @@ class ACallOnRealDevicesCarriesAudioBothWays(unittest.IsolatedAsyncioTestCase):
     "opens the machine's real devices: set SIPRAL_AUDIO_DEVICES=1 where a test may",
 )
 class TheEchoCancellationSwitchReopensTheOpenDevices(unittest.TestCase):
-    """The switch on open devices reopens them where they were, with the gain
-    and the mute, and the info says what the platform did. Opt-in."""
+    """Toggling echo cancellation reopens devices in place, keeping gain and
+    mute. Opt-in."""
 
     def test_the_devices_are_kept_and_the_state_read_back(self) -> None:
         with Stack(audio=AudioMode.DEVICE, audio_activation=AudioActivation.MANUAL) as stack:

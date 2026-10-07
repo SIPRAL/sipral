@@ -3,9 +3,7 @@
 
 """``Settings``: what a stack runs with, `sipral_stack_settings_t` as Python.
 
-Read with :meth:`sipral.Stack.settings`: every default filled in, which is
-what a settings screen or a support report shows rather than what was
-passed.
+Read with :meth:`sipral.Stack.settings`, every default filled in.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ class Settings:
 
     #: The protocol the stack signals over.
     transport: Transport
-    #: Whether it retransmits anything itself: only over UDP.
+    #: Whether it retransmits itself (only over UDP).
     retransmits: bool
     timer_t1_ms: int
     timer_t2_ms: int
@@ -36,13 +34,11 @@ class Settings:
     offer_dtmf: bool
     offer_rtcp_mux: bool
     silence_suppression: bool
-    #: How long inbound audio may stop before it is reported; zero with the
-    #: watchdog off.
+    #: How long inbound audio may stop before it is reported; zero for off.
     media_stall_ms: int
     g729_annex_b: bool
     referrals: bool
-    #: How often an account behind a NAT sends to its registrar; zero when
-    #: that keep-alive is off.
+    #: Registrar keep-alive interval behind a NAT; zero for off.
     registrar_keepalive_ms: int
     max_dialogs: int
     max_server_transactions: int
@@ -54,17 +50,14 @@ class Settings:
     path_mtu: int
     #: ``datagram_without_stream_bytes`` as given, zero for never.
     datagram_without_stream_bytes: int
-    #: The SRTP suites the stack's calls offer and accept unless their
-    #: account names its own, in the order they are offered (ABI 0.35).
+    #: SRTP suites in offer order, unless an account names its own.
     srtp_suites: tuple[SrtpSuite, ...]
-    #: Whether a ``pseudonym_salt`` was given; the salt itself is never
-    #: read back (ABI 0.35).
+    #: Whether a ``pseudonym_salt`` was given; the salt is never read back.
     pseudonym_salted: bool
-    #: Whether the trace writes whole messages now (ABI 0.35).
+    #: Whether the trace writes whole messages now.
     diagnostic_trace: bool
-    #: Whether the platform's echo cancellation is asked for, the default
-    #: filled in (ABI 0.35); :meth:`sipral.audio.Audio.info` says what the
-    #: platform did.
+    #: Whether platform echo cancellation is asked for;
+    #: :meth:`sipral.audio.Audio.info` says what the platform did.
     system_echo_cancellation: bool
 
     @classmethod
