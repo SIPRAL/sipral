@@ -31,26 +31,20 @@
 //!
 //! # Sans-I/O
 //!
-//! Nothing here opens a socket, reads a clock or draws a random number. The
-//! certificate is fetched by the application, which is where a cache, an
-//! HTTP client and its timeouts belong; the time is given; and ECDSA
-//! signatures take their nonce from RFC 6979, so signing needs no
-//! randomness.
+//! No sockets, clocks or randomness: the application fetches the
+//! certificate (with its own cache and timeouts) and passes the time, and
+//! ECDSA nonces come from RFC 6979.
 //!
 //! # Limits
 //!
-//! Everything read here may come from an attacker, and all of it is read
-//! within fixed bounds, without panicking on any input: an Identity header
-//! field of at most [`MAX_IDENTITY_LEN`] octets, a fetched chain of at most
-//! [`MAX_CHAIN_LEN`] octets and [`MAX_CHAIN_CERTIFICATES`] certificates, each
-//! at most [`MAX_CERTIFICATE_LEN`] octets of DER, and JSON nested at most
-//! sixteen deep.
+//! All input is treated as hostile and read within fixed bounds, without
+//! panicking: [`MAX_IDENTITY_LEN`], [`MAX_CHAIN_LEN`],
+//! [`MAX_CHAIN_CERTIFICATES`], [`MAX_CERTIFICATE_LEN`], and JSON nesting of
+//! sixteen.
 //!
-//! No comparison here involves a secret: the one secret this crate holds is
-//! a signer's private key, and every operation on it is the constant-time
-//! arithmetic of the `p256` crate. What a verifier compares — signatures,
-//! names, numbers, URIs — is public, and a timing difference in comparing it
-//! tells an attacker nothing the message did not.
+//! The only secret is the signer's key, handled by `p256`'s constant-time
+//! arithmetic; everything a verifier compares is public, so timing leaks
+//! nothing.
 //!
 //! # What is not checked
 //!

@@ -49,21 +49,16 @@ pub struct Config {
     /// originating number. Off by default: only a number or a range naming
     /// the originating number gives a certificate authority over it.
     ///
-    /// A SHAKEN certificate names its provider rather than the numbers, and
-    /// whether that provider may vouch for a given number is known only to
-    /// whoever decided to trust it — the application, with the roots of a
-    /// SHAKEN deployment, which turns this on. On, a certificate carrying
-    /// any code vouches for every number there is.
+    /// SHAKEN certificates name a provider, not numbers; whether to trust it
+    /// for any number is the deployment's call. On, any code vouches for
+    /// every number.
     pub accept_service_provider_codes: bool,
     /// The schemes an `info` URI may name, compared without regard to case
     /// (RFC 3986 §3.1): [`DEFAULT_INFO_SCHEMES`], `https` alone, by default.
     ///
-    /// The hook for a deployment whose certificates are reached some other
-    /// way: one that fetches over plain `http` from a repository whose
-    /// content it authenticates by the chain alone, say, adds `"http"`
-    /// here. Anything else is refused with [`InfoProblem::Scheme`] before
-    /// the application is asked to fetch it, so that a request cannot have a
-    /// verifier reach for a `file:`, `ldap:` or `data:` URI of its choosing.
+    /// A deployment that fetches over plain `http` adds it here. Other
+    /// schemes are refused with [`InfoProblem::Scheme`] before any fetch, so
+    /// a request cannot point the verifier at `file:`, `ldap:` or `data:`.
     pub info_schemes: &'static [&'static str],
 }
 
@@ -285,14 +280,10 @@ impl Pending {
     /// As [`Pending::verify_once`], for a PASSporT that came in the request
     /// `arrival` names, on the line it names.
     ///
-    /// A proxy that forks one INVITE to several contacts sends each branch
-    /// the same `Identity`, and two of those contacts can be two lines of
-    /// one verifier — two accounts of one stack, the members of a ring
-    /// group. Each branch is the same request, not a replay of it, so a
-    /// PASSporT already recorded is taken again when every time it was
-    /// recorded was for the same request ([`Arrival::request`]) on another
-    /// line. The same PASSporT in another request (another `Call-ID`), or
-    /// the same request again on a line that already took it, is still a
+    /// A forked INVITE carries the same `Identity` to each branch, and two
+    /// branches may reach two lines of one verifier. So a recorded PASSporT
+    /// is accepted again for the same request ([`Arrival::request`]) on a
+    /// different line. Another request, or the same line twice, is still a
     /// replay (RFC 8224 §12.1).
     #[must_use]
     pub fn verify_arrival(
@@ -389,14 +380,11 @@ impl Pending {
 /// again inside its freshness window is refused as a replay (RFC 8224
 /// §12.1): see [`Pending::verify_once`].
 ///
-/// Optional, and the application's to keep, one per verifier: a request is
-/// verified in two steps with a fetch between them, so the state cannot live
-/// in a [`Verifier`] that is made afresh for each. Bounded twice over: an
-/// entry goes once its `iat` has left the window, after which the PASSporT
-/// is refused as stale anyway, and when `capacity` entries are still inside
-/// it the oldest goes to make room. Only verified PASSporTs are recorded, so
-/// only a signer this verifier trusts can fill it, and it would have to sign
-/// `capacity` calls inside one window to push a recorded one out early.
+/// Optional, kept by the application per verifier (a [`Verifier`] may be
+/// made per request). Entries expire with their `iat` window, and at
+/// `capacity` the oldest goes. Only verified PASSporTs are recorded, so only
+/// a trusted signer issuing `capacity` calls in one window could evict one
+/// early.
 #[derive(Debug, Clone)]
 pub struct ReplayCache {
     capacity: usize,

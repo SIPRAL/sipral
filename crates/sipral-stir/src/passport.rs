@@ -67,12 +67,9 @@ impl Tn {
     /// `(`, `)`) and spaces dropped, what is left being one to fifteen of
     /// `0123456789#*` with at least one digit among them.
     ///
-    /// Only the first step of §8.3. Turning a national or dial-string
-    /// number into E.164 needs the country and dialling plan of the
-    /// deployment, which this crate does not know; a number that reaches
-    /// here in another form is canonical in that form, as §8.3 allows "in
-    /// the case that an implementation cannot determine how to convert the
-    /// number". [`Tn::canonical_with`] takes the deployment's plan.
+    /// Only the first step of §8.3: E.164 conversion needs the deployment's
+    /// dialling plan, which [`Tn::canonical_with`] takes. Otherwise the
+    /// number stays as written, as §8.3 allows.
     ///
     /// # Errors
     ///
@@ -92,9 +89,7 @@ impl Tn {
     /// number". A number written with `+` is international already, and
     /// `plan` is not asked.
     ///
-    /// Signer and verifier have to convert alike, or a number one signs is
-    /// not the number the other checks; that is why the plan is the
-    /// deployment's to give and not this crate's to guess.
+    /// Signer and verifier must use the same plan.
     ///
     /// # Errors
     ///
