@@ -2737,6 +2737,82 @@ fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
     );
 }
 
+/// A digit whose packets arrive in a backlog the jitter buffer skips is
+/// still heard: a receive loop that stalled for half a second hands the
+/// session everything at once, the buffer jumps its playout point past the
+/// audio it holds too much of, and the key pressed meanwhile went with it.
+#[test]
+fn a_digit_in_a_backlog_the_buffer_skips_is_still_heard() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let frame = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .frame_samples();
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    for _ in 0..10 {
+        tone(&mut samples, 8_000, &mut phase);
+        pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+
+    pair.caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .send_dtmf(Digit::from_char('7').expect("a key"), DEFAULT_DIGIT)
+        .expect("the digit is queued");
+    let mut held_back = Vec::new();
+    for _ in 0..30 {
+        tone(&mut samples, 8_000, &mut phase);
+        let mut session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        if let Some(datagram) = session.capture(&samples, pair.now).expect("encodes") {
+            held_back.push(datagram.payload.to_vec());
+        }
+        drop(session);
+        pair.advance();
+    }
+    {
+        let mut session = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media");
+        for mut datagram in held_back {
+            session.receive(&mut datagram, caller_media(), pair.now);
+        }
+        let mut played = vec![0_i16; session.frame_samples()];
+        for _ in 0..30 {
+            session.playback(&mut played);
+        }
+        assert!(
+            session.statistics(pair.now).quality.discarded_overflow > 0,
+            "the buffer kept the whole backlog, so nothing here was tested"
+        );
+    }
+    pair.callee.drain(pair.now, false);
+
+    let heard: Vec<_> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived { digit, .. } => Some(*digit),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(heard, [Some('7')], "the key pressed in the backlog");
+}
+
 /// An offer of Opus beside the eight-kilohertz codecs names its events on
 /// both clocks, so a call that settles on PCMU still has events on PCMU's
 /// clock (RFC 4733 §2.5.1.2), and a digit dialled on it is heard once, at

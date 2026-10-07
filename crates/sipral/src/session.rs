@@ -32,9 +32,9 @@ use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
 use sipral_rtp::srtp::{Master, Policy, Rekeyed, Suite};
 use sipral_rtp::{
-    Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
-    PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, StreamFormat,
-    UNAVAILABLE, VoipMetricsBlock, is_rtcp,
+    Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Frame,
+    Outcome, PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpPacket, RtpSession,
+    StreamConfig, StreamFormat, UNAVAILABLE, VoipMetricsBlock, is_rtcp,
 };
 use sipral_ua::{QualityReportMetrics, RemoteQualityMetrics};
 
@@ -933,15 +933,58 @@ impl MediaSession {
             Received::Queued => {
                 self.note_arrival(now);
                 // decrypted in place; the bytes before the tag are the packet the far end sent
+                let plain = datagram.len().saturating_sub(self.rtp.rtp_overhead());
+                let plain = datagram.get(..plain).unwrap_or_default();
                 if let Some(tap) = self.tap.as_mut() {
-                    let plain = datagram.len().saturating_sub(self.rtp.rtp_overhead());
-                    tap.received(datagram.get(..plain).unwrap_or_default());
+                    tap.received(plain);
                 }
+                self.hear_event(plain, self.rtp.quality().delay);
                 Arrival::Queued
+            }
+            // a key pressed is a key pressed however late its packet came:
+            // the audio it lagged behind is gone, the press is not
+            Received::Dropped(Discard::Late) => {
+                let plain = datagram.len().saturating_sub(self.rtp.rtp_overhead());
+                self.hear_event(datagram.get(..plain).unwrap_or_default(), Duration::ZERO);
+                Arrival::Dropped(Discard::Late)
             }
             Received::Dropped(Discard::NotKeyed) => Arrival::NotKeyed,
             Received::Dropped(why) => Arrival::Dropped(why),
         }
+    }
+
+    /// Report a named-event key (RFC 4733) as its packet arrives, not when it plays: the jitter
+    /// buffer may skip or drop the packet, and the digit would be lost. One report per event
+    /// timestamp. `ahead` is how long until the audio sent with it plays, where the in-band
+    /// detector would hear the same press.
+    fn hear_event(&mut self, plain: &[u8], ahead: Duration) {
+        let Some(receiver) = self.heard.as_mut() else {
+            return;
+        };
+        let Ok(packet) = RtpPacket::parse(plain) else {
+            return;
+        };
+        let header = packet.header();
+        let frame = Frame {
+            sequence: header.sequence,
+            timestamp: header.timestamp,
+            payload_type: header.payload_type,
+            marker: header.marker,
+            payload: packet.payload(),
+        };
+        let Ok(Outcome::Reported(reported)) = receiver.receive(frame) else {
+            return;
+        };
+        let event = digit_heard(&reported, self.plan.codec.clock_rate());
+        if let MediaEvent::DigitReceived {
+            digit,
+            held: Some(held),
+            ..
+        } = event
+        {
+            self.signals.received_event(digit, held, ahead);
+        }
+        self.events.push_back(event);
     }
 
     /// Let RTP's latch follow the far end until ICE selects a pair.
@@ -1337,13 +1380,9 @@ impl MediaSession {
     fn fill(&mut self, room: &mut [i16]) -> Playback {
         let coder = &mut self.coder;
         let noise = &mut self.noise;
-        let heard = &mut self.heard;
-        let events = &mut self.events;
-        let signals = &mut self.signals;
         // the codec arrives on this end's own number for it, which a peer
         // that renumbered a dynamic type (RFC 3264 §6.1) sends with
         let payload_type = self.plan.codec_in;
-        let rate = self.plan.codec.clock_rate();
         // a peer that answered one G.711 law and sends the other: decode with the law it names
         // (same frame shape, RFC 3551 table 4), unless our named events use that number
         let dtmf = self.plan.dtmf_in;
@@ -1376,26 +1415,8 @@ impl MediaSession {
                 }
                 Playback::Packet
             }
-            // named events are not audio. The receiver collapses a digit's updates and three final
-            // packets into one report
-            Pull::Packet(frame) => {
-                if let Some(receiver) = heard.as_mut()
-                    && let Ok(Outcome::Reported(reported)) = receiver.receive(frame)
-                {
-                    let event = digit_heard(&reported, rate);
-                    if let MediaEvent::DigitReceived {
-                        digit,
-                        held: Some(held),
-                        ..
-                    } = event
-                    {
-                        // the same press may also be in the audio
-                        signals.received_event(digit, held);
-                    }
-                    events.push_back(event);
-                }
-                conceal(coder, room)
-            }
+            // named events are not audio; they were read on arrival (`MediaSession::hear_event`)
+            Pull::Packet(_) => conceal(coder, room),
             // Opus FEC: rebuild the lost frame from the next packet if it is already here
             Pull::Conceal => {
                 let rebuilt = self

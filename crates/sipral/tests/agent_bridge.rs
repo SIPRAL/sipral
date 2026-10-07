@@ -52,9 +52,11 @@ const PERSON_HZ: f64 = 1_700.0;
 
 const AMPLITUDE: f64 = 8_000.0;
 
-/// How much audio is listened to once a bridge is up, after a moment for
-/// the jitter buffers to fill.
-const SETTLE: Duration = Duration::from_millis(400);
+/// How much of what a call heard is measured, from the first frame the far
+/// end's tone is loud in. When that frame comes is up to the jitter buffers
+/// on the way, a bridge's and the listener's, which wait longer the more
+/// unevenly packets arrive: on a busy machine half a second each. So the
+/// moment is found in the audio, not on the clock.
 const LISTEN: Duration = Duration::from_millis(1_000);
 
 /// The longest any one step may take.
@@ -214,12 +216,6 @@ impl Party {
             .expect("named events were negotiated");
     }
 
-    /// How loud `hz` is in what `call` heard since [`Party::forget`].
-    fn level(&self, call: CallHandle, hz: f64) -> f64 {
-        let tone = &self.tones[&call];
-        level_at(&tone.heard, tone.rate, hz)
-    }
-
     fn forget(&mut self) {
         for tone in self.tones.values_mut() {
             tone.heard.clear();
@@ -236,6 +232,13 @@ impl Party {
             })
         })
     }
+}
+
+/// Which of the two parties.
+#[derive(Clone, Copy)]
+enum Side {
+    Pbx,
+    Agent,
 }
 
 /// The three stacks, and the bridge between them.
@@ -324,20 +327,79 @@ impl World {
         Err(format!("timed out waiting until {what}"))
     }
 
-    /// Turn for `length`.
-    fn run(&mut self, length: Duration) {
-        let end = Instant::now() + length;
-        while Instant::now() < end {
-            self.turn();
+    /// Listen afresh: what either end heard so far is forgotten.
+    fn listen(&mut self) {
+        self.pbx.forget();
+        self.agent.forget();
+    }
+
+    fn party(&mut self, side: Side) -> &mut Party {
+        match side {
+            Side::Pbx => &mut self.pbx,
+            Side::Agent => &mut self.agent,
         }
     }
 
-    /// Listen for [`LISTEN`], after [`SETTLE`].
-    fn listen(&mut self) {
-        self.run(SETTLE);
-        self.pbx.forget();
-        self.agent.forget();
-        self.run(LISTEN);
+    /// Turn until `call` has heard [`LISTEN`] of audio since `hears` was
+    /// first loud in it, after [`World::listen`]; in that audio, `hears` is
+    /// loud and `not` is not.
+    ///
+    /// Only the frames that carried something count. A machine too busy to
+    /// turn the three stacks in real time starves the bridge, which drops
+    /// what it cannot catch up on, and the listener's buffer waits out the
+    /// gaps: what is measured here is whose voice each end hears, so the
+    /// silence between is left out rather than counted against it.
+    fn hears(
+        &mut self,
+        side: Side,
+        who: &str,
+        call: CallHandle,
+        hears: f64,
+        not: f64,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + STEP;
+        loop {
+            let tone = &self.party(side).tones[&call];
+            let frame = usize::try_from(tone.rate / 50).unwrap();
+            let wanted = usize::try_from(LISTEN.as_millis() / 20).unwrap();
+            let audible: Vec<&[i16]> = tone
+                .heard
+                .chunks_exact(frame)
+                .skip_while(|chunk| level_at(chunk, tone.rate, hears) <= AMPLITUDE / 8.0)
+                .filter(|chunk| chunk.iter().any(|sample| sample.unsigned_abs() > 64))
+                .collect();
+            if audible.len() >= wanted {
+                let mean = |hz: f64| {
+                    audible
+                        .iter()
+                        .take(wanted)
+                        .map(|chunk| level_at(chunk, tone.rate, hz))
+                        .sum::<f64>()
+                        / f64::from(u32::try_from(wanted).unwrap())
+                };
+                let (loud, quiet) = (mean(hears), mean(not));
+                if loud > AMPLITUDE / 8.0 && loud > quiet * 4.0 {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "{who} heard {hears} Hz at {loud:.0} and {not} Hz at {quiet:.0}"
+                ));
+            }
+            if Instant::now() >= deadline {
+                let frames = audible.len();
+                let buffer = self
+                    .party(side)
+                    .endpoint
+                    .engine
+                    .session(call)
+                    .map(|session| format!("{:?}", session.statistics(Instant::now()).quality));
+                return Err(format!(
+                    "{who} heard {frames} frames of {wanted} from {hears} Hz on; \
+                     its buffer: {buffer:?}"
+                ));
+            }
+            self.turn();
+        }
     }
 
     /// The caller's call placed at the bridge with a field of the PBX's
@@ -389,19 +451,6 @@ fn level_at(samples: &[i16], rate: u32, hz: f64) -> f64 {
     power.max(0.0).sqrt() * 2.0 / length
 }
 
-/// `hears` is loud in what `call` heard and `not` is not.
-fn hears(party: &Party, who: &str, call: CallHandle, hears: f64, not: f64) -> Result<(), String> {
-    let loud = party.level(call, hears);
-    let quiet = party.level(call, not);
-    if loud > AMPLITUDE / 8.0 && loud > quiet * 4.0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "{who} heard {hears} Hz at {loud:.0} and {not} Hz at {quiet:.0}"
-        ))
-    }
-}
-
 /// Run `attempt` up to three times: a real UDP send can sit long enough in
 /// a busy machine's queue that a stream is read as lost
 /// (`tests/headless_bridge.rs` says more).
@@ -437,6 +486,8 @@ fn the_bridge_carries_audio_both_ways_forwards_digits_and_ends_with_the_agent() 
             return Err("the agent's INVITE carried no caller context".to_owned());
         }
         world.listen();
+        world.hears(Side::Pbx, "the caller", caller, AGENT_HZ, CALLER_HZ)?;
+        world.hears(Side::Agent, "the agent", agent_call, CALLER_HZ, AGENT_HZ)?;
         let legs = world.bridge.legs();
         let named =
             |codec: Option<sipral::Codec>| codec.map(|codec| codec.encoding_name().to_owned());
@@ -446,8 +497,6 @@ fn the_bridge_carries_audio_both_ways_forwards_digits_and_ends_with_the_agent() 
         {
             return Err(format!("the legs' codecs read {legs:?}"));
         }
-        hears(&world.pbx, "the caller", caller, AGENT_HZ, CALLER_HZ)?;
-        hears(&world.agent, "the agent", agent_call, CALLER_HZ, AGENT_HZ)?;
 
         world.pbx.send_digit(caller, '5');
         world.until("the agent hears the caller's 5", |world| {
@@ -611,7 +660,7 @@ fn a_bridged_transfer_puts_the_caller_through_to_the_person_it_names() {
         });
         let (caller, agent_call) = world.connect()?;
         world.listen();
-        hears(&world.pbx, "the caller", caller, AGENT_HZ, CALLER_HZ)?;
+        world.hears(Side::Pbx, "the caller", caller, AGENT_HZ, CALLER_HZ)?;
 
         let person = Uri::parse_str("sip:person@agents.example.invalid").unwrap();
         world
@@ -629,8 +678,8 @@ fn a_bridged_transfer_puts_the_caller_through_to_the_person_it_names() {
         })?;
 
         world.listen();
-        hears(&world.pbx, "the caller", caller, PERSON_HZ, AGENT_HZ)?;
-        hears(&world.pbx, "the person", person_call, CALLER_HZ, AGENT_HZ)?;
+        world.hears(Side::Pbx, "the caller", caller, PERSON_HZ, AGENT_HZ)?;
+        world.hears(Side::Pbx, "the person", person_call, CALLER_HZ, AGENT_HZ)?;
 
         world.pbx.send_digit(caller, '9');
         world.until("the person hears the caller's 9", |world| {

@@ -688,12 +688,14 @@ impl Signals {
 
     /// A digit the far end sent as an RFC 4733 event, reported as it ended:
     /// a press heard in the audio as well within [`SAME_PRESS`] of it is the
-    /// same press, and is not reported again.
-    pub(crate) fn received_event(&mut self, key: Option<char>, held: Duration) {
+    /// same press, and is not reported again. `ahead` is how long until the
+    /// audio that went with the event is heard, since the event is reported
+    /// as it arrives and the audio waits in the jitter buffer.
+    pub(crate) fn received_event(&mut self, key: Option<char>, held: Duration, ahead: Duration) {
         let Some(key) = key else {
             return;
         };
-        let end = self.listener.now();
+        let end = self.listener.now().saturating_add(ahead);
         let press = Press {
             key,
             start: end.saturating_sub(held),
@@ -943,7 +945,7 @@ mod tests {
         for chunk in chunks.by_ref().take(10) {
             early.heard(chunk, &mut outbox);
         }
-        early.received_event(Some('9'), Duration::from_millis(60));
+        early.received_event(Some('9'), Duration::from_millis(60), Duration::ZERO);
         for chunk in chunks {
             early.heard(chunk, &mut outbox);
         }
@@ -958,7 +960,7 @@ mod tests {
             late.heard(&pcm[at..at + frame], &mut outbox);
             at += frame;
         }
-        late.received_event(Some('9'), Duration::from_millis(100));
+        late.received_event(Some('9'), Duration::from_millis(100), Duration::ZERO);
         while at + frame <= pcm.len() {
             late.heard(&pcm[at..at + frame], &mut outbox);
             at += frame;
@@ -973,7 +975,7 @@ mod tests {
             other.heard(&pcm[at..at + frame], &mut outbox);
             at += frame;
         }
-        other.received_event(Some('3'), Duration::from_millis(100));
+        other.received_event(Some('3'), Duration::from_millis(100), Duration::ZERO);
         while at + frame <= pcm.len() {
             other.heard(&pcm[at..at + frame], &mut outbox);
             at += frame;
