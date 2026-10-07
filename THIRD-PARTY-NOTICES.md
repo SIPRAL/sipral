@@ -593,6 +593,14 @@ parts, `PyJWT` and `attrs` under MIT, and `aiohappyeyeballs` under PSF-2.0.
 The `livekit` wheel carries LiveKit's native client library, under the
 same Apache-2.0.
 
+`integrations/agents/examples/local_agent.py` and `sipral_agents.local`
+add no package: they reach two programs the user installs and runs, over
+HTTP with Python's standard library, and run macOS's `say`. Nothing of
+them is copied here or shipped. As the README names them: whisper.cpp's
+`whisper-server` 1.9.5 (MIT) with the Whisper `base.en` model (MIT), and
+Ollama 0.40.0 (MIT) with `qwen2.5:1.5b` (Apache-2.0); each licence is the
+one its project's repository or model card states.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

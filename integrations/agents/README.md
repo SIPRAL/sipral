@@ -130,6 +130,95 @@ and dial the extension from any phone on the PBX. `--host` picks the
 address to listen on. `tests/test_demo.py` places a call to the demo and
 checks the caller hears its own tone back.
 
+## A voice agent with no key, on your own machine
+
+`examples/local_agent.py` answers calls with an agent that listens, thinks
+and speaks entirely on the machine it runs on: no account, no key, no
+service that charges. `LocalAgentServer` runs the three steps behind the
+same core as every other connector (`LocalAgent` is its `Provider`):
+
+- **Listening**: whisper.cpp's `whisper-server` (MIT) and the Whisper
+  `base.en` model (MIT, 148 MB), over its HTTP `/inference` endpoint
+  (`WhisperServer`).
+- **Thinking**: Ollama (MIT) and `qwen2.5:1.5b` (Apache-2.0, 986 MB), over
+  its HTTP chat API with streaming on (`Ollama`). The reply is spoken a
+  sentence at a time, so the first sentence plays while the rest is still
+  being written.
+- **Speaking**: macOS's own voice, `say` (`SystemVoice`), or any program
+  that reads text on its input and writes a 16 kHz WAV file
+  (`CommandVoice(["prog", "--out", "{out}"])`). Piper is not used: its
+  maintained releases (`piper-tts` 1.3.0 and later) are GPL-3.0-or-later,
+  and the older MIT ones phonemise through espeak-ng, which is GPL-3.0.
+- **The end of a turn**: 700 ms of quiet after speech, measured on the
+  energy of each 20 ms frame (`EnergyVad`; threshold and timings are
+  arguments). Speech that starts while the agent talks cancels its turn and
+  drops what is still queued in the call.
+
+On a Mac:
+
+```sh
+brew install whisper-cpp ollama
+curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+whisper-server -m ggml-base.en.bin --host 127.0.0.1 --port 8178 &
+ollama serve &
+ollama pull qwen2.5:1.5b
+
+cargo build --release -p sipral-ffi
+python3 -m pip install websockets cffi
+export SIPRAL_LIBRARY=target/release PYTHONPATH=integrations/agents:bindings/python
+python3 integrations/agents/examples/local_agent.py --port 5070
+```
+
+It loads the model, then prints the address to call; a softphone dials it,
+hears "Hello, how can I help?" and talks. The same `SIPRAL_*` variables as
+the demo put it on a PBX extension. `--model`, `--voice` and `--greeting`
+change the rest.
+
+The example plays the caller too. With the agent running, in another
+terminal:
+
+```sh
+say -o question.wav --data-format=LEI16@16000 "What are your opening hours on Saturday?"
+python3 integrations/agents/examples/local_agent.py --ask question.wav \
+    --to sip:agent@127.0.0.1:5070 --record heard.wav
+```
+
+places a call from a second Sipral stack, says the question after the
+greeting, records what comes back and prints how long after the end of
+the question the first sound of the answer came. `--barge-in` says the
+question again a second into the answer and prints how soon the answer
+stopped.
+
+Measured on 7 October 2026 on an Apple M2 with 24 GB, macOS 27, both stacks
+on loopback, the machine loaded by other builds (load average 8 to 17), 6
+calls with three different questions, the model already loaded:
+
+| | Measured |
+|---|---|
+| Question transcribed, from the end of the turn | 147 to 568 ms |
+| First words of the reply from the model | 249 to 904 ms |
+| First audio of the reply ready (one sentence through `say`) | 3.6 to 5.6 s |
+| `say` alone, one sentence, same machine | 1.9 to 2.5 s |
+| First sound heard by the caller, from the end of the question | 4.3 to 7.1 s |
+| The answer stopping once the caller talked over it (1 call) | 0.8 s |
+
+The caller's figure adds the 700 ms of quiet that end a turn and the
+jitter buffer to the agent's. Most of the wait is `say`, which takes about
+two seconds for any sentence, however short; a faster synthesiser plugged
+in through `CommandVoice` shortens it by as much. Whisper heard every
+question word for word, and the answers were relevant and short
+(transcribed back from `heard.wav`: "I'm sorry, but as an AI, I don't have
+specific opening hours. Please check the website or contact customer
+service for accurate information."). The first question after `ollama
+serve` starts waits for the model to load (26 s here), which is why the
+example loads it before it takes calls.
+
+`tests/test_local.py` checks the end-of-turn detector, and on a call
+between two stacks with stand-ins for the three programs that a question
+is transcribed, answered a sentence at a time and heard, that talking over
+the answer interrupts it and becomes the next question, and that the
+greeting is heard. It needs no model and no program.
+
 ## Example
 
 ```python
@@ -273,4 +362,7 @@ runs them in a virtual environment of its own.
 
 This package is under the same terms as Sipral: AGPL-3.0-only, or the
 commercial licence. Its one dependency besides `sipral` is `websockets`,
-BSD-3-Clause, which needs nothing else.
+BSD-3-Clause, which needs nothing else. The local agent reaches whisper.cpp
+and Ollama as separate programs over HTTP, with the standard library; they
+and their models are the user's to install and are not dependencies of the
+package (`THIRD-PARTY-NOTICES.md`).

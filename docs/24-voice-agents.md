@@ -109,6 +109,16 @@ speaks the same protocol and plays the caller back; the steps are in
 [`integrations/agents/README.md`](../integrations/agents/), "A
 voice agent in five minutes".
 
+**An agent with no key at all.** `integrations/agents/examples/local_agent.py`
+listens with whisper.cpp, thinks with a small model in Ollama and speaks
+with the system's voice, every step on the same machine, behind the same
+core (`LocalAgentServer`, `LocalAgent`): turn ends found on energy, the
+reply spoken a sentence at a time, the agent cut short when the caller
+talks over it. On an Apple M2 the caller heard the first sound of an
+answer 4.3 to 7.1 s after the end of the question, most of it the system
+voice; the steps and figures are in the package's README, "A voice agent
+with no key, on your own machine".
+
 **A bridge from a configuration file.** `python -m sipral_agents
 bridge.toml` (or the `sipral-agents` command the package installs) runs
 both paths at once from one stack: it registers every account the file

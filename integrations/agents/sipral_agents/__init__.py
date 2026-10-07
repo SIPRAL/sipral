@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Sytek
 
 """Sipral for voice-agent WebSocket APIs: a SIP call joined to OpenAI
-Realtime, Gemini Live, ElevenLabs Agents, Vapi or Deepgram Voice Agent,
-over one core, and a bridge that serves a PBX's calls from a configuration
-file."""
+Realtime, Gemini Live, ElevenLabs Agents, Vapi, Deepgram Voice Agent or a
+local agent with no key, over one core, and a bridge that serves a PBX's
+calls from a configuration file."""
 
 from .core import (
     AgentCall,
@@ -26,6 +26,7 @@ from .core import (
 from .deepgram import DeepgramAgent
 from .elevenlabs import ElevenLabsAgent
 from .gemini_live import GeminiLive
+from .local import CommandVoice, EnergyVad, LocalAgent, LocalAgentServer, Ollama, SystemVoice, WhisperServer
 from .openai_realtime import OpenAIRealtime
 from .outbound import MachinePolicy, dial
 from .serve import ProviderFactory, serve, wait_for_media
@@ -37,12 +38,17 @@ __all__ = [
     "AgentEventKind",
     "Audio",
     "Backoff",
+    "CommandVoice",
     "DeepgramAgent",
+    "EnergyVad",
     "ElevenLabsAgent",
     "GeminiLive",
     "GoAway",
     "Interrupted",
+    "LocalAgent",
+    "LocalAgentServer",
     "MachinePolicy",
+    "Ollama",
     "OpenAIRealtime",
     "Provider",
     "ProviderError",
@@ -51,9 +57,11 @@ __all__ = [
     "SessionRefused",
     "Signal",
     "SpeechStarted",
+    "SystemVoice",
     "Transcript",
     "TurnComplete",
     "VapiAgent",
+    "WhisperServer",
     "dial",
     "serve",
     "wait_for_media",
