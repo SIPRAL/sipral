@@ -3,17 +3,9 @@
 
 //! A D2 recording, turned into pcapng packets.
 //!
-//! Every [`Arrival::Datagram`] and [`Arrival::StreamData`] frame the
-//! recording holds becomes one packet, addressed and timed the way the
-//! frame was recorded; [`Arrival::TransportBound`] is not a packet, it is
-//! where a stream transport's two ends come from, since a `StreamData`
-//! frame carries none of its own. `Arrival::StreamClosed` and
-//! `Arrival::TransportFailed` are not on the wire and produce nothing.
-//!
-//! [`export_replayed`] adds the other direction: the recording is fed back
-//! into a live layer through [`Replayed`], and every message that layer
-//! writes in answer becomes a packet from this end, so one file holds both
-//! halves of the session, each packet marked inbound or outbound.
+//! Each [`Arrival::Datagram`] and [`Arrival::StreamData`] becomes one packet.
+//! [`Arrival::TransportBound`] only supplies the addresses a `StreamData`
+//! frame lacks; closures and failures produce nothing.
 
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr};
@@ -26,9 +18,7 @@ use crate::packet;
 use crate::pcapng::{Direction, Writer};
 use crate::redact::{RedactError, Redactor, redact_message};
 
-/// An arbitrary origin so timestamps read as a plausible wall-clock moment;
-/// nothing checks it against anything, the way nothing in `docs/18-replay.md`
-/// checks a recording's own offsets against a clock either.
+/// Arbitrary, so timestamps look like a plausible wall-clock moment.
 const TIMESTAMP_ORIGIN_US: u64 = 1_700_000_000_000_000;
 
 #[derive(Clone, Copy)]
@@ -39,20 +29,13 @@ struct Bound {
 
 /// Turn `recording` into a pcapng file.
 ///
-/// With `redactor`, every message is redacted (see [`crate::redact`]) before
-/// it becomes a packet, and the packet's own source and destination
-/// addresses are rewritten the same way the message's own header addresses
-/// are, so the two agree. Without one, the export carries the recording
-/// exactly as it was written — for the organisation's own use, never for
-/// anything that leaves it.
-///
-/// This is the far end's half of the conversation only, because that is all
-/// a recording holds; [`export_replayed`] adds this end's half.
+/// With `redactor`, each message and the packet addresses are redacted the
+/// same way, so they agree. Without one the export is verbatim, for internal
+/// use only. Only the far end's half; see [`export_replayed`].
 ///
 /// # Errors
-/// [`RedactError`] when `redactor` is given and a frame's bytes are not a
-/// message the parser can read: the export stops rather than write a frame
-/// nobody has redacted.
+/// [`RedactError`] when a frame cannot be parsed for redaction: the export
+/// stops rather than write an unredacted frame.
 pub fn export(recording: &Recording, redactor: Option<Redactor>) -> Result<Vec<u8>, RedactError> {
     let mut capture = Capture::new(redactor);
     for frame in recording.frames() {
@@ -63,23 +46,16 @@ pub fn export(recording: &Recording, redactor: Option<Redactor>) -> Result<Vec<u
     Ok(capture.finish())
 }
 
-/// A layer a recording can be replayed into for [`export_replayed`]: driven
-/// the way [`Driven`] says, asked after every frame what it wrote, and told
-/// when the application acted on its own.
+/// A layer a recording can be replayed into for [`export_replayed`].
 pub trait Replayed: Driven {
-    /// The next message this layer wants written, or `None` once it has
-    /// nothing more to say for now — `Endpoint::poll_transmit` and
-    /// `UserAgent::poll_transmit` both answer exactly this.
+    /// The next message this layer wants written, or `None` for now.
     fn poll_transmit(&mut self) -> Option<Transmit>;
 
-    /// The application did something of its own here, under `label` — the
-    /// name a [`Recorder::cue`](sipral_core::replay::Recorder::cue) wrote.
+    /// The application acted here under `label`, the name a
+    /// [`Recorder::cue`](sipral_core::replay::Recorder::cue) wrote.
     ///
-    /// Only the application knows what a label means, so a replay that is to
-    /// write the requests that action sent does it again here: places the
-    /// call, answers it, registers the account. A layer that ignores a cue
-    /// replays a session in which the application never did it, and the
-    /// capture shows exactly that.
+    /// The layer repeats the action (place the call, register...). Ignoring
+    /// the cue replays a session where the application never did it.
     fn cue(&mut self, label: &str, now: Instant);
 }
 
@@ -88,8 +64,6 @@ impl Replayed for Endpoint {
         Self::poll_transmit(self)
     }
 
-    /// An endpoint has no policy of its own for anything an application
-    /// does, so a cue asks nothing of it.
     fn cue(&mut self, _label: &str, _now: Instant) {}
 }
 
@@ -97,12 +71,10 @@ impl Replayed for Endpoint {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExportError {
-    /// A message could not be redacted — see [`export`].
+    /// A message could not be redacted; see [`export`].
     Redact(RedactError),
-    /// The layer the recording was replayed into refused a frame. A
-    /// recording holds what arrived, malformed messages included, and a
-    /// capture that skipped the refusal would hide the very thing it is
-    /// exported to show.
+    /// The replay target refused a frame. Not skipped, since a malformed
+    /// message may be exactly what the capture is for.
     Replay(ReceiveError),
 }
 
@@ -126,34 +98,19 @@ impl From<RedactError> for ExportError {
 /// Replay `recording` into `target` and turn the whole session — what
 /// arrived, and what `target` wrote in answer — into one pcapng file.
 ///
-/// Every frame is fed to `target` at its recorded offset from `origin`, the
-/// way [`Replay`] feeds it; a cue is handed to [`Replayed::cue`]; and after
-/// each frame everything `target` wants written becomes a packet from this
-/// end, stamped with that frame's offset. So the file holds both directions
-/// in the order they happened: the far end's messages exactly as recorded,
-/// and this end's exactly as the engine writes them — the same bytes the
-/// recorded stack wrote, since the recording carries the seed every branch,
-/// tag and `Call-ID` is derived from (`docs/18-replay.md`). Each packet is
-/// marked inbound or outbound, so Wireshark's direction column and filters
-/// read it as a capture made at this end.
+/// After each frame, whatever `target` writes becomes an outbound packet at
+/// that frame's offset. Because the recording carries the seed, this end's
+/// branches, tags and `Call-ID` come out as the recorded stack wrote them.
 ///
-/// `target` must be built with [`Recording::seed`] and the configuration the
-/// recorded stack ran with: a replay under different timers is a different
-/// run, and the capture is of that run.
+/// `target` must be built with [`Recording::seed`] and the recorded
+/// configuration; other timers make a different run.
 ///
-/// Redaction is [`export`]'s, applied to both directions with one
-/// [`Redactor`], so an address or a user reads as the same pseudonym whichever
-/// way the packet went; this end's own `Authorization` is dropped like any
-/// other.
-///
-/// A message this end writes on a transport the recording never bound has no
-/// address to be sent from, and is left out rather than given an invented
-/// one.
+/// One [`Redactor`] covers both directions, so pseudonyms agree. A message
+/// on a transport the recording never bound is left out.
 ///
 /// # Errors
-/// [`ExportError::Replay`] when `target` refuses a frame, and
-/// [`ExportError::Redact`] when `redactor` is given and a message cannot be
-/// read to be redacted. Nothing is returned then.
+/// [`ExportError::Replay`] when `target` refuses a frame,
+/// [`ExportError::Redact`] when a message cannot be redacted.
 pub fn export_replayed<T: Replayed>(
     recording: &Recording,
     target: &mut T,
@@ -178,13 +135,11 @@ pub fn export_replayed<T: Replayed>(
     Ok(capture.finish())
 }
 
-/// The packets of one export, and what they need remembered between frames.
 struct Capture {
     writer: Writer,
     redactor: Option<Redactor>,
     bound: HashMap<u32, Bound>,
-    /// Next TCP sequence number, per transport and direction: `true` is
-    /// this end's.
+    /// Next TCP sequence per transport and direction (`true` = this end).
     tcp_seq: HashMap<(u32, bool), u32>,
     ident: u16,
 }
@@ -204,8 +159,6 @@ impl Capture {
         self.writer.finish()
     }
 
-    /// One recorded arrival: a packet from the far end, or where a transport's
-    /// two ends are.
     fn arrived(&mut self, arrival: &Arrival, at: Duration) -> Result<(), RedactError> {
         match arrival {
             Arrival::TransportBound {
@@ -256,7 +209,6 @@ impl Capture {
         }
     }
 
-    /// One message this end wrote in the replay.
     fn sent(&mut self, transmit: &Transmit, at: Duration) -> Result<(), RedactError> {
         let Some(b) = self.bound.get(&transmit.transport.0).copied() else {
             return Ok(());
@@ -280,8 +232,7 @@ impl Capture {
         )
     }
 
-    /// One packet: UDP when `stream` is `None`, else TCP on that transport
-    /// and direction's own sequence.
+    /// UDP when `stream` is `None`, else TCP.
     fn packet(
         &mut self,
         at: Duration,
@@ -405,8 +356,6 @@ Content-Length: 0\r\n\r\n";
     fn every_datagram_arrival_becomes_one_pcapng_packet() {
         let recording = a_recording();
         let bytes = export(&recording, None).expect("no redaction, nothing to fail on");
-        // two IDB+SHB header blocks plus one EPB for the one Datagram frame
-        // (the TransportBound frame produces no packet of its own)
         assert!(bytes.len() > 48 + 12);
         let sip_text = "SIP/2.0 401";
         assert!(
@@ -447,13 +396,10 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(bytes.len(), 48);
     }
 
-    /// The recording in the tree: a registration challenged, granted and
-    /// refreshed.
+    /// A registration challenged, granted and refreshed.
     const FIXTURE: &str =
         include_str!("../../../fixtures/replay/registration-challenged.sipralrec");
 
-    /// The phone that recording was taken from, as a replay drives it: the
-    /// agent, and the one thing its application did on its own.
     struct Phone {
         agent: UserAgent,
     }
@@ -514,8 +460,7 @@ Content-Length: 0\r\n\r\n";
         }
     }
 
-    /// Every Enhanced Packet Block in a capture: its packet data and the
-    /// direction its `epb_flags` names, `0` when it names none.
+    /// Each EPB's data and `epb_flags` direction (`0` when absent).
     fn packets(capture: &[u8]) -> Vec<(Vec<u8>, u32)> {
         let word =
             |at: usize| u32::from_le_bytes(capture[at..at + 4].try_into().expect("four bytes"));

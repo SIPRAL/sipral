@@ -4,17 +4,9 @@
 //! A synthetic Ethernet frame around one UDP or TCP segment, for a pcapng
 //! packet that Wireshark's transport and SIP dissectors will both read.
 //!
-//! Two made-up MAC addresses are all the link layer is here for — nothing
-//! reads them — and the checksums are real ones, computed the way RFC 791
-//! §3.1 and RFC 793/RFC 768 say to, so a reader that checks them finds
-//! nothing wrong with the packet.
-//!
-//! Every header is built by appending fields in order rather than indexing
-//! into a fixed buffer: the workspace denies `clippy::indexing_slicing`, and
-//! a checksum that has to be written back into the middle of what it was
-//! computed over is instead computed once with the checksum field at zero —
-//! which is what the algorithm asks for anyway — and the header built a
-//! second time with the real value already in place.
+//! The MAC addresses are made up; the checksums are real (RFC 791 §3.1,
+//! RFC 793, RFC 768). Headers are appended field by field, so a checksum is
+//! computed with the field at zero and the header then built a second time.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -35,9 +27,7 @@ fn ethernet_header(ethertype: u16) -> Vec<u8> {
     header
 }
 
-/// The Internet checksum (RFC 1071): the one's complement of the one's
-/// complement sum of 16-bit words, used unchanged for an IPv4 header and,
-/// over a different span of bytes, for a UDP or TCP segment.
+/// The Internet checksum (RFC 1071).
 fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let (pairs, rest) = data.as_chunks::<2>();
@@ -143,9 +133,7 @@ fn tcp_fields(sport: u16, dport: u16, seq: u32, checksum: u16, payload: &[u8]) -
     tcp
 }
 
-/// RFC 768: a UDP checksum that comes out to exactly zero is sent as
-/// all-ones, because zero already means "no checksum was computed" on the
-/// wire.
+/// RFC 768: a computed zero is sent as all-ones, since zero means "no checksum".
 fn udp_checksum_on_wire(computed: u16) -> u16 {
     if computed == 0 { 0xFFFF } else { computed }
 }
@@ -189,8 +177,7 @@ pub fn ipv6_udp(src: Ipv6Addr, sport: u16, dst: Ipv6Addr, dport: u16, payload: &
     );
     let mut for_checksum = pseudo;
     for_checksum.extend_from_slice(&probe);
-    // RFC 8200 §8.1: a UDP checksum over IPv6 is mandatory and is never
-    // transmitted as zero, unlike RFC 768's IPv4 allowance
+    // RFC 8200 §8.1: mandatory over IPv6, never sent as zero
     let checksum = udp_checksum_on_wire(internet_checksum(&for_checksum));
     let udp = udp_fields(sport, dport, checksum, payload);
 

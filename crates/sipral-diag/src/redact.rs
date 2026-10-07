@@ -5,28 +5,18 @@
 //! (RFC 4566) it may carry, before a diagnostics export leaves the
 //! organisation.
 //!
-//! GDPR's usual list for SIP traffic: a URI's user part, a display name, a
-//! phone number written as either, and every IP literal in a header or in
-//! SDP. [`Redactor`] turns each into a pseudonym — a keyed HMAC-SHA256 by
-//! default, so a call flow stays correlatable to whoever holds the key and
-//! to nobody else, or, in [`Mode::Delete`], a placeholder that is stable only
-//! for the run that produced it. Credentials are never pseudonymised: an
-//! `Authorization`/`Proxy-Authorization` value and an SDES `inline:` key are
-//! dropped outright, in both modes, because a hash of a password is still a
-//! password a large enough dictionary reverses.
+//! User parts, display names, phone numbers and IP literals become
+//! pseudonyms: a keyed HMAC-SHA256 by default, correlatable only by whoever
+//! holds the key, or per-run placeholders in [`Mode::Delete`]. Credentials
+//! and SDES keys are always dropped, never hashed: a hashed password still
+//! falls to a dictionary.
 //!
-//! What this rewrites, precisely: the display name and the URI user part of
-//! `From`, `To`, every `Contact`, every `Record-Route`/`Route` entry,
-//! `P-Asserted-Identity`, `P-Preferred-Identity`, `Remote-Party-ID`,
-//! `Diversion`, and the Request-URI; a `tel:` URI's subscriber number the
-//! same way; and, in every header and in the SDP body, every IPv4 or IPv6
-//! literal, wherever it is written — a header's host, an SDP `c=` or `o=`
-//! line, a `received=` parameter — each scanned once, out of the original
-//! bytes it arrived in, so an already-pseudonymised address is never mistaken
-//! for a second real one and hashed again. What it deliberately leaves alone:
-//! `Call-ID` and every `tag` (the file has to keep correlating a dialog's own
-//! messages to remain a call flow), and a domain name that is not a literal
-//! address (nothing here resolves one to find out what it names).
+//! Rewritten: display name and user part of `From`, `To`, `Contact`,
+//! `Route`/`Record-Route`, `P-Asserted-Identity`, `P-Preferred-Identity`,
+//! `Remote-Party-ID`, `Diversion` and the Request-URI; `tel:` numbers; every
+//! IP literal in headers and SDP, scanned once from the original bytes so a
+//! pseudonym is never hashed again. Kept: `Call-ID` and tags, so the flow
+//! still correlates, and domain names.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -44,8 +34,7 @@ use sipral_core::msg::{
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Why a message could not be redacted: it is not one this build's parser can
-/// read, so nothing here can promise every identifier in it was found.
+/// The message did not parse, so no identifier in it can be promised found.
 #[derive(Debug)]
 pub struct RedactError(ParseError);
 
@@ -70,20 +59,13 @@ impl From<ParseError> for RedactError {
 /// What a redacted identifier becomes.
 #[derive(Clone)]
 pub enum Mode {
-    /// HMAC-SHA256 keyed with the organisation's own secret, truncated: the
-    /// same input always becomes the same output under one key, so a call's
-    /// messages stay correlatable to each other and to nothing else.
+    /// Truncated HMAC-SHA256 under the organisation's key: stable per key.
     Hash(Vec<u8>),
-    /// No durable identifier at all. Every distinct value seen in one export
-    /// gets the next placeholder in sequence — stable within that export, so
-    /// the flow is still legible, and reproducing nothing across two of them.
+    /// Sequential placeholders, stable within one export only.
     Delete,
 }
 
-// the organisation's HMAC key lives in `Hash`'s payload, so a derived `Debug`
-// would print it in full the first time anything logs a `Mode` or an error
-// context that carries one; `crates/sipral-core/src/sdp/crypto.rs`'s
-// `KeySalt` redacts itself the same way, for the same reason
+// hand-written so the HMAC key is never printed
 impl core::fmt::Debug for Mode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -93,9 +75,7 @@ impl core::fmt::Debug for Mode {
     }
 }
 
-// the same key, for the same reason, is not left behind in freed memory:
-// whoever reads it can test a guessed address against every pseudonym made
-// with it
+// with the key, a guessed address can be tested against every pseudonym
 impl Drop for Mode {
     fn drop(&mut self) {
         if let Mode::Hash(key) = self {
@@ -104,22 +84,15 @@ impl Drop for Mode {
     }
 }
 
-/// A key of `secret`'s for one purpose: HMAC-SHA256 keyed with `secret`, over
-/// `label`.
-///
-/// One way, so nothing made with the result says anything about `secret`,
-/// and a different label gives a key unrelated to this one. What a stack
-/// keys its log's pseudonyms with when it is given no salt of their own: a
-/// key derived from a secret it already holds, never that secret itself.
+/// HMAC-SHA256(`secret`, `label`): a one-way, per-purpose key, used for log
+/// pseudonyms when no salt is configured.
 #[must_use]
 pub fn derive_key(secret: &[u8], label: &[u8]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hmac(secret, label))
 }
 
-/// Rewrites identifiers as a recording's messages are redacted, remembering
-/// every value it has already replaced so the same input keeps the same
-/// output within one export — required for [`Mode::Hash`] to correlate at
-/// all, and for [`Mode::Delete`] to stay internally consistent.
+/// Rewrites identifiers, remembering each replacement so one input keeps one
+/// output for the whole export.
 #[derive(Debug)]
 pub struct Redactor {
     mode: Mode,
@@ -161,8 +134,7 @@ impl Redactor {
         token
     }
 
-    /// An IPv4 literal, pseudonymised into another IPv4 literal so the
-    /// message it came from still parses as one.
+    /// Maps to another IPv4 literal so the message still parses.
     pub(crate) fn ipv4(&mut self, addr: Ipv4Addr) -> Ipv4Addr {
         if let Some(existing) = self.ipv4.get(&addr) {
             return *existing;
@@ -206,10 +178,7 @@ impl Redactor {
     }
 }
 
-/// RFC 5737's three documentation ranges, cycled through by a per-run
-/// counter: valid, routable-looking IPv4 addresses that are guaranteed to
-/// name nothing real, which is what a placeholder for a deleted address has
-/// to be.
+/// Cycles through the RFC 5737 documentation ranges, which name nothing real.
 fn placeholder_ipv4(n: u32) -> Ipv4Addr {
     const BLOCKS: [(u8, u8, u8); 3] = [(192, 0, 2), (198, 51, 100), (203, 0, 113)];
     let index = ((n - 1) / 256) as usize % BLOCKS.len();
@@ -218,14 +187,9 @@ fn placeholder_ipv4(n: u32) -> Ipv4Addr {
     Ipv4Addr::new(b0, b1, b2, host)
 }
 
-/// HMAC-SHA256(`key`, `data`). RFC 2104 §2 replaces a key longer than the
-/// 64-octet block with its own hash and pads every key with zeros to the
-/// block; doing both here by hand hands the primitive a block-sized key, the
-/// one form of keying it offers that cannot fail on a key of arbitrary
-/// length (`crates/sipral-dtls/src/prf.rs` keys HMAC the same way).
-///
-/// The block-sized copy of the key and the hash a long key is replaced with
-/// are wiped before this returns; the HMAC state wipes itself.
+/// HMAC-SHA256(`key`, `data`). The RFC 2104 §2 key shaping (hash if longer
+/// than a block, zero-pad) is done here so keying cannot fail. Key copies are
+/// wiped.
 fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut block_key = hmac::digest::Key::<HmacSha256>::default();
     let mut hashed = Zeroizing::new([0_u8; 32]);
@@ -252,9 +216,8 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Redact one SIP message: RFC 3261 identifiers structurally, then every IP
-/// literal the body and the headers still carry — an SDP `c=`/`o=` line reads
-/// the same way as any other IP literal, so it needs no separate parser.
+/// Redact one SIP message: identifiers structurally, then every IP literal
+/// in headers and body.
 ///
 /// # Errors
 /// [`RedactError`] when `bytes` does not parse as a SIP message.
@@ -262,9 +225,7 @@ pub fn redact_message(bytes: &[u8], red: &mut Redactor) -> Result<Vec<u8>, Redac
     let mut scratch = ParseScratch::new();
     let message = msg::parse(bytes, &mut scratch, ParseMode::Lenient)?;
 
-    // the body is redacted, and its IP literals scanned, before anything
-    // downstream reads its length: Content-Length has to match the body
-    // this function is about to emit, not the one the message arrived with
+    // first, so Content-Length can match the redacted body
     let new_body = scan_ip_literals(&redact_body(message.body(), red), red);
 
     let start_line = match message.kind() {
@@ -298,9 +259,6 @@ pub fn redact_message(bytes: &[u8], red: &mut Redactor) -> Result<Vec<u8>, Redac
     }
     text.push_str("\r\n");
 
-    // every header value above is already fully redacted — structurally, or
-    // by its own IP-literal scan against the bytes it arrived with — so
-    // nothing here needs a second pass over the assembled text
     let mut out = text.into_bytes();
     out.extend_from_slice(&new_body);
     Ok(out)
@@ -309,51 +267,26 @@ pub fn redact_message(bytes: &[u8], red: &mut Redactor) -> Result<Vec<u8>, Redac
 /// Redact one D1 record (`docs/14-diagnostics.md`), returned as the same
 /// JSON [`Record::to_json`] writes.
 ///
-/// A record names no user, no display name and no body — that is its own
-/// rule — so what it carries of GDPR's list is IP literals: the socket
-/// address of every decision that has one, and any address a `Call-ID`
-/// was written with. Each goes through `red` exactly as it does in
-/// [`redact_message`], so one [`Redactor`] handed a call's record and then
-/// its D2 recording gives an address the same pseudonym in both, and the
-/// two still line up. The `Call-ID` otherwise stays, for the reason it
-/// stays in a redacted message.
+/// A record carries no user or body, only IP literals, which get the same
+/// pseudonyms as in [`redact_message`] under the same [`Redactor`].
 #[must_use]
 pub fn redact_record(record: &Record, red: &mut Redactor) -> String {
     redact_record_json(&record.to_json(), red)
 }
 
-/// [`redact_record`] over a record already serialised, or over the whole
-/// document `Endpoint::diagnostics_json` writes, which is the same shape
-/// around several records.
-///
-/// JSON can be scanned as it stands: every key and every string value is
-/// quoted, and a quotation mark ends a run of address characters, so a run
-/// that parses as an address is one a decision or a `Call-ID` carried and
-/// never a key, a reason code or an offset.
+/// [`redact_record`] over serialised JSON, one record or the whole
+/// `Endpoint::diagnostics_json` document. Quotes end address runs, so keys
+/// and codes are never mistaken for addresses.
 #[must_use]
 pub fn redact_record_json(json: &str, red: &mut Redactor) -> String {
     String::from_utf8(scan_ip_literals(json.as_bytes(), red)).unwrap_or_else(|_| json.to_owned())
 }
 
-/// Free text — a log line, an error sentence, a state report — with what
-/// [`redact_message`] takes out of a message taken out of it too, for text
-/// that is not a message and cannot be parsed as one.
+/// [`redact_message`]'s rules applied to free text (log lines, errors).
 ///
-/// Three passes, each the same rule [`redact_message`] applies structurally:
-///
-/// - **Credentials are dropped, not pseudonymised.** Everything on a line
-///   after `Authorization:`, `Proxy-Authorization:` or `Digest ` becomes
-///   `REDACTED`, and an SDES `inline:` key is cut out the way it is in an SDP
-///   body.
-/// - **A SIP, SIPS or tel URI's user part** — the name or the number — is
-///   pseudonymised wherever a `sip:`, `sips:` or `tel:` is written, so a URI
-///   an application handed in and an error sentence quoted back reads as the
-///   same pseudonym the redacted messages carry.
-/// - **Every IPv4 or IPv6 literal** is pseudonymised, scanned out of the
-///   original text and never out of a pseudonym already written.
-///
-/// A display name written loose in a sentence is not recognisable as one and
-/// is not touched; nothing this crate's callers write puts one there.
+/// Everything after `Authorization:`, `Proxy-Authorization:`, `Digest ` or a
+/// key marker becomes `REDACTED`; `sip:`/`sips:`/`tel:` user parts and IP
+/// literals are pseudonymised. A loose display name is not recognised.
 #[must_use]
 pub fn redact_text(text: &str, red: &mut Redactor) -> String {
     let mut out = String::with_capacity(text.len());
@@ -376,22 +309,16 @@ pub fn redact_text(text: &str, red: &mut Redactor) -> String {
     out
 }
 
-/// Whether `line` continues a credential the line before it was cut at —
-/// RFC 3261 §7.3.1's folding, a line that starts with a space or a tab — and
-/// so goes with it. A line that does not continue one ends the folding.
+/// Whether `line` folds onto a cut credential (RFC 3261 §7.3.1).
 fn folded(line: &str, folding: &mut bool) -> bool {
     let continues = *folding && line.starts_with([' ', '\t']);
     *folding = continues;
     continues
 }
 
-/// A line cut where a credential starts: what may be kept, and — when a
-/// credential was found — the line ending that follows it, so the output
-/// keeps the line structure the input had.
+/// The part before a credential, and its line ending when one was cut.
 fn split_credentials(line: &str) -> (&str, Option<&str>) {
-    // the three RFC 4566 §5.12 methods that carry a key, RFC 4567's key
-    // management attribute and the ICE password, beside the credentials and
-    // the SDES key
+    // RFC 4566 §5.12 key methods, RFC 4567 key-mgmt, the ICE password
     const MARKERS: [&str; 7] = [
         "digest ",
         "inline:",
@@ -422,10 +349,8 @@ fn split_credentials(line: &str) -> (&str, Option<&str>) {
     (line.get(..cut).unwrap_or(line), Some(ending))
 }
 
-/// Where the first `Authorization` or `Proxy-Authorization` name in a
-/// lower-cased line ends, past its colon: the name, then any white space or
-/// control bytes — `authorization\0:` included, which a lenient reader may
-/// still take for the field — then the colon.
+/// Past the colon of the first `authorization` name, skipping white space
+/// and control bytes (a lenient reader still takes `authorization\0:`).
 fn credential_name_end(lower: &str) -> Option<usize> {
     let bytes = lower.as_bytes();
     let mut from = 0;
@@ -445,15 +370,10 @@ fn credential_name_end(lower: &str) -> Option<usize> {
     None
 }
 
-/// White space or a control byte: nothing a header field name is made of,
-/// and nothing that makes `Authorization` another field when it stands
-/// between the name and its colon.
 const fn ignorable(byte: u8) -> bool {
     byte <= b' ' || byte == 0x7f
 }
 
-/// The URI and address passes of [`redact_text`] over one piece of a line,
-/// appended to `out`.
 fn redact_uris_and_addresses(text: &str, red: &mut Redactor, out: &mut String) {
     let lower = text.to_ascii_lowercase();
     let mut plain_from = 0;
@@ -496,9 +416,8 @@ fn redact_uris_and_addresses(text: &str, red: &mut Redactor, out: &mut String) {
     ));
 }
 
-/// Whether a `sip:`, `sips:` or `tel:` scheme starts at `at` in `lower` — and
-/// is not the tail of a longer word — with its length and whether it is
-/// `tel:`.
+/// A `sip:`, `sips:` or `tel:` scheme at `at` that is not the tail of a word:
+/// its length and whether it is `tel:`.
 fn uri_scheme_at(lower: &str, at: usize) -> Option<(usize, bool)> {
     let preceded_by_word = lower
         .get(..at)
@@ -514,12 +433,8 @@ fn uri_scheme_at(lower: &str, at: usize) -> Option<(usize, bool)> {
         .map(|(scheme, tel)| (scheme.len(), tel))
 }
 
-/// SDES key material dropped from an `a=crypto:` line, and the user name of
-/// an `o=` line (RFC 4566 §5.2: "the user's login on the originating host")
-/// pseudonymised like any other user part — `-`, which is what a host with
-/// no notion of users writes, is left as it is. Everything else in the body
-/// passes through unchanged here, and picks up its IP redaction from
-/// [`scan_ip_literals`] over the whole message afterwards.
+/// Drops key lines and pseudonymises the `o=` user (RFC 4566 §5.2), unless
+/// it is `-`. IP literals are handled later by [`scan_ip_literals`].
 fn redact_body(body: &[u8], red: &mut Redactor) -> Vec<u8> {
     let text = String::from_utf8_lossy(body);
     let mut out = String::with_capacity(text.len());
@@ -554,21 +469,13 @@ fn redact_origin_line(line: &str, red: &mut Redactor) -> String {
     )
 }
 
-/// A session description line with the key material it carries dropped, or
-/// `None` for a line that carries none.
+/// An SDP line with its key material dropped, or `None` if it has none.
 ///
-/// - `a=crypto:` (RFC 4568 §9.1): every `inline:` key-salt, however many
-///   key parameters the line lists after `;`, keeping each one's lifetime
-///   and `MKI:length` after its `|`.
-/// - `k=` (RFC 4566 §5.12): the key after the method, or the whole value
-///   when no method is written; `k=prompt` carries none and is kept.
-/// - `a=key-mgmt:` (RFC 4567 §3): the key management data after the
-///   protocol identifier, which for MIKEY carries the keys themselves.
-/// - `a=ice-pwd:` (RFC 8839 §5.4): the password every connectivity check
-///   is authenticated with (RFC 8445 §7.2.2), which lets whoever reads it
-///   answer this end's checks as the peer. The ICE user fragment travels
-///   in every check in the clear and is kept; DTLS-SRTP's `a=fingerprint`
-///   names a public key and is kept.
+/// - `a=crypto:` (RFC 4568 §9.1): every `inline:` key-salt; lifetime and MKI stay.
+/// - `k=` (RFC 4566 §5.12): the key; `k=prompt` is kept.
+/// - `a=key-mgmt:` (RFC 4567 §3): the data after the protocol id.
+/// - `a=ice-pwd:` (RFC 8839 §5.4): it authenticates checks (RFC 8445
+///   §7.2.2). The ufrag and `a=fingerprint` are public and kept.
 fn strip_key_line(line: &str) -> Option<String> {
     let indent = line.len() - line.trim_start().len();
     let (lead, body) = line.split_at(indent);
@@ -610,21 +517,12 @@ fn strip_key_line(line: &str) -> Option<String> {
     Some(format!("{lead}{stripped}{ending}"))
 }
 
-/// A whole SIP message with its secrets taken out and nothing else touched:
-/// the value of every `Authorization` and `Proxy-Authorization` field, folded
-/// continuation lines included, and every key a session description carries
-/// (`a=crypto` `inline:` keys, `k=`, `a=key-mgmt`; see [`redact_message`]'s
-/// body pass), and the password of any `sip:` or `sips:` URI that carries
-/// one. Users, display names and addresses stay as they are.
+/// A SIP message with only its secrets removed: credential fields (folded
+/// lines included), SDP keys and URI passwords. Users and addresses stay.
 ///
-/// For a diagnostic trace an operator turned on to compare two runs of the
-/// same installation, where a pseudonym would hide exactly what is being
-/// compared. It reads lines rather than parsing, so bytes the parser refuses
-/// — which is when a trace is wanted most — are stripped the same way: a
-/// credential field is recognised by its name at the start of any line, in
-/// any case, and a key line anywhere in the body, a multipart one included.
-/// `Content-Length` is left as it arrived, so a body whose keys were taken
-/// out is shorter than it says.
+/// For operator traces, where pseudonyms would hide what is compared. It
+/// works line by line, so unparseable messages are stripped too.
+/// `Content-Length` is not adjusted.
 #[must_use]
 pub fn strip_secrets(message: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(message.len());
@@ -652,9 +550,7 @@ pub fn strip_secrets(message: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Free text with its credentials cut and nothing pseudonymised:
-/// [`redact_text`]'s credential pass alone, for the lines of a diagnostic
-/// trace.
+/// [`redact_text`]'s credential pass alone, nothing pseudonymised.
 #[must_use]
 pub fn strip_secrets_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -667,8 +563,7 @@ pub fn strip_secrets_text(text: &str) -> String {
         folding = secret.is_some();
         let mut clean = Vec::with_capacity(kept.len());
         strip_uri_passwords(kept.as_bytes(), &mut clean);
-        // only ASCII between an ASCII colon and an ASCII `@` was replaced, so
-        // what is left is as valid as what came in
+        // only ASCII was replaced, so this stays valid UTF-8
         out.push_str(&String::from_utf8_lossy(&clean));
         if let Some(tail) = secret {
             if kept.to_ascii_lowercase().ends_with("authorization:") {
@@ -681,14 +576,8 @@ pub fn strip_secrets_text(text: &str) -> String {
     out
 }
 
-/// `text` onto `out`, with the password of every `sip:` or `sips:` URI in it
-/// replaced: RFC 3261 §19.1.1's `user:password@host`, whose password the RFC
-/// calls "NOT RECOMMENDED" because carrying it "in clear text (such as URIs)
-/// has proven to be a security risk". The user is kept.
-///
-/// The user part ends at the `@` before any `>`, `<`, `"` or white space; a
-/// colon in it starts the password. A URI with no `@` there has no user
-/// part, and its colon is the port's.
+/// Copies `text`, replacing the password in `user:password@host` URIs
+/// (RFC 3261 §19.1.1). Without an `@` the colon is the port's.
 fn strip_uri_passwords(text: &[u8], out: &mut Vec<u8>) {
     let mut at = 0;
     while let Some(rest) = text.get(at..).filter(|rest| !rest.is_empty()) {
@@ -724,11 +613,8 @@ fn strip_uri_passwords(text: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// The lines of a message, each with its ending: `\r\n`, `\n`, or a `\r`
-/// alone. RFC 3261 §7 ends a line with CRLF, and a lenient reader — which is
-/// what a PBX that took the message was — also ends one at either byte
-/// alone, so a field after a bare CR is a field here too and not the tail of
-/// whatever line came before it.
+/// Lines with their endings. A bare CR or LF also ends a line, as it does
+/// for a lenient PBX, so no field hides behind one.
 fn lines(message: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut rest = message;
     core::iter::from_fn(move || {
@@ -751,11 +637,9 @@ fn lines(message: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-/// The name of an `Authorization` or `Proxy-Authorization` field starting
-/// `line`, as written, when it is one: the name, optional whitespace, then
-/// the colon (RFC 3261 §7.3.1). White space and control bytes anywhere
-/// before the colon are not counted — ` Authorization\0:` is the field to a
-/// reader lenient enough, and a trace has to assume one.
+/// The name as written, when `line` starts an `Authorization` or
+/// `Proxy-Authorization` field (RFC 3261 §7.3.1). Control bytes before the
+/// colon are ignored, as a lenient reader would.
 fn credential_field(line: &[u8]) -> Option<&[u8]> {
     let colon = line.iter().position(|byte| *byte == b':')?;
     let written = line.get(..colon)?;
@@ -769,7 +653,6 @@ fn credential_field(line: &[u8]) -> Option<&[u8]> {
     .then_some(written.trim_ascii())
 }
 
-/// The `\r\n`, `\n` or `\r` a line ends with, or nothing for the last one.
 fn line_ending(line: &[u8]) -> &[u8] {
     if line.ends_with(b"\r\n") {
         b"\r\n"
@@ -795,11 +678,8 @@ fn redact_header_value(
         HeaderName::Contact => redact_addr_list(value, red),
         HeaderName::RecordRoute | HeaderName::Route => redact_route_list(value, red),
         HeaderName::Extension(ext) if is_identity_header(ext) => redact_single_addr(value, red),
-        // everything else keeps its shape and gets only the IP-literal pass —
-        // scanned from the ORIGINAL bytes, never from another header's own
-        // output: an already-pseudonymised IPv4 is itself a valid dotted-quad,
-        // and scanning it a second time would hash the pseudonym instead of
-        // correlating it with the address that produced it
+        // scan the original bytes: a pseudonymised IPv4 is still a valid
+        // address and would be hashed twice
         _ => String::from_utf8_lossy(&scan_ip_literals(value, red)).into_owned(),
     }
 }
@@ -912,17 +792,11 @@ fn split_tel_params(opaque: &str) -> (&str, &str) {
         .map_or((opaque, ""), |i| opaque.split_at(i))
 }
 
-/// Every IPv4 or IPv6 literal in `bytes`, pseudonymised — the second pass
-/// that reaches an address in a header this crate does not otherwise
-/// structurally rewrite (`Via`'s `sent-by` and `received=`, `Record-Route`'s
-/// host when it is not the entry redacted above and any extension header) and
-/// every address in the SDP body, without needing to parse either.
+/// Pseudonymises every IP literal in `bytes`, for headers not rewritten
+/// structurally (`Via`, extensions) and the SDP body.
 ///
-/// Uses `std`'s own [`Ipv4Addr`]/[`Ipv6Addr`] parsers as the validator on a
-/// maximal run of candidate characters, rather than a hand-written pattern:
-/// they already reject the false positives that matter here — a version
-/// number, a timestamp's `HH:MM:SS`, a byte count — because none of those is
-/// a well-formed address.
+/// `std`'s address parsers validate each maximal candidate run, which
+/// rejects version numbers, `HH:MM:SS` and byte counts.
 fn scan_ip_literals(bytes: &[u8], red: &mut Redactor) -> Vec<u8> {
     let text = String::from_utf8_lossy(bytes);
     let chars: Vec<char> = text.chars().collect();
@@ -965,13 +839,8 @@ fn run_end(chars: &[char], start: usize, class: impl Fn(char) -> bool) -> usize 
     end
 }
 
-/// [`scan_ip_literals`] over a `&str` rather than raw bytes, for the pieces of
-/// a structurally-parsed address that are copied through as text: a URI's own
-/// parameters (`maddr`, and any extension a gateway adds) and headers, and a
-/// name-addr's parameters (`fs_path` and similar carry a whole embedded URI).
-/// None of those is parsed further here, so an IP literal inside one would
-/// otherwise survive a structural redaction untouched — this is the same
-/// safety net [`scan_ip_literals`] is for everything else.
+/// [`scan_ip_literals`] for URI and name-addr parameters copied as text
+/// (`maddr`, `fs_path` and similar can embed an address).
 fn scan_ip_literals_str(text: &str, red: &mut Redactor) -> String {
     String::from_utf8(scan_ip_literals(text.as_bytes(), red)).unwrap_or_else(|_| text.to_string())
 }
@@ -987,9 +856,6 @@ mod tests {
         Redactor::new(Mode::Hash(b"organisation-secret".to_vec()))
     }
 
-    /// A derived key is HMAC-SHA256 under the secret over the label: the
-    /// same pair gives the same key, another label or another secret another
-    /// one, and a long secret is hashed to the block as RFC 2104 has it.
     #[test]
     fn a_key_is_derived_per_label_and_per_secret() {
         let secret = [3_u8; 32];
@@ -1090,11 +956,7 @@ Content-Length: {}\r\n\r\n{sdp}",
 
     #[test]
     fn a_host_structurally_redacted_in_contact_matches_the_same_host_scanned_in_via() {
-        // Contact's host goes through redact_uri (structural); Via's host,
-        // untouched by the structural pass, goes through scan_ip_literals —
-        // the two must still agree, and must not compound: scanning Contact's
-        // own already-pseudonymised, still IP-shaped output would hash the
-        // pseudonym instead of correlating it with the real address
+        // Contact is redacted structurally, Via by scanning; they must agree
         let msg = b"REGISTER sip:example.com SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
@@ -1175,9 +1037,8 @@ Content-Length: {}\r\n\r\n{sdp}",
         assert!(out.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:REDACTED|2^20|1:32"));
     }
 
-    /// A session description carrying every kind of key this stack knows of:
-    /// two key parameters on one `a=crypto` line (RFC 4568 §9.1 allows a
-    /// list), a `k=` line and a MIKEY `a=key-mgmt`.
+    /// Every key kind: two `inline:` on one `a=crypto` line (RFC 4568
+    /// §9.1), `k=` and MIKEY `a=key-mgmt`.
     const KEYED_SDP: &str = "v=0\r\no=alice 1 1 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
 t=0 0\r\nk=base64:S0VZLUxJTkUtU0VDUkVU\r\n\
 a=key-mgmt:mikey AQAFgM0XflABAAAAAAAAAAAAAAsAyO7-SECRET-MIKEY\r\n\
@@ -1212,7 +1073,6 @@ Content-Length: {}\r\n\r\n{KEYED_SDP}",
 
     #[test]
     fn every_key_on_a_line_and_every_kind_of_key_line_is_dropped() {
-        // the redaction every export and every trace line goes through
         let out = redact(keyed_invite().as_bytes(), &mut hash_redactor());
         for key in KEYS {
             assert!(!out.contains(key), "{key} in {out}");
@@ -1235,7 +1095,6 @@ Content-Length: {}\r\n\r\n{KEYED_SDP}",
         {
             assert!(!out.contains(secret), "{secret} in {out}");
         }
-        // the whole message otherwise: users, names and addresses as sent
         for kept in [
             "INVITE sip:bob@198.51.100.4 SIP/2.0\r\n",
             "Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK1\r\n",
@@ -1274,8 +1133,6 @@ Content-Length: {}\r\n\r\n{KEYED_SDP}",
 
     #[test]
     fn free_text_loses_a_folded_credential_and_every_sdp_key() {
-        // a message logged as prose: the second line of a folded
-        // Authorization value, and the key lines, go with it
         let text = "Authorization: Digest username=\"a\",\r\n\tresponse=\"f00dcafe\"\r\n\
 Via: next\r\nk=base64:S0VZS0VZ\r\na=key-mgmt:mikey TUlLRVk=\r\n k=clear:cGxhaW4=\r\n";
         for out in [
@@ -1301,8 +1158,7 @@ plain line"
         );
     }
 
-    /// RFC 3261 §19.1.1's `sip:user:password@host`: the user stays, as
-    /// everything else in a diagnostic trace does, and the password goes.
+    /// RFC 3261 §19.1.1 `sip:user:password@host`.
     #[test]
     fn stripping_takes_a_password_out_of_a_uri_and_keeps_the_rest_of_it() {
         let message = "REGISTER sips:alice:pw1SECRET@pbx.example SIP/2.0\r\n\
@@ -1326,8 +1182,6 @@ Route: <sip:pbx.example:5060;lr>\r\n\r\n";
         }
     }
 
-    /// RFC 4568 §9.1 writes no space after `inline:`, and a key written with
-    /// one is a key all the same.
     #[test]
     fn a_key_after_a_space_is_still_a_key() {
         let line = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:  S3CRETKEY|2^20\r\n";
@@ -1383,9 +1237,6 @@ Content-Length: {}\r\n\r\n{sdp}",
             a1, b,
             "two distinct values never collide on one placeholder"
         );
-        // the placeholder is a position in this run, not a function of the
-        // bytes redacted, unlike Mode::Hash's HMAC — nothing here lets a
-        // reader of the placeholder alone recover or match the original value
         assert!(!a1.contains("alice"));
     }
 
@@ -1549,10 +1400,7 @@ Content-Length: {}\r\n\r\n{body}",
         assert!(redact_message(b"not a sip message at all", &mut red).is_err());
     }
 
-    /// The ICE password (RFC 8839 §5.4) is a credential: every connectivity
-    /// check is authenticated with it. Taken out in both log modes, and in
-    /// free text; the user fragment, which every check carries in the
-    /// clear, and the DTLS fingerprint, a public key's digest, are kept.
+    /// RFC 8839 §5.4. The ufrag and fingerprint are public and kept.
     #[test]
     fn the_ice_password_is_taken_out_in_both_modes() {
         const PASSWORD: &str = "asd88fgpdd777uzjYhagZg";
@@ -1592,12 +1440,8 @@ Content-Length: {}\r\n\r\n{body}",
         }
     }
 
-    /// Every malformed shape of a credential field a lenient reader may still
-    /// take for one — any case, white space or a control byte between the
-    /// name and its colon or in front of it, lines ended by CRLF, LF or a
-    /// bare CR, the value folded or not, the field first, among the others or
-    /// last — loses its value in the diagnostic trace, in the text forms and
-    /// in the pseudonymised one wherever it parses.
+    /// Case, control bytes around the name, line endings, folding and
+    /// position, across every strip and redaction.
     #[test]
     fn no_malformed_credential_field_leaks_through_any_strip() {
         const SECRET: &str = "5ecretRe5ponse";

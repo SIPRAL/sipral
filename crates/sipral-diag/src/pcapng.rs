@@ -1,27 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A minimal pcapng writer: one section, one interface, one block type for
-//! every packet.
-//!
-//! Only what Wireshark and `tshark` need to read a capture back: a Section
-//! Header Block, an Interface Description Block naming Ethernet, and one
-//! Enhanced Packet Block per packet, with a direction when the packet has
-//! one (`epb_flags`) and no other option. No name resolution block, no
-//! second interface — a diagnostics export is one synthetic Ethernet segment
-//! carrying whatever a D2 recording held, not a capture of a real interface.
+//! A minimal pcapng writer: one section, one Ethernet interface, and one
+//! Enhanced Packet Block per packet, optionally with a direction.
 
-/// `0x0A0D0D0A`, the block type every pcapng file starts with.
 const SECTION_HEADER_BLOCK: u32 = 0x0A0D_0D0A;
-/// `0x00000001`, an Interface Description Block.
 const INTERFACE_DESCRIPTION_BLOCK: u32 = 0x0000_0001;
-/// `0x00000006`, an Enhanced Packet Block.
 const ENHANCED_PACKET_BLOCK: u32 = 0x0000_0006;
-/// `epb_flags`, the Enhanced Packet Block option that carries direction.
 const EPB_FLAGS: u16 = 2;
-/// The byte-order magic that says this file is little-endian.
+/// Says the file is little-endian.
 const BYTE_ORDER_MAGIC: u32 = 0x1A2B_3C4D;
-/// `LINKTYPE_ETHERNET`.
 const LINKTYPE_ETHERNET: u16 = 1;
 
 /// Which way a packet went, as `epb_flags` spells it.
@@ -35,13 +23,8 @@ pub enum Direction {
 
 /// Builds a pcapng byte stream, one packet at a time.
 ///
-/// [`Writer::new`] opens the one section and the one interface every packet
-/// is attributed to; [`Writer::packet`] appends one; [`Writer::finish`] hands
-/// back the bytes. Timestamps are microseconds since an arbitrary origin —
-/// pcapng's default resolution when no `if_tsresol` option says otherwise —
-/// which is enough for Wireshark to order and time a flow; nothing here
-/// claims they are wall-clock time, because a D2 recording's own offsets
-/// never were either (`docs/18-replay.md`).
+/// Timestamps are microseconds since an arbitrary origin (pcapng's default
+/// resolution), not wall-clock time.
 #[derive(Debug, Default)]
 pub struct Writer {
     buf: Vec<u8>,
@@ -64,10 +47,8 @@ impl Writer {
         self.block(ENHANCED_PACKET_BLOCK, &body);
     }
 
-    /// The same, carrying which way the packet went in the block's
-    /// `epb_flags` option (pcapng §4.3.1: bits 0–1, `01` inbound and `10`
-    /// outbound), which Wireshark shows and filters on as
-    /// `frame.packet_flags_direction`.
+    /// The same, with the direction in `epb_flags` (pcapng §4.3.1), which
+    /// Wireshark filters on as `frame.packet_flags_direction`.
     pub fn packet_in(&mut self, timestamp_us: u64, data: &[u8], direction: Direction) {
         let mut body = Self::packet_body(timestamp_us, data);
         // options start on a 32-bit boundary after the padded packet data
@@ -117,8 +98,7 @@ impl Writer {
         self.block(INTERFACE_DESCRIPTION_BLOCK, &body);
     }
 
-    /// A generic block: type, total length, body padded to four bytes, total
-    /// length again — the shape every pcapng block shares (RFC 9199 §3.1).
+    /// Type, total length, padded body, total length again (RFC 9199 §3.1).
     fn block(&mut self, block_type: u32, body: &[u8]) {
         let pad = (4 - body.len() % 4) % 4;
         let total_len = 12 + body.len() + pad;
@@ -138,9 +118,7 @@ mod tests {
     #[test]
     fn a_fresh_writer_holds_the_section_and_interface_blocks_and_nothing_else() {
         let bytes = Writer::new().finish();
-        // section header block (28 bytes: 12 + 16 body) + interface
-        // description block (20 bytes: 12 + 8 body), both four-byte aligned
-        // already
+        // SHB 12 + 16, IDB 12 + 8
         assert_eq!(bytes.len(), 28 + 20);
         assert_eq!(
             bytes.get(0..4),
@@ -178,8 +156,7 @@ mod tests {
         let before = writer.buf.len();
         let ts: u64 = 0x0001_0203_0405_0607;
         writer.packet(ts, b"x");
-        // block header (8 bytes: type + total_len) + interface_id (4 bytes)
-        // precede the two timestamp halves in an Enhanced Packet Block
+        // type, total length, interface id
         let body = writer.buf.get(before + 12..).expect("the timestamp fields");
         let high_bytes: [u8; 4] = body
             .get(0..4)

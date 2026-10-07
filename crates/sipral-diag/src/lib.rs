@@ -1,41 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Diagnostics a NOC can act on, out of what `docs/14-diagnostics.md` (D1)
-//! and `docs/18-replay.md` (D2) already produce.
+//! Diagnostics a NOC can act on, built from D1 (`docs/14-diagnostics.md`)
+//! and D2 (`docs/18-replay.md`) output.
 //!
-//! Two things live here:
+//! - [`export()`]: a D2 recording as a pcapng file that Wireshark reads as a call.
+//! - [`export_replayed()`]: the same, plus the messages this end writes when
+//!   the recording is replayed into a live layer.
+//! - [`redact`]: strips personal data and credentials so a recording can
+//!   leave the organisation.
 //!
-//! - [`export()`]: a D2 recording, read back and turned into a pcapng file —
-//!   every message the recording holds, as a UDP or TCP packet between the
-//!   addresses and at the offsets the recording carries, so Wireshark's own
-//!   SIP dissector reads it as a call.
-//! - [`export_replayed()`]: the same, with the recording fed back into a
-//!   live layer and every message that layer writes in answer placed beside
-//!   what arrived — one capture of both directions of the session.
-//! - [`redact`]: the same messages with the personal data RFC 3261 and SDP
-//!   carry taken out first — user parts, display names, phone numbers and IP
-//!   literals become a stable pseudonym or a placeholder, and credentials are
-//!   dropped outright — so a recording can leave the organisation.
-//!
-//! # What a D2 recording is, for this crate's purposes
-//!
-//! `docs/18-replay.md` is the source of truth. The one fact this crate leans
-//! on throughout: a recording holds what *arrived* at the recorded stack and
-//! nothing it sent, because nothing here ever offered the recorder a
-//! transmitted byte to keep (`crates/sipral-ffi/src/diagnostics.rs`). A
-//! pcapng built by [`export()`] is therefore the far end's half of the
-//! conversation — the truth of what is in the file. [`export_replayed()`]
-//! is the full two-way flow: the messages this end sent are not read from
-//! the file but written again, by replaying the recording into the actual
-//! engine (`sipral_core::replay::Driven`) under the seed the file carries.
-//!
-//! It also never contains audio — RTP arrives at `sipral-rtp` on another
-//! socket and is never part of a D2 [`Arrival`](sipral_core::replay::Arrival)
-//! — so there is no RTP or RTCP summary for this crate to place in a pcapng
-//! today; the day the format gains one, [`export::export`]'s exhaustive match
-//! over `Arrival` will refuse to compile until it is taught what to do with
-//! it, rather than silently dropping it.
+//! A recording holds only what *arrived*, never what was sent, so
+//! [`export()`] gives the far end's half; [`export_replayed()`] regenerates
+//! the other half by replaying under the recorded seed. Recordings carry no
+//! RTP (see [`Arrival`](sipral_core::replay::Arrival)).
 
 // tests say what they mean; the no-panic discipline is for the library
 #![cfg_attr(
