@@ -102,7 +102,7 @@ Mid 2027, planned.
 Every release.
 
 - Every published figure measured again by the gate on each change *(in progress)*
-- An adversarial review of the DTLS-SRTP code, with interop and failure tests against other implementations *(in progress)*
+- An adversarial review of the DTLS-SRTP code, with interop and failure tests against other implementations *(done)*
 - More PBXs proven in the lab, and caller identity, diversion, redirection and failover between servers shown working *(in progress)*
 - Interop with carriers and a commercial SBC
 <!-- releases: end -->
