@@ -40,6 +40,7 @@
 mod audio;
 mod device_open;
 mod drift;
+mod dtls;
 mod fork;
 mod fork_ice;
 mod ice_lite;
@@ -301,15 +302,25 @@ fn list_audio_devices() -> ExitCode {
     }
 }
 
+/// What the binary does when it is run as a tool rather than as a flow: the
+/// greeting and the beep `inband`'s machine flow has the far end play,
+/// written where `scripts/lab.sh` then copies them from; or one DTLS-SRTP
+/// handshake against OpenSSL, for `scripts/lab.sh dtls-interop`.
+fn tool() -> Option<ExitCode> {
+    match env::args().nth(1).as_deref() {
+        Some("--write-greeting") => Some(inband::write_greeting_into(env::args().nth(2))),
+        Some("--dtls") => Some(dtls::run(&env::args().skip(2).collect::<Vec<_>>())),
+        _ => None,
+    }
+}
+
 fn main() -> ExitCode {
     #[cfg(all(feature = "wasapi", target_os = "windows"))]
     if env::args().nth(1).as_deref() == Some("--list-audio-devices") {
         return list_audio_devices();
     }
-    // not a flow: the greeting and the beep `inband`'s machine flow has the
-    // far end play, written where `scripts/lab.sh` then copies them from
-    if env::args().nth(1).as_deref() == Some("--write-greeting") {
-        return inband::write_greeting_into(env::args().nth(2));
+    if let Some(code) = tool() {
+        return code;
     }
     let server = env::args().nth(1).unwrap_or_else(|| "kamailio".to_owned());
     let port: u16 = env::args()

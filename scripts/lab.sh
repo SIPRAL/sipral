@@ -132,6 +132,17 @@
 #                               P-Asserted-Identity sent and received, a
 #                               Diversion on a diverted call, a 302 followed
 #                               (part of a run that names nothing too)
+#   scripts/lab.sh dtls-interop only DTLS-SRTP against OpenSSL, no SIP: the
+#                               Rust harness as client and as server facing
+#                               `openssl s_server`/`s_client -dtls1_2
+#                               -use_srtp` in one container
+#                               (interop/dtls/run.sh), six handshakes on four
+#                               profiles with the RFC 5764 keying material
+#                               required identical on both ends, then six
+#                               refusals: a certificate the fingerprint does
+#                               not name, no SRTP profile in common, DTLS 1.0
+#                               -- each way round (part of a run that names
+#                               nothing too)
 #   scripts/lab.sh fusionpbx    only FusionPBX on FreeSWITCH
 #                               (interop/fusionpbx): the harness's flows
 #                               straight at it and a call to its own echo,
@@ -4337,6 +4348,25 @@ if [ "$WANT" = all ] || [ "$WANT" = identity ]; then
     else
         printf '  note  no libsipral_ffi, so the identity flows are skipped with the other C flows\n'
     fi
+fi
+
+# DTLS-SRTP against an implementation this project did not write: the Rust
+# harness's `--dtls` (interop/harness/src/dtls.rs) and OpenSSL in one
+# container, over its loopback, which interop/dtls/run.sh drives -- twelve
+# handshakes of a few seconds each, after the package is installed.
+dtls_interop_flow() {
+    lab_run "DTLS-SRTP against OpenSSL" $((LAB_START_APT_S + 3 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -v "$HARNESS:/harness:ro" \
+        -v "$ROOT/interop/dtls:/dtls:ro" \
+        debian:trixie-slim sh /dtls/run.sh /harness
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = dtls-interop ]; then
+    step "DTLS-SRTP against OpenSSL -- the harness as client and as server, no SIP"
+    dtls_interop_flow \
+        && pass "keyed alike with OpenSSL both ways on four profiles; wrong fingerprint, no common profile and DTLS 1.0 refused" \
+        || fail "DTLS-SRTP against OpenSSL"
 fi
 
 # FusionPBX (interop/fusionpbx, compose.yaml's `fusionpbx` profile): its

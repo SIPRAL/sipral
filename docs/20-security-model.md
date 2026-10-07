@@ -123,13 +123,14 @@ reason phrase names the field (`Bad <field>`, RFC 3261 §8.2.x), and the
 refusal is noted in the diagnostic record. An ACK that fails it is dropped,
 since nothing answers an ACK.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Thirty-four
+**Fuzzing covers the doors an attacker's bytes come through.** Thirty-six
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
 `replay`, `dialoginfo`, `mwi`, `headless`, `rtcp`, `rtp_dtmf`,
-`srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
-`dtls_handshake`), one for
+`srtp_unprotect`, `stun`, `turn`), three for DTLS (`dtls_record`,
+`dtls_handshake`, and `dtls_connection`, a real client and server with the
+fuzzer on the path between them), one for
 DTMF over SIP INFO (`dtmf_info`), two for ICE — the full agent (`ice`) and the
 lite agent's own state machine (`ice_lite`), which `ice` never drives
 directly since it only ever reaches `LiteAgent` across a simulated network —
@@ -154,7 +155,7 @@ G.729 decoder — speech frames, Annex B's SID frames, frames not sent and
 frames lost — the payload reader and an encoder with Annex B's DTX; it
 decodes and re-encodes every input, so its 24 hours came to about 0.67
 million executions, the thinnest coverage of any target. `scripts/check.sh`
-builds all thirty-four on every run so none of them rots uncompiled between
+builds all thirty-six on every run so none of them rots uncompiled between
 releases.
 
 `ice` covers the one seam that is open to anybody before a
@@ -578,6 +579,17 @@ this end directly rather than through the line's own proxy.
   again only for a retransmission whose Finished authenticates. Fingerprints
   under SHA-384 and SHA-512 are read, and the longest hash the peer offered is
   the one its certificate is checked under (RFC 8122 §5.1).
+
+  Two checks have since come from outside the code under review. The
+  handshake now meets OpenSSL with no PBX in between (`scripts/lab.sh
+  dtls-interop`, `docs/11-testing.md`): as client and as server, on all four
+  profiles, the SRTP keying material it exports is octet for octet OpenSSL's;
+  a certificate the fingerprint does not name, no profile in common and DTLS
+  1.0 are each refused, either way round, with no keys released. And a fuzz
+  target, `dtls_connection`, runs both state machines against each other with
+  the fuzzer as an on-path attacker that drops, reorders, duplicates, corrupts
+  and injects, checking that keys are released once, only to ends that agree
+  on them, and never to a client that met the wrong certificate.
 
   One limit is known and is a property of the design rather than of the code.
   A DTLS connection ends on any fatal alert, and an alert arriving before the

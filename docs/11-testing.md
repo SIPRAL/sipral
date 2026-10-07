@@ -373,8 +373,8 @@ through the message parser and every accessor a binding client or an ICE
 agent calls, since STUN and media share a port by design. `turn` takes the stream framer
 and ChannelData both ways they arrive, delimited and self-delimiting.
 
-Two for DTLS, whose peer's bytes are read before anything in them is
-authenticated. Neither covers the seam a call goes through now that the
+Three for DTLS, whose peer's bytes are read before anything in them is
+authenticated. None covers the seam a call goes through now that the
 handshake is joined to one: `sipral_nat::classify` sorting a hostile datagram
 on the media port and `MediaSession::receive` routing it. A target for that —
 a session opened awaiting its keys, and a run of datagrams from alternating
@@ -390,7 +390,23 @@ message type and a body through the message parser and asserts that a body
 which parses writes back as the same octets, since a handshake signs a hash of
 what it received; then through what a handshake reads next from that message:
 the cookie check, the certificate's key and fingerprint, the key exchange
-point, the signatures.
+point, the signatures. `dtls_connection` keeps both ends honest and gives the
+fuzzer the path between a real client and a real server instead: one octet
+configures the pair (the server's cookie exchange, datagrams small enough to
+fragment every flight, which SRTP profiles each end accepts, whether the client
+expects a certificate the server does not hold), and the rest is a program
+that delivers, drops, duplicates, reorders, truncates and flips bits in what
+each end sent, slips datagrams of its own in, lets time pass, and closes or
+sends application data from either end. Past not panicking it asserts that an
+end connects at most once and reports nothing after it failed or closed, that
+application data arrives only at a connected end and is accepted only from
+one, that two ends which both connected exported mirrored SRTP keys under one
+profile both accept, and that a client expecting another certificate never
+connects. Its five seeds are whole handshakes — with the cookie exchange,
+fragmented, with a lost ClientHello, data and a close — and the two refusals,
+no common profile and the wrong fingerprint; its first five-minute run, on 7
+October 2026, executed 8,063 inputs and found nothing. That count is low
+because every input makes two P-256 keys and signs two handshakes.
 
 One more, added for `sipral-ua`'s own INFO-based DTMF (`docs/04-ua.md`).
 `dtmf_info` takes
@@ -503,7 +519,7 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than thirty-four runs beginning at
+targets with something to start from rather than thirty-six runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
@@ -558,7 +574,7 @@ added on 29 September 2026 — `stir_identity`, `multipart`, `rtt` and
 recorded here yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all thirty-four, under the nightly that `fuzz/` pins, so
+do on every run is **build** all thirty-six, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -782,6 +798,8 @@ the generator itself — never the block, which the next run overwrites.
 | DTMF, SIP INFO | yes | yes | yes |
 | SRTP (SDES) | yes | yes | yes |
 | DTLS-SRTP | yes | yes | yes |
+| DTLS-SRTP keying material identical to OpenSSL's (RFC 5764 §4.2), both roles | yes | yes | not yet |
+| DTLS-SRTP refused: wrong fingerprint, no common profile, DTLS 1.0 | yes | yes | not yet |
 | Codec change while held | yes | yes | yes |
 | SIP MESSAGE | yes | yes | yes |
 | Message waiting indication | yes | yes | yes |
@@ -1061,6 +1079,39 @@ straight at Asterisk:
   REGISTER sent to the first goes unanswered, the stack moves to the second by
   itself (RFC 3263 §4.3), registers there and places the call through it.
 
+### DTLS-SRTP against OpenSSL
+
+Every DTLS-SRTP flow above keys a call against a PBX, which says the
+handshake completes and the media decrypts; it does not say the keys are the
+ones RFC 5764 §4.2 defines, since both ends could agree on something else and
+still talk. `scripts/lab.sh dtls-interop` (and a run that names nothing)
+takes SIP out of it: the Rust harness's `--dtls` mode
+(`interop/harness/src/dtls.rs`) runs one handshake over a UDP socket, as
+client or as server, and prints its exporter output in the RFC's order —
+client key, server key, client salt, server salt — while `openssl s_server`
+or `s_client -dtls1_2 -use_srtp ... -keymatexport EXTRACTOR-dtls_srtp` prints
+its own, both in one container (`interop/dtls/run.sh`, Debian 13's OpenSSL
+package). Six handshakes have to produce the same octets on both ends:
+`SRTP_AES128_CM_HMAC_SHA1_80` each way round, `_32`, `SRTP_AEAD_AES_128_GCM`,
+`SRTP_AEAD_AES_256_GCM`, and an OpenSSL client offering two profiles to a
+harness server that picks by its own preference. Six have to be refused by
+the harness for the reason named, with no keys released, and an OpenSSL
+server never finishing its handshake: OpenSSL's certificate not the one the fingerprint names
+(`FingerprintMismatch`, either role); no SRTP profile in common
+(`NoSrtpProfile`, either role); and DTLS 1.0 — an OpenSSL client speaking
+only 1.0 refused with `ProtocolVersion`, and an OpenSSL server speaking only
+1.0 finding no suite in the harness's offer and saying so with
+`handshake_failure`. BoringSSL is not run: its `bssl` tool has no DTLS mode.
+
+One behaviour the step makes visible rather than tests. A server answering
+with the stateless cookie exchange (the default, RFC 6347 §4.2.1) reads only
+an unfragmented ClientHello until its cookie returns, as OpenSSL's own
+`DTLSv1_listen` does; OpenSSL's `s_client` on macOS, where the socket reports
+no MTU, falls back to 256-octet datagrams and fragments its second
+ClientHello, which that server then never reads. The step pins `s_client`'s
+MTU at 1200 so the result does not depend on the host; on Linux the default
+already fits.
+
 ## Interoperability procedure
 
 Each live exit criterion in `10-roadmap.md` is one scripted flow, driven by
@@ -1307,7 +1358,7 @@ warnings as errors for `aarch64-apple-ios` over every crate that builds for it
 — `sipral-ffi`'s graph, read from `cargo tree` so a crate that joins it is
 covered, and `sipral-io-coreaudio` — for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all thirty-four fuzz targets under their own nightly — which nothing else
+over all thirty-six fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, `osv-scanner` for known vulnerabilities in every dependency the tree

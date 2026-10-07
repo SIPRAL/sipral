@@ -37,6 +37,10 @@ sipral = { path = "../../crates/sipral", version = "1.1.0", default-features = f
 # else this crate used to reach into `sipral-core`, `sipral-media` and
 # `sipral-rtp` for goes through `sipral` instead.
 sipral-core.workspace = true
+# The DTLS-SRTP handshake on its own, over a plain UDP socket, for the step
+# that runs it against OpenSSL (src/dtls.rs): the facade keeps its DTLS
+# behind a call, and what is compared there is the exporter's output itself.
+sipral-dtls = { path = "../../crates/sipral-dtls", version = "1.1.0" }
 # The wasapi flow's own resampler (src/wasapi.rs): a real WASAPI endpoint runs
 # shared mode at whatever rate the audio engine mixes at, commonly 48 kHz,
 # never the call's own 8 kHz or 16 kHz, and `sipral-io-wasapi` deliberately

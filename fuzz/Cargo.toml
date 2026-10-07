@@ -298,3 +298,10 @@ path = "fuzz_targets/websocket.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dtls_connection"
+path = "fuzz_targets/dtls_connection.rs"
+test = false
+doc = false
+bench = false

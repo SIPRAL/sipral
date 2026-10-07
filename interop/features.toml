@@ -93,6 +93,18 @@ unit_tested = true
 flows = ["DTLS-SRTP, held and resumed", "DTLS-SRTP, phone to phone"]
 
 [[feature]]
+name = "DTLS-SRTP keying material identical to OpenSSL's (RFC 5764 §4.2), both roles"
+implemented = true
+unit_tested = true
+flows = ["Sipral client, OpenSSL server, SRTP_AES128_CM_HMAC_SHA1_80", "OpenSSL client, Sipral server, SRTP_AES128_CM_HMAC_SHA1_80", "Sipral client, OpenSSL server, SRTP_AES128_CM_HMAC_SHA1_32", "Sipral client, OpenSSL server, SRTP_AEAD_AES_128_GCM", "OpenSSL client, Sipral server, SRTP_AEAD_AES_256_GCM", "OpenSSL client offering two, Sipral server choosing its own preference"]
+
+[[feature]]
+name = "DTLS-SRTP refused: wrong fingerprint, no common profile, DTLS 1.0"
+implemented = true
+unit_tested = true
+flows = ["Sipral client, OpenSSL server with a certificate the signalling did not name", "OpenSSL client with a certificate the signalling did not name, Sipral server", "Sipral client offering SHA1_80, OpenSSL server taking only AEAD_AES_128_GCM", "OpenSSL client offering only SHA1_32, Sipral server taking only SHA1_80", "OpenSSL client speaking DTLS 1.0 only, Sipral server", "Sipral client, OpenSSL server speaking DTLS 1.0 only"]
+
+[[feature]]
 name = "Codec change while held"
 implemented = true
 unit_tested = true

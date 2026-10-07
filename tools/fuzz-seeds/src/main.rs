@@ -39,6 +39,7 @@
 //! cargo run -p sipral-fuzz-seeds -- <dir>  # write somewhere else instead
 //! ```
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -52,12 +53,13 @@ use sipral_core::msg::{
 use sipral_core::replay::Recording;
 use sipral_core::sdp::{self, Crypto};
 use sipral_dtls::handshake::{
-    HandshakeMessage, HandshakeType, HelloVerifyRequest, fragments as dtls_fragments,
+    HandshakeMessage, HandshakeType, HelloVerifyRequest, SrtpProtectionProfile,
+    fragments as dtls_fragments,
 };
 use sipral_dtls::keys::EcdsaKey;
 use sipral_dtls::record::{ContentType, ProtocolVersion, records as dtls_records};
 use sipral_dtls::x509::{Certificate as DtlsCertificate, CertificateParams};
-use sipral_dtls::{Config as DtlsConfig, Connection, Random, Role, State};
+use sipral_dtls::{Config as DtlsConfig, Connection, Event as DtlsEvent, Random, Role, State};
 use sipral_headless::{ControlMessage, FrameDecoder, write_frame};
 use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
@@ -3188,6 +3190,197 @@ fn dtls_seed_name(side: &str, msg_type: HandshakeType) -> Option<&'static str> {
     })
 }
 
+/// The configuration octet and program of each `dtls_connection` seed, and
+/// whether its two ends finish connected. A program is one operation an
+/// octet: the low bit names the end whose datagrams move, the next three the
+/// operation (`fuzz_targets/dtls_connection.rs` lists them).
+fn dtls_connection_seeds() -> Result<Vec<Seed>, Wrong> {
+    // deliver the client's datagrams, then the server's, over and over: a
+    // whole handshake on a path that loses nothing
+    let mut clean = Vec::new();
+    for _ in 0..4 {
+        clean.extend_from_slice(&[0x00; 8]);
+        clean.extend_from_slice(&[0x01; 8]);
+    }
+    // the ClientHello lost, the client's timer sending it again after a
+    // second, and the connected ends exchanging data and closing
+    let mut lossy = vec![0x02, 0x0C, 11];
+    lossy.extend_from_slice(&clean);
+    lossy.extend_from_slice(&[0x0E, 1, 4, b'p', b'i', b'n', b'g', 0x00]);
+    lossy.extend_from_slice(&[0x0F, 1, 4, b'p', b'o', b'n', b'g', 0x01]);
+    lossy.extend_from_slice(&[0x0E, 0, 0x00]);
+
+    let seeds: [(&'static str, u8, &[u8], bool); 5] = [
+        // the cookie exchange on, every profile on both ends
+        ("cookie", 0x01, &clean, true),
+        // no cookie, every flight fragmented to small datagrams
+        ("fragmented", 0x02, &clean, true),
+        ("lossy", 0x01, &lossy, true),
+        // the server takes only SRTP_AEAD_AES_128_GCM, the client offers
+        // only SRTP_AES128_CM_HMAC_SHA1_80
+        ("no-common-profile", 0x19, &clean, false),
+        // the client expects a certificate the server does not hold
+        ("wrong-fingerprint", 0x41, &clean, false),
+    ];
+    let mut out = Vec::new();
+    for (name, setup, program, connects) in seeds {
+        let mut seed = vec![setup];
+        seed.extend_from_slice(program);
+        let (client, server) = through_dtls_connection(name, &seed)?;
+        if (client && server) != connects {
+            return Err(Wrong(format!(
+                "the {name} seed leaves the client connected: {client}, the server: {server}"
+            )));
+        }
+        out.push((name, seed));
+    }
+    Ok(out)
+}
+
+/// The SRTP profiles a `dtls_connection` end accepts, from two bits of the
+/// configuration octet.
+fn dtls_connection_profiles(choice: u8) -> Vec<SrtpProtectionProfile> {
+    match choice & 3 {
+        0 => vec![
+            SrtpProtectionProfile::AEAD_AES_256_GCM,
+            SrtpProtectionProfile::AEAD_AES_128_GCM,
+            SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80,
+            SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32,
+        ],
+        1 => vec![SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80],
+        2 => vec![SrtpProtectionProfile::AEAD_AES_128_GCM],
+        _ => vec![
+            SrtpProtectionProfile::AES128_CM_HMAC_SHA1_32,
+            SrtpProtectionProfile::AEAD_AES_256_GCM,
+        ],
+    }
+}
+
+/// The client and the server `dtls_connection` builds out of its
+/// configuration octet, in that order.
+fn dtls_connection_ends(name: &str, setup: u8, now: Instant) -> Result<[Connection; 2], Wrong> {
+    let (server_key, server_certificate) = dtls_identity(0x5E, DTLS_SERVER_SEED)?;
+    let (client_key, client_certificate) = dtls_identity(0xC1, DTLS_CLIENT_SEED)?;
+    let (_, stranger) = dtls_identity(0x77, 0x77)?;
+
+    let mut server = DtlsConfig::new(
+        Role::Server,
+        server_key,
+        server_certificate.clone(),
+        vec![client_certificate.fingerprint()],
+    );
+    server.cookie_exchange = setup & 1 != 0;
+    server.srtp_profiles = dtls_connection_profiles(setup >> 2);
+    let expected = if setup & 0x40 != 0 {
+        stranger
+    } else {
+        server_certificate
+    };
+    let mut client = DtlsConfig::new(
+        Role::Client,
+        client_key,
+        client_certificate,
+        vec![expected.fingerprint()],
+    );
+    client.srtp_profiles = dtls_connection_profiles(setup >> 4);
+    if setup & 2 != 0 {
+        server.max_datagram = 300;
+        client.max_datagram = 300;
+    }
+    let build = |config, seed| {
+        Connection::new(config, &mut DtlsFixed(seed), now).map_err(|why| {
+            Wrong(format!(
+                "a DTLS end of the {name} seed does not build: {why:?}"
+            ))
+        })
+    };
+    Ok([
+        build(client, DTLS_CLIENT_SEED)?,
+        build(server, DTLS_SERVER_SEED)?,
+    ])
+}
+
+/// One `dtls_connection` seed, run the way the target runs it, for the
+/// operations the seeds use: deliver, lose, let time pass, send and close.
+/// Whether each end, the client first, reported its keys.
+fn through_dtls_connection(name: &str, seed: &[u8]) -> Result<(bool, bool), Wrong> {
+    let (&setup, program) = seed
+        .split_first()
+        .ok_or_else(|| Wrong(format!("the {name} seed is empty")))?;
+    let mut now = Instant::now();
+    let mut ends = dtls_connection_ends(name, setup, now)?;
+    let mut paths: [VecDeque<Vec<u8>>; 2] = Default::default();
+    let mut keyed = [false; 2];
+    let collect = |ends: &mut [Connection; 2],
+                   paths: &mut [VecDeque<Vec<u8>>; 2],
+                   keyed: &mut [bool; 2]| {
+        for ((end, path), keyed) in ends.iter_mut().zip(paths.iter_mut()).zip(keyed.iter_mut()) {
+            path.extend(std::iter::from_fn(|| end.poll_transmit()));
+            while let Some(event) = end.poll_event() {
+                if matches!(event, DtlsEvent::Connected(_)) {
+                    *keyed = true;
+                }
+            }
+        }
+    };
+    collect(&mut ends, &mut paths, &mut keyed);
+
+    let mut rest = program;
+    let mut octet = move || {
+        let (&first, tail) = rest.split_first()?;
+        rest = tail;
+        Some(first)
+    };
+    while let Some(op) = octet() {
+        let [client, server] = &mut ends;
+        let [from_client, from_server] = &mut paths;
+        // the end whose datagrams move, where they arrive, and the path
+        let (sender, receiver, path) = if op & 1 == 0 {
+            (client, server, from_client)
+        } else {
+            (server, client, from_server)
+        };
+        match (op >> 1) & 7 {
+            0 => {
+                if let Some(datagram) = path.pop_front() {
+                    receiver.handle_datagram(&datagram, now);
+                }
+            }
+            1 => {
+                path.pop_front();
+            }
+            6 => {
+                now += Duration::from_millis(100) * u32::from(octet().unwrap_or(0));
+                sender.handle_timeout(now);
+                receiver.handle_timeout(now);
+            }
+            7 => match octet().unwrap_or(0) % 4 {
+                0 => sender.close(),
+                1 => {
+                    let len = usize::from(octet().unwrap_or(0));
+                    let payload: Vec<u8> = (0..len).filter_map(|_| octet()).collect();
+                    sender.send_application_data(&payload).map_err(|why| {
+                        Wrong(format!("the {name} seed sends data it cannot: {why:?}"))
+                    })?;
+                }
+                _ => {
+                    return Err(Wrong(format!(
+                        "the {name} seed uses an action it is not checked for"
+                    )));
+                }
+            },
+            _ => {
+                return Err(Wrong(format!(
+                    "the {name} seed uses an operation it is not checked for"
+                )));
+            }
+        }
+        collect(&mut ends, &mut paths, &mut keyed);
+    }
+    let [client, server] = keyed;
+    Ok((client, server))
+}
+
 /// The one-octet length in front of the `Content-Type`, which is how the
 /// `dtmf_info` target cuts its input into the header and the body.
 fn encode_info(content_type: &[u8], body: &[u8]) -> Result<Vec<u8>, Wrong> {
@@ -3324,6 +3517,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("builder", builder_seeds()?),
         ("crypto", crypto_seeds()?),
         ("dialoginfo", dialoginfo_seeds()?),
+        ("dtls_connection", dtls_connection_seeds()?),
         ("dtls_handshake", dtls_handshake_seeds()?),
         ("dtls_record", dtls_record_seeds()?),
         ("dtmf_info", dtmf_info_seeds()?),

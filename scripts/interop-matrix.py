@@ -192,6 +192,23 @@ LAYER_SECTIONS = {
             "a 302 followed by the stack",
         ),
     ),
+    "DTLS-SRTP against OpenSSL -- the harness as client and as server, no SIP": (
+        "openssl_dtls",
+        (
+            "Sipral client, OpenSSL server, SRTP_AES128_CM_HMAC_SHA1_80",
+            "OpenSSL client, Sipral server, SRTP_AES128_CM_HMAC_SHA1_80",
+            "Sipral client, OpenSSL server, SRTP_AES128_CM_HMAC_SHA1_32",
+            "Sipral client, OpenSSL server, SRTP_AEAD_AES_128_GCM",
+            "OpenSSL client, Sipral server, SRTP_AEAD_AES_256_GCM",
+            "OpenSSL client offering two, Sipral server choosing its own preference",
+            "Sipral client, OpenSSL server with a certificate the signalling did not name",
+            "OpenSSL client with a certificate the signalling did not name, Sipral server",
+            "Sipral client offering SHA1_80, OpenSSL server taking only AEAD_AES_128_GCM",
+            "OpenSSL client offering only SHA1_32, Sipral server taking only SHA1_80",
+            "OpenSSL client speaking DTLS 1.0 only, Sipral server",
+            "Sipral client, OpenSSL server speaking DTLS 1.0 only",
+        ),
+    ),
 }
 # Steps whose one result is lab.sh's own closing `ok`/`FAIL` line, read the
 # way AGENT_SECTIONS's are (parse_agent_section), though no example agent is
@@ -251,6 +268,7 @@ PEER_LABELS = {
     "stir_pair": "sipral, C ABI to C ABI (STIR/SHAKEN)",
     "kamailio_members": "Kamailio, routing to three sipral stacks registered at it",
     "fusionpbx": "FusionPBX → FreeSWITCH",
+    "openssl_dtls": "OpenSSL (DTLS-SRTP alone, no SIP)",
 }
 
 # Every peer worth an eventual row that this lab cannot reach yet, because
@@ -774,6 +792,10 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # two stacks of this library, and a certificate authority made for
         # the run: nobody else's release to name
         return "n/a"
+    if peer_key == "openssl_dtls":
+        # whatever Debian trixie's openssl package is on the day: the run
+        # prints it (interop/dtls/run.sh), and no file here pins it
+        return "Debian 13's package"
     if peer_key == "robust_listener":
         # interop/robust/listener.py, a few lines of Python in the lab: no
         # release of anybody's to pin.

@@ -1009,6 +1009,7 @@ dependencies = [
  "sipral",
  "sipral-audio",
  "sipral-core",
+ "sipral-dtls",
  "sipral-io-pipewire",
  "sipral-io-wasapi",
  "sipral-media",
