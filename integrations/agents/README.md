@@ -175,7 +175,7 @@ warnings. [`examples/bridge.toml`](examples/bridge.toml) is a complete file.
 | Table | Keys |
 |---|---|
 | `[sip]` | `bind_host`, `bind_port`, `media_host` (the address RTP is advertised on), `user_agent`, `codecs`, `invite_limit` (`"voice-agent"` for a trunk's rush of calls), `tls_ca` (authorities for SIP agents over TLS), and `[sip.backoff]` with `first`, `longest`, `jitter`, `attempts` |
-| `[[accounts]]` | `aor`, `registrar_address` and `agent` (required); `registrar` (unset, the account does not register), `auth_user`, `auth_password_env`, `display_name` |
+| `[[accounts]]` | `aor`, `registrar_address` and `agent` (required); `registrar` (unset, the account does not register), `auth_user`, `auth_password_env`, `display_name`, and `[accounts.machine]` for the calls it places (below) |
 | `[agents.NAME]`, `service = "sip"` | `uri` (required), `address` (`host:port`, when the URI's host is not the server), `auth_user` and `auth_password_env` (a digest challenge from the agent), `transfer` (`"refer"` or `"bridge"`), `outcomes` (`"header"` or `"refer"`), `outcome_uris` (a table: outcome = URI), `max_seconds`, `copy_headers` |
 | `[agents.NAME]`, any other `service` | `"openai-realtime"`, `"gemini-live"`, `"elevenlabs"`, `"vapi"` or `"deepgram"`, and that class's own arguments, `api_key_env` in place of `api_key`; tables (`session`, `setup`, `overrides`, `agent`, `call`, `settings`) are TOML tables |
 
@@ -186,6 +186,36 @@ an `api_key`, `password` or `auth_password` written in the file is refused.
 A call to a SIP account with no agent is answered 404. One stack checks TLS
 certificates against one name, so SIP agents over TLS on different hosts
 need a bridge each.
+
+### Calls the agent places, and answering machines
+
+```sh
+SALES_SIP_PASSWORD=... OPENAI_API_KEY=... \
+    python -m sipral_agents examples/bridge.toml --dial sip:1001@pbx.example.com --from sip:sales@pbx.example.com
+```
+
+places one call from the account to the number and prints what became of
+it. `sipral_agents.dial(stack, account, target, factory, policy=...)` does
+the same from code. The library decides who answered from the first seconds
+of audio; a person is joined to the agent at once, and for a machine the
+account's policy decides:
+
+```toml
+[[accounts]]
+aor = "sip:sales@pbx.example.com"
+# ...
+[accounts.machine]
+on_machine = "message"   # "hangup" (the default), "message" or "agent"
+on_unknown = "agent"     # or "hangup", when the detector cannot tell
+beep_wait_s = 20         # how long to wait for the beep before speaking anyway
+max_greeting_ms = 1600   # any of the detector's limits, in milliseconds
+```
+
+`"message"` connects the agent at the machine's beep, so that what it says
+is recorded from its first word. The outcome is `"human"`, `"machine"`
+(hung up), `"message"`, `"machine_agent"`, `"unknown"`, `"unknown_hangup"`
+or `"no_answer"`. Only an agent that is a WebSocket service places calls;
+a SIP agent places its own.
 
 ## LiveKit
 

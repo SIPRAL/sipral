@@ -808,6 +808,11 @@ carrying a `CallProgress`:
 Listening costs a few detectors a frame while it lasts, and nothing once
 it has come to its end (`MediaSession::is_detecting_progress`).
 
+A voice agent that places calls acts on the verdict in `sipral-agents`:
+`dial` joins the call to the agent for a person, and for a machine hangs up,
+connects at the beep to leave a message, or connects anyway, as the call's
+`MachinePolicy` says (`docs/24-voice-agents.md`, "Calls the agent places").
+
 ### The consent tone
 
 `ConsentTone` is a beep repeated while a call is being recorded — 1400 Hz,

@@ -122,6 +122,26 @@ The format is in [`integrations/agents/README.md`](../integrations/agents/)
 and [`examples/bridge.toml`](../integrations/agents/examples/bridge.toml)
 is a complete one.
 
+**Calls the agent places.** `sipral_agents.dial(stack, account, target,
+factory, policy=MachinePolicy(...))` places a call and lets the library
+decide who answered from the first seconds of the far end's audio
+(`Call.detect_progress`, `docs/05-media.md`, "Call progress and who
+answered"): a short greeting and then silence is a person, a greeting that
+runs on or has more words than a person answers with is a machine. A person
+is joined to the agent at once. For a machine the policy's `on_machine`
+says what happens: `"hangup"` (the default) hangs up without the agent ever
+connecting, `"message"` connects the agent at the machine's beep — when the
+machine starts recording — or after `beep_wait_s` with no beep, and
+`"agent"` connects it as for a person. `on_unknown` (`"agent"` or
+`"hangup"`) covers a verdict the detector could not reach, and the
+detector's own limits (`max_greeting_ms`, `max_words`,
+`silence_after_greeting_ms` and the rest) are set per policy. `dial` returns
+what became of the call: `"human"`, `"machine"`, `"message"`,
+`"machine_agent"`, `"unknown"`, `"unknown_hangup"` or `"no_answer"`. In the
+bridge's file the policy is an account's `[accounts.machine]` table, and
+`python -m sipral_agents bridge.toml --dial TARGET --from AOR` places one call
+from that account to its agent and prints the outcome.
+
 The adapters' WebSocket protocols were read again on 7 October 2026 from
 the pages under each section and ElevenLabs' Agents WebSocket reference
 (https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket),

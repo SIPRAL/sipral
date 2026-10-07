@@ -3770,6 +3770,17 @@ The facade carries the same as `UserAgent::probe_server` with
 `client.networkTest` and the client's `networkTest` event (TypeScript,
 Android and iOS halves).
 
+**Answering-machine detection on the calls an agent places.** No new entry
+point: `sipral_call_detect_progress` already decides who answered and hears
+the machine's beep (`SIPRAL_PROGRESS_KIND_ANSWERED_BY`, `_BEEP`), with every
+limit configurable per call (`docs/05-media.md`, "Call progress and who answered"). What is new
+is above the ABI, in `sipral-agents`: `dial` places a call and joins it to
+the agent only as its `MachinePolicy` says — on a machine, hang up (the
+default), connect at the beep so that a message is left, or connect anyway —
+and the bridge's configuration file carries the policy per account
+(`[accounts.machine]`, `python -m sipral_agents bridge.toml --dial TARGET
+--from AOR`; `docs/24-voice-agents.md`).
+
 **What a bridge between two calls needs.** Three gaps a bridge from a PBX to
 a voice agent ran into, filled without a new event kind:
 

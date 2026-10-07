@@ -26,8 +26,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="read the file and the environment it names, print the routes, and exit",
     )
+    parser.add_argument(
+        "--dial",
+        metavar="TARGET",
+        help="place one call to TARGET from the account --from names, then exit",
+    )
+    parser.add_argument(
+        "--from",
+        dest="caller",
+        metavar="AOR",
+        help="the account --dial places its call from",
+    )
     parser.add_argument("--quiet", action="store_true", help="log warnings and errors only")
     args = parser.parse_args(argv)
+    if (args.dial is None) != (args.caller is None):
+        parser.error("--dial and --from go together")
     logging.basicConfig(
         level=logging.WARNING if args.quiet else logging.INFO,
         format="%(asctime)s %(message)s",
@@ -43,6 +56,14 @@ def main(argv: list[str] | None = None) -> int:
             target = agent.options["uri"] if agent.service == "sip" else agent.service
             print(f"{account.aor} -> {agent.name} ({target})")
         return 0
+    if args.dial is not None:
+        try:
+            outcome = asyncio.run(_dial_once(settings, args.caller, args.dial))
+        except ConfigError as error:
+            print(f"sipral-agents: {error}", file=sys.stderr)
+            return 2
+        print(outcome)
+        return 0
     try:
         with contextlib.suppress(KeyboardInterrupt):
             asyncio.run(Bridge(settings).serve())
@@ -50,6 +71,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"sipral-agents: {error}", file=sys.stderr)
         return 2
     return 0
+
+
+async def _dial_once(settings, caller: str, target: str) -> str:
+    bridge = Bridge(settings)
+    try:
+        return await bridge.dial(caller, target)
+    finally:
+        if bridge.stack is not None:
+            bridge.stack.close()
 
 
 if __name__ == "__main__":

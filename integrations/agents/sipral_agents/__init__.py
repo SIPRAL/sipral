@@ -27,6 +27,7 @@ from .deepgram import DeepgramAgent
 from .elevenlabs import ElevenLabsAgent
 from .gemini_live import GeminiLive
 from .openai_realtime import OpenAIRealtime
+from .outbound import MachinePolicy, dial
 from .serve import ProviderFactory, serve, wait_for_media
 from .vapi import VapiAgent
 
@@ -41,6 +42,7 @@ __all__ = [
     "GeminiLive",
     "GoAway",
     "Interrupted",
+    "MachinePolicy",
     "OpenAIRealtime",
     "Provider",
     "ProviderError",
@@ -52,6 +54,7 @@ __all__ = [
     "Transcript",
     "TurnComplete",
     "VapiAgent",
+    "dial",
     "serve",
     "wait_for_media",
 ]

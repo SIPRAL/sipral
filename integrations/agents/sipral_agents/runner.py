@@ -4,7 +4,10 @@
 """The ready-to-run bridge: a TOML file names the SIP accounts to take
 calls on and, for each, the agent that answers them -- one of the WebSocket
 services or another SIP address -- and :class:`Bridge` serves them all from
-one stack. ``python -m sipral_agents bridge.toml`` runs it.
+one stack. ``python -m sipral_agents bridge.toml`` runs it, and
+``--dial TARGET --from AOR`` places one call from an account to its agent
+instead, deciding who answered as the account's ``[accounts.machine]``
+table says (:class:`sipral_agents.outbound.MachinePolicy`).
 
 The file holds no secret: an API key or a password is named by the
 environment variable that holds it (``api_key_env``,
@@ -30,6 +33,7 @@ from .deepgram import DeepgramAgent
 from .elevenlabs import ElevenLabsAgent
 from .gemini_live import GeminiLive
 from .openai_realtime import OpenAIRealtime
+from .outbound import DETECTOR_KEYS, MachinePolicy, dial
 from .serve import _run_call
 from .sip_bridge import BridgeConfig, BridgedCall, agent_server, agent_target, domain_of
 from .vapi import VapiAgent
@@ -91,6 +95,8 @@ class AccountSettings:
     auth_user: str | None = None
     auth_password: str | None = None
     display_name: str | None = None
+    #: What a call this account places does when a machine answers.
+    machine: MachinePolicy = field(default_factory=MachinePolicy)
 
 
 @dataclass
@@ -235,6 +241,7 @@ def _account(
             raise ConfigError(f"{where}: {key} is required")
     if options["agent"] not in agents:
         raise ConfigError(f"{where}: no [agents.{options['agent']}] for {options['aor']}")
+    options["machine"] = _machine(where, options.get("machine", {}))
     try:
         return AccountSettings(**options)
     except TypeError:
@@ -242,6 +249,25 @@ def _account(
         raise ConfigError(
             f"{where} has unknown keys: {', '.join(sorted(set(options) - known))}"
         ) from None
+
+
+def _machine(where: str, table: Any) -> MachinePolicy:
+    """An account's ``[accounts.machine]`` table: ``on_machine``,
+    ``on_unknown``, ``beep_wait_s`` and any of the detector's limits."""
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where}: machine must be a table")
+    unknown = set(table) - {"on_machine", "on_unknown", "beep_wait_s", *DETECTOR_KEYS}
+    if unknown:
+        raise ConfigError(f"{where} machine has unknown keys: {', '.join(sorted(unknown))}")
+    try:
+        return MachinePolicy(
+            on_machine=table.get("on_machine", "hangup"),
+            on_unknown=table.get("on_unknown", "agent"),
+            beep_wait_s=float(table.get("beep_wait_s", 20.0)),
+            detector={key: table[key] for key in DETECTOR_KEYS if key in table},
+        )
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{where} machine: {error}") from None
 
 
 def _tls_server_name(settings: Settings) -> str | None:
@@ -285,6 +311,8 @@ class Bridge:
         self.stack: Stack | None = None
         #: account handle -> (its settings, what answers its calls)
         self.routes: dict[int, tuple[AccountSettings, Callable[[Call, Any], Any]]] = {}
+        #: account handle -> the account itself, to place calls from
+        self.lines: dict[int, Account] = {}
         self._calls: set[asyncio.Task] = set()
 
     async def start(self) -> Stack:
@@ -316,6 +344,7 @@ class Bridge:
             else:
                 handler = self._service_handler(agent)
             self.routes[line.handle] = (account, handler)
+            self.lines[line.handle] = line
             if account.registrar:
                 line.register()
             _log.info("%s answers with %s (%s)", account.aor, agent.name, agent.service)
@@ -357,6 +386,34 @@ class Bridge:
             return BridgedCall(stack, cfg, call, event.message).run()
 
         return handle
+
+    async def dial(self, aor: str, target: str) -> str:
+        """Place one call from the account ``aor`` to ``target`` and join it
+        to that account's agent once its ``machine`` policy says so; returns
+        what :func:`sipral_agents.outbound.dial` says became of it. Only an
+        agent that is a WebSocket service places calls."""
+        if self.stack is None:
+            await self.start()
+        found = [
+            (handle, account)
+            for handle, (account, _handler) in self.routes.items()
+            if account.aor == aor
+        ]
+        if not found:
+            raise ConfigError(f"no account {aor} to call from")
+        handle, account = found[0]
+        agent = self.settings.agents[account.agent]
+        if agent.service == "sip":
+            raise ConfigError(f"{aor} hands its calls to a SIP agent, which places its own")
+        return await dial(
+            self.stack,
+            self.lines[handle],
+            target,
+            lambda _call: agent.provider(),
+            policy=account.machine,
+            media_host=self.settings.media_host,
+            backoff=self.settings.backoff,
+        )
 
     async def serve(self) -> None:
         try:
