@@ -3,28 +3,15 @@
 
 //! Telling STUN, DTLS and media apart on a socket that carries all three.
 //!
-//! One port carries the connectivity checks, the key exchange and the media,
-//! because opening a second one would need a second hole in the NAT that this
-//! whole component exists to avoid. The first octet is what separates them,
-//! and RFC 7983 §7 is the table: 0 to 3 is STUN, 20 to 63 is DTLS, 128 to 191
-//! is RTP or RTCP, and every other value belongs to something this tree does
-//! not speak.
+//! One port carries all three, since a second would need a second NAT
+//! hole. RFC 7983 §7 splits on the first octet: 0-3 STUN, 20-63 DTLS,
+//! 128-191 RTP/RTCP, anything else unknown. (STUN's top two bits are zero,
+//! RFC 8489 §5; RTP's are its version 2, RFC 3550 §5.1; DTLS content types
+//! lie between, RFC 9147 §4.)
 //!
-//! The ranges are not arbitrary. "The most significant 2 bits of every STUN
-//! message MUST be zeroes. This can be used to differentiate STUN packets
-//! from other protocols when STUN is multiplexed with other protocols on the
-//! same port" (RFC 8489 §5); RTP puts its version number, 2, in those same
-//! two bits (RFC 3550 §5.1); and a DTLS record begins with a content type,
-//! which RFC 9147 §4 draws from a range that starts above STUN's and ends
-//! below RTP's. Three protocols that were each designed to be recognisable
-//! beside the others, and one table that writes the result down.
-//!
-//! The first octet is the rule. The cookie and the four-byte alignment of the
-//! length field are corroboration, and RFC 8489 §5 offers both for exactly
-//! this: a datagram in STUN's range that has neither is not a STUN message
-//! anyone here should try to parse. Nothing corroborates the DTLS range,
-//! because a record's own header is checked by the layer that reads it and a
-//! datagram that is not a record is discarded there rather than here.
+//! For STUN the magic cookie and 4-byte length alignment corroborate the
+//! first octet (RFC 8489 §5). DTLS is not corroborated here: its own layer
+//! checks the record header.
 
 use crate::stun::{HEADER_LEN, MAGIC_COOKIE};
 

@@ -16,15 +16,9 @@
 //!
 //! # Where TLS goes
 //!
-//! TURN over TLS is TURN over TCP inside a record layer, and this workspace
-//! has no crypto library to build one with. So the seam is named rather than
-//! filled: a caller using `Transport::Tls` owns the handshake, the certificate
-//! checks and the record layer, and this crate never sees any of it. Bytes
-//! come out of the caller's TLS session and go into `StreamFraming::push`;
-//! bytes come out of the client and go into the caller's TLS session. Nothing
-//! else about the framing changes, because at this level nothing else does —
-//! which is exactly why the boundary is worth drawing here instead of
-//! inventing cryptography behind it.
+//! With `Transport::Tls` the caller owns the handshake, certificate checks
+//! and record layer: decrypted bytes go into `StreamFraming::push`, and the
+//! client's output goes into the caller's TLS session. Framing is unchanged.
 
 use core::fmt;
 

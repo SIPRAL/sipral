@@ -4,24 +4,15 @@
 //! TURN: the relay of last resort (RFC 8656, which obsoletes RFC 5766 and
 //! RFC 6156).
 //!
-//! Everything else in this crate tries to find a path between two endpoints.
-//! This is what happens when there is none: a server on the public Internet
-//! holds an address on our behalf, peers send to it, and it forwards. It costs
-//! a round trip and somebody's bandwidth, so it is the last thing tried and
-//! the first thing that works when nothing else does.
+//! A public server relays for us when no direct path exists; it costs a
+//! round trip and bandwidth, so it is tried last.
 //!
-//! Two things shape the code here more than the rest of the specification. The
-//! first is the four-byte channel header: a Send indication wraps every packet
-//! in thirty-six octets of STUN, which on a voice frame is more overhead than
-//! payload, so the client binds a channel and uses indications only until the
-//! binding is confirmed. The second is TCP and TLS, which exist for the
-//! corporate network that lets nothing out but 443 — the case this whole
-//! component was written for. The TLS handshake is the caller's; see
-//! [`framing`] for exactly where the seam is.
+//! Channels (4-byte header) replace Send indications (36 octets) once
+//! bound. TCP and TLS cover networks that only allow 443; the TLS session
+//! is the caller's (see [`framing`]).
 //!
-//! Sans-I/O, like the binding client: the caller supplies the time, supplies
-//! transaction ids drawn from a real random source, feeds in what arrived, and
-//! takes back what to send and when to be called again.
+//! Sans-I/O: the caller supplies time, random transaction ids and input,
+//! and takes back output and the next deadline.
 
 mod attribute;
 mod channel;

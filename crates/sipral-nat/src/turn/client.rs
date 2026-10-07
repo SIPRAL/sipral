@@ -646,15 +646,10 @@ impl TurnClient {
     /// Stop keeping a peer's address let through: its permission, and every
     /// channel bound to a port on it, are no longer refreshed.
     ///
-    /// For an allocation that outlives the reason a peer was let in — one
-    /// shared by the branches of a forked call, of which one has ended. RFC
-    /// 8656 gives no way to take either back ("there is no way to
-    /// explicitly delete a permission", §3.3; "no way to explicitly delete a
-    /// channel binding; the client must simply wait for it to time out",
-    /// §3.5), so both are left to lapse at the server, five and ten minutes
-    /// on. A channel keeps its number out of use until five minutes after it
-    /// lapses, as §12 asks of one that expires, and an answer to a
-    /// CreatePermission already on its way installs nothing. A later
+    /// For a shared allocation whose branch ended. Neither can be deleted
+    /// (RFC 8656 §3.3, §3.5), so both lapse at the server after five and ten
+    /// minutes; the channel number stays reserved five minutes more (§12).
+    /// An in-flight CreatePermission answer installs nothing. A later
     /// [`TurnClient::permit`] or [`TurnClient::bind_channel`] asks again.
     pub fn withdraw(&mut self, peer: IpAddr, now: Instant) {
         self.permissions.retain(|entry| entry.peer != peer);
@@ -1386,20 +1381,12 @@ impl TurnClient {
     /// A 438 is answered once per nonce: a second one naming a nonce we have
     /// already used is a server that will never be satisfied.
     ///
-    /// A 401 is different: "the client MUST NOT perform this retry if it is
-    /// not changing the USERNAME, USERHASH, REALM, or its associated
-    /// password from the previous attempt" (RFC 8489 §9.2.5). A request
-    /// that already carried MESSAGE-INTEGRITY — a Refresh or any other
-    /// request sent once an allocation is established — was already
-    /// answering for the realm named in `self.auth`; a 401 naming that same
-    /// realm again is the server saying those credentials are no longer
-    /// good (expired ephemeral credentials are the common production
-    /// cause), not an invitation to resend them unchanged, so it ends the
-    /// transaction at once. A 401 naming a *different* realm is a change of
-    /// realm and, with it, of the derived password, so it still gets its
-    /// one retry. An unauthenticated request's first challenge is
-    /// unaffected either way, since there was no previous attempt to have
-    /// left unchanged.
+    /// A 401 may only be retried with changed credentials (RFC 8489
+    /// §9.2.5). So for a request that already carried MESSAGE-INTEGRITY, a
+    /// 401 for the same realm means the credentials expired (common with
+    /// ephemeral ones) and ends the transaction; a different realm changes
+    /// the key and gets one retry. An unauthenticated first request is
+    /// unaffected.
     fn answerable(
         &self,
         index: usize,

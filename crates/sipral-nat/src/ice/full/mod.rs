@@ -107,19 +107,12 @@ const MAX_EARLY: usize = 32;
 /// The most datagrams an agent holds for [`IceAgent::poll_transmit`], and the
 /// most answers the facade's lite end holds for the same.
 ///
-/// Every Binding request that reaches a candidate is answered, a stranger's
-/// unsigned one included (a 400 or a 401, RFC 8445 §7.3), so without a
-/// ceiling the queue is as long as the flood an application that is slow to
-/// drain it lets in. Past this many, the datagram being queued is dropped and
-/// counted in [`IceAgent::transmits_dropped`]; what is already queued stays
-/// and goes out in order. The new one gives way rather than the oldest
-/// because every datagram here is a STUN transaction's or is sent again
-/// later anyway: a check the peer gets no answer to comes again, the agent's
-/// own checks are retransmitted on their timer (RFC 8489 §6.2.1), and a
-/// consent check or a keepalive, sent once, is followed by the next one.
-/// Two hundred and fifty-six is more than one pass of the agent queues of
-/// its own at the default pair limit, so an application that drains after
-/// every call, as it is told to, never reaches it.
+/// Every Binding request is answered, a stranger's included (RFC 8445 §7.3),
+/// so the queue needs a ceiling. Past it the new datagram is dropped and
+/// counted in [`IceAgent::transmits_dropped`]: everything here is
+/// retransmitted or superseded anyway (RFC 8489 §6.2.1). 256 exceeds one
+/// pass at the default pair limit, so a caller that drains after every call
+/// never hits it.
 ///
 /// A stranger's refusals never fill it: they stop at [`REFUSAL_CEILING`],
 /// and the rest is kept for the call's own traffic.
@@ -129,13 +122,9 @@ pub const TRANSMIT_CEILING: usize = 256;
 /// authentication may take — the unsigned 400s and 401s anybody who can reach
 /// the port can have written.
 ///
-/// Past it such a refusal is dropped and counted in
-/// [`IceAgent::transmits_dropped`], while the other half stays open to what
-/// the call cannot do without: the answers to the peer's checks, which carry
-/// its nomination and its consent, and the agent's own checks and consent
-/// requests. Without the split, a flood that arrived while the application
-/// was slow to drain took every slot, and the call's own datagrams were the
-/// ones dropped until it did — for a consent check, sent once, a lost one.
+/// Past it such refusals are dropped and counted in
+/// [`IceAgent::transmits_dropped`], keeping the other half for the call's
+/// own checks, answers and consent, which a flood would otherwise crowd out.
 pub const REFUSAL_CEILING: usize = TRANSMIT_CEILING / 2;
 
 /// A TURN server to gather a relayed candidate from.
@@ -189,17 +178,11 @@ pub struct IceConfig {
     /// Fails — the timer of RFC 8863, whose whole subject is that an agent
     /// with no pair left is not an agent that has failed.
     ///
-    /// Two situations reach it, and neither is rare. A peer whose candidates
-    /// were all unusable — a different address family, an FQDN, TCP only —
-    /// leaves a checklist with no pairs at all. A checklist whose pairs have
-    /// all failed is the same thing one step later. In both, a peer behind a
-    /// NAT can still arrive with a check that forms a peer-reflexive pair and
-    /// connects the call (§7.3.1.3), so failing at once would throw away a
-    /// call that was about to work.
+    /// Reached when no peer candidate was usable or all pairs failed; a
+    /// peer behind a NAT may still form a peer-reflexive pair (§7.3.1.3).
     ///
-    /// The default is [`crate::turn::DEFAULT_TI`], the life of one whole STUN
-    /// transaction: long enough that a peer whose first check was lost has
-    /// retransmitted every time it is going to, and no longer.
+    /// Default [`crate::turn::DEFAULT_TI`], one full STUN transaction: enough
+    /// for every retransmission of a lost first check.
     pub patience: Duration,
 }
 
@@ -1007,13 +990,10 @@ impl IceAgent {
     /// §4.4: "ICE processing continues as if the subsequent offer had never
     /// been made").
     ///
-    /// The peer starts its checks under them as soon as it has answered, and
-    /// those can arrive before its answer does. Until the restart is taken
-    /// up, a check signed with them is kept rather than refused, the newest
-    /// thirty-two of them, and answered — and checked back on — when
-    /// [`Self::restart`] takes up the same credentials and the peer's side
-    /// of the exchange arrives through [`Self::set_remote`]. A restart with
-    /// other credentials, or `None` here, drops what was kept.
+    /// The peer's checks under them can beat its answer here. Until the
+    /// restart, the newest 32 such checks are kept, then answered and
+    /// triggered when [`Self::restart`] uses the same credentials and
+    /// [`Self::set_remote`] arrives. Other credentials, or `None`, drop them.
     pub fn expect_restart(&mut self, pending: Option<Credentials>) {
         if self.pending != pending {
             self.awaiting.clear();
@@ -1346,11 +1326,8 @@ impl IceAgent {
     /// highest-priority valid pair — asked without handing over the data and
     /// without counting as traffic for the keepalive timer.
     ///
-    /// It exists for a caller whose producer borrows its own buffer: one that
-    /// cannot find out there is nowhere to send by trying, because by then it
-    /// has already built a frame it will have to throw away, or taken a
-    /// handshake record out of a flight it cannot put back. Asking first is
-    /// what lets "there is no route" be a precondition rather than a failure.
+    /// For producers that cannot undo building a frame or taking a record:
+    /// ask first, so "no route" is a precondition, not a failure.
     ///
     /// # Errors
     ///

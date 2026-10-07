@@ -129,21 +129,13 @@ pub(super) fn remote_ufrag<'m>(username: &'m [u8], local_ufrag: &[u8]) -> Option
 /// request naming the role this agent does not hold — ICE-CONTROLLING to a
 /// controlled agent, or the reverse — is no conflict and changes nothing.
 ///
-/// `lite` is whether the agent answering is a lite one, and for a lite agent
-/// neither half of the arithmetic is a real conflict. A Binding request only
-/// ever reaches a lite agent from a full peer — two lite agents exchange no
-/// checks (§6.1.1) — and §6.1.1 makes "one full, one lite" the full agent's
-/// controlling role unconditionally. So an ICE-CONTROLLED request naming a
-/// lite agent's controlled role is always answered with a 487 that keeps
-/// that role, and an ICE-CONTROLLING request reaching a lite agent that
-/// started controlling — because the description it read said the peer was
-/// lite too — always moves it to controlled and is answered, whatever the
-/// tiebreaker says: the peer that sent it is the one doing the checks and
-/// the nominating, and a lite agent that kept a role it can never act on,
-/// sending no checks and nominating nothing, would leave the call with no
-/// path about half the time. A full agent passes `false`: either side of a
-/// full-full conflict is the real ambiguity the arithmetic is there to
-/// settle.
+/// For a `lite` agent there is never a real conflict: only a full peer
+/// sends checks, and §6.1.1 makes it controlling. So ICE-CONTROLLED against
+/// a controlled lite agent always gets a 487 and the role stays; and
+/// ICE-CONTROLLING against a lite agent that started controlling (it thought
+/// the peer lite) always moves it to controlled, whatever the tiebreaker.
+/// Otherwise the lite agent could hold a role it cannot act on and the call
+/// would find no path about half the time. Full agents pass `false`.
 pub(super) fn resolve_role(
     role: &mut Role,
     tiebreaker: u64,

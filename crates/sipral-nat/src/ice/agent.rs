@@ -144,17 +144,12 @@ impl LiteAgent {
 
     /// Start a new ICE session under new credentials (RFC 8445 §9).
     ///
-    /// A lite agent restarts because its peer did: RFC 8839 §4.4.2.1 makes
-    /// an answerer that accepts a restart "change the SDP "ice-pwd" and
-    /// "ice-ufrag" attribute values", and these are the new ones. The pair
-    /// the old session selected stays selected — §9 has media keep flowing on
-    /// it until the new session selects one — so the old credentials are
-    /// kept too, and a check signed with them is still answered: that is the
-    /// peer's consent check on the pair still in use (RFC 7675), and refusing
-    /// it would withdraw consent from the audio the restart was meant to
-    /// keep. They are forgotten the moment the peer nominates under the new
-    /// ones. A nomination under the old credentials is answered and not
-    /// followed: that session is over.
+    /// A lite agent restarts when its peer does (RFC 8839 §4.4.2.1); these
+    /// are the new credentials. The old pair stays selected until the new
+    /// session selects (§9), so checks under the old credentials are still
+    /// answered: they are the peer's consent checks (RFC 7675). The old
+    /// credentials go once the peer nominates under the new ones; a
+    /// nomination under the old ones is answered but not followed.
     pub fn restart(&mut self, local_ufrag: String, local_pwd: String) {
         let old_ufrag = core::mem::replace(&mut self.local_ufrag, local_ufrag);
         let old_pwd = core::mem::replace(&mut self.local_pwd, local_pwd);
@@ -245,24 +240,8 @@ impl LiteAgent {
                 .map_or_else(String::new, |(_, pwd)| pwd.clone())
         };
 
-        // Past this point the request is authenticated, so a response may be
-        // signed with the same credentials the peer just proved it holds.
-        //
-        // A Binding request only ever reaches a lite agent's answering side
-        // when the peer is a full agent (RFC 8445 §6.1.1: two lite agents
-        // exchange no connectivity checks at all, so a lite peer never sends
-        // one) — and §6.1.1 makes a full peer's role controlling
-        // unconditionally, never controlled. An ICE-CONTROLLED request is
-        // therefore never a genuine role conflict here, only a full peer
-        // that has it backwards (or is spoofing one): the tiebreaker
-        // arithmetic in §7.3.1.1 is not run in this agent's favour, so it
-        // cannot move this agent to the controlling role roughly half the
-        // time, one it can never act on (no candidate gathering beyond
-        // host) and that would leave the call unable to find a path. The
-        // same holds the other way round: an ICE-CONTROLLING request to this
-        // agent in the controlling role it took believing the peer lite too
-        // is that full peer, and this agent yields to it rather than let the
-        // tiebreaker keep it in charge of checks it never sends.
+        // Authenticated from here, so the response may be signed. The
+        // lite-side role rules are explained at `server::resolve_role`.
         if server::resolve_role(&mut self.role, self.tiebreaker, &message, true) {
             return server::error_signed(
                 &message,
@@ -775,16 +754,8 @@ mod tests {
 
     #[test]
     fn a_controlled_lite_agent_never_switches_to_controlling_whatever_the_tiebreaker_says() {
-        // a Binding request only ever reaches this code from a full peer
-        // (RFC 8445 SS8.2: two lite agents exchange none), and SS6.1.1 makes
-        // that peer's role controlling unconditionally — never controlled —
-        // so ICE-CONTROLLED naming this agent's role is not the genuine
-        // ambiguity SS7.3.1.1's arithmetic exists to settle. Before this
-        // defence, a tiebreaker (100, fixed by `agent()`) that happened to
-        // be "larger than or equal to" the value the request named would
-        // still flip this agent to a role it can never act on — no
-        // candidate gathering beyond host — leaving the call unable to find
-        // a path about half the time a full peer got the roles backwards.
+        // a full peer is always controlling (RFC 8445 §6.1.1), so the
+        // tiebreaker (100, from `agent()`) must not flip this lite agent
         for theirs in [0, 50, 100, u64::MAX] {
             let mut agent = agent(Role::Controlled);
             let datagram = check(|builder| {

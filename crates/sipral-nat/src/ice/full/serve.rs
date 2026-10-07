@@ -155,15 +155,10 @@ impl IceAgent {
     /// told of offered ([`IceAgent::expect_restart`]), for the moment the
     /// restart is taken up.
     ///
-    /// The peer starts checking under them as soon as it has sent its answer
-    /// — "the answerer [...] would begin connectivity checks" (RFC 8839
-    /// §4.4.2.1, §7.1) — and its first checks can reach this end before the
-    /// answer does. Answered under the credentials still in force they are
-    /// an unsigned 401 (RFC 8489 §9.1.3: an unknown USERNAME), which the
-    /// peer's agent discards and retransmits after, costing the new session
-    /// up to one RTO before it has a pair. Kept, they are answered — and
-    /// checked back on — the moment the restart is followed, well inside the
-    /// peer's transaction for them.
+    /// The peer's first checks (RFC 8839 §4.4.2.1, §7.1) can beat its
+    /// answer. Refusing them (an unsigned 401, RFC 8489 §9.1.3) would cost up
+    /// to one RTO; kept, they are answered as soon as the restart is taken
+    /// up, inside the peer's transaction.
     pub(super) fn awaits_restart(
         &mut self,
         via: usize,

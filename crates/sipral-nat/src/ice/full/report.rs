@@ -3,16 +3,10 @@
 
 //! What became of every candidate pair and every relay an agent tried.
 //!
-//! A call that ends up relayed when the site expected a direct path, or that
-//! finds no path at all, is a support call, and the answer to it is a list:
-//! each pair the checklist held, and which of the things RFC 8445 lets happen
-//! to a pair happened to it — its check went unanswered, the peer refused it,
-//! the answer came back from somewhere else, the relay would not let the peer
-//! through, or it worked and another pair was chosen over it. The list is
-//! written down as each of those happens, from the transaction that decided
-//! it, rather than worked out afterwards from the checklist: §8.1.2 takes the
-//! losing pairs off the checklist the moment a pair is selected, so by the
-//! time anyone asks, most of what lost is no longer there to look at.
+//! For support: each pair and what happened to it (unanswered, refused,
+//! answered from elsewhere, blocked by the relay, or worked but lost).
+//! Recorded as it happens, since §8.1.2 removes losing pairs from the
+//! checklist at selection.
 
 use std::net::SocketAddr;
 

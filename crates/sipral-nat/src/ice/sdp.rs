@@ -161,13 +161,8 @@ fn rtcp_destination(media: &MediaDescription, rtp: SocketAddr) -> Option<SocketA
 /// What the peer said about ICE for one data stream, read out of its offer
 /// or answer (RFC 8839 §5).
 ///
-/// [`Debug`] leaves the password out, the way [`Credentials`] does on this
-/// end's own. It is the same secret seen from the other side: whoever holds
-/// it can sign a connectivity check the peer will believe, and a check the
-/// peer believes is how the media gets pointed somewhere. This type derived
-/// its `Debug` while `Credentials` wrote one by hand, which is the usual
-/// shape of this mistake — one end is remembered and the other is not, and
-/// the half that leaks is the half that came in off the network.
+/// [`Debug`] omits the password, as for [`Credentials`]: with it anyone can
+/// sign checks the peer believes and redirect the media.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RemoteIce {
     /// The username fragment this stream's checks must be signed against.
@@ -328,21 +323,14 @@ mod tests {
 
     /// What declaring ICE adds to an offer, in bytes on the wire.
     ///
-    /// Measured rather than estimated, and pinned here rather than written
-    /// into a document that would stop being true. A request that outgrew the
-    /// path and was dropped by a NAT is the most expensive failure this
-    /// project has a record of — silent, and two days to find — and the
-    /// attributes below were four hundred of the bytes that did it, against a
-    /// peer that did not speak ICE at all. `docs/06-nat.md` quotes this test.
+    /// Measured and pinned here (quoted by `docs/06-nat.md`): an oversized
+    /// request silently dropped by a NAT once cost two days, and these
+    /// attributes were 400 of its bytes.
     ///
-    /// One address and one component is the floor: 143 bytes, fixed
-    /// attributes and one candidate line together (`docs/06-nat.md`). A
-    /// laptop with Wi-Fi, Ethernet and a VPN, offering both components and a
-    /// reflexive candidate for each, adds eight more candidate lines to that
-    /// floor — not eight more copies of the fixed attributes, which are
-    /// written once regardless of how many candidates follow. What a whole
-    /// INVITE with the facade's own candidates comes to is measured beside
-    /// the facade, in `crates/sipral/src/tests.rs`.
+    /// Floor: 143 bytes for one address and one component. Three interfaces
+    /// with both components and reflexive candidates add eight candidate
+    /// lines, not more fixed attributes. Whole INVITEs are measured in
+    /// `crates/sipral/src/tests.rs`.
     #[test]
     fn what_declaring_ice_costs_on_the_wire() {
         // `n` identical candidates, so every candidate line this writes is

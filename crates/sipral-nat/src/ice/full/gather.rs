@@ -272,23 +272,14 @@ impl IceAgent {
     /// with `server` `None`, from somewhere that is not a server at all: a
     /// one-to-one NAT whose public address is configured rather than asked.
     ///
-    /// What RFC 8445 §5.1.1.2 describes is a Binding transaction from the
-    /// base to a STUN server, and nothing in it depends on which component
-    /// ran that transaction. An application that already maps its sockets —
-    /// because the same address goes into `c=` and `m=` for a peer that does
-    /// not do ICE at all — would otherwise have the agent ask the same server
-    /// the same question a second time, and wait for the answer before an
-    /// offer could be written. This is how the answer it already has becomes
-    /// a candidate instead, and how an offer stays a single pass of work.
+    /// Lets an application that already mapped its socket (e.g. for `c=`)
+    /// reuse the answer instead of the agent asking again (RFC 8445
+    /// §5.1.1.2 does not care who ran the transaction).
     ///
-    /// The candidate is built exactly as one this agent gathered itself:
-    /// the priority from RFC 8445 §5.1.2 with a local preference below every
-    /// server the configuration names, the foundation from the type, the
-    /// base's address and the server's (§5.1.1.3), and nothing at all when it
-    /// is redundant with a candidate already held (§5.1.3) — which is what a
-    /// host with no NAT in front of it gets back from every server it asks.
-    /// Keeping the mapping alive until ICE concludes is the application's,
-    /// since it owns the transaction that made it.
+    /// Built as if gathered here: priority per §5.1.2 with a local
+    /// preference below every configured server, foundation per §5.1.1.3,
+    /// and dropped if redundant (§5.1.3), as it is with no NAT. Keeping the
+    /// mapping alive is the application's.
     ///
     /// # Errors
     ///
@@ -334,24 +325,15 @@ impl IceAgent {
     /// A relayed candidate on an allocation the application made itself, from
     /// `base` on the TURN server at `server`, before the agent existed.
     ///
-    /// The same reason [`IceAgent::add_server_reflexive`] exists, one server
-    /// further: an Allocate is two round trips (the first one bare, answered
-    /// 401, RFC 8489 §9.2), and an agent that ran them itself would hold the
-    /// offer until they came back. An application that allocates while the
-    /// user is still dialling has the answer when the offer is written, and
-    /// this is how it becomes a candidate — RFC 8445 §5.1.1.2's relayed
-    /// candidate, its base the relayed address itself, and beside it the
-    /// server-reflexive candidate the response's XOR-MAPPED-ADDRESS names,
-    /// unless that one is redundant (§5.1.3).
+    /// Like [`IceAgent::add_server_reflexive`]: an Allocate takes two round
+    /// trips (RFC 8489 §9.2), which an application can run while the user
+    /// dials. Adds the relayed candidate (§5.1.1.2) and, unless redundant
+    /// (§5.1.3), the server-reflexive one from XOR-MAPPED-ADDRESS.
     ///
-    /// From here on the allocation is the agent's, exactly as one it gathered
-    /// itself: it installs the permissions the peer's candidates need, binds
-    /// channels, keeps the NAT binding towards the server alive with Binding
-    /// indications, refreshes the allocation before it lapses, and gives it
-    /// back when ICE concludes on another pair (§8.3.1) or when
-    /// [`IceAgent::release_relays`] is called. Events the client queued before
-    /// it was handed over are history by then and are dropped with it; what
-    /// it still has to send is sent.
+    /// The agent then owns the allocation: permissions, channels, NAT
+    /// keepalives, refreshes, and release when ICE concludes elsewhere
+    /// (§8.3.1) or on [`IceAgent::release_relays`]. Events the client queued
+    /// earlier are dropped; pending transmits are sent.
     ///
     /// # Errors
     ///
@@ -380,20 +362,13 @@ impl IceAgent {
     /// agents of the other branches of a forked call, which were all offered
     /// the one relayed candidate (RFC 8839 §7, RFC 8656 §1).
     ///
-    /// The candidate is the one [`IceAgent::add_relayed`] makes of the same
-    /// allocation, with the same priority and foundation, so an agent built
-    /// for each branch from the same host addresses advertises what the
-    /// offer did. From here on this agent is one of the allocation's holders:
-    /// it asks the server to let its own peer's candidates through and binds
-    /// a channel for its own selected pair, hears what the server relays from
-    /// its own peer, and keeps the allocation and the NAT binding under it
-    /// alive as a holder of its own would. Letting go of it — ICE concluding
-    /// on a pair that does not use it (RFC 8445 §8.3.1), or
-    /// [`IceAgent::release_relays`] — gives it back to the server only when
-    /// no other holder is left: "Once all ICE sessions have ceased using a
-    /// given local candidate [...] the agent can free that candidate". Until
-    /// then it only stops keeping the peers no other holder asked for let
-    /// through.
+    /// Same candidate, priority and foundation as [`IceAgent::add_relayed`],
+    /// so each branch advertises what the offer did. This agent becomes one
+    /// holder: it permits and binds for its own peer, hears its own peer's
+    /// traffic and keeps the allocation alive. Releasing it (§8.3.1, or
+    /// [`IceAgent::release_relays`]) frees it at the server only when no
+    /// holder is left ("Once all ICE sessions have ceased using a given local
+    /// candidate [...]").
     ///
     /// # Errors
     ///
@@ -461,12 +436,9 @@ impl IceAgent {
     /// ICE sessions still hold ([`IceAgent::add_shared_relay`]), let go of it
     /// and leave it to them.
     ///
-    /// A relay left to lapse holds a port and the account's quota on the
-    /// server for up to ten minutes after the call that used it is gone, and
-    /// a user whose quota is a handful of allocations cannot place the next
-    /// call through it until then. The requests leave through
-    /// [`IceAgent::poll_transmit`] like everything else; nobody waits for the
-    /// answers.
+    /// A lapsing relay would hold the account's quota for up to ten minutes.
+    /// Requests leave through [`IceAgent::poll_transmit`]; answers are not
+    /// awaited.
     pub fn release_relays(&mut self, now: Instant) {
         for relay in 0..self.relays.len() {
             let live = self.relays.get(relay).is_some_and(|entry| {
@@ -488,15 +460,10 @@ impl IceAgent {
     /// Hand back every allocation this agent holds and has not given back,
     /// each with the server it is on, for an agent that will never run.
     ///
-    /// The other way out of [`IceAgent::add_relayed`]: an application that
-    /// wrote an offer around a relay and then had it refused before it left —
-    /// the call it described never existed, so there is no peer, no check and
-    /// no permission to undo — gets the allocation back whole, still live on
-    /// its server, for the next call on the same socket. Whatever the agent
-    /// had queued for the server is dropped with it; the client's own
-    /// refresh timer is untouched, and keeps the allocation from lapsing once
-    /// its new owner drives it. An allocation other agents still hold stays
-    /// theirs, and is not among what comes back.
+    /// The undo of [`IceAgent::add_relayed`] for an offer that never went
+    /// out: allocations come back live for the next call on the socket.
+    /// Queued server traffic is dropped; the refresh timer is untouched.
+    /// Allocations other agents still hold are not returned.
     #[must_use]
     pub fn into_relays(self) -> Vec<(SocketAddr, TurnClient)> {
         self.relays

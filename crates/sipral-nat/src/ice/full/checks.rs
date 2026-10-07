@@ -951,19 +951,10 @@ impl IceAgent {
     /// §7.2.5.4: a checklist whose pairs have all finished without a valid
     /// pair for every component has Failed — but not the instant they finish.
     ///
-    /// RFC 8863 is the whole of the difference. A checklist with nothing left
-    /// to check is not a checklist that has failed: a peer behind a NAT may
-    /// still arrive with a check that forms a peer-reflexive pair and carries
-    /// the call (§7.3.1.3), and the commonest reason there is nothing left to
-    /// check is that the peer has not got here yet. So the agent waits
-    /// [`IceConfig::patience`] from the moment its checklist was formed, and
-    /// only then says so.
-    ///
-    /// A checklist that never had a pair at all goes through this same door.
-    /// It used to leave by a different one — an early return that meant such
-    /// a checklist stayed Running for the life of the call, with `deadline()`
-    /// answering `None`, so a correct caller was entitled to sleep for ever
-    /// on a call that was never going to connect.
+    /// Per RFC 8863, the agent waits [`IceConfig::patience`] from checklist
+    /// formation first: a peer behind a NAT may still arrive and form a
+    /// peer-reflexive pair (§7.3.1.3). A checklist that never had a pair takes
+    /// the same path, so it cannot stay Running with no deadline.
     pub(super) fn update_checklist(&mut self, stream: usize, now: Instant) {
         let Some(entry) = self.streams.get(stream) else {
             return;

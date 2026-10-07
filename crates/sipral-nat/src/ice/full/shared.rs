@@ -3,29 +3,14 @@
 
 //! One TURN allocation that several ICE sessions use at once.
 //!
-//! A forked INVITE carries one offer to every branch, with one relayed
-//! candidate in it, and one allocation stands behind that candidate. It
-//! cannot be one per branch: the server knows an allocation by the addresses
-//! it runs between, and "If the client wishes to allocate a second relayed
-//! transport address, it must create a second allocation using a different
-//! 5-tuple" (RFC 8656 §3.2), while the offer named one socket. It does not
-//! need to be either: "Since SIP supports forking, TURN supports multiple
-//! peers per relayed transport address" (RFC 8656 §1), and RFC 8839 §7 runs
-//! each answer as "an independent offer/answer exchange, with its own set of
-//! local candidates, pairs, checklists, states". So every branch's agent
-//! holds the one allocation as a relayed candidate of its own, asks it for
-//! the permissions and the channels its own peer needs, and hears the
-//! relayed traffic of its own peer; and the allocation is given back only
-//! when the last of them lets go of it — "Once all ICE sessions have ceased
-//! using a given local candidate (a candidate may be used by multiple ICE
-//! sessions, e.g., in forking scenarios), the agent can free that
-//! candidate" (RFC 8445 §8.3.1).
+//! A forked offer has one relayed candidate, so one allocation (a second
+//! needs a different 5-tuple, RFC 8656 §3.2), and TURN supports several peers
+//! per relayed address (§1). Each branch is its own ICE session (RFC 8839
+//! §7) holding the allocation as its own candidate, with its own permissions
+//! and channels; it is freed when the last holder lets go (RFC 8445 §8.3.1).
 //!
-//! The client sits behind a lock because each branch's agent runs on the
-//! thread that carries that branch's audio. Everything the client reports is
-//! handed to every agent that holds it, each through a queue of its own, so
-//! that the agent that happened to take the server's answer is not the only
-//! one to hear that a permission is in or that the allocation is gone.
+//! The client is behind a lock since branches run on different audio
+//! threads, and every event goes to every holder through its own queue.
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};

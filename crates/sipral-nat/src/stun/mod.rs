@@ -11,10 +11,8 @@
 //! module because they are ordinary attributes that this crate's later layers
 //! read and write.
 //!
-//! What is deliberately absent is NAT type classification. RFC 5389 removed it
-//! when it obsoleted RFC 3489, because real NATs do not fall into the classic
-//! types and the algorithm gave wrong answers on the devices that were
-//! actually deployed.
+//! No NAT type classification: RFC 5389 dropped it because real NATs do not
+//! fit the classic types.
 
 pub(crate) mod address;
 mod attribute;
