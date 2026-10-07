@@ -3,25 +3,11 @@
 
 //! Reliable provisional responses (RFC 3262), both ways round.
 //!
-//! A 180 Ringing is a datagram like any other, and on UDP it can be lost. That
-//! matters more than it sounds: an offer or an answer can travel in a 1xx, and
-//! a carrier that mandates `100rel` will not complete a call without one. So
-//! the response is numbered, retransmitted until it is acknowledged, and the
-//! acknowledgement is a request of its own — PRACK — because unlike an ACK it
-//! has to be able to cross a proxy that predates this extension.
-//!
-//! Both ends keep a little state, and the two are not symmetric.
-//!
-//! The end that **sends** one holds the bytes and a doubling timer, and refuses
-//! to send a second before the first is acknowledged: §3 gives the first
-//! response special treatment because it carries the initial sequence number,
-//! and without an acknowledgement there is no way to know the two arrived in
-//! order.
-//!
-//! The end that **receives** one holds the highest number it has seen in
-//! order. §4: a response whose `RSeq` is not exactly one higher "MUST NOT be
-//! acknowledged with a PRACK, and MUST NOT be processed further", which is
-//! what turns an unordered transport into an ordered stream of them.
+//! A 1xx can carry an offer or answer and is lost on UDP like any datagram,
+//! so it is numbered, retransmitted, and acknowledged by PRACK (a request,
+//! so it crosses proxies that predate the extension). The sender holds the
+//! bytes and a timer and sends no second one before the first is acked (§3).
+//! The receiver accepts only `RSeq` exactly one higher (§4).
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -34,68 +20,45 @@ use crate::transaction::{DialogId, InviteServer, Raw, TimerHandle, TransactionId
 pub(super) const OPTION_100REL: &str = "100rel";
 
 /// The largest `RSeq` a first reliable provisional response may carry.
-///
-/// §3: "The value of the header field for the first reliable provisional
-/// response in a transaction MUST be between 1 and 2**31 - 1." The ceiling is
-/// there so that the series can climb by one for the life of the transaction
-/// without ever wrapping, which §3 forbids outright.
+/// §3: "between 1 and 2**31 - 1", so the series never wraps.
 pub(super) const FIRST_RSEQ_CEILING: u32 = i32::MAX as u32;
 
 /// What the end that sent a reliable provisional response has to remember.
 #[derive(Debug)]
 pub(super) struct Sent {
-    /// The transaction it was sent on, so that giving up can refuse the call.
     pub(super) invite: TransactionId<InviteServer>,
-    /// The bytes, retransmitted unchanged.
     pub(super) message: OwnedMessage,
-    /// How many times it has gone out, which is what the doubling counts.
     pub(super) attempt: u32,
     /// 64·T1 after the first one: "the UAS SHOULD reject the original request
     /// with a 5xx response".
     pub(super) give_up_at: Instant,
-    /// The scheduled retransmission, so that a PRACK can take it down.
     pub(super) timer: Option<TimerHandle>,
-    /// Whether a PRACK matched it and was not refused: §3's "remove it from
-    /// the list of unacknowledged provisional responses". Kept rather than
-    /// forgotten until the INVITE or the dialog ends, because a PRACK the
-    /// layer above refuses under RFC 3261 §8.2 — a `Require` it cannot
-    /// honour, a body it cannot read, an offer it will not take — has
-    /// acknowledged nothing, and the retry that follows has to find it again
-    /// ([`super::Endpoint::refuse_prack`]).
+    /// Whether a PRACK matched it (§3). Kept until the INVITE or dialog ends,
+    /// because a PRACK refused under RFC 3261 §8.2 acknowledged nothing and the
+    /// retry must find it again ([`super::Endpoint::refuse_prack`]).
     pub(super) acknowledged: bool,
-    /// Whether the INVITE has had its final response, after which §3 has
-    /// the retransmissions stop for good: "it SHOULD NOT continue to
-    /// retransmit the unacknowledged reliable provisional responses".
+    /// INVITE answered with a final response: §3 stops retransmissions.
     pub(super) quiet: bool,
 }
 
 /// One reliable provisional response, on whichever side of it we are.
 #[derive(Debug)]
 pub(super) struct Reliable {
-    /// The dialog it belongs to. A fork numbers each branch separately, so the
-    /// number alone does not identify one.
+    /// A fork numbers each branch separately, so the dialog is part of the key.
     pub(super) dialog: DialogId,
-    /// Its `RSeq`.
     pub(super) rseq: u32,
-    /// The `CSeq` number of the request it answers, which `RAck` copies.
+    /// The `CSeq` number of the request it answers, copied into `RAck`.
     pub(super) cseq: u32,
-    /// That request's method, which `RAck` copies too. §7.2: "The method name
-    /// in the RAck header is case sensitive."
+    /// That request's method. §7.2: "case sensitive".
     pub(super) method: Box<[u8]>,
-    /// Where its PRACK, or its retransmissions, go.
     pub(super) flow: Flow,
     /// Present on the end that sent it.
     pub(super) sent: Option<Sent>,
 }
 
 impl Reliable {
-    /// Whether a PRACK's `RAck` names this response.
-    ///
-    /// §3: "A matching PRACK is defined as one within the same dialog as the
-    /// response, and whose method, CSeq-num, and response-num in the RAck
-    /// header field match, respectively, the method from the CSeq, the
-    /// sequence number from the CSeq, and the sequence number from the RSeq of
-    /// the reliable provisional response."
+    /// Whether a PRACK's `RAck` names this response (§3: same dialog, method,
+    /// CSeq number and RSeq).
     fn answered_by(&self, dialog: DialogId, rack: &RAck<'_>) -> bool {
         self.sent.as_ref().is_none_or(|sent| !sent.acknowledged)
             && self.dialog == dialog
@@ -109,24 +72,14 @@ impl Reliable {
 #[derive(Debug, Default)]
 pub(super) struct Reliables {
     entries: Slab<Reliable>,
-    /// Every entry, by the dialog it belongs to.
-    ///
-    /// Ending a dialog, matching a PRACK and refusing a call whose response
-    /// went unacknowledged each ask about one dialog or one INVITE. Answered
-    /// by visiting every entry, a burst of calls given up on at the same
-    /// instant cost the square of their number.
+    /// Every entry, by dialog. Indexed so a burst of ended calls is not
+    /// quadratic.
     of_dialog: HashMap<DialogId, Vec<Raw>>,
     /// Every entry this end sent, by the INVITE it answers.
     of_invite: HashMap<TransactionId<InviteServer>, Vec<Raw>>,
-    /// The highest `RSeq` received in order, per dialog.
-    ///
-    /// §4 keeps this "for the initial request", which predates a clean answer
-    /// for forking: one INVITE that a proxy forks is answered by several user
-    /// agents, each numbering its own series from its own transaction (§3:
-    /// "The RSeq numbering space is within a single transaction"). Keyed on
-    /// the request, two branches would look to each other like a series full
-    /// of gaps, and every response after the first would be discarded. Keyed
-    /// on the dialog, which is what tells the branches apart, both are read.
+    /// The highest `RSeq` received in order, per dialog. §4 says per request,
+    /// but a forked INVITE gets one series per branch (§3), and keying on the
+    /// request would discard every branch but one.
     heard: HashMap<DialogId, u32>,
     /// The next `RSeq` to write per INVITE we are answering (§3).
     series: HashMap<TransactionId<InviteServer>, u32>,
@@ -144,7 +97,6 @@ impl Reliables {
         }
     }
 
-    /// Keep one, and name it.
     pub(super) fn keep(&mut self, reliable: Reliable) -> Raw {
         let dialog = reliable.dialog;
         let invite = reliable.sent.as_ref().map(|sent| sent.invite);
@@ -156,17 +108,14 @@ impl Reliables {
         raw
     }
 
-    /// What is known about one.
     pub(super) fn get(&self, raw: Raw) -> Option<&Reliable> {
         self.entries.get(raw)
     }
 
-    /// What is known about one, mutably.
     pub(super) fn get_mut(&mut self, raw: Raw) -> Option<&mut Reliable> {
         self.entries.get_mut(raw)
     }
 
-    /// Forget one, acknowledged or given up on.
     pub(super) fn forget(&mut self, raw: Raw) -> Option<Reliable> {
         let reliable = self.entries.remove(raw)?;
         unlink(&mut self.of_dialog, &reliable.dialog, raw);
@@ -176,10 +125,7 @@ impl Reliables {
         Some(reliable)
     }
 
-    /// The response a PRACK acknowledges, if it is one we are still holding.
-    ///
-    /// §3: a PRACK that matches nothing "MUST be responded to with a 481", so
-    /// `None` here is an answer rather than a shrug.
+    /// The response a PRACK acknowledges. `None` means 481 (§3).
     pub(super) fn answered_by(&self, dialog: DialogId, rack: &RAck<'_>) -> Option<Raw> {
         self.of_dialog.get(&dialog)?.iter().copied().find(|raw| {
             self.entries
@@ -188,10 +134,7 @@ impl Reliables {
         })
     }
 
-    /// Whether this INVITE already has one waiting to be acknowledged.
-    ///
-    /// §3: "The UAS MUST NOT send a second reliable provisional response until
-    /// the first is acknowledged."
+    /// Whether this INVITE already has one unacknowledged (§3 allows only one).
     pub(super) fn outstanding_on(&self, invite: TransactionId<InviteServer>) -> bool {
         self.of_invite.get(&invite).is_some_and(|held| {
             held.iter().any(|raw| {
@@ -203,35 +146,25 @@ impl Reliables {
         })
     }
 
-    /// The next number in this INVITE's series.
-    ///
-    /// The first is drawn from `first`, which the caller takes from its own
-    /// entropy: §3 recommends choosing it uniformly in 1..2³¹-1, so that a
-    /// number seen on the wire says nothing about how many calls this endpoint
-    /// has taken. Every one after that is "greater by exactly one".
+    /// The next number in this INVITE's series. `first` comes from the caller's
+    /// entropy (§3 recommends a random start); then "greater by exactly one".
     pub(super) fn next_rseq(&mut self, invite: TransactionId<InviteServer>, first: u32) -> u32 {
         let rseq = *self.series.entry(invite).or_insert(first);
         self.series.insert(invite, rseq.saturating_add(1));
         rseq
     }
 
-    /// Everything this INVITE is still holding, for when it ends.
     pub(super) fn on_invite(&self, invite: TransactionId<InviteServer>) -> Vec<Raw> {
         self.of_invite.get(&invite).cloned().unwrap_or_default()
     }
 
-    /// This INVITE is over: forget its series.
     pub(super) fn forget_series(&mut self, invite: TransactionId<InviteServer>) {
         self.series.remove(&invite);
     }
 
-    /// Whether a reliable provisional response is the next one in order (§4),
-    /// and remember it if it is.
-    ///
-    /// The first for a transaction is accepted whatever its number, since that
-    /// is the number the series starts from. After that only one higher is
-    /// taken: a lower one is a retransmission, and a gap means one was lost
-    /// and this one cannot be processed until it arrives.
+    /// Whether a reliable provisional response is next in order (§4), and
+    /// remember it if so. The first is taken at any number; then only one
+    /// higher. Lower is a retransmission, a gap means one was lost.
     pub(super) fn in_order(&mut self, dialog: DialogId, rseq: u32) -> bool {
         match self.heard.get(&dialog) {
             None => {
@@ -246,18 +179,15 @@ impl Reliables {
         }
     }
 
-    /// This dialog is over: forget its numbering.
     pub(super) fn forget_heard(&mut self, dialog: DialogId) {
         self.heard.remove(&dialog);
     }
 
-    /// Everything held for a dialog, for when it ends.
     pub(super) fn on_dialog(&self, dialog: DialogId) -> Vec<Raw> {
         self.of_dialog.get(&dialog).cloned().unwrap_or_default()
     }
 }
 
-/// Take one entry out of an index, and its key with it once nothing is left.
 fn unlink<K: Eq + core::hash::Hash>(index: &mut HashMap<K, Vec<Raw>>, key: &K, raw: Raw) {
     if let Some(held) = index.get_mut(key) {
         held.retain(|known| *known != raw);
@@ -278,10 +208,7 @@ pub(super) fn rack_value(reliable: &Reliable) -> Box<[u8]> {
     out.into_boxed_slice()
 }
 
-/// Whether a message offers or demands `100rel`.
-///
-/// §3: a UAS may answer reliably only if the INVITE listed the option tag in
-/// `Supported`, and must do so if it listed it in `Require`.
+/// Whether a message offers or demands `100rel` (§3).
 pub(super) fn offers_100rel(request: &crate::msg::RawMessage<'_>) -> bool {
     request.supported().has(OPTION_100REL) || request.require().has(OPTION_100REL)
 }
@@ -291,10 +218,8 @@ pub(super) fn demands_100rel(request: &crate::msg::RawMessage<'_>) -> bool {
     request.require().has(OPTION_100REL)
 }
 
-/// Whether a provisional response says it was sent reliably.
-///
-/// §4: a 100 that carries the option tag anyway is ignored, because "100
-/// (Trying) responses are hop-by-hop only" and the mechanism is end to end.
+/// Whether a provisional response says it was sent reliably. §4: a 100 is
+/// hop-by-hop, so it never is.
 pub(super) fn is_reliable(response: &crate::msg::RawMessage<'_>) -> bool {
     response
         .status()
@@ -303,7 +228,6 @@ pub(super) fn is_reliable(response: &crate::msg::RawMessage<'_>) -> bool {
         && response.rseq().is_ok()
 }
 
-/// The method of the request a response answers, from its `CSeq`.
 pub(super) fn answered_method(response: &crate::msg::RawMessage<'_>) -> Box<[u8]> {
     response.cseq().map_or_else(
         |_| Box::from(Method::Invite.as_str().as_bytes()),
@@ -381,7 +305,6 @@ mod tests {
 
     #[test]
     fn a_rack_is_written_the_way_the_rfc_prints_it() {
-        // "RAck: 776656 1 INVITE"
         let reliable = Reliable {
             rseq: 776_656,
             ..heard(0, 0)
@@ -423,8 +346,7 @@ mod tests {
         assert!(store.outstanding_on(invite));
         assert!(!store.outstanding_on(invite_server(1)));
 
-        // acknowledged, it no longer holds the next one back, and a refused
-        // PRACK that takes the acknowledgement back holds it again
+        // acked, then a refused PRACK takes the ack back
         let mark = |store: &mut Reliables, acknowledged: bool| {
             if let Some(sent) = store.get_mut(held).and_then(|held| held.sent.as_mut()) {
                 sent.acknowledged = acknowledged;
@@ -457,8 +379,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn the_first_response_heard_sets_the_series_and_the_rest_must_follow_it() {
-        // §4: one that is not exactly one higher "MUST NOT be acknowledged
-        // with a PRACK, and MUST NOT be processed further"
+        // §4: not exactly one higher is not processed
         let mut store = Reliables::new();
         let branch = dialog(0);
         assert!(store.in_order(branch, 900), "the first sets the series");

@@ -18,25 +18,17 @@
 //! ACK sent |                  |                    |
 //! ```
 //!
-//! Three things here are where implementations go wrong.
+//! A 2xx does not end the transaction. RFC 6026's `Accepted` state passes up
+//! a retransmitted 2xx, or one from another fork, instead of dropping it as a
+//! stray ("the call connected but the app thinks it failed"). It waits there
+//! for timer M and never ACKs a 2xx itself: that ACK is the dialog's (§13).
 //!
-//! A 2xx does not end the transaction. RFC 6026 added the `Accepted` state so
-//! that a retransmitted 2xx, or a 2xx from another branch of a downstream
-//! fork, is passed up rather than dropped as a stray — which is the corner
-//! that produces "the call connected but the app thinks it failed". The
-//! machine sits there for timer M and never ACKs a 2xx itself: that ACK
-//! belongs to the dialog (§13).
+//! A provisional response stops timer A and timer B. After 180 and silence,
+//! how long to wait is the user's decision.
 //!
-//! A provisional response stops both timers. Retransmissions stop because the
-//! far end is clearly alive, and timer B goes with them, so an INVITE that is
-//! answered with 180 and then nothing does not time out here — waiting is the
-//! user's decision, not the transaction's.
-//!
-//! A retransmitted final response in `Completed` re-sends the ACK and is *not*
-//! passed up again. The far end did not hear the ACK; the user does not need
-//! to hear about it twice. A 2xx in `Completed` is not one of those: it is a
-//! branch that answered after another refused, and it goes up without an ACK,
-//! exactly as in `Accepted`.
+//! In `Completed`, a retransmitted non-2xx final response re-sends the ACK and
+//! is not passed up again. A 2xx there is another branch answering after one
+//! refused: it goes up without an ACK, as in `Accepted`.
 
 use std::time::Instant;
 
@@ -52,20 +44,19 @@ use super::timer::{TimerConfig, TimerName};
 pub(crate) struct InviteClientMachine {
     state: InviteClientState,
     request: OwnedMessage,
-    /// Built once, on the first non-2xx final response, and re-sent for every
+    /// Built on the first non-2xx final response, re-sent for each
     /// retransmission of it.
     ack: Option<OwnedMessage>,
     config: TimerConfig,
     reliable: bool,
-    /// How many times the request has been retransmitted, which is what timer
-    /// A's doubling counts.
+    /// Retransmissions so far; timer A's doubling counts these.
     attempt: u32,
     timer_a: Option<Instant>,
     timer_b: Option<Instant>,
     timer_d: Option<Instant>,
     timer_m: Option<Instant>,
-    /// The user asked to cancel before anything came back, so the CANCEL is
-    /// waiting for the first provisional response (RFC 3261 §9.1).
+    /// Cancel asked for before any response; the CANCEL waits for the first
+    /// provisional (RFC 3261 §9.1).
     cancel_pending: bool,
 }
 
@@ -116,16 +107,13 @@ impl InviteClientMachine {
             .min()
     }
 
-    /// Fire whichever timer is due, earliest first.
-    ///
-    /// Call until nothing is returned: a caller that comes back late may have
-    /// several to work through, and firing one can arm another.
+    /// Fire whichever timer is due, earliest first. Call until it returns
+    /// `None`: a late caller may have several due, and one can arm another.
     pub(crate) fn handle_timeout(&mut self, now: Instant) -> Option<(TimerName, Effects)> {
         let due = self.next_deadline().filter(|at| *at <= now)?;
 
         if self.timer_a == Some(due) {
-            // "reset the timer with a value of 2*T1", and again with double
-            // that, for as long as we are still in Calling
+            // "reset the timer with a value of 2*T1", doubling while Calling
             self.attempt = self.attempt.saturating_add(1);
             self.timer_a = Some(now + self.config.retransmit(self.attempt, None));
             return Some((
@@ -169,19 +157,15 @@ impl InviteClientMachine {
                 self.on_response_while_open(status, response, now)
             }
             InviteClientState::Accepted if status.is_success() => {
-                // a retransmission, or another fork's 2xx: both go up, and the
-                // machine stays where it is
+                // a retransmission or another fork's 2xx: up, and stay
                 Effects::notify(Notify::Response)
             }
             InviteClientState::Completed if status.is_success() => {
-                // not a retransmission of the refusal but a dialog: a proxy
-                // forwards every 2xx, even after a final response from another
-                // branch (§16.7 step 5). RFC 6026 §8.4 has the ACK re-sent
-                // only for "retransmissions of a response with status code
-                // 300-699", and the ACK built for one of those is not an ACK
-                // for this; §13.2.2.4 gives the ACK for a 2xx to the TU,
-                // which needs to hear of it to send one and then end the
-                // dialog it did not want
+                // another branch's dialog, not a retransmission: proxies
+                // forward every 2xx (§16.7 step 5). RFC 6026 §8.4 re-sends the
+                // ACK only for 300-699 retransmissions; the ACK for a 2xx is
+                // the TU's (§13.2.2.4), which must hear of it to send one and
+                // end the unwanted dialog
                 Effects::notify(Notify::Response)
             }
             InviteClientState::Completed if !status.is_provisional() => {
@@ -203,10 +187,8 @@ impl InviteClientMachine {
 
     /// The user wants the call given up on.
     ///
-    /// Always accepted while the transaction is open. RFC 3261 §9.1 will not
-    /// let a CANCEL go before a provisional response has arrived — the server
-    /// could receive it before the INVITE and have nothing to cancel — so one
-    /// asked for too early is held rather than refused, and
+    /// Always accepted while the transaction is open. A CANCEL may not go
+    /// before a provisional (RFC 3261 §9.1), so an early one is held and
     /// [`InviteClientMachine::take_deferred_cancel`] says when it may go.
     pub(crate) fn request_cancel(&mut self) -> CancelDisposition {
         match self.state {
@@ -223,10 +205,8 @@ impl InviteClientMachine {
         }
     }
 
-    /// Whether a CANCEL that was held may now go out.
-    ///
-    /// Ask after feeding in a response. True at most once: the CANCEL is a
-    /// transaction of its own from then on.
+    /// Whether a held CANCEL may now go. Ask after feeding a response; true at
+    /// most once.
     pub(crate) fn take_deferred_cancel(&mut self) -> bool {
         let due = self.cancel_pending && self.state == InviteClientState::Proceeding;
         if due {
@@ -255,8 +235,8 @@ impl InviteClientMachine {
         now: Instant,
     ) -> Effects {
         if status.is_provisional() {
-            // no more retransmissions, and no timeout either: how long to wait
-            // for a ringing phone is the user's decision, not ours
+            // no retransmissions and no timeout: how long a phone may ring is
+            // the user's decision
             self.state = InviteClientState::Proceeding;
             self.timer_a = None;
             self.timer_b = None;
@@ -267,9 +247,8 @@ impl InviteClientMachine {
         self.timer_b = None;
 
         if status.is_success() {
-            // RFC 6026 7.2: sit here for timer M so that retransmissions and
-            // other forks' 2xx are recognised rather than dropped as strays.
-            // The ACK for a 2xx is the dialog's, not ours
+            // RFC 6026 7.2: wait for timer M so retransmissions and other
+            // forks' 2xx are recognised. The 2xx ACK is the dialog's
             self.state = InviteClientState::Accepted;
             self.timer_m = Some(now + self.config.sixty_four_t1());
             return Effects::notify(Notify::Response);
@@ -282,8 +261,7 @@ impl InviteClientMachine {
         Effects {
             send: self.ack.clone(),
             notify: Some(Notify::Response),
-            // on a reliable transport there is nothing to absorb, so timer D
-            // is zero and the machine is done as soon as the ACK is out
+            // reliable transport: nothing to absorb, timer D is zero
             terminated: wait.is_zero(),
         }
     }
@@ -406,9 +384,8 @@ mod tests {
         let (mut machine, _, _, _) = start(false);
         let mut sent = 1;
         let mut last = None;
-        // step to each deadline in turn, the way a caller with a real clock
-        // does; jumping straight to 64*T1 would collapse the retransmissions
-        // into one, which is also right and is not what this measures
+        // step to each deadline as a real clock would; jumping straight to
+        // 64*T1 would merge the retransmissions
         while let Some(at) = machine.next_deadline() {
             let (name, effects) = machine.handle_timeout(at).expect("a timer");
             if effects.send.is_some() {
@@ -450,8 +427,7 @@ mod tests {
         assert_eq!(machine.state(), InviteClientState::Accepted);
         assert_eq!(machine.next_deadline(), Some(now + config.sixty_four_t1()));
 
-        // a second 2xx, from a retransmission or from another fork, goes up
-        // too rather than being dropped as a stray
+        // a second 2xx (retransmission or another fork) goes up too
         let second = feed(&mut machine, &response(200, Some(b"other-fork")), now);
         assert_eq!(second.notify, Some(Notify::Response));
         assert_eq!(machine.state(), InviteClientState::Accepted);
@@ -507,11 +483,9 @@ mod tests {
 
     #[test]
     fn a_2xx_after_a_refusal_goes_up_and_is_not_answered_with_the_refusals_ack() {
-        // RFC 6026 §8.4 re-sends the ACK only for "retransmissions of a
-        // response with status code 300-699". A 2xx that follows a 486 is
-        // another branch's dialog, forwarded by a proxy that forwards every
-        // 2xx (§16.7 step 5): its ACK is the TU's (§13.2.2.4), and the TU
-        // can only send one if it hears of it
+        // RFC 6026 §8.4 re-sends the ACK only for 300-699. A 2xx after a 486
+        // is another branch's dialog (§16.7 step 5), whose ACK is the TU's
+        // (§13.2.2.4)
         let (mut machine, _, now, _) = start(false);
         let busy = feed(&mut machine, &response(486, Some(b"a6c85cf")), now);
         let refusal_ack = busy.send.expect("the refusal is acknowledged here");
@@ -545,8 +519,7 @@ mod tests {
 
     #[test]
     fn on_a_reliable_transport_the_machine_is_done_as_soon_as_the_ack_is_out() {
-        // timer D is zero there: nothing retransmits, so there is nothing to
-        // absorb
+        // timer D is zero there: nothing to absorb
         let (mut machine, _, now, _) = start(true);
         let effects = feed(&mut machine, &response(486, Some(b"a6c85cf")), now);
         assert!(effects.send.is_some());

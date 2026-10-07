@@ -3,25 +3,12 @@
 
 //! Answering a challenge (RFC 3261 §22, RFC 8760).
 //!
-//! A registrar refuses the first REGISTER it ever sees, and a proxy refuses
-//! the first INVITE. That is not a failure, it is the handshake: the refusal
-//! carries a nonce, and the request goes again with a hash of the nonce, the
-//! password and what the request is asking for.
+//! The endpoint never holds the password and never decides to answer: a
+//! wrong answer can lock the account. It owns the bookkeeping: the nonce
+//! count, the client nonce, the 401/407 split and the `CSeq` (§22.2).
 //!
-//! The endpoint does none of that on its own. It reads the challenge, says so,
-//! and waits: the password is the one thing this layer must never hold on to,
-//! and *whether* to answer at all is a decision with a locked account at the
-//! other end of it. What it does own is the bookkeeping the RFC is exact
-//! about — the nonce count, which has to move by one per request and never
-//! skip; the client nonce; the separation of the 401 and 407 spaces; and the
-//! `CSeq`, which §22.2 makes the client increment "as it would normally when
-//! sending an updated request".
-//!
-//! The challenge outlives the transaction that earned it, because the
-//! transaction ends the moment the refusal is final and the answer comes from
-//! a person who may take a while. The set is capped rather than unbounded: a
-//! peer that challenges everything and a caller that never retries must not
-//! be able to grow it.
+//! A challenge outlives its transaction, since the answer may wait on a
+//! person. The store is capped so a hostile peer cannot grow it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,26 +26,15 @@ use crate::transaction::{AnyTransactionId, DialogId};
 
 /// How many challenged requests are remembered at once.
 ///
-/// One per account being registered, plus whatever is in flight, is a handful.
-/// The cap is what stops a peer that refuses everything from turning this into
-/// a place to put memory.
+/// Capped against a peer that refuses everything.
 const REMEMBERED: usize = 32;
 
 /// How many times one request goes again with credentials before the stack
 /// calls the password wrong.
 ///
-/// §22.1's guard — the same nonce coming back without `stale` means the
-/// credentials were rejected — turns on the nonce being the same. A server
-/// that draws a fresh one for every refusal and never marks it `stale` walks
-/// straight past that guard, and the exchange then runs one wrong password
-/// per round trip for as long as the process lives, which is how an account
-/// gets locked out. Nothing on the wire tells that apart from a server ageing
-/// its nonces honestly, so the count is the defence.
-///
-/// Three, because a correct exchange needs one, a nonce that aged out between
-/// the request and the answer needs two, and a third is already generous. The
-/// allowance is per request, not per destination: a fresh request gets the
-/// whole of it again, since a password can be corrected while a process runs.
+/// §22.1's same-nonce guard fails against a server that rotates its nonce
+/// without `stale`; this count stops the lock-out. One answer is normal, two
+/// cover an aged nonce. Per request, not per destination.
 const ANSWERS: u8 = 3;
 
 /// A request that was refused, and the challenge it was refused with.
@@ -68,33 +44,20 @@ pub(super) struct Challenged {
     pub(super) request: OwnedMessage,
     /// Where it went.
     pub(super) flow: Flow,
-    /// The dialog it belonged to, when it had one: §22.2's "increment the
-    /// CSeq" has to come from the dialog there, or the next request in it
-    /// reuses the number.
+    /// The dialog it belonged to; §22.2's new `CSeq` must come from it.
     pub(super) dialog: Option<DialogId>,
     /// How many times this request has already gone again with credentials.
-    ///
-    /// Kept here rather than in a ledger of its own because this record
-    /// outlives the transaction that earned it, and the allowance has to
-    /// outlive it too: a server that draws a fresh nonce every time is
-    /// exactly a server that keeps making new transactions.
+    /// Kept here because it must outlive the transaction.
     pub(super) spent: u8,
-    /// The protection domains the refusal asked to be answered for, each
-    /// with whether a proxy (407) asked: what the caller weighs before it
-    /// lets a password near the challenge ([`Endpoint::challenge_origin`]).
+    /// The realms asked for, each with whether a proxy (407) asked
+    /// ([`Endpoint::challenge_origin`]).
     pub(super) realms: Vec<(bool, Arc<str>)>,
 }
 
-/// Who asked for credentials, as far as this end can tell: where the
-/// challenged request went — the address the refusal came back from — and
-/// the realms it named.
+/// Who asked for credentials: where the request went and the realms named.
 ///
-/// What a user agent needs to decide whether a password is for this
-/// challenge at all. RFC 3261 §22.1: "each such protection domain has its
-/// own set of usernames and passwords", and an answer is material for an
-/// offline search of the password whoever chose the nonce can run (RFC 7616
-/// §5.10, §5.11), so a password answers its own server's realm and nobody
-/// else's.
+/// An answer enables an offline password search (RFC 7616 §5.10, §5.11), so
+/// a password should answer only its own server's realm (RFC 3261 §22.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChallengeOrigin {
     /// Where the request that was refused went.
@@ -108,19 +71,10 @@ pub struct ChallengeOrigin {
 /// The challenges waiting for an answer.
 #[derive(Debug, Default)]
 pub(super) struct Challenges {
-    /// In the order they were learned, so that the oldest goes first when the
-    /// cap is reached. A linear scan of at most [`REMEMBERED`] is cheaper than
-    /// a map plus a queue to order it.
+    /// Oldest first; a scan of at most [`REMEMBERED`] beats a map.
     entries: Vec<(AnyTransactionId, Challenged)>,
-    /// How many answers each request still in flight has spent, keyed by the
-    /// transaction its latest retry created.
-    ///
-    /// Keyed by transaction and not by request because a request has no
-    /// identity the endpoint keeps: every retry starts a new transaction, and
-    /// the allowance belongs to the request, so it is handed from the
-    /// transaction that is ending to the one replacing it. Nothing is ever
-    /// reused: a transaction id is a slot and a generation, so a freed slot
-    /// comes back as a different id.
+    /// Answers spent per request in flight, keyed by its latest retry's
+    /// transaction and handed on to the next one.
     spent: Vec<(AnyTransactionId, u8)>,
 }
 
@@ -136,10 +90,7 @@ impl Challenges {
     /// Hand the allowance a request has already spent to the transaction its
     /// retry just created.
     ///
-    /// One entry per chain, and only between the retry going out and its
-    /// answer coming back: [`Self::take_answered`] takes it from here the
-    /// moment a challenge arrives, and [`Self::forget`] drops it when the
-    /// transaction ends any other way.
+    /// [`Self::take_answered`] or [`Self::forget`] removes it.
     pub(super) fn carry(&mut self, retried: AnyTransactionId, spent: u8) {
         self.spent.retain(|(known, _)| *known != retried);
         if self.spent.len() >= REMEMBERED {
@@ -148,9 +99,7 @@ impl Challenges {
         self.spent.push((retried, spent));
     }
 
-    /// The transaction is over, so whatever it was carrying is not coming
-    /// back. Only the allowance is dropped; the challenge itself outlives
-    /// the transaction on purpose.
+    /// The transaction is over. Only the allowance goes; the challenge stays.
     pub(super) fn forget(&mut self, id: AnyTransactionId) {
         self.spent.retain(|(known, _)| *known != id);
     }
@@ -158,12 +107,8 @@ impl Challenges {
     /// How many answers the request behind this transaction has spent, taken
     /// out on the way.
     ///
-    /// Taken and not read, because the count is moving: whoever asks is
-    /// about to put it somewhere that outlives this ledger. Leaving it here
-    /// would keep an entry per chain that ever ran, successful ones
-    /// included, and thirty-two of those would push a live chain out and let
-    /// its allowance start again — which is the whole defence, failing
-    /// open, under nothing worse than ordinary traffic.
+    /// Taken, not read: stale entries would push live chains out and reset
+    /// their allowance.
     pub(super) fn take_answered(&mut self, id: AnyTransactionId) -> u8 {
         let Some(at) = self.spent.iter().position(|(known, _)| *known == id) else {
             return 0;
@@ -203,31 +148,16 @@ impl Challenges {
 
 /// How many destinations are remembered at once.
 ///
-/// A phone registers with one registrar and calls a handful of people, so this
-/// is far past what an honest deployment reaches. It is a ceiling rather than
-/// a growing table because the destination is whatever the caller last sent
-/// to, and a peer that challenges everything must not be able to make this a
-/// place to put memory.
+/// Far above an honest deployment; capped against hostile peers.
 const DESTINATIONS: usize = 32;
 
 /// What each destination has already challenged with.
 ///
-/// §22.2: "UAs SHOULD cache the credentials for a given value of the To header
-/// field and 'realm' and attempt to re-use these values on the next request
-/// for that destination." The realm half of that is inside [`AuthCache`],
-/// which keeps one entry per protection domain; what is left to key by is the
-/// destination, and this is where it is kept.
-///
-/// Per destination rather than per transaction, which is the whole point: a
-/// registration that refreshes every hour was paying for a 401 and a second
-/// round trip every hour, for the life of the process, because the challenge
-/// it had already answered died with the transaction that earned it.
+/// §22.2 caches credentials per `To` and realm; [`AuthCache`] keys the realm,
+/// this keys the destination. It spares a refresh the extra 401 round trip.
 #[derive(Debug, Default)]
 pub(super) struct Known {
-    /// In the order they were first challenged, so the oldest goes when the
-    /// cap is reached. A scan of at most [`DESTINATIONS`] is cheaper than a
-    /// map plus the queue that orders it, and the scan is what the eviction
-    /// needs anyway.
+    /// Oldest first; a scan of at most [`DESTINATIONS`] beats a map.
     entries: Vec<(Box<[u8]>, AuthCache)>,
 }
 
@@ -241,9 +171,7 @@ impl Known {
     /// What this destination has challenged with, opening an empty one for a
     /// destination not seen before.
     ///
-    /// `None` only if the entry just pushed cannot be read back, which cannot
-    /// happen; this crate says so by carrying on without a cache rather than
-    /// by panicking, and the cost of that is one round trip.
+    /// `None` cannot happen; it would cost a round trip, not a panic.
     fn at(&mut self, destination: &[u8]) -> Option<&mut AuthCache> {
         let known = self
             .entries
@@ -270,8 +198,7 @@ impl Known {
             .map(|(_, cache)| cache)
     }
 
-    /// The same, to write: only for spending a count on an answer already
-    /// drawn, which is why it opens nothing that is not already there.
+    /// The same, to write. Opens nothing new.
     fn peek_mut(&mut self, destination: &[u8]) -> Option<&mut AuthCache> {
         self.entries
             .iter_mut()
@@ -289,12 +216,7 @@ impl Known {
 /// The destination a challenge belongs to (§22.2's "value of the To header
 /// field").
 ///
-/// The URI out of it rather than the whole value: a display name is
-/// decoration, and a tag names one end of a dialog rather than a different
-/// registrar. Getting this wrong in the forgiving direction costs a round
-/// trip; getting it wrong in the other would answer one destination with
-/// another's challenge, which the realm check inside [`AuthCache`] would then
-/// have to catch.
+/// Only the URI: display name and tag do not change the registrar.
 pub(super) fn destination(to: &[u8]) -> Option<Box<[u8]>> {
     crate::msg::NameAddrRef::parse(to)
         .ok()
@@ -304,31 +226,17 @@ pub(super) fn destination(to: &[u8]) -> Option<Box<[u8]>> {
 impl Endpoint {
     /// Send a challenged request again, with credentials.
     ///
-    /// The nonce count and the client nonce are the endpoint's: `nc` "MUST"
-    /// be different for every request sent with the same nonce. The `CSeq`
-    /// moves on too (§22.2).
+    /// The endpoint draws `nc` and the client nonce, and moves the `CSeq`
+    /// (§22.2). The challenge is consumed, so a second call with the same
+    /// handle is refused, except when §18.1.1 asks for a
+    /// stream: then the same handle works once the transport is bound.
     ///
-    /// The stored challenge is consumed, so a second call with the same
-    /// handle is refused rather than replaying a nonce count. There is one
-    /// exception, and it is the one error the endpoint raises to ask the
-    /// caller to do something: when §18.1.1 refuses to send the retry over a
-    /// datagram and asks for a stream, the challenge stays where it is and
-    /// the same handle works again once the transport is bound. What the
-    /// refused attempt had drawn is dropped and drawn again then — a number
-    /// the server never saw leaves a gap, which it tolerates, while holding
-    /// one back risks putting it on the wire behind a higher one, which it
-    /// does not.
-    ///
-    /// One request goes again with credentials at most three times. The
-    /// fourth challenge on the same request is reported as a refusal
-    /// whatever nonce it carries, because a server that rotates its nonce
-    /// defeats §22.1's guard and one wrong password per round trip is how an
-    /// account gets locked out.
+    /// At most three retries per request; the fourth challenge is a refusal
+    /// whatever its nonce (§22.1).
     ///
     /// # Errors
-    /// [`AuthRetryError`] when there is no challenge under this handle, when
-    /// the credentials cannot be applied to it, or when the retry cannot be
-    /// sent.
+    /// [`AuthRetryError`] when there is no challenge, the credentials do not
+    /// apply, or the retry cannot be sent.
     pub fn retry_with_credentials(
         &mut self,
         failed: AnyTransactionId,
@@ -345,18 +253,11 @@ impl Endpoint {
 
     /// Rewrite the body a challenged request will go again with.
     ///
-    /// For a caller that has to make the retry smaller: RFC 3261 §18.1.1
-    /// refused it a datagram, and no stream came to carry it instead.
-    /// `reshape` is handed the body the request went out with and returns the
-    /// one to send in its place, or `None` to leave it as it is. The retry
-    /// still goes through [`Self::retry_with_credentials`], under the same
-    /// handle and held to the same rules; §22.2 makes it a new request, and
-    /// nothing about answering a challenge ties it to the body the refused
-    /// one carried.
-    ///
-    /// `true` when the body was replaced; `false` when there is no challenge
-    /// under this handle, `reshape` left it alone, or the request could not
-    /// be written again around the new body.
+    /// For a retry too large for a datagram (§18.1.1) with no stream.
+    /// `reshape` returns the new body, or `None`. The retry still goes through
+    /// [`Self::retry_with_credentials`]. `true` when the body was replaced;
+    /// `false` when no challenge is held, `reshape` declined, or the request
+    /// could not be rebuilt around the new body.
     pub fn reshape_challenged_body(
         &mut self,
         failed: AnyTransactionId,
@@ -383,9 +284,8 @@ impl Endpoint {
 
     /// Stop holding a challenge nobody is going to answer.
     ///
-    /// A retry §18.1.1 held back for a stream that never came is the one
-    /// case: the challenge would otherwise sit in the store until newer ones
-    /// pushed it out. `true` when there was one.
+    /// For a retry held for a stream that never came. `true` when there
+    /// was one.
     pub fn abandon_challenge(&mut self, failed: AnyTransactionId) -> bool {
         self.challenges.take(failed).is_some()
     }
@@ -409,11 +309,9 @@ impl Endpoint {
         })
     }
 
-    /// The `Bearer` challenge (RFC 8898) behind the request held under
-    /// `failed` that `credentials` cannot answer — they hold no access
-    /// token, or only the one that protection domain has already refused —
-    /// so that the application can be asked for a new one. `None` when no
-    /// challenge is held there, or every `Bearer` one in it is answerable.
+    /// The `Bearer` challenge (RFC 8898) under `failed` that `credentials`
+    /// cannot answer, so a new token can be fetched. `None` when all are
+    /// answerable or nothing is held.
     #[must_use]
     pub fn token_wanted(
         &self,
@@ -440,12 +338,9 @@ impl Endpoint {
     /// Answer the challenge held under `failed` with nothing, ever: the
     /// caller decided its password is not for whoever asked.
     ///
-    /// The challenge is dropped as [`Self::abandon_challenge`] drops it, and
-    /// the realms it named are closed in the destination's cache as well,
-    /// so that §22.2's answer ahead of a challenge does not hand the same
-    /// party an answer on the next request without being asked. The refusal
-    /// stands, and is recorded as `auth.challenge.declined`. `true` when
-    /// there was one.
+    /// Like [`Self::abandon_challenge`], and the realms are also closed in the
+    /// destination cache so §22.2 does not answer them unasked. Recorded as
+    /// `auth.challenge.declined`. `true` when there was one.
     pub fn decline_challenge(&mut self, failed: AnyTransactionId) -> bool {
         let Some(held) = self.challenges.take(failed) else {
             return false;
@@ -471,9 +366,6 @@ impl Endpoint {
     }
 
     /// The retry itself, with the challenge already out of the store.
-    ///
-    /// Split from [`Self::retry_with_credentials`] only so that the one error
-    /// which puts the challenge back has somewhere to put it back from.
     fn send_retry(
         &mut self,
         failed: AnyTransactionId,
@@ -486,11 +378,8 @@ impl Endpoint {
             .as_raw()
             .method()
             .ok_or(AuthRetryError::NoChallenge)?;
-        // The refusal gave the call's room under max_dialogs back, and
-        // another call may have taken it since: a retry outside a dialog is
-        // a call placed again, held to the same ceiling as the first INVITE.
-        // Nothing has been drawn yet, so the challenge goes back and the
-        // same handle works once a call ends.
+        // a retry outside a dialog is a new call under max_dialogs; the room
+        // may be gone, and the challenge goes back
         if method == Method::Invite
             && held.dialog.is_none()
             && self.dialogs_held() >= self.config.max_dialogs
@@ -506,21 +395,13 @@ impl Endpoint {
             return Err(AuthRetryError::NothingToAnswer);
         }
 
-        // §22.2: "it MUST increment the CSeq header field value as it would
-        // normally when sending an updated request" — which inside a dialog
-        // means asking the dialog, so that the number it hands out next does
-        // not collide with this one
+        // §22.2: increment the CSeq; inside a dialog, the dialog hands it out
         let cseq = match held.dialog.and_then(|dialog| self.dialogs.get_mut(dialog)) {
             Some(state) => state
                 .next_request(method)
                 .map_err(|_| AuthRetryError::NoSuchDialog)?
                 .cseq(),
-            // Either there was no dialog, or there is no longer one because
-            // the request was the BYE that ended it — §15.1.1 leaves nothing
-            // behind, and a challenged BYE still has to go again or the far
-            // end keeps a call this end has hung up. Both want the number
-            // after the one that was refused, and in the second case nothing
-            // will ever ask this dialog for another.
+            // no dialog, or a challenged BYE whose dialog is gone (§15.1.1)
             None => held
                 .request
                 .as_raw()
@@ -547,25 +428,15 @@ impl Endpoint {
             .written_for_the_datagram(flow, message)
             .map_err(AuthRetryError::Unsendable)?;
 
-        // The credentials are what made it large. §18.1.1 has to be applied
-        // here as well as on the first send, or the one request in a call that
-        // is certain to have grown is the one request nobody checked.
+        // the credentials grew it, so §18.1.1 applies again
         let promoted = {
             let call = held.request.as_raw().call_id().ok();
             self.promote_if_too_big(flow, message.len(), call)
         };
         let promoted = match promoted {
             Ok(promoted) => promoted,
-            // §18.1.1 refused to send this one and asked the caller for a
-            // stream. That is the one error here the caller is expected to
-            // act on, so the challenge goes back where it was and the same
-            // handle works again once the connection is open. Everything
-            // drawn for the attempt that could not leave — the nonce count,
-            // the branch, and inside a dialog the CSeq — is dropped with it
-            // and drawn again next time: a number the server never saw
-            // leaves a gap, which is allowed, while keeping it would let a
-            // request that goes out meanwhile carry a higher one and put
-            // this one on the wire out of order, which is not.
+            // §18.1.1 wants a stream: the challenge goes back. What was drawn
+            // is dropped; a gap is allowed, an out-of-order number is not.
             Err(super::error::SendError::NeedsStreamTransport) => {
                 self.challenges.remember(failed, held);
                 return Err(AuthRetryError::Unsendable(
@@ -593,15 +464,8 @@ impl Endpoint {
         if let Some(dialog) = dialog {
             self.remember_dialog(retried, dialog);
         }
-        // Both counts move here and nowhere earlier, because the transaction
-        // has now actually started: an attempt §18.1.1 refused to send
-        // returned above without reaching this, and so costs nothing.
-        //
-        // The nonce count is the server's bookkeeping, one per request that
-        // carries a given nonce. The allowance is ours, and travels with the
-        // request rather than with the transaction: every retry gets a new
-        // id, and a server drawing a fresh nonce each time would otherwise
-        // restart the count on every round trip.
+        // both counts move only once the transaction has started; the
+        // allowance follows the request, not the transaction
         if let Some(to) = held
             .request
             .as_raw()
@@ -616,8 +480,7 @@ impl Endpoint {
 
     /// Put the rebuilt request in a transaction of its own.
     ///
-    /// A retry is a new transaction, not a continuation: a new branch went
-    /// into the `Via` above, and §17.1.3 matches responses on that.
+    /// A new branch, so a new transaction (§17.1.3).
     pub(super) fn start_retry(
         &mut self,
         method: Method<'_>,
@@ -641,9 +504,7 @@ impl Endpoint {
             .start_invite_client(message.clone(), flow, timers, now)
             .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
         match dialog {
-            // §14.1: an INVITE inside a dialog is a re-INVITE and never
-            // forks, so it gets no dialog set. Watching one here would open a
-            // second, parallel view of a call that already exists
+            // §14.1: a re-INVITE never forks and gets no dialog set
             Some(dialog) => self.watch_reinvite(id, dialog, message),
             None => {
                 self.dialogs
@@ -656,8 +517,7 @@ impl Endpoint {
 
     /// A refusal that carries a challenge worth answering.
     ///
-    /// Reported after the response itself, so that the caller sees the whole
-    /// message first and this as a note about what can be done with it.
+    /// Reported after the response itself.
     pub(super) fn on_challenge(
         &mut self,
         id: AnyTransactionId,
@@ -672,8 +532,7 @@ impl Endpoint {
             return;
         }
 
-        // both are read before the cache is borrowed, which the borrow
-        // checker insists on and which also keeps the token draw in one place
+        // read before the cache is borrowed
         let cnonce = String::from_utf8_lossy(&self.tokens.token()).into_owned();
         let raw = request.as_raw();
         let (Some(to), Ok(_)) = (
@@ -682,41 +541,23 @@ impl Endpoint {
         ) else {
             return;
         };
-        // taken before the cache is borrowed, for the same reason the cnonce
-        // is read there; and taken rather than read because from here it
-        // travels on the record below, which outlives this ledger
         let spent = self.challenges.take_answered(id);
         let Some(cache) = self.known.at(&to) else {
             return;
         };
         if spent >= ANSWERS {
-            // The allowance is gone. §22.1 stops a client answering the same
-            // nonce twice, and a server that draws a new one for every
-            // refusal walks straight past that, so the count is what closes
-            // it: the fourth challenge on one request is a refusal whatever
-            // nonce it carries.
-            //
-            // The credentials are marked refused as well, not just this
-            // request stopped. Otherwise §22.2's pre-emptive answer would go
-            // on offering the same password, now known wrong, on every later
-            // request to this destination — the same lock-out, one round trip
-            // at a time instead of three.
+            // Allowance gone (§22.1). The credentials are marked refused too,
+            // or §22.2's pre-emptive answer would keep sending the wrong
+            // password.
             cache.refuse(response);
-            // Said by saying nothing: no `Event::Challenged` follows the
-            // response, which is exactly how the same-nonce refusal below
-            // reports itself and what every caller already reads as the end
-            // of the exchange.
+            // reported by sending no `Event::Challenged`
             return;
         }
         if cache.learn(response, &raw, &cnonce) != Learned::Retry {
-            // either nothing here can be answered (RFC 8760 §2.4: "The client
-            // MUST ignore any challenge it does not understand"), or the same
-            // nonce came back without `stale`, which §22.1 says not to answer
-            // twice
+            // nothing answerable (RFC 8760 §2.4), or the same nonce without
+            // `stale` (§22.1)
             return;
         }
-        // collected while the cache is borrowed and reported after, because
-        // reporting takes the whole endpoint
         let answering: Vec<_> = cache
             .challenges()
             .map(|challenge| {
@@ -776,15 +617,8 @@ impl Endpoint {
     /// The credential header fields for a request that has not been challenged
     /// yet, when this destination has challenged before (§22.2).
     ///
-    /// Empty when nothing is remembered, when what is remembered was refused,
-    /// or when it belongs to a proxy and this is a different conversation
-    /// (§22.3).
-    ///
-    /// The nonce count is not spent here. What comes back has to be handed to
-    /// [`Self::spend_answer`] once the request carrying it is on its way, and
-    /// dropped without that if it never goes: `nc` "MUST" differ on every
-    /// request that carries the same nonce, so the number belongs to the
-    /// request that reaches the wire.
+    /// Empty when nothing usable is remembered (§22.3). The nonce count is
+    /// spent only by [`Self::spend_answer`], once the request leaves.
     pub(super) fn answer_ahead(
         &self,
         request: &OutgoingRequest,
@@ -804,9 +638,7 @@ impl Endpoint {
             .unwrap_or_default()
     }
 
-    /// The same, for a request that has already been refused once: what the
-    /// destination's cache says to answer with, drawn from the one place the
-    /// nonce count lives.
+    /// The same, for a request that has already been refused once.
     fn answers_for(&self, request: &OwnedMessage, credentials: &Credentials) -> Answered {
         let raw = request.as_raw();
         let (Some(method), Some(uri)) = (raw.method(), raw.request_uri_bytes()) else {
@@ -828,10 +660,6 @@ impl Endpoint {
 
     /// Move the nonce count on, now that the request carrying the answer is
     /// committed.
-    ///
-    /// Takes the destination again rather than holding a borrow across the
-    /// build: the answer was drawn from one cache and goes back to the same
-    /// one, and between the two the whole endpoint has to be free.
     pub(super) fn spend_answer(&mut self, to: &[u8], answered: &Answered) {
         if let Some(cache) = self.known.peek_mut(to) {
             cache.spend(answered);
@@ -841,9 +669,7 @@ impl Endpoint {
 
 /// The request again, with a new `Via`, a new `CSeq` and credentials.
 ///
-/// Everything else is copied in the order it arrived, so that the retry is the
-/// request the far end already saw rather than a different one that happens to
-/// ask for the same thing.
+/// Everything else is copied in its original order.
 pub(super) fn rebuild(
     request: &RawMessage<'_>,
     via: &[u8],
@@ -907,8 +733,7 @@ fn rebuild_with(
                 | HeaderName::Route
                 | HeaderName::ContentLength
                 | HeaderName::ContentType
-                // replaced by the ones being added, so that a second refusal
-                // does not stack two sets of credentials on one request
+                // replaced, so credentials do not stack
                 | HeaderName::Authorization
                 | HeaderName::ProxyAuthorization
         ) {
@@ -993,11 +818,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_chain_that_is_over_gives_its_slot_back() {
-        // The ledger that bridges a retry and the next challenge has as many
-        // slots as the set above. If an entry outlived its chain, ordinary
-        // traffic would push a live one out and the allowance would start
-        // again — the whole defence failing open. So there are exactly two
-        // ways in and both take the entry with them.
+        // a stale entry would push a live chain out; both exits remove it
         let mut challenges = Challenges::new();
 
         challenges.carry(id(1), 2);
@@ -1016,8 +837,6 @@ Content-Length: 0\r\n\
             "a transaction that ended without being challenged keeps no slot"
         );
 
-        // so a live chain is still there after more traffic than the ledger
-        // holds, because none of that traffic left anything behind
         challenges.carry(id(3), 2);
         for slot in 100..200 {
             challenges.carry(id(slot), 1);
@@ -1044,8 +863,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_challenge_outlives_the_transaction_that_earned_it() {
-        // the refusal is final, so the transaction ends on timer K while the
-        // password is still being typed
+        // the transaction ends on timer K while the password is typed
         let mut challenges = Challenges::new();
         challenges.remember(id(0), held());
         assert_eq!(challenges.len(), 1);

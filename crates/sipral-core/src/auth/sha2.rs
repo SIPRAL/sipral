@@ -4,28 +4,21 @@
 //! SHA-256 and SHA-512/256 (FIPS 180-4), the two algorithms RFC 8760 adds to
 //! SIP digest.
 //!
-//! Two functions rather than one generic one: the 32-bit and 64-bit families
-//! differ in block size, in the rotation amounts, in the length field and in
-//! the tables, which leaves almost nothing to share but the shape.
+//! Two functions, not one generic: block size, rotations, length field and
+//! tables all differ between the 32- and 64-bit families.
 //!
-//! SHA-512/256 is SHA-512 with a different starting state and the result cut
-//! to 32 bytes. The starting state is not arbitrary — FIPS 180-4 §5.3.6
-//! derives it by running SHA-512 over the string "SHA-512/256" with each word
-//! of the standard state exclusive-ORed with `a5a5a5a5a5a5a5a5` — and the
-//! known-answer tests are what prove it was transcribed correctly.
+//! SHA-512/256 is SHA-512 with another initial state (FIPS 180-4 §5.3.6),
+//! truncated to 32 bytes. Known-answer tests check the transcription.
 //!
-//! What goes through here is a password — [`super::digest`] hashes an A1 that
-//! holds one — so the buffers the message is copied into are overwritten
-//! before the digest returns, the same best effort [`super::secret`] makes for
-//! the A1 itself.
+//! The input is an A1 holding a password, so the copies of the message are
+//! overwritten before returning, the same best effort as [`super::secret`].
 
 use super::secret::wipe;
 
 /// Where one SHA-256 writes the message it is reading.
 ///
-/// Named for the reason [`super::md5::Scratch`] is: the A1 of RFC 3261 §22.4
-/// is `user:realm:password` and ends up in `tail` whole, and the schedule
-/// below starts as that same block read back as sixteen words.
+/// Named for the same reason as [`super::md5::Scratch`]: a whole A1 lands in
+/// `tail`, and the schedule starts as that block read back as words.
 pub(super) struct Scratch256 {
     /// The last part-block, its padding, and the length field.
     tail: [u8; 128],
@@ -59,7 +52,7 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     sha256_in(data, &mut Scratch256::new())
 }
 
-/// The same, in a buffer the caller owns and can read back.
+/// [`sha256`] with a scratch buffer the caller owns and can inspect.
 fn sha256_in(data: &[u8], scratch: &mut Scratch256) -> [u8; 32] {
     let mut state: [u32; 8] = [
         0x6a09_e667,
@@ -95,8 +88,6 @@ fn sha256_in(data: &[u8], scratch: &mut Scratch256) -> [u8; 32] {
             compress256(&mut state, chunk, &mut scratch.words);
         }
     }
-    // the message has been read; what is left of it here is a copy nobody
-    // needs and the digest below does not come from
     scratch.wipe();
 
     let mut out = [0_u8; 32];
@@ -192,7 +183,7 @@ pub(super) fn sha512_256(data: &[u8]) -> [u8; 32] {
     sha512_256_in(data, &mut Scratch512::new())
 }
 
-/// The same, in a buffer the caller owns and can read back.
+/// [`sha512_256`] with a scratch buffer the caller owns and can inspect.
 fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
     let mut state: [u64; 8] = [
         0x2231_2194_fc2b_f72c,
@@ -228,8 +219,6 @@ fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
             compress512(&mut state, chunk, &mut scratch.words);
         }
     }
-    // the message has been read; what is left of it here is a copy nobody
-    // needs and the digest below does not come from
     scratch.wipe();
 
     // "the result cut to 32 bytes": the leftmost 256 bits
@@ -246,8 +235,8 @@ fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
 )]
 fn compress512(state: &mut [u64; 8], block: &[u8], w: &mut [u64; 80]) {
     for (word, chunk) in w.iter_mut().zip(block.as_chunks::<8>().0) {
-        // read straight out of the block, as `compress256` does: a buffer
-        // copied into and left behind is one more place the message lives
+        // read straight from the block: an intermediate copy would be one
+        // more place the message lives
         *word = u64::from_be_bytes(*chunk);
     }
     for i in 16..80 {
@@ -455,10 +444,8 @@ mod tests {
 
     #[test]
     fn the_message_is_not_left_behind_in_the_buffers_it_was_read_into() {
-        // as in `md5`: the level below the buffer that wipes itself, where
-        // the last block of an A1 is copied in the clear. Both lengths, so
-        // that the block loop is walked as well as the tail, and against
-        // known answers so that a wipe which broke the hash could not pass
+        // as in `md5`: an A1's last block is copied here in the clear. Both
+        // lengths, checked against known answers
         for (message, sha256_expected, sha512_256_expected) in [
             (
                 &b"alice:example.com:hunter2"[..],

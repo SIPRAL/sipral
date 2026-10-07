@@ -3,20 +3,10 @@
 
 //! The RFC 4475 torture corpus, run against the message layer.
 //!
-//! `fixtures/rfc4475/manifest.toml` says what each of the 49 messages is
-//! supposed to do. This reads it and holds the layer to it:
-//!
-//! - `parse` — the message is well formed and has to survive a round trip
-//!   byte for byte.
-//! - `reject` — either the parser refuses it, or it parses and
-//!   [`RawMessage::validate`] refuses it. Both are the stack answering 400;
-//!   which one happens depends on whether the fault is in the framing or in a
-//!   field, and the RFC does not care.
-//! - `semantic` — well formed, and what to do about it lives in a layer above
-//!   this one.
-//!
-//! The manifest is read by hand rather than with a TOML crate. The format is
-//! ours, three keys matter, and `sipral-core` has no dependencies on purpose.
+//! `fixtures/rfc4475/manifest.toml` classes the 49 messages: `parse` must
+//! round-trip byte for byte, `reject` must fail the parser or
+//! [`RawMessage::validate`] (both are a 400), `semantic` is for a layer above.
+//! The manifest is read by hand: `sipral-core` has no dependencies.
 
 // a test says what it means; the no-panic discipline is for the library
 #![allow(
@@ -46,8 +36,7 @@ fn fixtures() -> PathBuf {
         .join("fixtures/rfc4475")
 }
 
-/// Read the `[[message]]` blocks. Values are quoted strings on their own line,
-/// which is all this manifest ever holds.
+/// Read the `[[message]]` blocks. Values are quoted strings on their own line.
 fn manifest() -> Vec<Entry> {
     let text = fs::read_to_string(fixtures().join("manifest.toml")).expect("the manifest");
     let mut entries = Vec::new();
@@ -115,8 +104,7 @@ fn round_trips(bytes: &[u8]) -> bool {
         return false;
     };
     let owned = message.to_owned();
-    // 3.1.1.8 dblreq puts two requests in one datagram; only the first is
-    // this message, and the rest is the next one's problem
+    // 3.1.1.8 dblreq: two requests in one datagram, only the first counts
     owned.as_raw().as_bytes() == bytes.get(..message.len()).unwrap_or_default()
 }
 

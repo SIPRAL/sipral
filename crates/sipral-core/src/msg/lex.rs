@@ -3,14 +3,9 @@
 
 //! The lexical rules every header value obeys, in one place.
 //!
-//! Three things bite every SIP parser, and all three are here rather than
-//! repeated per field:
-//!
-//! - A value folded across lines (RFC 3261 §7.3.1) is equivalent to the same
-//!   value with the fold replaced by a single space.
-//! - A comma separates values only outside a quoted string and outside a
-//!   `<...>` URI. `Contact: "Smith, John" <sip:j@x>` is one value, not two.
-//! - The same is true of the semicolon that separates parameters.
+//! A fold equals a single space (RFC 3261 §7.3.1). Commas and semicolons
+//! separate only outside quoted strings and `<...>`: `"Smith, John" <sip:j@x>`
+//! is one value.
 //!
 //! RFC 3261 §25.1:
 //!
@@ -33,8 +28,7 @@ pub fn unfold(value: &[u8]) -> Cow<'_, [u8]> {
     let mut i = 0;
     while let Some(&b) = value.get(i) {
         if b == b'\r' || b == b'\n' {
-            // a fold is CRLF (or a bare LF from a lenient parse) plus the
-            // whitespace that continues the line; all of it becomes one space
+            // CRLF (or a lenient bare LF) plus the following whitespace
             while matches!(value.get(i), Some(b'\r' | b'\n' | b' ' | b'\t')) {
                 i += 1;
             }
@@ -49,10 +43,9 @@ pub fn unfold(value: &[u8]) -> Cow<'_, [u8]> {
 
 /// Drop leading and trailing linear whitespace.
 ///
-/// A fold counts: `LWS = [*WSP CRLF] 1*WSP` (RFC 3261 §25.1), so a value that
-/// begins after a continuation line begins with CRLF, and leaving those two
-/// bytes in place turns whitespace into content. `Route:\r\n <sip:a@b>` would
-/// otherwise arrive with a display name of CRLF.
+///
+/// A fold counts (`LWS`, RFC 3261 §25.1). Otherwise `Route:\r\n <sip:a@b>`
+/// would get a display name of CRLF.
 #[must_use]
 pub fn trim(value: &[u8]) -> &[u8] {
     let mut s = value;
@@ -103,9 +96,8 @@ pub fn unquote(value: &[u8]) -> Cow<'_, [u8]> {
 /// Whether the value is one syntactically complete quoted string and nothing
 /// else.
 ///
-/// The closing quote has to be the *first* unescaped one, not merely the last
-/// byte: `"a" b="c"` starts and ends with a quote and is two values with a
-/// missing separator between them.
+/// The closing quote must be the first unescaped one: `"a" b="c"` is not one
+/// string.
 #[must_use]
 pub fn is_quoted(value: &[u8]) -> bool {
     let v = trim(value);
@@ -133,10 +125,8 @@ fn quoted_len(v: &[u8]) -> Option<usize> {
 
 /// The whitespace-separated pieces of a value, folds included.
 ///
-/// RFC 3261 §25.1 makes the separator `LWS = [*WSP CRLF] 1*WSP`, so the space
-/// between the two halves of `CSeq: 1 INVITE` may be several spaces, a tab, or
-/// a fold. RFC 4475's `wsinv` really does send `cseq: 0009\r\n  INVITE`, and a
-/// splitter that looks for one 0x20 byte misses it.
+/// The separator is `LWS` (RFC 3261 §25.1), so a fold counts (RFC 4475
+/// `wsinv`).
 #[derive(Clone, Debug)]
 pub struct LwsFields<'a> {
     rest: &'a [u8],
@@ -170,8 +160,7 @@ struct Depth {
 }
 
 impl Depth {
-    /// Feed one byte. Returns whether the byte is a separator candidate, that
-    /// is whether it sits at the top level.
+    /// Feed one byte. Returns whether it sits at the top level.
     fn step(&mut self, b: u8) -> bool {
         if self.in_quotes {
             if self.escaped {
@@ -293,8 +282,7 @@ impl<'a> Iterator for Params<'a> {
     type Item = (&'a [u8], Option<&'a [u8]>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // a loop, not a call per empty field: `;;;;` is as long as the value
-        // it arrived in, and the stack is not
+        // a loop, not recursion: `;;;;` can be as long as the value
         let field = loop {
             if self.rest.is_empty() {
                 return None;
@@ -347,8 +335,6 @@ mod tests {
         assert_eq!(trim(b"  \tx y \t "), b"x y");
         assert_eq!(trim(b""), b"");
         assert_eq!(trim(b"   "), b"");
-        // a fold is whitespace too, and a value that follows one starts with
-        // its CRLF
         assert_eq!(trim(b"\r\n   x y"), b"x y");
         assert_eq!(trim(b"\r\n\t"), b"");
         assert_eq!(trim(b"x\r\n "), b"x");
@@ -371,8 +357,7 @@ mod tests {
         assert!(is_quoted(br#""fine""#));
         assert!(is_quoted(br#""has \" inside""#));
         assert!(!is_quoted(b"bare"));
-        // starts and ends with a quote, and is still two values with the
-        // separator missing
+        // two values with the separator missing
         assert!(!is_quoted(br#""a" b="c""#));
         assert!(!is_quoted(br#""a"junk"#));
         assert!(is_quoted(br#""""#));
@@ -471,8 +456,7 @@ mod tests {
 
     #[test]
     fn a_run_of_empty_parameters_as_long_as_a_message_costs_no_stack() {
-        // a message may carry a value of hundreds of kilobytes, and one call
-        // per empty field would be a stack frame per semicolon
+        // one call per empty field would be a stack frame per semicolon
         let mut value = vec![b';'; 1 << 20];
         value.extend_from_slice(b"a=1");
         let (_, params) = Params::split(&value);

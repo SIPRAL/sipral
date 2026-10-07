@@ -3,18 +3,10 @@
 
 //! One INVITE and every dialog it turned into (RFC 3261 §13.2.2).
 //!
-//! A proxy may fork a call to the desk phone, the mobile and the voicemail at
-//! once. All three ring, all three can answer, and "multiple 2xx responses may
-//! arrive at the UAC for a single INVITE request ... each represents a distinct
-//! dialog". They are told apart by the tag in `To`, and nothing here picks
-//! between them: this records what came back and leaves the choice — take one,
-//! take both, hang up on the loser — to the layer that knows what the call is
-//! for.
-//!
-//! What it does insist on is that nothing is lost. Every 2xx gets its own
-//! dialog and its own ACK, including one that arrives after another branch has
-//! already been answered, because a 2xx nobody acknowledges is a call the far
-//! end thinks is up.
+//! A forked INVITE can get several 2xx, "each represents a distinct dialog",
+//! told apart by the `To` tag. Nothing here picks one; that is left above.
+//! Every 2xx gets its own dialog and ACK, even a late one: an
+//! unacknowledged 2xx is a call the far end thinks is up.
 
 use super::key::DialogKey;
 use super::request::InDialogRequest;
@@ -29,14 +21,11 @@ pub enum Fork {
     Opened(DialogKey),
     /// It belongs to a dialog the set already had, which has taken it.
     Advanced(DialogKey),
-    /// A non-2xx final answered the INVITE, so "all early dialogs are
-    /// considered terminated" (§13.2.2.3). Any dialog already confirmed by a
-    /// 2xx from another branch is left alone — it is a call in progress, not
-    /// an attempt that failed.
+    /// A non-2xx final ended all early dialogs (§13.2.2.3). Dialogs already
+    /// confirmed by another branch's 2xx are left alone.
     Refused,
-    /// Nothing: a 100, a response with no tag to name a dialog by, one that
-    /// arrived after the set was finished with, or one that would have opened
-    /// a branch when the caller had no room for another dialog.
+    /// Nothing: a 100, no tag, a response after the set finished, or a new
+    /// branch when the caller had no room for it.
     Ignored,
 }
 
@@ -51,19 +40,14 @@ pub struct DialogSet {
 
 struct Branch {
     dialog: Dialog,
-    /// The ACK as it went out, kept because §13.2.2.4 makes retransmitting it
-    /// our job: "The ACK MUST be passed to the client transport every time a
-    /// retransmission of the 2xx final response that triggered the ACK
-    /// arrives."
+    /// The ACK as sent, kept because §13.2.2.4 makes us resend it for every
+    /// retransmitted 2xx.
     ack: Option<OwnedMessage>,
 }
 
 impl DialogSet {
-    /// Start from the INVITE that was sent.
-    ///
-    /// `over_tls` says how it left, which is half of what the `secure` flag
-    /// of §12.1 needs; the other half is its Request-URI, read from the
-    /// message.
+    /// Start from the INVITE that was sent. `over_tls` plus the Request-URI
+    /// give the `secure` flag of §12.1.
     #[must_use]
     pub const fn new(invite: OwnedMessage, over_tls: bool) -> Self {
         Self {
@@ -121,13 +105,11 @@ impl DialogSet {
         self.on_response_with_room(response, true)
     }
 
-    /// [`DialogSet::on_response`], for a caller that holds its dialogs to a
-    /// ceiling.
+    /// [`DialogSet::on_response`] for a caller that caps its dialogs.
     ///
-    /// With `room` false, a response that would open a branch the set does
-    /// not have yet opens nothing and is [`Fork::Ignored`]. Every branch that
-    /// is already open goes on taking its own responses, and a refusal still
-    /// ends the early ones, because neither makes anything new to hold.
+    /// With `room` false, a response that would open a new branch is
+    /// [`Fork::Ignored`]. Open branches still take their responses, and a
+    /// refusal still ends the early ones.
     ///
     /// # Errors
     /// As [`DialogSet::on_response`].
@@ -137,13 +119,11 @@ impl DialogSet {
         room: bool,
     ) -> Result<Fork, DialogError> {
         let status = response.status().ok_or(DialogError::WrongKind)?;
-        // §13.2.2.4 gives the answer window an end: 64*T1 after the first 2xx
-        // "no more new 2xx responses are expected to arrive"
+        // §13.2.2.4: no new 2xx is expected 64*T1 after the first
         if self.closed {
             return Ok(Fork::Ignored);
         }
-        // "only 2xx and 101-199 responses with a To tag ... will establish a
-        // dialog": a 100 is hop by hop and names nothing
+        // §12.1: only 101-199 and 2xx with a To tag open a dialog
         if status.is_provisional() && status.get() < 101 {
             return Ok(Fork::Ignored);
         }
@@ -163,9 +143,7 @@ impl DialogSet {
             return Ok(Fork::Refused);
         }
 
-        // A provisional after the INVITE has been refused says nothing worth
-        // keeping. A 2xx still does: it is a dialog the far end believes in,
-        // and one nobody acknowledges is a call left standing at that end.
+        // After a refusal a provisional is worthless, but a 2xx still needs its ACK.
         if self.refused && !status.is_success() {
             return Ok(Fork::Ignored);
         }
@@ -195,12 +173,9 @@ impl DialogSet {
         Ok(Fork::Opened(key))
     }
 
-    /// The answer window is over: 64*T1 after the first 2xx, "all the early
-    /// dialogs that have not transitioned to established dialogs are
-    /// terminated" (§13.2.2.4), and nothing further is expected.
-    ///
-    /// The clock belongs to the caller, as everywhere here; this is the same
-    /// instant the INVITE client transaction leaves `Accepted`.
+    /// The answer window is over: 64*T1 after the first 2xx, unconfirmed early
+    /// dialogs end (§13.2.2.4). The caller owns the clock; this is when the
+    /// INVITE client transaction leaves `Accepted`.
     pub fn no_more_answers(&mut self) {
         self.closed = true;
         for branch in &mut self.branches {
@@ -233,9 +208,7 @@ impl DialogSet {
         branch.dialog.ack_2xx(&invite)
     }
 
-    /// Keep the ACK that went out, so a retransmitted 2xx can be answered
-    /// without asking the caller for it again — and with the same bytes,
-    /// answer included.
+    /// Keep the ACK that went out, so a retransmitted 2xx gets the same bytes.
     ///
     /// # Errors
     /// [`DialogError::NoSuchDialog`] when the name is not one of ours.
@@ -255,8 +228,7 @@ impl DialogSet {
         self.branch(key).and_then(|branch| branch.ack.as_ref())
     }
 
-    /// The tags the branches answered with, which is what a fork looks like
-    /// from here.
+    /// The tags the branches answered with.
     pub fn remote_tags(&self) -> impl Iterator<Item = Option<&Tag>> {
         self.branches
             .iter()
@@ -361,7 +333,6 @@ Content-Length: 0\r\n\
         assert_eq!(state_of(&set, &first), DialogState::Early);
         assert_eq!(state_of(&set, &second), DialogState::Early);
 
-        // and a second provisional on one branch is that dialog again
         assert_eq!(feed(&mut set, &first), Fork::Advanced(key_of(&first)));
         assert_eq!(set.len(), 2);
     }
@@ -403,8 +374,6 @@ Content-Length: 0\r\n\
         assert_eq!(feed(&mut set, &from_branch(603, "bob2", "")), Fork::Ignored);
         assert_eq!(feed(&mut set, &from_branch(180, "bob2", "")), Fork::Ignored);
 
-        // a 2xx is a call the far end believes in, and one nobody
-        // acknowledges is a call left standing there
         let late = from_branch(200, "bob2", "");
         assert_eq!(feed(&mut set, &late), Fork::Opened(key_of(&late)));
         assert_eq!(state_of(&set, &late), DialogState::Confirmed);
@@ -522,7 +491,6 @@ Content-Length: 0\r\n\
             .expect("a message");
         set.keep_ack(&key, ack.clone()).expect("kept");
 
-        // the 2xx arrives again: the same bytes go out again, answer included
         assert_eq!(feed(&mut set, &answered), Fork::Advanced(key.clone()));
         assert_eq!(
             set.ack_for(&key)

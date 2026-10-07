@@ -3,25 +3,12 @@
 
 //! The RFC 4317 offer/answer examples, run against the SDP layer.
 //!
-//! `fixtures/rfc4317/manifest.toml` lists every description of every section
-//! in the order the RFC gives it: an offer, then the answer to it, then
-//! (where the section goes on) the next offer of the same session and its
-//! answer. The second offer is not always the first offerer's: in several
-//! sections the answerer makes it. Each exchange is held to three things:
-//!
-//! - the example's answer is a legal answer to the example's offer under
-//!   RFC 3264 §6, and every description a party sends after its first is a
-//!   legal modification of that party's previous one under §8;
-//! - [`SessionDescription::answer`], told only which streams to take and
-//!   with which formats, produces an answer that agrees with the example's
-//!   stream for stream;
-//! - [`SessionDescription::media_plans`] reads the two descriptions and
-//!   settles on the codec and direction the section says it should.
-//!
-//! The examples name their hosts (`host.atlanta.example.com`), which a
-//! sans-I/O core does not resolve. The last check substitutes documentation
-//! addresses for every `c=` that names a host, and nothing else; the
-//! `0.0.0.0` of §5.2 and §5.3 stays what it is.
+//! `fixtures/rfc4317/manifest.toml` lists each section's offers and answers in
+//! RFC order. Each exchange must be legal under RFC 3264 §6 (and §8 for later
+//! descriptions), match [`SessionDescription::answer`] stream for stream, and
+//! settle in [`SessionDescription::media_plans`] as the section says. Host
+//! names in `c=` get documentation addresses; the `0.0.0.0` of §5.2 and §5.3
+//! stays.
 
 // a test says what it means; the no-panic discipline is for the library
 #![allow(
@@ -147,10 +134,8 @@ fn all_exchanges() -> Vec<Exchange> {
     out
 }
 
-/// The exchanges whose example answer RFC 3264 §6.1 does not allow, with
-/// what the check says about it. RFC 4317 has no errata; these are the
-/// RFC's own examples as printed, and the checks below prove they can tell
-/// them from the rest.
+/// The exchanges whose printed answer RFC 3264 §6.1 does not allow (RFC 4317
+/// has no errata), and what the check says.
 const NOT_LEGAL_ANSWERS: &[(&str, &str, &str)] = &[(
     // "If a stream is offered as sendonly, the corresponding stream MUST be
     // marked as recvonly or inactive in the answer": Bob's second offer
@@ -168,10 +153,9 @@ fn not_legal(exchange: &Exchange) -> Option<&'static str> {
         .map(|(_, _, why)| *why)
 }
 
-/// Whether `format` of `answered` names a codec `offered` also lists: the
-/// same payload type, or a dynamic one mapped to the same encoding, clock
-/// rate and channels. RFC 3264 §6.1 has the answerer keep the offer's
-/// number for a codec only as a SHOULD, and §2.3 of RFC 4317 renumbers.
+/// Whether `format` of `answered` names a codec `offered` also lists, by
+/// number or by dynamic mapping. RFC 3264 §6.1 keeps the number only as a
+/// SHOULD, and RFC 4317 §2.3 renumbers.
 fn in_offer(offered: &MediaDescription, answered: &MediaDescription, format: &str) -> bool {
     if offered.formats.iter().any(|f| f == format) {
         return true;
@@ -192,8 +176,7 @@ fn in_offer(offered: &MediaDescription, answered: &MediaDescription, format: &st
         })
 }
 
-/// Whether `answer` is a legal answer to `offer` under RFC 3264 §6, and
-/// why not when it is not.
+/// Whether `answer` is a legal answer to `offer` under RFC 3264 §6.
 fn check_answer(offer: &SessionDescription, answer: &SessionDescription) -> Result<(), String> {
     // "the answer MUST contain exactly the same number of "m=" lines as the
     // offer"
@@ -251,8 +234,8 @@ fn check_answer(offer: &SessionDescription, answer: &SessionDescription) -> Resu
     Ok(())
 }
 
-/// Whether `next` is a legal successor, under RFC 3264 §8, of `previous`,
-/// the last description the same party sent in the same session.
+/// Whether `next` legally follows `previous` from the same party, under
+/// RFC 3264 §8.
 fn check_modification(
     previous: &SessionDescription,
     next: &SessionDescription,
@@ -279,8 +262,7 @@ fn check_modification(
         return Err(format!("version {} follows {}", b.version, a.version));
     }
     // §8: "the number of m lines MUST NOT be less than the number of m lines
-    // in the previous SDP", and the streams that were there keep their media
-    // type
+    // in the previous SDP", and kept streams keep their media type
     if next.media.len() < previous.media.len() {
         return Err("a stream was removed rather than refused".to_owned());
     }
@@ -292,11 +274,9 @@ fn check_modification(
     Ok(())
 }
 
-/// Ask the stack for the answer the example gives: the same streams taken or
-/// refused, on the same ports and addresses, with the same formats in the
-/// same order, and the direction the example's answerer wrote. A format the
-/// example renumbered is asked for under the offer's number, which is what
-/// the builder writes and what RFC 3264 §6.1 recommends.
+/// Ask the stack for the example's answer: same streams, ports, formats and
+/// direction. A renumbered format is asked for under the offer's number
+/// (RFC 3264 §6.1).
 fn rebuild(exchange: &Exchange) -> SessionDescription {
     let streams: Vec<StreamAnswer> = exchange
         .offer
@@ -346,8 +326,7 @@ fn offer_numbers(offered: &MediaDescription, answered: &MediaDescription) -> Vec
         .collect()
 }
 
-/// A `c=` naming a host, given a documentation address; any other left as
-/// it is.
+/// A `c=` naming a host, given a documentation address.
 fn resolved(connection: &mut Option<Connection>, address: Ipv4Addr) {
     if connection.as_ref().is_some_and(|c| c.ip().is_none()) {
         *connection = Some(Connection::new(IpAddr::V4(address)));
@@ -373,8 +352,7 @@ fn plan(exchange: &Exchange, stream: usize) -> Result<Option<MediaPlan>, SdpErro
     offer.media_plan(&answer, stream)
 }
 
-/// The negotiation of every stream, each of which has to settle, as the
-/// offerer sees it.
+/// The negotiation of every stream, each of which has to settle, offerer side.
 fn plans(exchange: &Exchange) -> Vec<Option<MediaPlan>> {
     let offer = addressed(&exchange.offer, Ipv4Addr::new(192, 0, 2, 1));
     let answer = addressed(&exchange.answer, Ipv4Addr::new(192, 0, 2, 2));
@@ -494,8 +472,7 @@ fn every_later_description_is_a_legal_modification_of_the_same_partys_last() {
 fn the_stack_answers_every_offer_as_the_example_does() {
     for exchange in all_exchanges() {
         if not_legal(&exchange).is_some() {
-            // the builder narrows the direction to what the offer allows,
-            // which is exactly where the example does not
+            // the builder narrows the direction where the example does not
             continue;
         }
         let built = rebuild(&exchange);
@@ -653,10 +630,8 @@ fn audio_and_video_3() {
         settled(plan(&exchange, 1).expect("video").as_ref()),
         ("H261".to_owned(), Direction::SendRecv)
     );
-    // RFC 3264 §6.1 makes the same number only a SHOULD, and the planner
-    // matches a renumbered dynamic type by what it maps to. Each end sends
-    // with the other's number and takes its own (§5.1): Alice sends iLBC as
-    // Bob's 99 and receives it as her own 97, and Bob the other way round.
+    // RFC 3264 §6.1: same number is only a SHOULD. Each end sends with the
+    // other's number (§5.1): Alice sends iLBC as 99 and receives it as 97.
     let alice = plan(&exchange, 0).expect("audio").expect("up");
     assert_eq!(alice.codec.rtpmap.encoding, "iLBC");
     assert_eq!((alice.codec.payload(), alice.codec_in), (99, 97));
@@ -692,10 +667,8 @@ fn two_audio_streams() {
         settled(plan(&exchange, 0).expect("audio").as_ref()),
         ("iLBC".to_owned(), Direction::SendRecv)
     );
-    // A stream of nothing but named events is legal (the events are the
-    // payload), but a MediaPlan holds exactly one codec and RFC 4733 events
-    // are deliberately not one, so the planner has nothing to put there.
-    // This pins that gap; see the RFC 4317 README.
+    // A MediaPlan holds one codec and RFC 4733 events are not one, so an
+    // events-only stream has no plan. See the RFC 4317 README.
     assert_eq!(plan(&exchange, 1), Err(SdpError::NoCodec { stream: 1 }));
 }
 

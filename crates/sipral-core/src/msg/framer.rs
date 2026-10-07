@@ -10,35 +10,22 @@
 //! > Content-Length header field MUST be used with stream oriented
 //! > transports.
 //!
-//! So a message here without one is refused rather than read to the end of the
-//! buffer: guessing would swallow whatever followed it.
+//! A message without one is refused: reading to the end of the buffer would
+//! swallow whatever followed. This is the one copy in the receive path, since
+//! a message may arrive across many reads and the parser wants one buffer.
 //!
-//! This is the one place in the receive path that copies. A message can arrive
-//! split across any number of reads, and the parser hands out spans into a
-//! single contiguous buffer, so the bytes have to be accumulated somewhere.
-//!
-//! Between messages a peer may send keep-alives (RFC 5626 §4.4.1): a double
-//! CRLF is a ping, which a server MUST answer with a single CRLF, and a single
-//! CRLF is that answer. They are skipped here and counted separately, so the
-//! layer that owns the connection can reply to one and take the other as proof
-//! the flow is alive — see [`StreamFramer::take_ping`] and
+//! Keep-alives (RFC 5626 §4.4.1): a double CRLF is a ping, a single CRLF the
+//! pong. Both are skipped and counted, see [`StreamFramer::take_ping`] and
 //! [`StreamFramer::take_pong`].
 //!
-//! Work is bounded per byte received rather than per call. A peer that feeds
-//! one byte at a time cannot make this re-scan the whole pending buffer each
-//! time: the search for the end of the headers resumes where it stopped, and
-//! once the body's length is known nothing is parsed again until that many
-//! bytes are actually there.
+//! Work is bounded per byte received: the header search resumes where it
+//! stopped, and nothing is parsed again until the whole body is in.
 //!
-//! A message the parser refuses does not cost the connection when its
-//! framing is still known — its head ended, and named exactly one
-//! `Content-Length`. It is handed out as [`Framed::Refused`], for the layer
-//! above to answer, and the stream reads on after it. One longer than
-//! [`Limits::max_message_bytes`] is handed out the same way the moment its
-//! head is in, and the rest of its body is passed over as it arrives without
-//! ever being held. Only framing that is lost — a head longer than the bound,
-//! or one that says nothing, or two different things, about where its body
-//! ends — is an error, and that one is final.
+//! A refused message whose framing is known (head ended, one
+//! `Content-Length`) is handed out as [`Framed::Refused`] and the stream reads
+//! on. One past [`Limits::max_message_bytes`] is handed out as soon as its
+//! head is in, and its body is skipped without being held. Lost framing is a
+//! final error.
 
 use super::error::ParseError;
 use super::header::HeaderName;
@@ -52,23 +39,16 @@ use super::span::ParseScratch;
 pub enum Framed<'a> {
     /// A message, whole and inside every bound.
     Message(RawMessage<'a>),
-    /// A message the parser refused, whose framing is still known: the
-    /// stream has already moved past it, and what comes after it is read as
-    /// usual.
-    ///
-    /// Only its head is handed out — the start line and the header fields,
-    /// empty line included — because that is all an answer is written from
-    /// (RFC 3261 §8.2.6.2), and because the body of one past
-    /// [`Limits::max_message_bytes`] is never held at all.
+    /// A message the parser refused, whose framing is still known. The stream
+    /// has already moved past it. Only the head is handed out: an answer needs
+    /// nothing more (RFC 3261 §8.2.6.2).
     Refused {
         /// The start line and the header fields.
         head: &'a [u8],
-        /// How long the whole message is, body included, as its head
-        /// declares it.
+        /// The whole message length its head declares.
         length: usize,
-        /// Why the parser refused it: [`ParseError::MessageTooLarge`] for one
-        /// whose declared length is past the bound, whatever else is wrong
-        /// with it.
+        /// Why it was refused; [`ParseError::MessageTooLarge`] whenever the
+        /// declared length is past the bound.
         error: ParseError,
     },
 }
@@ -86,11 +66,9 @@ pub struct StreamFramer {
     need: Option<usize>,
     pings: u32,
     pongs: u32,
-    /// A CRLF that has been read as a pong and could still turn out to be the
-    /// first half of a ping split between two reads.
+    /// A CRLF read as a pong that may still be the first half of a split ping.
     dangling: bool,
-    /// Body bytes of a message refused as longer than the bound that have not
-    /// arrived yet, and are to be passed over unread when they do.
+    /// Body bytes of an oversized message still to be skipped.
     discard: usize,
     limits: Limits,
 }
@@ -124,17 +102,12 @@ impl StreamFramer {
 
     /// Take bytes off the transport.
     ///
-    /// Bytes still owed to the body of a message refused as too long are
-    /// passed over here, before anything is kept. What is kept may run past
-    /// the bound by what one read carried, while the head at the front of it
-    /// ends inside the bound: [`StreamFramer::next_message`] takes the
-    /// message off the front, or refuses it, before anything more is read.
+    /// Bytes owed to an oversized body are skipped first.
     ///
     /// # Errors
-    /// [`ParseError::MessageTooLarge`] when the head of the message being
-    /// assembled has grown past the bound without ending. There is no
-    /// recovering from that on a stream — nothing says where the message
-    /// ends — so the caller closes the connection.
+    /// [`ParseError::MessageTooLarge`] when the head grows past the bound
+    /// without ending. Nothing then says where the message ends, so the caller
+    /// closes the connection.
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), ParseError> {
         let skipped = self.discard.min(bytes.len());
         self.discard -= skipped;
@@ -149,30 +122,23 @@ impl StreamFramer {
 
     /// The next complete message, if one has arrived.
     ///
-    /// `Ok(None)` means "not yet"; call again after more bytes. A message the
-    /// parser refuses is [`Framed::Refused`] rather than an error, as long as
-    /// where it ends is still known, and the call after it reads on. An `Err`
-    /// is final: a stream whose framing is wrong cannot be resynchronised, so
-    /// the connection goes.
+    /// `Ok(None)` means not yet. An `Err` is final: the stream cannot be
+    /// resynchronised and the connection goes.
     ///
     /// # Errors
-    /// [`ParseError::MissingContentLength`] or
-    /// [`ParseError::ConflictingContentLength`] for a message that cannot be
-    /// framed, [`ParseError::BadHeaderLine`] for a `Content-Length` that is
-    /// not a number, and [`ParseError::MessageTooLarge`] for a head that has
-    /// grown past the bound without ending.
+    /// [`ParseError::MissingContentLength`],
+    /// [`ParseError::ConflictingContentLength`], [`ParseError::BadHeaderLine`]
+    /// for a non-numeric `Content-Length`, [`ParseError::MessageTooLarge`] for
+    /// a head past the bound.
     pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<Framed<'_>>, ParseError> {
         self.skip_keepalives();
 
         let ready = match self.need {
-            // once the length is known, nothing is parsed again until the
-            // bytes are actually here
             Some(n) => self.pending() >= n,
             None => self.headers_are_complete(),
         };
         if !ready {
-            // a head past the bound that never ended: what `push` refuses,
-            // left behind by the message that was in front of it
+            // a head past the bound left behind by the message in front of it
             if self.need.is_none() && self.pending() > self.limits.max_message_bytes as usize {
                 return Err(self.too_large());
             }
@@ -190,15 +156,12 @@ impl StreamFramer {
             ..
         } = self;
         let bytes = buf.get(*start..).unwrap_or_default();
-        // the message at the front and nothing behind it: several can be
-        // queued in one read, and together they may pass a bound that each
-        // of them keeps
+        // only the front message: several queued ones may together pass a bound
         let bound = limits.max_message_bytes as usize;
         let window = bytes.get(..bytes.len().min(bound)).unwrap_or_default();
         let error = match parse_with_limits(window, scratch, mode, *limits) {
             Ok(message) => {
-                // presence, not value: the parser has already framed the body
-                // with it, and two that agree are its business, not ours
+                // presence only: the parser already framed the body with it
                 if message.header_count(HeaderName::ContentLength) == 0 {
                     return Err(ParseError::MissingContentLength);
                 }
@@ -207,16 +170,12 @@ impl StreamFramer {
                 *need = None;
                 return Ok(Some(Framed::Message(message)));
             }
-            // the head has ended — that is what made it ready — so a parser
-            // that has not seen it end either stopped at the bound, the empty
-            // line straddling it, or reads a bare LF as no line end at all.
-            // Neither is "not yet": waiting would hold whatever followed, past
-            // every bound, since `push` lets a head that has ended grow on
+            // The head has ended, so a parser that disagrees stopped at the bound or
+            // reads a bare LF differently. Waiting would hold what followed forever.
             Err(error) => error,
         };
 
-        // refused, or not all here yet: either way the head says how long
-        // the message is, or the framing is lost with it
+        // refused or incomplete: the head says how long it is, or framing is lost
         let (head_len, declared) = match declared_length(bytes) {
             Ok(found) => found,
             Err(ParseError::UnterminatedHeaders) => return Ok(None),
@@ -249,8 +208,7 @@ impl StreamFramer {
 
     /// Consume one keep-alive ping, if one arrived.
     ///
-    /// RFC 5626 §4.4.1 makes answering it a MUST for a server: one CRLF back,
-    /// on the same connection.
+    /// RFC 5626 §4.4.1: a server MUST answer with one CRLF.
     pub fn take_ping(&mut self) -> bool {
         if self.pings == 0 {
             return false;
@@ -260,10 +218,7 @@ impl StreamFramer {
     }
 
     /// Consume one keep-alive pong, if one arrived.
-    ///
-    /// This is the half of §4.4.1 the client depends on: a ping that is not
-    /// answered within ten seconds means the flow is dead, and nothing else on
-    /// an idle connection says otherwise.
+    /// A ping unanswered for ten seconds means the flow is dead (§4.4.1).
     pub fn take_pong(&mut self) -> bool {
         if self.pongs == 0 {
             return false;
@@ -273,13 +228,10 @@ impl StreamFramer {
     }
 
     /// A ping of ours has just gone out on this connection.
+    /// A ping of ours has just gone out on this connection.
     ///
-    /// A lone CRLF read before now was an answer, or half of a ping torn
-    /// between two reads; the next one to arrive is the answer to this ping
-    /// rather than the other half of that one. Without this, a far end that
-    /// pongs every ping on an idle connection would have its second pong paired
-    /// with its first and read as a ping, and the ping it answered would be
-    /// called unanswered.
+    /// The next lone CRLF is the answer to it, not the second half of an
+    /// earlier torn ping. Without this, two pongs in a row pair up as a ping.
     pub fn ping_sent(&mut self) {
         self.dangling = false;
     }
@@ -327,9 +279,7 @@ impl StreamFramer {
 
     /// Skip the CRLFs a peer sends between messages, counting pings and pongs.
     ///
-    /// Only whole pairs are consumed: a lone `\r` at the end of the buffer is
-    /// half of a CRLF that has not finished arriving, and eating it would
-    /// desynchronise the very next message.
+    /// Only whole pairs are consumed: a trailing `\r` may be half a CRLF.
     fn skip_keepalives(&mut self) {
         let mut crlfs = 0_u32;
         while self.buf.get(self.start..self.start + 2) == Some(b"\r\n") {
@@ -338,22 +288,16 @@ impl StreamFramer {
         }
         self.scanned = self.scanned.max(self.start);
 
-        // A pair is a ping; the odd CRLF left over is a pong, and it is
-        // reported the moment it arrives rather than held back to see whether a
-        // second one follows. On an idle connection that second one may never
-        // come, and the pong is the only thing that says the flow is alive. The
-        // cost is that a ping split between two reads counts as a pong and then
-        // as the ping it was, so it is still answered — four bytes torn in half
-        // by the network buy the far end one keep-alive interval, and nothing
-        // else.
+        // A pair is a ping, an odd CRLF is a pong reported at once: on an idle
+        // connection nothing else proves the flow alive. A ping torn across reads
+        // counts as a pong and then a ping, and is still answered.
         let run = crlfs + u32::from(self.dangling);
         self.pings += run / 2;
         let odd = run % 2 == 1;
         if odd && !self.dangling {
             self.pongs += 1;
         }
-        // a byte that cannot continue the run ends it, so the next lone CRLF is
-        // a pong of its own rather than the other half of this one
+        // a byte that cannot continue the run ends it
         self.dangling = odd && self.buf.get(self.start).is_none_or(|byte| *byte == b'\r');
     }
 
@@ -519,8 +463,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_pong_on_its_own_is_seen_without_anything_following_it() {
-        // the flow-failure timer depends on this: the pong is usually the last
-        // thing on the connection for the next twenty-five seconds
+        // the flow-failure timer depends on this
         let mut f = framer();
         f.push(b"\r\n").expect("pushed");
         assert!(
@@ -534,8 +477,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn two_pongs_are_two_pongs_and_not_a_ping() {
-        // a run is only a ping when it arrives as one; a CRLF that was already
-        // read as a pong does not pair up with the next message's
+        // a CRLF already read as a pong does not pair with the next
         let mut f = framer();
         f.push(b"\r\n").expect("pushed");
         assert!(
@@ -563,9 +505,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_pong_to_each_of_two_pings_is_two_pongs_and_not_a_ping() {
-        // an idle connection to a server that answers every ping: nothing but
-        // time between the two answers, and the second one answers the second
-        // ping rather than completing the first
+        // two pongs on an idle connection answer two pings
         let mut f = framer();
         f.ping_sent();
         f.push(b"\r\n").expect("pushed");
@@ -588,8 +528,6 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_ping_torn_in_half_by_the_network_is_still_answered() {
-        // answering it is the MUST; the pong it is counted as first only costs
-        // the far end a keep-alive interval
         let mut f = framer();
         f.push(b"\r\n").expect("pushed");
         assert!(
@@ -747,7 +685,6 @@ There is no way to know how many octets belong here.",
 
     #[test]
     fn a_malformed_start_line_with_a_length_is_refused_and_the_stream_reads_on() {
-        // where it ends is still known, so nothing about the next one is lost
         let mut f = framer();
         let mut both = b"NOT A SIP MESSAGE\r\nContent-Length: 0\r\n\r\n".to_vec();
         both.extend_from_slice(BYE);
@@ -862,9 +799,8 @@ Content-Length: 5000\r\n\
         assert_eq!(after, vec![Some("BYE".to_owned())]);
     }
 
-    /// Feed `stream` and then `junk` in pieces, taking every message off as it
-    /// comes, and report the most the framer ever held; the connection may
-    /// end on the way, which is also a bound.
+    /// Feed `stream` then `junk` in pieces and report the most the framer ever
+    /// held. The connection may close on the way.
     fn most_held(f: &mut StreamFramer, mode: ParseMode, stream: &[u8], junk: usize) -> usize {
         let mut most = 0;
         let filler = vec![b'x'; 512];
@@ -887,9 +823,7 @@ Content-Length: 5000\r\n\
 
     #[test]
     fn a_head_whose_blank_line_straddles_the_bound_is_not_waited_on_forever() {
-        // the empty line begins inside the bound and ends past it, so the
-        // head is longer than the bound by up to three bytes; reading it as
-        // a head that fits and has not arrived yet held everything after it
+        // empty line straddling the bound must not count as a head that fits
         for over in 1..=3 {
             let bound = 200;
             let mut head = b"OPTIONS sip:b@example.com SIP/2.0\r\n\
@@ -908,8 +842,7 @@ Content-Length: 0\r\nSubject: "
 
     #[test]
     fn a_head_ended_by_bare_line_feeds_is_not_waited_on_forever_when_strict() {
-        // the framer finds the end of a head at `\n\n` and the strict parser
-        // does not; one of the two has to decide, or what follows piles up
+        // framer and strict parser disagree on `\n\n`; one must decide
         let head = b"OPTIONS sip:b@example.com SIP/2.0\r\n\
 Via: SIP/2.0/TCP h;branch=z9hG4bK1\n\
 Content-Length: 0\n\

@@ -1,21 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The names the caller holds things by.
+//! The handles the caller holds things by.
 //!
-//! RFC 3261 §17 has four transaction machines, and they are not
-//! interchangeable: a PRACK is answered on an INVITE server transaction, a
-//! CANCEL forms a non-INVITE client transaction of its own, and mixing them up
-//! is the kind of mistake that shows up as a call that never connects.
+//! The four machines of RFC 3261 §17 are not interchangeable: a PRACK is
+//! answered on an INVITE server transaction, a CANCEL is its own non-INVITE
+//! client transaction. So handles are typed by machine, and mixing them up
+//! does not compile. This survives into C (one struct per kind) and the
+//! bindings.
 //!
-//! So the handle is typed by machine. `respond(prack_transaction, ...)` where
-//! an INVITE server transaction was meant does not compile, and the guarantee
-//! survives into C — one struct per kind — and from there into Swift, .NET and
-//! Kotlin.
-//!
-//! The other half is generational identity. A transaction dies on a timer and
-//! its slot is reused; a handle issued before that never answers to the new
-//! occupant. See [`super::slab`].
+//! Handles are generational: a slot reused after a timer never answers to an
+//! old handle. See [`super::slab`].
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -45,8 +40,7 @@ mod sealed {
 
 /// One of the four transaction machines in RFC 3261 §17.
 ///
-/// Sealed: the set is closed by the RFC, and an extension method still uses
-/// one of these four.
+/// Sealed: the RFC closes the set, and extension methods use one of these.
 pub trait TransactionKind: sealed::Sealed + 'static {
     /// Which end this machine sits on.
     const ROLE: Role;
@@ -55,11 +49,8 @@ pub trait TransactionKind: sealed::Sealed + 'static {
     /// For error messages and for the C projection.
     const NAME: &'static str;
 
-    /// How [`Endpoint::transaction_state`] reaches the right arena.
-    ///
-    /// The dispatch has to live on the kind, because that is the only thing
-    /// the caller's handle carries about which of the four machines it names.
-    /// The trait is sealed, so nobody outside implements this.
+    /// How [`Endpoint::transaction_state`] reaches the right arena. It lives
+    /// on the kind because that is all the handle carries about its machine.
     #[doc(hidden)]
     fn state_of(endpoint: &Endpoint, id: TransactionId<Self>) -> Option<Self::State>
     where
@@ -84,10 +75,10 @@ pub enum NonInviteServer {}
 
 /// RFC 3261 §17.1.1.2, as corrected by RFC 6026 §7.1.
 ///
-/// `Accepted` is the correction: a 2xx does not end the transaction outright.
-/// It sits here for timer M and passes every further 2xx up, including ones
-/// from other forks, instead of treating them as strays — which is what
-/// produces "the call connected but the app thinks it failed".
+/// `Accepted` is the correction: a 2xx does not end the transaction. It stays
+/// for timer M and passes every further 2xx up, including other forks',
+/// instead of dropping them as strays (the "call connected but the app thinks
+/// it failed" bug).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InviteClientState {
     /// The INVITE has gone out and nothing has come back.
@@ -96,9 +87,8 @@ pub enum InviteClientState {
     Proceeding,
     /// A 2xx arrived and more may follow.
     Accepted,
-    /// A final response other than 2xx arrived; the ACK is being retransmitted
-    /// for as long as the response is, and a 2xx from another branch still
-    /// goes up.
+    /// A non-2xx final response arrived; the ACK is retransmitted as long as
+    /// the response is, and a 2xx from another branch still goes up.
     Completed,
     /// Done.
     Terminated,
@@ -122,11 +112,10 @@ pub enum NonInviteClientState {
 pub enum InviteServerState {
     /// The INVITE arrived; provisional responses may go out.
     Proceeding,
-    /// A 2xx went out. Timer L, and retransmissions of the INVITE are absorbed
-    /// here rather than answered again.
+    /// A 2xx went out. Timer L; INVITE retransmissions are absorbed, not
+    /// answered again.
     Accepted,
-    /// A final response other than 2xx went out and is being retransmitted
-    /// until the ACK arrives.
+    /// A non-2xx final response went out and is retransmitted until the ACK.
     Completed,
     /// The ACK arrived; timer I absorbs its retransmissions.
     Confirmed,
@@ -174,9 +163,8 @@ kinds! {
 
 /// One reliable provisional response awaiting its PRACK (RFC 3262).
 ///
-/// It carries the dialog, so a PRACK cannot be aimed at the wrong one: a fork
-/// produces several early dialogs on the same INVITE, each numbering its own
-/// provisionals, and the numbers alone do not say which is which.
+/// It carries the dialog: a fork makes several early dialogs on one INVITE,
+/// each numbering its own provisionals.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProvisionalResponseId {
     dialog: DialogId,
@@ -208,14 +196,11 @@ impl fmt::Debug for ProvisionalResponseId {
     }
 }
 
-/// A transaction, named by the machine it runs.
-///
-/// The kind is a phantom, so this is four bytes of slot and four of
-/// generation whichever machine it names.
+/// A transaction, named by the machine it runs. The kind is a phantom: always
+/// four bytes of slot and four of generation.
 pub struct TransactionId<K: TransactionKind> {
     pub(crate) raw: Raw,
-    // fn() -> K rather than K: this is Send and Sync whatever K is, and K is
-    // never constructed
+    // fn() -> K: Send and Sync whatever K is, and K is never constructed
     kind: PhantomData<fn() -> K>,
 }
 
@@ -234,8 +219,7 @@ impl<K: TransactionKind> TransactionId<K> {
     }
 }
 
-// derive would demand K: Clone and friends, which an uninhabited kind cannot
-// offer and does not need
+// derive would demand K: Clone, which an uninhabited kind cannot offer
 impl<K: TransactionKind> Clone for TransactionId<K> {
     fn clone(&self) -> Self {
         *self
@@ -320,9 +304,8 @@ any_from! {
 
 /// A dialog: `Call-ID` and both tags (RFC 3261 §12).
 ///
-/// Not parameterised by anything. Which transaction created a dialog is not
-/// part of the dialog's identity, and a dialog outlives the transaction that
-/// made it by however long the call lasts.
+/// Not tied to a transaction kind: a dialog outlives the transaction that
+/// made it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DialogId {
     pub(crate) raw: Raw,

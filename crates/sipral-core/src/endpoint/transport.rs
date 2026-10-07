@@ -3,27 +3,13 @@
 
 //! What a transport is to a stack that never opens one.
 //!
-//! The endpoint decides *what* to send and over *which* kind of transport; the
-//! socket belongs to whoever called it. So a transport here is three facts —
-//! an identifier the caller chose, the protocol it speaks, and the addresses
-//! at its two ends — and everything the RFCs make conditional on the transport
-//! is derived from the protocol alone.
+//! The socket belongs to the caller. A transport here is an identifier, a
+//! protocol and two addresses. Reliability decides which timers exist
+//! (RFC 3261 §17); framing decides how bytes become messages (§18.3).
 //!
-//! Two of those conditions run through the whole stack. Reliability decides
-//! which timers exist at all: RFC 3261 §17 sets timers D, I, J and K to zero
-//! on a reliable transport, because nothing retransmits there and there is
-//! nothing to absorb. Framing decides how bytes become messages: a datagram
-//! carries exactly one message, and a byte stream needs `Content-Length` to
-//! find the end of one (§18.3).
-//!
-//! `Ws` and `Wss` are named here because RFC 7118 registers them as
-//! `sent-protocol` transports and the stack must not treat a `Via` that
-//! carries them as malformed. They are not stream transports: RFC 7118 §4.2
-//! puts exactly one SIP message in each WebSocket message, so a frame is fed
-//! in whole, the way a datagram is. The WebSocket itself — the handshake, the
-//! frames, the pings — is `sipral-ua`'s (`sipral_ua::websocket`), which feeds
-//! each message it unframes in here as a datagram and names the transport's
-//! `.invalid` host with [`super::Endpoint::advertise_name`].
+//! WebSocket frames hold one message each (RFC 7118 §4.2), so they are fed in
+//! as datagrams. The WebSocket itself lives in `sipral_ua::websocket`, which
+//! names the `.invalid` host with [`super::Endpoint::advertise_name`].
 
 use core::fmt;
 use std::net::{IpAddr, SocketAddr};
@@ -33,10 +19,7 @@ use crate::msg::HostRef;
 
 /// A transport the caller opened, named by the caller.
 ///
-/// The endpoint never opens a socket and never owns one; it is told which
-/// transports exist and asked to write bytes to them. What the number means —
-/// an index into a table of sockets, a file descriptor, a handle from some
-/// runtime — is the caller's business and is never interpreted here.
+/// The number is never interpreted here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TransportId(pub u32);
 
@@ -54,8 +37,7 @@ pub enum TransportProtocol {
     Udp,
     /// A byte stream framed on `Content-Length` (§18.3).
     Tcp,
-    /// TLS over TCP. A stream, and the one that makes a `sips:` URI mean
-    /// anything.
+    /// TLS over TCP.
     Tls,
     /// RFC 7118 over a plain WebSocket. One message per frame.
     Ws,
@@ -66,8 +48,7 @@ pub enum TransportProtocol {
 impl TransportProtocol {
     /// The `sent-protocol` transport token, as it is written in a `Via`.
     ///
-    /// RFC 3261 §25.1 spells these upper case in every example and RFC 7118
-    /// §5 adds `WS` and `WSS` in the same shape.
+    /// Upper case, as in RFC 3261 §25.1 and RFC 7118 §5.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -82,9 +63,7 @@ impl TransportProtocol {
     /// Read a transport token, from a `Via` or from a URI's `transport`
     /// parameter.
     ///
-    /// Case-insensitive, because both places hold a `token` and §7.3.1 makes
-    /// those case-insensitive; the URI grammar in §19.1.1 writes the same
-    /// values lower case.
+    /// Case-insensitive (§7.3.1).
     #[must_use]
     pub fn from_token(token: &[u8]) -> Option<Self> {
         [Self::Udp, Self::Tcp, Self::Tls, Self::Ws, Self::Wss]
@@ -92,11 +71,8 @@ impl TransportProtocol {
             .find(|candidate| token.eq_ignore_ascii_case(candidate.as_str().as_bytes()))
     }
 
-    /// Whether the transport delivers for us, so that nothing here has to
-    /// retransmit.
-    ///
-    /// This is the flag RFC 3261 §17 keys timers D, I, J and K on, and the
-    /// one that stops timers A, E and G from ever being armed.
+    /// Whether the transport delivers for us, so nothing retransmits
+    /// (RFC 3261 §17 timers A, D, E, G, I, J, K).
     #[must_use]
     pub const fn is_reliable(self) -> bool {
         !matches!(self, Self::Udp)
@@ -105,9 +81,7 @@ impl TransportProtocol {
     /// Whether messages arrive as a byte stream that has to be framed on
     /// `Content-Length` (§18.3).
     ///
-    /// False for WebSocket even though it runs on TCP: RFC 7118 §4.2 puts one
-    /// SIP message in each WebSocket message, so the framing is already done
-    /// by the time the bytes reach here.
+    /// False for WebSocket, which is already framed (RFC 7118 §4.2).
     #[must_use]
     pub const fn is_stream(self) -> bool {
         matches!(self, Self::Tcp | Self::Tls)
@@ -121,9 +95,7 @@ impl TransportProtocol {
 
     /// The port to use when a URI or a `sent-by` gives none.
     ///
-    /// RFC 3261 §18.1.1: "It is 5060 for UDP, TCP and SCTP, 5061 for TLS."
-    /// There is no answer for WebSocket: the port is whichever one the
-    /// connection was made to, and that is the application's.
+    /// RFC 3261 §18.1.1. None for WebSocket.
     #[must_use]
     pub const fn default_port(self) -> Option<u16> {
         match self {
@@ -142,13 +114,10 @@ impl fmt::Display for TransportProtocol {
 
 /// A host, kept rather than borrowed.
 ///
-/// The endpoint asks the caller to resolve names (RFC 3263 is I/O, and the
-/// platform has a better resolver than a library would), so a host has to
-/// outlive the message it was read out of.
+/// The caller resolves names (RFC 3263), so a host outlives its message.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Host {
-    /// A domain name, in the case it was written in. Comparison of names is
-    /// case-insensitive, but what goes back on the wire is what arrived.
+    /// A domain name, in the case it was written in.
     Name(Arc<str>),
     /// A literal address, which needs no resolving.
     Ip(IpAddr),
@@ -180,26 +149,19 @@ impl fmt::Display for Host {
         match *self {
             Self::Name(ref name) => f.write_str(name),
             Self::Ip(IpAddr::V4(addr)) => write!(f, "{addr}"),
-            // everywhere but a Via's `received` parameter, an IPv6 literal
-            // wears brackets (§19.1.1)
+            // brackets everywhere but a Via's `received` (§19.1.1)
             Self::Ip(IpAddr::V6(addr)) => write!(f, "[{addr}]"),
         }
     }
 }
 
 /// Something that happened to a transport, on its way in.
-///
-/// This is one half of the endpoint's whole surface: everything that arrives
-/// arrives here, and nothing arrives any other way.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum Input<'a> {
     /// One message in one packet. Also how a WebSocket frame is fed in.
     ///
-    /// `local` is the address the packet was received on, which RFC 3581 §4
-    /// makes the address the response has to be sent *from* — a caller
-    /// listening on several interfaces cannot answer from the wrong one and
-    /// still traverse a symmetric NAT.
+    /// The response goes out from `local` (RFC 3581 §4).
     Datagram {
         /// Which transport it came in on.
         transport: TransportId,
@@ -210,8 +172,7 @@ pub enum Input<'a> {
         /// The packet, whole.
         data: &'a [u8],
     },
-    /// Bytes off a stream transport, in whatever sizes the reads happened to
-    /// come in. Messages are found by `Content-Length` (§18.3).
+    /// Bytes off a stream transport, in any chunking (§18.3).
     StreamData {
         /// Which connection they came in on.
         transport: TransportId,
@@ -225,10 +186,8 @@ pub enum Input<'a> {
     },
     /// A transport is open and may be written to.
     ///
-    /// `local` is what goes into the `Via` of everything sent on it, so a
-    /// caller bound to a wildcard address has to say here which address the
-    /// far end can reach it at. `remote` is the far end of a connection, and
-    /// `None` for a datagram socket, which has many.
+    /// `local` goes into the `Via`, so a wildcard bind must name a reachable
+    /// address here.
     TransportBound {
         /// The name the caller will use for it from now on.
         transport: TransportId,
@@ -264,39 +223,28 @@ impl Input<'_> {
 
 /// Bytes the caller has to put on a transport.
 ///
-/// The payload is refcounted rather than owned, because a retransmission has
-/// to be the identical datagram (§17.1.1.2) and the transaction that owns the
-/// message is going to send it again. A retransmission is therefore an `Arc`
-/// clone, not a copy.
+/// The payload is shared because a retransmission is the identical datagram
+/// (§17.1.1.2).
 #[derive(Clone, Debug)]
 pub struct Transmit {
     /// Which transport to write to.
     pub transport: TransportId,
-    /// Where to send it. Ignored by a connected transport, which has only one
-    /// far end, and carried anyway so that a log line says where it went.
+    /// Where to send it. A connected transport ignores it.
     pub destination: SocketAddr,
     /// Which of the transport's local addresses to send from, when it has
     /// more than one.
     ///
-    /// RFC 3581 §4: "The response MUST be sent from the same address and port
-    /// that the corresponding request was received on", which a caller
-    /// listening on a wildcard address cannot work out for itself. `None`
-    /// means the transport's own address, which is the answer for every
-    /// request this endpoint originates.
+    /// Set for responses (RFC 3581 §4); `None` means the transport's own.
     pub source: Option<SocketAddr>,
     /// The bytes.
     pub payload: Arc<[u8]>,
-    /// What the transport speaks. May differ from the transport the request
-    /// nominally wanted, after the §18.1.1 switch away from a datagram.
+    /// What the transport speaks; may differ after the §18.1.1 switch.
     pub protocol: TransportProtocol,
 }
 
 /// Why a transport could not deliver.
 ///
-/// Coarse on purpose. The endpoint's reaction to all of these is the same —
-/// RFC 3261 §17 says a client transaction informs its user and terminates —
-/// and the detail belongs in the caller's log, where the real error message
-/// still is.
+/// Coarse on purpose: the reaction is the same for all (RFC 3261 §17).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TransportErrorKind {
@@ -352,8 +300,6 @@ mod tests {
 
     #[test]
     fn a_transport_token_is_read_in_any_case() {
-        // a Via writes UDP and a URI parameter writes udp, and §7.3.1 makes
-        // both the same token
         assert_eq!(
             TransportProtocol::from_token(b"udp"),
             Some(TransportProtocol::Udp)
@@ -385,8 +331,7 @@ mod tests {
 
     #[test]
     fn only_tcp_and_tls_need_framing() {
-        // a WebSocket message carries exactly one SIP message (RFC 7118 4.2),
-        // so it arrives whole and never reaches the Content-Length framer
+        // RFC 7118 §4.2: one SIP message per WebSocket message
         assert!(TransportProtocol::Tcp.is_stream());
         assert!(TransportProtocol::Tls.is_stream());
         assert!(!TransportProtocol::Udp.is_stream());
@@ -421,7 +366,6 @@ mod tests {
             Host::from_ref(HostRef::Ipv4(Ipv4Addr::new(192, 0, 2, 4))).to_string(),
             "192.0.2.4"
         );
-        // brackets everywhere but a Via's received parameter
         assert_eq!(
             Host::from_ref(HostRef::Ipv6(Ipv6Addr::LOCALHOST)).to_string(),
             "[::1]"

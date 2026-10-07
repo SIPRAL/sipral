@@ -3,40 +3,20 @@
 
 //! Reading a session description (RFC 4566 §5).
 //!
-//! SDP is a list of `<type>=<value>` lines whose order is fixed, not a format
-//! with a grammar to recurse through. So the parser is a walk down the lines
-//! with one rule: a line may not appear before a line that has to precede it.
-//! Each type letter has a rank, and the rank may never go backwards, which is
-//! the whole of §5's ordering in one comparison.
-//!
-//! A type letter that is not one of the fourteen refuses the entire
-//! description, not the line. That is what §5 asks for — "an SDP parser MUST
-//! completely ignore any session description that contains a type letter that
-//! it does not understand" — and it is not the usual be-liberal rule: SDP
-//! deliberately has no room for new letters, so one that appears means the
-//! sender and the reader disagree about what the description says.
+//! Each type letter has a rank that may never go backwards, which is all of
+//! §5's ordering. An unknown letter refuses the whole description: §5 says
+//! a parser "MUST completely ignore" it.
 
 use super::error::SdpError;
 use super::media::MediaDescription;
 use super::session::KeyLine;
 use super::session::{Attribute, Connection, Origin, SessionDescription, Timing};
 
-/// Bounds that stop a hostile peer from making the parser do unbounded work.
+/// Bounds that stop a hostile peer from making the parser do unbounded work,
+/// like [`crate::msg::Limits`] one layer down.
 ///
-/// A body arrives from a stranger, inside a message that a proxy may have
-/// grown on the way, and every line of it turns into an allocation. The header
-/// parser has had bounds since it was written ([`crate::msg::Limits`]); this is
-/// the same idea one layer down, plus two shapes a header list does not have:
-/// a section can nest inside the description (an `m=` block), and one line
-/// can itself be a list (the format tokens after `m=`'s three fixed fields).
-///
-/// `e=`, `p=`, `b=`, `t=` and the `r=` lines under a `t=` get no bound of
-/// their own. Each is one allocation per line, exactly like an `a=` line, but
-/// none of them is where an extension puts attacker-shaped structure — a peer
-/// gains nothing sending a thousand `e=` lines that `a=` does not already give
-/// it more cheaply — so `max_body_bytes` and `max_line_bytes` already bound
-/// their count and their cost together, the way they would for any line kind
-/// nobody has singled out.
+/// `e=`, `p=`, `b=`, `t=` and `r=` get no bound of their own: they give an
+/// attacker nothing `a=` does not, and the byte bounds cover them.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Largest body accepted.
@@ -45,12 +25,10 @@ pub struct Limits {
     pub max_line_bytes: u32,
     /// Most `m=` blocks accepted.
     pub max_media: u16,
-    /// Most `a=` lines accepted in the whole description, session level and
-    /// media level together — the product of two per-block bounds is not a
-    /// bound.
+    /// Most `a=` lines accepted in the whole description. The product of two
+    /// per-block bounds is not a bound.
     pub max_attributes: u16,
-    /// Most `a=` lines accepted in one section alone — the session level
-    /// before the first `m=`, or one `m=` block.
+    /// Most `a=` lines accepted in one section alone.
     pub max_attributes_per_section: u16,
     /// Most format tokens accepted on one `m=` line.
     pub max_formats: u16,
@@ -60,29 +38,10 @@ impl Limits {
     /// The defaults: 16 KiB total, 2 KiB per line, 16 streams, 256 attributes
     /// overall and 64 per section, 64 formats on one `m=` line.
     ///
-    /// Sized against what a real call carries, ICE and SRTP included, not
-    /// against RFC 4566's grammar, which puts no ceiling on any of this at
-    /// all. The body bound is a quarter of the 65,535 octets
-    /// [`crate::msg::Limits::DEFAULT`] lets the whole message around it be:
-    /// room for a description carrying ICE candidates on a handful of
-    /// streams, and nothing like room for a megabyte of `a=` lines. The
-    /// stream bound is several times the handful of `m=` lines one offer
-    /// puts side by side — audio, video, and whatever a conferencing peer
-    /// adds next to them — and it is what keeps the per-section bound from
-    /// being multiplied without end. The attribute bound on the whole
-    /// description is four sections filled to the per-section bound: a peer
-    /// can load a few streams to the brim, not all sixteen of them.
-    /// The per-line bound is longer than the longest line this stack
-    /// writes or expects to read: a base64-encoded 256-bit `a=crypto` master
-    /// key is under 200 bytes, and the longest `a=candidate` line RFC 8839
-    /// describes is under 150, so one line cannot spend the whole body budget
-    /// by itself. The per-section attribute bound is room for every codec,
-    /// `fmtp`, `rtcp-fb` line and every candidate a dual-stack host with a
-    /// relay gathers for one stream, while stopping a single stream from
-    /// claiming the whole description's attribute budget by itself. The
-    /// format bound is more than twice the widest codec list a real offer
-    /// writes, well short of the 128 payload type numbers RFC 3551 leaves
-    /// room for if every one of them were listed on one line.
+    /// Sized for real calls with ICE and SRTP. The body is a quarter of
+    /// [`crate::msg::Limits::DEFAULT`]. A line fits the longest `a=crypto`
+    /// (under 200 bytes) and `a=candidate` (under 150). The total attribute
+    /// bound is four full sections, so a peer cannot fill all sixteen streams.
     pub const DEFAULT: Self = Self {
         max_body_bytes: 16_384,
         max_line_bytes: 2_048,
@@ -121,8 +80,8 @@ pub fn parse_with_limits(bytes: &[u8], limits: Limits) -> Result<SessionDescript
     Parser::new().run(text, limits)
 }
 
-/// Where each type letter may appear at session level. The order is §5's, and
-/// `r=` shares its rank with the `t=` it belongs to.
+/// Where each type letter may appear at session level, in §5 order; `r=`
+/// shares the rank of its `t=`.
 const fn session_rank(kind: char) -> Option<u8> {
     Some(match kind {
         'v' => 0,
@@ -162,9 +121,7 @@ struct Parser {
     media: Vec<MediaDescription>,
     rank: u8,
     attributes: usize,
-    /// `a=` lines seen since the current section started — the session level
-    /// before the first `m=`, or the current `m=` block — reset at every
-    /// `m=` line.
+    /// `a=` lines in the current section, reset at every `m=`.
     section_attributes: usize,
 }
 
@@ -213,8 +170,7 @@ impl Parser {
         }
         for (index, raw) in text.split('\n').enumerate() {
             let number = index + 1;
-            // "parsers SHOULD be tolerant and also accept records terminated
-            // with a single newline character"
+            // §5: accept a bare LF as a line end
             let line = raw.strip_suffix('\r').unwrap_or(raw);
             if line.is_empty() {
                 continue;
@@ -501,8 +457,7 @@ a=sendrecv\r\n";
 
     #[test]
     fn a_line_ending_of_one_newline_is_accepted() {
-        // "parsers SHOULD be tolerant and also accept records terminated with
-        // a single newline character"
+        // §5: a bare LF is accepted
         let lf = OFFER.replace("\r\n", "\n");
         let sdp = parse(lf.as_bytes()).expect("an offer");
         assert_eq!(sdp.media.len(), 1);
@@ -512,8 +467,6 @@ a=sendrecv\r\n";
 
     #[test]
     fn a_type_letter_we_do_not_know_refuses_the_whole_description() {
-        // "an SDP parser MUST completely ignore any session description that
-        // contains a type letter that it does not understand"
         let odd = OFFER.replace("t=0 0\r\n", "t=0 0\r\nq=something\r\n");
         assert_eq!(
             parse(odd.as_bytes()).unwrap_err(),
@@ -690,9 +643,7 @@ m=audio 49170 RTP/AVP 0\r\n";
 
     #[test]
     fn the_session_level_is_a_section_of_its_own() {
-        // three attributes before the first m= and none after it: nowhere
-        // near the bound on the whole description, and the session level
-        // alone still has to answer to the bound on one section
+        // three session-level attributes still hit the per-section bound
         let body = "v=0\r\n\
 o=- 1 1 IN IP4 192.0.2.1\r\n\
 s=-\r\n\
@@ -738,8 +689,6 @@ m=audio 5000 RTP/AVP 0\r\n";
 
     #[test]
     fn the_per_section_bound_resets_at_the_session_line_and_at_each_m() {
-        // one attribute at session level, two on each of two streams: no
-        // section holds more than two, even though the total is five
         let body = "v=0\r\n\
 o=- 1 1 IN IP4 192.0.2.1\r\n\
 s=-\r\n\
@@ -817,9 +766,7 @@ m=audio 5006 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n";
     #[test]
     fn the_default_bounds_take_what_a_call_actually_carries() {
         assert!(parse(OFFER.as_bytes()).is_ok());
-        // and refuse what no call carries: many streams, each within the
-        // per-section budget on its own, that together are still too many
-        // attributes for one description
+        // many streams within their own budget still exceed the total
         let mut extra = String::new();
         for n in 0..5 {
             let _ = write!(extra, "m=audio {} RTP/AVP 0\r\n", 5000 + n * 2);

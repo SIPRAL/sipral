@@ -3,30 +3,22 @@
 
 //! The store that owns the four machines.
 //!
-//! Until now each machine existed on its own: a caller fed it a message and
-//! read back what it wanted done. This is what holds them — one arena per
-//! kind, so a handle is typed by machine and a slot is never shared between
-//! two of them, plus the two indexes of RFC 3261 §17.1.3 and §17.2.3 that turn
-//! an arriving message into the transaction it belongs to.
+//! One arena per kind, so handles are typed and slots never shared, plus the
+//! two indexes of RFC 3261 §17.1.3 and §17.2.3 that map an arriving message to
+//! its transaction.
 //!
-//! Each transaction also remembers its flow: which transport, to what address,
-//! over what protocol. §18.2.2 requires exactly that of a server — "this
-//! requires the server transport to maintain an association between server
-//! transactions and transport connections" — and a client needs it for the
-//! same reason, so that a retransmission goes back out where the original
-//! went.
+//! Each transaction remembers its flow (transport, address, protocol). §18.2.2
+//! requires it of a server ("an association between server transactions and
+//! transport connections"), and a client needs it so a retransmission leaves
+//! where the original did.
 //!
-//! Deadlines are not indexed. Every other timer in this stack is set once and
-//! fires once, and lives in a [`super::timer::Timers`] queue; a transaction's
-//! deadline moves on nearly every message it sees, so an index would spend
-//! more time being cancelled and rebuilt than it would ever save. What is
-//! scanned is the transaction slots of one endpoint, which for a user agent
-//! are tens: finding the next deadline visits each slot once, and a call to
-//! the endpoint's `handle_timeout` sweeps them at most twice. A slot a
-//! transaction has left is still visited, because the arenas never shrink, so
-//! the cost follows the most transactions ever live at once rather than the
-//! number live now. `endpoint::store_tests` holds ten thousand of them to that
-//! bound by counting the slots visited.
+//! Deadlines are not indexed. A transaction's deadline moves on nearly every
+//! message, so an index would cost more than it saves; one-shot timers live in
+//! a [`super::timer::Timers`] queue instead. Finding the next deadline visits
+//! each slot once, and `handle_timeout` sweeps at most twice. Vacated slots
+//! are visited too (arenas never shrink), so the cost follows the peak number
+//! of live transactions. `endpoint::store_tests` checks that bound with ten
+//! thousand of them.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -45,26 +37,23 @@ use super::timer::TimerConfig;
 use crate::endpoint::{Flow, TransportId};
 use crate::msg::{HeaderError, OwnedMessage, RawMessage, Uri};
 
-/// A transaction we started: the machine, where its messages go, and the key
-/// it is indexed by. The machine owns the request, since it is the thing that
-/// retransmits it.
+/// A transaction we started: the machine (which owns and retransmits the
+/// request), where its messages go, and its index key.
 #[derive(Debug)]
 pub(crate) struct ClientEntry<M> {
     /// The state machine.
     pub(crate) machine: M,
     /// Where this transaction's messages go.
     pub(crate) flow: Flow,
-    /// How many times its request has gone out again, or its ACK for a
-    /// refusal has.
+    /// How many times its request, or its ACK for a refusal, went out again.
     pub(crate) retransmitted: u32,
     key: ClientKey,
 }
 
 /// A transaction somebody else started.
 ///
-/// The request is kept here rather than in the machine because this is the
-/// side that has to answer it: every response is built from the request per
-/// §8.2.6.2, and the user may send several.
+/// The request is kept here, not in the machine, because every response is
+/// built from it (§8.2.6.2) and the user may send several.
 #[derive(Debug)]
 pub(crate) struct ServerEntry<M> {
     /// The state machine.
@@ -114,11 +103,9 @@ impl From<Server> for AnyTransactionId {
     }
 }
 
-/// §8.2.2.2's own three fields — the `From` tag, the `Call-ID` and the
-/// `CSeq`, number and method — normalised the way each compares: the tag
-/// case-insensitively (§7.3.1), the other two as they are (§20.8, §20.16).
-/// Every server transaction is indexed by one, whatever its method: the
-/// section is about any request that arrives twice, not only an INVITE.
+/// §8.2.2.2's three fields: `From` tag (case-insensitive, §7.3.1), `Call-ID`
+/// and `CSeq` number and method (as is, §20.8, §20.16). Every server
+/// transaction is indexed by one, whatever its method.
 type MergeKey = (Box<[u8]>, Box<[u8]>, u32, Box<[u8]>);
 
 /// The key `request` would be found under in the merge index, when it carries
@@ -136,19 +123,17 @@ fn merge_key(request: &RawMessage<'_>) -> Option<MergeKey> {
     ))
 }
 
-/// The line of this end a request was sent to: its Request-URI, as it
-/// arrived. Empty for a message with none, which never reaches the index.
+/// The line a request was sent to: its Request-URI as it arrived. Empty when
+/// there is none; such a message never reaches the index.
 fn line_of(request: &RawMessage<'_>) -> Box<[u8]> {
     request.request_uri_bytes().unwrap_or_default().into()
 }
 
-/// Whether two Request-URIs name the same line: the same bytes, or two
-/// spellings RFC 3261 §19.1.4 holds equivalent. A URI that does not parse is
-/// only ever the same line as its own bytes.
+/// Whether two Request-URIs name the same line: same bytes, or equivalent per
+/// RFC 3261 §19.1.4. An unparseable URI only matches its own bytes.
 ///
-/// Asked only of the transactions that already share a request's merge key,
-/// which is one in the common case, so the parse costs nothing on a request
-/// that is not a second copy of another.
+/// Only asked of transactions already sharing the merge key, usually one, so
+/// the parse is cheap.
 fn same_line(held: &[u8], arrived: &[u8]) -> bool {
     held == arrived
         || matches!(
@@ -190,15 +175,12 @@ pub(crate) struct Transactions {
     non_invite_servers: Slab<ServerEntry<NonInviteServerMachine>>,
     clients: HashMap<ClientKey, Client>,
     servers: HashMap<ServerKey, Server>,
-    /// The Request-URI of every live server transaction, grouped by its
-    /// (`From` tag, `Call-ID`, `CSeq`) — RFC 3261 §8.2.2.2's merged-request
-    /// check. One entry per transaction rather than a set of handles, because
-    /// the check only ever asks "is there already one of these on this line",
-    /// never "which". Grown when a server transaction starts and shrunk by
-    /// [`Transactions::release_invite_merge`] and
-    /// [`Transactions::release_non_invite_merge`], so it never outlives the
-    /// transactions it counts and is exactly as bounded as the two server
-    /// arenas are.
+    /// The Request-URI of every live server transaction, grouped by (`From`
+    /// tag, `Call-ID`, `CSeq`): RFC 3261 §8.2.2.2's merged-request check. Not
+    /// handles, since the check only asks whether one exists on this line.
+    /// Shrunk by [`Transactions::release_invite_merge`] and
+    /// [`Transactions::release_non_invite_merge`], so it is bounded like the
+    /// server arenas.
     merge: HashMap<MergeKey, Vec<Box<[u8]>>>,
 }
 
@@ -224,8 +206,7 @@ impl Transactions {
             + self.non_invite_servers.len()
     }
 
-    /// How many of them somebody else started, which is the half a peer
-    /// decides the size of.
+    /// How many of them somebody else started: the half a peer controls.
     pub(crate) fn servers_len(&self) -> usize {
         self.invite_servers.len() + self.non_invite_servers.len()
     }
@@ -307,8 +288,8 @@ impl Transactions {
         Ok((id, effects))
     }
 
-    /// Take a request that is not an INVITE. Nothing goes out: what to answer
-    /// is the user's decision.
+    /// Take a request that is not an INVITE. Nothing goes out: the answer is
+    /// the user's decision.
     ///
     /// # Errors
     /// [`HeaderError`] when a field the §17.2.3 key is built from is missing.
@@ -380,12 +361,10 @@ impl Transactions {
         }
     }
 
-    /// Whether a client transaction is already running under the key this
-    /// request would be indexed by.
+    /// Whether a client transaction already runs under this request's key.
     ///
-    /// The index holds one transaction per key, so a second one started under
-    /// a key in use would take the first one's responses and leave it
-    /// retransmitting into silence until its timer gave up.
+    /// The index holds one per key; a second would steal the first one's
+    /// responses and leave it retransmitting until its timer gave up.
     pub(crate) fn has_client_for(&self, request: &RawMessage<'_>) -> bool {
         ClientKey::for_request(request).is_ok_and(|key| self.clients.contains_key(&key))
     }
@@ -398,11 +377,9 @@ impl Transactions {
 
     /// The server transaction a request belongs to (§17.2.3).
     ///
-    /// An ACK is keyed as the INVITE it answers, which is what puts it on the
-    /// transaction that sent the response being acknowledged. A legacy ACK
-    /// that finds nothing is looked up once more with its To tag in the key,
-    /// which is where a re-INVITE it acknowledges is (§17.2.3,
-    /// [`ServerKey::with_ack_to_tag`]).
+    /// An ACK is keyed as the INVITE it answers. A legacy ACK that finds
+    /// nothing is looked up again with its To tag, where a re-INVITE would be
+    /// ([`ServerKey::with_ack_to_tag`]).
     pub(crate) fn server_for(&self, request: &RawMessage<'_>) -> Option<Server> {
         let key = ServerKey::for_request(request).ok()?;
         if let Some(found) = self.servers.get(&key) {
@@ -438,27 +415,19 @@ impl Transactions {
         }
     }
 
-    /// Whether `request` is a merged request (RFC 3261 §8.2.2.2): one with no
-    /// To tag whose From tag, `Call-ID` and `CSeq` already belong to a server
-    /// transaction this store is running, under a branch that does not itself
-    /// match that transaction (§17.2.3), and sent to the same line — the same
-    /// request, arrived by a second path, almost always a fork.
+    /// Whether `request` is a merged request (RFC 3261 §8.2.2.2): no To tag,
+    /// and its From tag, `Call-ID` and `CSeq` already belong to a running
+    /// server transaction under a branch that does not match it (§17.2.3),
+    /// sent to the same line. Usually a fork arriving twice.
     ///
-    /// The line is the Request-URI, compared by §19.1.4. §8.2.2.2 is written
-    /// for one UAS, and one stack with several accounts is several: each
-    /// registered a contact of its own, and a proxy forking to two of them
-    /// rewrites the Request-URI to each contact (§16.6). Two copies that
-    /// differ there are one request offered to two lines, and each line is
-    /// asked; two that agree are one line reached twice, and the second is
-    /// refused.
+    /// The line is the Request-URI, compared by §19.1.4. One stack with
+    /// several accounts is several UASes: a proxy forking to two of their
+    /// contacts rewrites the Request-URI to each (§16.6), and each line is
+    /// asked. Two copies to the same line: the second is refused.
     ///
-    /// The caller only calls this once `request` has already failed to match
-    /// anything through [`Transactions::server_for`], and before it creates a
-    /// transaction of its own, so a hit here is necessarily a different
-    /// transaction sharing the same fields, never the request comparing equal
-    /// to itself; and a hash lookup through [`Transactions::merge`] rather
-    /// than a visit per slot, because it is asked of every request that opens
-    /// a transaction, unlike [`Transactions::cancelled_by`]'s scan.
+    /// Called only after [`Transactions::server_for`] found nothing and before
+    /// a transaction is created, so a hit is always a different transaction.
+    /// A hash lookup, since every new request asks it.
     pub(crate) fn merged_with(&self, request: &RawMessage<'_>) -> bool {
         let untagged = request.to().is_ok_and(|to| to.tag().is_none());
         if !untagged {
@@ -471,10 +440,9 @@ impl Transactions {
         lines.iter().any(|held| same_line(held, arrived))
     }
 
-    /// Give a retiring INVITE server transaction's place in the §8.2.2.2
-    /// merge index back. A no-op once the id no longer resolves to anything,
-    /// which is why this has to be called before
-    /// [`Transactions::drop_invite_server`], not after.
+    /// Give a retiring INVITE server transaction's §8.2.2.2 merge entry back.
+    /// A no-op once the id no longer resolves, so call it before
+    /// [`Transactions::drop_invite_server`].
     pub(crate) fn release_invite_merge(&mut self, id: TransactionId<InviteServer>) {
         if let Some(entry) = self.invite_servers.get(id.raw) {
             forget_merge_key(&mut self.merge, &entry.request);
@@ -489,15 +457,12 @@ impl Transactions {
         }
     }
 
-    /// The server transaction a CANCEL is aimed at (§9.2), if there is one.
+    /// The server transaction a CANCEL is aimed at (§9.2), if any.
     ///
-    /// An INVITE is found through the index, by the CANCEL's own branch and
-    /// sent-by with the method taken as INVITE, since that is what a CANCEL is
-    /// nearly always for. A transaction of any other method is found by
-    /// visiting the non-INVITE server slots: the CANCEL does not say which
-    /// method it cancels, and the index is keyed on one. That is a visit per
-    /// slot, which is what finding the next deadline already costs after every
-    /// message.
+    /// An INVITE is found through the index (the CANCEL's branch and sent-by,
+    /// method taken as INVITE). Other methods are found by visiting the
+    /// non-INVITE server slots, since the CANCEL does not name the method; the
+    /// same cost as finding the next deadline.
     pub(crate) fn cancelled_by(&self, cancel: &RawMessage<'_>) -> Option<Server> {
         let key = ServerKey::for_cancelled(cancel).ok()?;
         if let Some(found) = self.servers.get(&key) {
@@ -560,17 +525,13 @@ impl Transactions {
     }
 }
 
-/// The four arenas, reached by typed handle.
-///
-/// Written as a macro because the four are the same code with four types in
-/// it, and four hand-written copies would drift the moment one of them gained
-/// a line.
+/// The four arenas, reached by typed handle. A macro so the four copies
+/// cannot drift.
 macro_rules! access {
     ($($get:ident, $get_mut:ident, $drop:ident => $slab:ident, $entry:ident, $machine:ty, $kind:ty, $index:ident;)*) => {
         impl Transactions {
             $(
-                /// The transaction, if this handle is still the one that slot
-                /// answers to.
+                /// The transaction, if this handle still matches its slot.
                 pub(crate) fn $get(&self, id: TransactionId<$kind>) -> Option<&$entry<$machine>> {
                     self.$slab.get(id.raw)
                 }
@@ -583,11 +544,8 @@ macro_rules! access {
                     self.$slab.get_mut(id.raw)
                 }
 
-                /// Retire the transaction and its index entry.
-                ///
-                /// The generation advances, so every copy of the handle stops
-                /// matching — including the one a late retransmission is
-                /// holding.
+                /// Retire the transaction and its index entry. Every copy of
+                /// the handle stops matching.
                 pub(crate) fn $drop(&mut self, id: TransactionId<$kind>) {
                     if let Some(entry) = self.$slab.remove(id.raw) {
                         self.$index.remove(&entry.key);
@@ -692,7 +650,7 @@ mod tests {
 
     #[test]
     fn an_invite_and_its_cancel_are_two_transactions_on_one_branch() {
-        // 17.1.3: the CSeq method is in the key because a CANCEL borrows the
+        // 17.1.3: the CSeq method is in the key because a CANCEL shares the
         // branch of the request it cancels
         let mut store = Transactions::new();
         let now = Instant::now();
@@ -761,8 +719,7 @@ mod tests {
     #[test]
     fn a_legacy_ack_finds_the_re_invite_it_acknowledges() {
         // §17.2.3 matches a legacy ACK by "the To tag of the response sent by
-        // the server transaction", and every response to a re-INVITE carries
-        // the To tag the re-INVITE itself does
+        // the server transaction", which for a re-INVITE is its own To tag
         let reinvite = b"INVITE sip:bob@192.0.2.9 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
 Max-Forwards: 70\r\n\

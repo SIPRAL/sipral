@@ -3,35 +3,19 @@
 
 //! Finding the server a URI names (RFC 3263 §4), without doing the finding.
 //!
-//! RFC 3263 turns a SIP URI into an ordered list of addresses with three kinds
-//! of DNS lookup — NAPTR, then SRV, then A or AAAA — and the order of those
-//! lookups, which answers to keep, how to rank what they return and when the
-//! answer stops being true are protocol, not I/O. The lookups themselves are
-//! I/O, and the platform's resolver is better than one a library would carry
-//! (`docs/01-architecture.md`). So [`Locator`] is the procedure with the
-//! resolver taken out: it hands out a [`Query`] at a time, is told the
-//! [`Answer`] the caller's resolver gave, and ends with the addresses to try,
-//! first to last, and how long the DNS said they hold.
+//! The lookups are I/O and belong to the platform resolver; their order and
+//! ranking are protocol. [`Locator`] hands out one [`Query`] at a time, takes
+//! the caller's [`Answer`], and ends with the addresses to try and their TTL.
 //!
-//! What it does, section by section, written from the RFCs, whose words are
-//! quoted where they decide something.
+//! - §4.1: the transport is the one the caller bound; NAPTR only picks its
+//!   SRV name.
+//! - §4.2: a numeric host needs no lookup; a host with a port gets A/AAAA
+//!   only; otherwise SRV, falling back to the host at the default port.
+//! - RFC 2782: priority order, weighted random within one; a lone `.` target
+//!   means no service.
+//! - §4.3: every address is kept, in order, for failover.
 //!
-//! - §4.1: the transport is not chosen here. It is the one the caller already
-//!   has bound for the traffic — an account's transport — so a NAPTR lookup,
-//!   when asked for, only picks which SRV name serves that transport, by the
-//!   services RFC 3263 registers (`SIP+D2U`, `SIP+D2T`, `SIPS+D2T`).
-//! - §4.2: a numeric host needs no lookup; a host with a port is looked up for
-//!   its addresses alone; otherwise the SRV name for the transport
-//!   (`_sip._udp`, `_sip._tcp`, `_sips._tcp`) is asked, and when it has no
-//!   records the host's own addresses are, at the transport's default port.
-//! - RFC 2782: SRV records are tried by ascending priority, and within one
-//!   priority in a random order weighted by their weights; a single record
-//!   whose target is `.` says the service is decidedly not available there.
-//! - §4.3: every address found is kept, in that order, so a caller whose first
-//!   server does not answer tries the next rather than asking again.
-//!
-//! Only the address family the caller's transport can reach is asked for: a
-//! socket bound to an IPv4 address sends nothing to an IPv6 one.
+//! Only the transport's address family is asked for.
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
@@ -71,8 +55,7 @@ pub struct Naptr {
     pub order: u16,
     /// Lower first, among records of the same order.
     pub preference: u16,
-    /// `S` for a record whose replacement is an SRV name, the only kind
-    /// RFC 3263 §4.1 follows.
+    /// `S` for an SRV replacement, the only kind RFC 3263 §4.1 follows.
     pub flags: Box<str>,
     /// `SIP+D2U`, `SIP+D2T`, `SIPS+D2T`, ...
     pub service: Box<str>,
@@ -116,16 +99,12 @@ pub enum Record {
 /// What the caller's resolver said to a [`Query`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Answer {
-    /// The records it returned. Records of a kind the query did not ask for
-    /// are passed over.
+    /// The records it returned; other kinds are ignored.
     Records(Vec<Record>),
-    /// The name has no record of that kind, or does not exist at all. Also
-    /// the right answer from a resolver that cannot ask for the kind — a
-    /// platform lookup that only knows addresses answers every NAPTR and SRV
-    /// query with this, and the procedure goes on to the host's addresses.
+    /// No record of that kind. Also the answer from a resolver that only
+    /// knows addresses.
     Nothing,
-    /// The resolver could not answer: no server reachable, a timeout, a
-    /// server failure.
+    /// The resolver could not answer.
     Failed,
 }
 
@@ -133,14 +112,12 @@ pub enum Answer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LocateError {
-    /// The DNS answered, and what it answered names no address of the family
-    /// the transport can reach: no record, or an SRV target of `.`.
+    /// The DNS named no reachable address, or an SRV target of `.`.
     NotFound,
     /// The resolver failed on every lookup that could have given an address.
     Unanswered,
-    /// The transport has no RFC 3263 procedure here: WebSocket names no SRV
-    /// service and no default port, so only a numeric host, or a host with a
-    /// port, can be located for it.
+    /// WebSocket has no SRV service or default port, so only a numeric host
+    /// or an explicit port works.
     Unsupported,
 }
 
@@ -162,8 +139,7 @@ impl core::error::Error for LocateError {}
 pub struct Located {
     /// The addresses, in the order §4.3 has them tried.
     pub targets: Vec<SocketAddr>,
-    /// The shortest time-to-live of every record the answer was built from,
-    /// or `None` for a numeric host, which never has to be looked up again.
+    /// The shortest TTL used, or `None` for a numeric host.
     pub ttl: Option<Duration>,
 }
 
@@ -180,8 +156,7 @@ struct HostLookup {
 enum Stage {
     /// Waiting for the NAPTR answer for the domain.
     Naptr,
-    /// Waiting for the SRV answer for the front name; the rest are the ones a
-    /// NAPTR answer ranked after it.
+    /// Waiting for the SRV answer for the front name.
     Srv(VecDeque<Arc<str>>),
     /// Waiting for the addresses of every host.
     Hosts(Vec<HostLookup>),
@@ -270,15 +245,9 @@ impl AddressFamily {
 impl Locator {
     /// Start locating `target`'s server for `protocol` over `family`.
     ///
-    /// `naptr` asks the domain's NAPTR records first (RFC 3263 §4.1), which a
-    /// deployment that publishes none — most of them — spends a round trip
-    /// on; without it the procedure starts at SRV, which §4.1 allows a client
-    /// that already knows its transport. `seed` is entropy for RFC 2782's
-    /// weighted order, the caller's to draw like every other random number in
-    /// this crate.
-    ///
-    /// A URI that is not a SIP URI, or that names a numeric host, is settled
-    /// here and asks nothing.
+    /// `naptr` asks NAPTR first (RFC 3263 §4.1); most domains publish none,
+    /// so off saves a round trip. `seed` feeds RFC 2782's weighted order.
+    /// A non-SIP URI or a numeric host is settled here and asks nothing.
     #[must_use]
     pub fn new(
         target: &Uri,
@@ -317,9 +286,7 @@ impl Locator {
             Host::Name(name) => {
                 locator.domain = name;
                 if let Some(port) = sip.port {
-                    // §4.2: "If the TARGET was not a numeric IP address, but a
-                    // port is present in the URI, the client performs an A or
-                    // AAAA record lookup of the domain name"
+                    // §4.2: a port in the URI means A/AAAA only
                     let domain = locator.domain.clone();
                     locator.ask_hosts(vec![(domain, port)]);
                 } else if naptr && locator.naptr_service().is_some() {
@@ -333,9 +300,8 @@ impl Locator {
         locator
     }
 
-    /// The next lookup to make, until there is none. Every query handed out
-    /// is waited for: answer each one, [`Answer::Failed`] included, or the
-    /// procedure never ends.
+    /// The next lookup to make. Answer every one, or the procedure never
+    /// ends.
     pub fn poll_query(&mut self) -> Option<Query> {
         self.queue.pop_front()
     }
@@ -353,8 +319,7 @@ impl Locator {
 
     /// What the resolver said to `query`.
     ///
-    /// Answers to a query this locator is not waiting for — a stale one, or
-    /// one answered twice — change nothing, and are reported with `false`.
+    /// Returns `false` for a query it is not waiting for.
     pub fn answer(&mut self, query: &Query, answer: Answer) -> bool {
         match core::mem::replace(&mut self.stage, Stage::Done) {
             Stage::Naptr if query.record == RecordType::Naptr && *query.name == *self.domain => {
@@ -420,8 +385,7 @@ impl Locator {
         self.ttl = Some(self.ttl.map_or(ttl, |held| held.min(ttl)));
     }
 
-    /// Ask the SRV names a NAPTR answer ranked, or the transport's own when it
-    /// ranked none.
+    /// Ask the SRV names NAPTR ranked, or the transport's own.
     fn ask_srv(&mut self, mut names: VecDeque<Arc<str>>) {
         if names.is_empty() {
             let Some(name) = self.srv_name() else {
@@ -482,21 +446,15 @@ impl Locator {
                     _ => None,
                 })
                 .collect(),
-            // NAPTR is optional in practice: a domain with none, or a
-            // resolver that cannot ask, goes on to SRV (§4.1: "If no NAPTR
-            // records are found, the client constructs SRV queries for those
-            // transport protocols it supports")
+            // §4.1: no NAPTR means SRV
             Answer::Nothing | Answer::Failed => Vec::new(),
         };
         usable.sort_by_key(|naptr| (naptr.order, naptr.preference));
         for naptr in &usable {
             self.note_ttl(naptr.ttl);
         }
-        // a domain whose NAPTR records offer other transports and not this
-        // one: the SRV name for this one is asked all the same. RFC 3263
-        // would have the client pick a transport the records offer; here the
-        // transport is fixed by the socket the caller bound, so the records
-        // can only say where it is served, not change what it is.
+        // NAPTR without our transport: the transport is fixed by the bound
+        // socket, so ask its SRV name anyway
         let names = usable
             .into_iter()
             .map(|naptr| Arc::from(&*naptr.replacement))
@@ -519,8 +477,7 @@ impl Locator {
                 Vec::new()
             }
         };
-        // RFC 2782: "A Target of \".\" means that the service is decidedly
-        // not available at this domain."
+        // RFC 2782: a `.` target means no service
         if let [only] = records.as_slice()
             && only.target.trim_end_matches('.').is_empty()
         {
@@ -533,8 +490,7 @@ impl Locator {
                 self.ask_srv(rest);
                 return;
             }
-            // §4.2: no SRV records, so the domain's own addresses at the
-            // transport's default port
+            // §4.2: no SRV, so the host at the default port
             let Some(port) = self.protocol.default_port() else {
                 self.outcome = Some(Err(LocateError::Unsupported));
                 return;
@@ -555,9 +511,8 @@ impl Locator {
         self.ask_hosts(hosts);
     }
 
-    /// RFC 2782's order: ascending priority, and within one priority a
-    /// weighted random draw, the records of weight zero placed first so that
-    /// they are chosen only when the draw lands on zero.
+    /// RFC 2782's order: ascending priority, then a weighted draw with zero
+    /// weights first.
     fn rank(&mut self, mut records: Vec<Srv>) -> Vec<Srv> {
         records.sort_by_key(|srv| srv.priority);
         let mut ranked = Vec::with_capacity(records.len());
@@ -568,7 +523,6 @@ impl Locator {
                 .position(|srv| srv.priority != priority)
                 .unwrap_or(records.len());
             let mut group: Vec<Srv> = records.drain(..split).collect();
-            // zero weights first, the order they came in otherwise kept
             group.sort_by_key(|srv| srv.weight != 0);
             while !group.is_empty() {
                 let total: u64 = group.iter().map(|srv| u64::from(srv.weight)).sum();
@@ -762,7 +716,6 @@ mod tests {
             addresses(&located),
             ["192.0.2.10:5080", "192.0.2.11:5080", "198.51.100.20:5062"]
         );
-        // the shortest TTL of anything the answer was built from
         assert_eq!(located.ttl, Some(secs(120)));
         assert!(
             !dns.asked.iter().any(|(_, kind)| *kind == RecordType::Naptr),
@@ -772,8 +725,7 @@ mod tests {
 
     #[test]
     fn with_no_srv_records_the_hosts_own_address_is_used_at_the_default_port() {
-        // RFC 3263 §4.2, and the resolver that only knows addresses: every
-        // SRV query answered with nothing
+        // RFC 3263 §4.2 with a resolver that only knows addresses
         let mut dns = FakeDns::default().with(
             "pbx.example.com",
             RecordType::A,
@@ -789,7 +741,6 @@ mod tests {
             ]
         );
 
-        // TLS asks `_sips._tcp` and falls back to 5061
         let mut dns = FakeDns::default().with(
             "pbx.example.com",
             RecordType::A,
@@ -806,7 +757,6 @@ mod tests {
         assert_eq!(addresses(&located), ["203.0.113.5:5061"]);
         assert_eq!(dns.asked[0].0, "_sips._tcp.pbx.example.com");
 
-        // and TCP `_sip._tcp`
         let mut dns = FakeDns::default();
         let mut locator = Locator::new(
             &uri("sip:pbx.example.com"),
@@ -933,8 +883,7 @@ mod tests {
 
     #[test]
     fn weights_share_out_the_first_place_within_a_priority() {
-        // RFC 2782: a server of weight 90 beside one of 10 comes first about
-        // nine times in ten
+        // RFC 2782: weight 90 beside 10 comes first about nine times in ten
         let mut heavy_first = 0;
         for seed in 0..1_000_u64 {
             let mut dns = FakeDns::default()

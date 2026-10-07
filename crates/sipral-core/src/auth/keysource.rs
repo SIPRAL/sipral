@@ -1,22 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A stream of unguessable blocks from one seed.
+//! A stream of unguessable blocks from one seed: `SHA-256(seed || counter)`.
 //!
-//! `SHA-256(seed || counter)`, and the counter never repeats. Nothing here
-//! reads a clock, opens a device or asks the operating system for anything:
-//! the caller supplies the thirty-two bytes once, which is what lets the same
-//! code run in a test with a fixed seed and on a phone with a real one.
+//! No clock, no device: the caller supplies the 32 bytes once, so a test can
+//! use a fixed seed.
 //!
-//! Two of these exist in a running stack and they are deliberately separate.
-//! The endpoint's drives everything that goes on the wire in clear — branches,
-//! tags, `Call-ID`s, the client nonce — and a replay recording carries the
-//! seed it runs on while it records, one derived for the recording
-//! ([`KeySource::derived`]), so that a recorded session can be replayed byte
-//! for byte without the file holding the seed the stack was built with. The media
-//! engine's derives SRTP master keys, and is written nowhere. Sharing one
-//! between them would put every key this stack will ever offer into every
-//! recording it makes.
+//! A stack holds two of these, kept separate on purpose. The endpoint's drives
+//! everything sent in clear (branches, tags, `Call-ID`s, the client nonce),
+//! and a replay recording carries a seed derived for it
+//! ([`KeySource::derived`]) so it replays byte for byte without exposing the
+//! stack's seed. The media engine's derives SRTP master keys and is written
+//! nowhere. Sharing one would put every key into every recording.
 
 use core::fmt;
 
@@ -25,8 +20,7 @@ use super::sha2::sha256;
 
 /// A seed, and the blocks drawn from it.
 ///
-/// Neither `Clone` nor `Copy`: two copies of a stream hand out the same
-/// blocks twice, and for key material that is the end of the encryption.
+/// Not `Clone`: two copies hand out the same blocks twice.
 pub struct KeySource {
     seed: [u8; 32],
     counter: u64,
@@ -37,8 +31,8 @@ pub struct KeySource {
 impl KeySource {
     /// Start from the caller's seed.
     ///
-    /// Two of these must never be given the same thirty-two bytes, and a
-    /// stack's media seed must not be its endpoint seed.
+    /// No two sources may get the same 32 bytes, and the media seed must not
+    /// be the endpoint seed.
     #[must_use]
     pub const fn new(seed: [u8; 32]) -> Self {
         Self {
@@ -48,17 +42,14 @@ impl KeySource {
         }
     }
 
-    /// Start from the caller's seed, and let no state held later say
-    /// anything about a block handed out earlier.
+    /// Start from the caller's seed, with forward secrecy.
     ///
-    /// Each block is `SHA-256(0x00 || seed || counter)`, and the seed is then
-    /// replaced by `SHA-256(0x01 || seed || counter)`, the old one
-    /// overwritten. Whoever reads this source's memory learns the blocks it
-    /// has still to hand out, and none it has handed out already (RFC 4086
-    /// §6.2): for a media engine, not the SRTP keys of the calls before.
-    /// What the media engine draws from, which nothing replays; the
-    /// endpoint's stream, which a replay recording reproduces from its seed,
-    /// stays on [`KeySource::new`].
+    /// Each block is `SHA-256(0x00 || seed || counter)`, then the seed is
+    /// replaced by `SHA-256(0x01 || seed || counter)`. Reading this source's
+    /// memory reveals future blocks but none already handed out (RFC 4086
+    /// §6.2), so not the SRTP keys of earlier calls. Used by the media engine;
+    /// the endpoint stream stays on [`KeySource::new`] because replays
+    /// reproduce it from its seed.
     #[must_use]
     pub const fn forward_secure(seed: [u8; 32]) -> Self {
         Self {
@@ -68,14 +59,12 @@ impl KeySource {
         }
     }
 
-    /// `SHA-256(seed || counter)`, and the counter moves on — or, made
-    /// [`KeySource::forward_secure`], the block and the next seed as it
-    /// says.
+    /// `SHA-256(seed || counter)`, then the counter moves on (or, made
+    /// [`KeySource::forward_secure`], the ratchet turns).
     ///
-    /// The counter is read before it is incremented, so the first block is
-    /// drawn at zero. That ordering is load-bearing: every branch, tag,
-    /// `Call-ID` and client nonce this stack has ever produced follows from
-    /// it, and a recorded session replays byte for byte only while it holds.
+    /// The first block is drawn at counter zero. Every branch, tag and
+    /// `Call-ID` depends on that order, and recordings replay only while it
+    /// holds.
     pub fn block(&mut self) -> [u8; 32] {
         let counter = self.counter.to_be_bytes();
         self.counter = self.counter.wrapping_add(1);
@@ -91,8 +80,6 @@ impl KeySource {
         digest
     }
 
-    /// One turn of the ratchet: the block for `counter`, and the seed moved
-    /// on past it.
     fn turn(&mut self, counter: [u8; 8]) -> [u8; 32] {
         let mut input = [0_u8; 41];
         for (slot, byte) in input
@@ -113,19 +100,14 @@ impl KeySource {
         block
     }
 
-    /// The seed as it stands, for the tests that hold the ratchet to what it
-    /// promises.
     #[cfg(test)]
     pub(crate) const fn state(&self) -> [u8; 32] {
         self.seed
     }
 
-    /// A stream of its own, seeded with `SHA-256(label || seed)`.
-    ///
-    /// One way: neither stream's blocks say anything about the other's, and
-    /// a different `label` gives an unrelated stream. What the endpoint
-    /// draws the seed of each replay recording from, so that a recording
-    /// carries a seed of its own and never this one.
+    /// A separate stream seeded with `SHA-256(label || seed)`. One way: neither
+    /// stream reveals the other. Each replay recording gets its seed from
+    /// here, never the endpoint's own.
     pub(crate) fn derived(&self, label: &[u8]) -> Self {
         let mut input = Vec::with_capacity(label.len() + self.seed.len());
         input.extend_from_slice(label);
@@ -136,11 +118,8 @@ impl KeySource {
     }
 }
 
-/// Written by hand, because the seed must not reach a log.
-///
-/// Everything that holds one of these derives `Debug` — the media engine, the
-/// endpoint, and the user agent above both — so a derived implementation here
-/// would put thirty-two bytes of entropy into any `{:?}` of a live stack.
+/// Written by hand so the seed never reaches a log: the media engine, the
+/// endpoint and the user agent all derive `Debug`.
 impl fmt::Debug for KeySource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("KeySource(<redacted>)")
@@ -180,11 +159,8 @@ mod tests {
         }
     }
 
-    /// G2: a forward-secure source is still a stream (the same seed, the
-    /// same blocks; no block twice), but what it holds after a draw is not
-    /// the seed it started from and cannot draw that block again: neither a
-    /// plain source nor a forward-secure one started from the state that is
-    /// left hands out anything already handed out.
+    /// G2: a forward-secure source is still a stream, but the state left after
+    /// a draw cannot draw any block already handed out.
     #[test]
     fn a_forward_secure_source_keeps_nothing_that_draws_its_past_blocks() {
         let mut one = KeySource::forward_secure([7; 32]);
@@ -213,9 +189,7 @@ mod tests {
 
     #[test]
     fn the_seed_does_not_reach_a_log() {
-        // the one thing a derived Debug would get wrong, and it would get it
-        // wrong everywhere at once: this type is held by the media engine,
-        // which is held by the facade, which an application prints
+        // this type sits inside the facade an application prints
         let source = KeySource::new([0xab; 32]);
         let printed = format!("{source:?}");
         assert!(!printed.contains("ab"), "{printed}");

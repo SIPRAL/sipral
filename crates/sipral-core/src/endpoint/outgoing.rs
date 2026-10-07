@@ -3,16 +3,9 @@
 
 //! What the caller describes, and what the endpoint fills in.
 //!
-//! The split is the point. The caller knows who is calling whom, what body to
-//! carry and which transport to leave on; the endpoint knows the branch, the
-//! sent-by, the sequence number and the tag, and none of those are safe to
-//! let a caller choose. A `Via` written by hand is a `Via` whose branch
-//! repeats, and a repeated branch is a response delivered to the wrong
-//! transaction.
-//!
-//! These own their contents, unlike the builders in `msg`, because they cross
-//! the boundary into the endpoint and are held until the message goes out. A
-//! borrowed form would tie the caller's buffers to the transaction's lifetime.
+//! The endpoint owns branch, sent-by, sequence number and tag: a hand-written
+//! `Via` repeats its branch and misroutes responses. These types own their
+//! contents because they are held until the message goes out.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,42 +14,32 @@ use super::transport::TransportId;
 use crate::dialog::CallId;
 use crate::msg::{BuildError, HeaderName, Method, StatusCode, Uri};
 
-/// The fields an endpoint writes itself, from what it keeps, and therefore
-/// refuses to take from a caller by name.
+/// The fields an endpoint writes itself and refuses from a caller.
 ///
-/// A second line of any of them is not a harmless repeat. Each is either a
-/// field that appears once, so that two lines are a malformed message every
-/// hop on the path resolves by guessing, or one whose value decides where the
-/// message goes or where it ends, so that a second line sends it somewhere
-/// the endpoint did not. [`OutgoingRequest::header`] and its two siblings
-/// cannot refuse on the spot, being builders, so the refusal is
-/// [`BuildError::OwnedField`] from the call that sends: nothing is built and
-/// nothing leaves.
+/// A second line of any of them is either malformed or redirects the
+/// message. Builders cannot refuse on the spot, so the sending call returns
+/// [`BuildError::OwnedField`] and nothing leaves.
 pub const ENDPOINT_FIELDS: &[HeaderName<'static>] = &[
-    // §8.1.1.7, §18.2.2: the branch keys the transaction, and the sent-by is
-    // where the response comes back to
+    // §8.1.1.7, §18.2.2: branch keys the transaction, sent-by routes responses
     HeaderName::Via,
-    // §8.1.1.2, §8.1.1.3: the tags name the dialog, and each field is one
+    // §8.1.1.2, §8.1.1.3: the tags name the dialog
     HeaderName::From,
     HeaderName::To,
-    // §8.1.1.4: the dialog's name, once
+    // §8.1.1.4
     HeaderName::CallId,
-    // §8.1.1.5, §12.2.1.1: the number a transaction and a dialog are ordered by
+    // §8.1.1.5, §12.2.1.1
     HeaderName::CSeq,
-    // §8.1.1.6: the hop count a loop is caught by
+    // §8.1.1.6
     HeaderName::MaxForwards,
-    // §8.1.1.8, §12.1.1: the remote target the far end sends the dialog to
+    // §8.1.1.8, §12.1.1
     HeaderName::Contact,
-    // §8.1.2, §12.2.1.1: the route set; a hop written by hand detours the
-    // request through a proxy the caller named
+    // §8.1.2, §12.2.1.1: a hand-written hop detours the request
     HeaderName::Route,
-    // §12.1.1: copied from the request into a response that opens a dialog,
-    // and the far end reads its route set off it
+    // §12.1.1
     HeaderName::RecordRoute,
-    // §7.4.1, §20.15: what the body is, written with the body
+    // §7.4.1, §20.15
     HeaderName::ContentType,
-    // §18.3, §20.14: where the message ends on a stream, so a second one is
-    // the start of a second message
+    // §18.3, §20.14: a second one starts a second message on a stream
     HeaderName::ContentLength,
 ];
 
@@ -73,11 +56,8 @@ impl Extra {
         Some((HeaderName::from_bytes(&self.name)?, &self.value))
     }
 
-    /// The same, refused rather than skipped when it cannot be written: a
-    /// name that is not a token, or a field the endpoint writes itself.
-    ///
-    /// A header the caller asked for and did not get, with nothing said, is
-    /// found in a capture a week later.
+    /// The same, but refused rather than silently skipped when the name is not a
+    /// token or is an endpoint field.
     pub(crate) fn field(&self) -> Result<(HeaderName<'_>, &[u8]), BuildError> {
         let Some((name, value)) = self.parts() else {
             return Err(BuildError::IllegalValue("a header field name is a token"));
@@ -89,12 +69,8 @@ impl Extra {
     }
 }
 
-/// A request the caller wants sent, out of dialog.
-///
-/// REGISTER, OPTIONS, SUBSCRIBE, MESSAGE, INVITE — anything that starts
-/// something rather than continuing it. What is inside a dialog comes from
-/// the dialog instead, which already knows the target, the route and the
-/// numbering.
+/// A request the caller wants sent, out of dialog (REGISTER, OPTIONS, INVITE
+/// and so on). In-dialog requests take their fields from the dialog.
 #[derive(Clone, Debug)]
 pub struct OutgoingRequest {
     pub(crate) method: Box<[u8]>,
@@ -115,12 +91,7 @@ pub struct OutgoingRequest {
 
 impl OutgoingRequest {
     /// A request of `method` to `request_uri`, leaving on `transport` for
-    /// `remote`.
-    ///
-    /// The endpoint does not choose the transport or resolve the address.
-    /// RFC 3263 resolution is I/O and belongs to whoever owns the sockets;
-    /// what the endpoint asks about is a target it found in a message rather
-    /// than one the caller handed it.
+    /// `remote`. The endpoint does not resolve addresses (RFC 3263 is I/O).
     #[must_use]
     pub fn new(
         method: Method<'_>,
@@ -154,33 +125,23 @@ impl OutgoingRequest {
         self
     }
 
-    /// The `From` value. Required.
-    ///
-    /// A tag is added if there is none: §8.1.1.3 makes it mandatory on a
-    /// request, and a caller that has no reason to pick one should not have
-    /// to invent an unguessable string.
+    /// The `From` value. Required. A tag is added if missing (§8.1.1.3).
     #[must_use]
     pub fn from(mut self, value: &[u8]) -> Self {
         self.from = Some(Box::from(value));
         self
     }
 
-    /// The `Call-ID`, when it has to be a particular one.
-    ///
-    /// §10.2 asks a user agent to reuse one `Call-ID` for every registration
-    /// it sends to the same registrar, so that the registrar can tell a
-    /// refresh from a second device. Everything else gets a fresh one.
+    /// The `Call-ID`, when it has to be a particular one. §10.2 reuses one per
+    /// registrar; everything else gets a fresh one.
     #[must_use]
     pub fn call_id(mut self, call_id: CallId) -> Self {
         self.call_id = Some(call_id);
         self
     }
 
-    /// The sequence number, when it has to continue a series.
-    ///
-    /// Registrations again: §10.2 wants the number to increase across
-    /// refreshes. Left alone it starts at 1, which §8.1.1.5 allows for a
-    /// request that starts something.
+    /// The sequence number, to continue a series (§10.2). Defaults to 1
+    /// (§8.1.1.5).
     #[must_use]
     pub const fn cseq(mut self, seq: u32) -> Self {
         self.cseq = Some(seq);
@@ -229,12 +190,8 @@ impl OutgoingRequest {
     }
 }
 
-/// A request the caller wants sent inside a dialog.
-///
-/// Much shorter than the out-of-dialog form, because the dialog already knows
-/// almost all of it: the Request-URI, the route set, both addresses with their
-/// tags, the `Call-ID` and the sequence number are §12.2.1.1's business and
-/// not the caller's.
+/// A request the caller wants sent inside a dialog. Request-URI, routes,
+/// tags, `Call-ID` and `CSeq` come from the dialog (§12.2.1.1).
 #[derive(Clone, Debug)]
 pub struct OutgoingInDialogRequest {
     pub(crate) method: Box<[u8]>,
@@ -299,11 +256,8 @@ impl OutgoingInDialogRequest {
     }
 }
 
-/// A response the caller wants sent.
-///
-/// Everything the response has to echo from the request — `Via`, `From`,
-/// `To`, `Call-ID`, `CSeq` — is taken from the request by the endpoint
-/// (§8.2.6.2), so none of it is here.
+/// A response the caller wants sent. Fields echoed from the request are
+/// filled in by the endpoint (§8.2.6.2).
 #[derive(Clone, Debug)]
 pub struct OutgoingResponse {
     pub(crate) status: StatusCode,
@@ -336,22 +290,15 @@ impl OutgoingResponse {
         self.status
     }
 
-    /// A reason phrase of your own, in place of the registered one.
-    ///
-    /// §21 makes the phrase advisory and explicitly allows replacing it, and
-    /// a carrier that says why in it is easier to debug against than one that
-    /// does not.
+    /// A reason phrase of your own. §21 makes the phrase advisory.
     #[must_use]
     pub fn reason(mut self, reason: &[u8]) -> Self {
         self.reason = Some(Box::from(reason));
         self
     }
 
-    /// The tag to put in `To`, when the request had none.
-    ///
-    /// Left alone, the endpoint adds one: §8.2.6.2 makes a tag mandatory on
-    /// every response except a 100, and a response without one cannot be part
-    /// of a dialog.
+    /// The tag to put in `To`, when the request had none. Left alone, the
+    /// endpoint adds one (§8.2.6.2).
     #[must_use]
     pub fn to_tag(mut self, tag: &[u8]) -> Self {
         self.to_tag = Some(Box::from(tag));

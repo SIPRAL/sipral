@@ -1,27 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! One enum per operation, `Display` written out by hand.
+//! One error enum per operation, `Display` by hand (no `thiserror`: the
+//! crate has no dependencies).
 //!
-//! No `thiserror`: `sipral-core` has no dependencies, and an error type is
-//! where that promise would be easiest to break for the least reason.
-//!
-//! Nothing here is a failure of the far end. A response that never came, a
-//! transport that died, a peer answering 500 — none of those are errors of an
-//! operation the caller performed, and all of them arrive as events. What is
-//! here is the caller asking for something that cannot be done: a request
-//! missing a field it has to have, a handle that named a transaction which no
-//! longer exists, bytes that are not a message.
+//! Failures of the far end (timeouts, dead transports, a 500) arrive as
+//! events. These are only for requests the caller made that cannot be done.
 
 use core::fmt;
 
 use crate::dialog::DialogError;
 use crate::msg::{BuildError, HeaderError, ParseError};
 
-/// Why bytes handed to the endpoint could not be taken.
-///
-/// A malformed datagram is the normal case on a public SIP port rather than a
-/// fault: nothing is broken, the packet is gone, and the caller carries on.
+/// Why bytes handed to the endpoint could not be taken. On a public port a
+/// malformed datagram is normal: drop it and carry on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReceiveError {
@@ -32,14 +24,10 @@ pub enum ReceiveError {
     WrongKindOfTransport,
     /// The bytes are not a SIP message the parser would take.
     ///
-    /// On a datagram this costs one packet, and a request among them has
-    /// already been answered 400 or 513 when it could be addressed
-    /// ([`super::Endpoint::unreadable`] counts both kinds). On a byte stream
-    /// it is returned only when the framing is lost with it, and then it
-    /// costs the connection: framing that is wrong cannot be resynchronised,
-    /// so the endpoint forgets the transport and the caller should close it.
-    /// A message on a stream whose end is still known is answered the same
-    /// way a datagram is, and the connection reads on without an error.
+    /// A datagram request is still answered 400 or 513 when possible
+    /// ([`super::Endpoint::unreadable`] counts both). On a stream this is
+    /// returned only when framing is lost: the endpoint forgets the transport
+    /// and the caller should close it.
     Malformed(ParseError),
 }
 
@@ -71,57 +59,34 @@ pub enum SendError {
     UnknownTransport,
     /// The message could not be assembled from what was given.
     Build(BuildError),
-    /// The message was assembled but has no `Via` branch to be keyed on,
-    /// which means it cannot become a transaction.
+    /// The message has no `Via` branch, so it cannot become a transaction.
     NotKeyable(HeaderError),
-    /// The request is too large for a datagram (RFC 3261 §18.1.1) and no
-    /// stream transport is open to move it to.
+    /// Too large for a datagram (RFC 3261 §18.1.1) and no stream transport is
+    /// open. An `Event::TransportWanted` says what to open.
     ///
-    /// An `Event::TransportWanted` says what to open, and how many bytes the
-    /// request came to against how many it had.
-    ///
-    /// Who holds the request until then depends on which door it came out
-    /// of. From `request` or `invite` the caller still owns it and sends it
-    /// again itself once the transport is bound. The same goes for every
-    /// request inside a dialog — `request_in_dialog`, `bye`, `reinvite`, and
-    /// `prack` and the two ACKs, which carry it inside `PrackError::Send` and
-    /// `AckError::Build`: nothing was started, a BYE that was refused has not
-    /// ended its dialog, and a provisional response that was not acknowledged
-    /// keeps its handle. From `retry_with_credentials` the endpoint is the
-    /// one holding it: the challenge stays in the store, and the caller asks
-    /// again with the same handle.
+    /// Nothing was started: the caller sends the request again once the
+    /// transport is bound. From `retry_with_credentials` the endpoint keeps the
+    /// challenge, and the caller retries with the same handle.
     NeedsStreamTransport,
     /// The handle names a dialog that has ended, or never existed.
     NoSuchDialog,
-    /// The dialog refused to produce the request: a method it does not send,
-    /// or a sequence space that has run out.
+    /// The dialog refused: a method it does not send, or `CSeq` ran out.
     Dialog(DialogError),
-    /// The method does not go out through the call it was given to. An INVITE
-    /// inside a dialog is a re-INVITE: it runs on an INVITE client transaction
-    /// and owns an ACK, so it goes out through [`super::Endpoint::reinvite`].
+    /// The method does not go out through this call. An in-dialog INVITE goes
+    /// through [`super::Endpoint::reinvite`].
     WrongMethod,
-    /// An INVITE is already running in this dialog, in one direction or the
-    /// other. §14.1: "a UAC MUST NOT initiate a new INVITE transaction within
-    /// a dialog while another INVITE transaction is in progress in either
-    /// direction." Two that cross are answered 491 by whichever end receives
-    /// the second one, so sending it buys nothing but a round trip.
+    /// An INVITE is already running in this dialog, either way. §14.1 forbids a
+    /// second one; the far end would answer 491.
     InviteInProgress,
-    /// A new call would take this end past
-    /// [`super::EndpointConfig::max_dialogs`]: the dialogs it holds, the
-    /// calls it has let in and not yet answered, and the calls it has placed
-    /// that nothing has answered yet, already come to `limit`. Nothing went
-    /// out. The same ceiling an incoming INVITE is answered 503 at.
+    /// A new call would pass [`super::EndpointConfig::max_dialogs`] (dialogs,
+    /// pending incoming and pending outgoing calls). Nothing went out.
     LimitReached {
         /// The ceiling in force.
         limit: usize,
     },
-    /// The request names a `sips:` URI — as its Request-URI, its first
-    /// `Route`, its `Contact`, or a REGISTER's address of record — and the
-    /// transport it was given is not TLS or secure WebSocket. RFC 3261
-    /// §26.2.2: a SIPS request is carried over TLS on every hop, and a UAC
-    /// that cannot do that for the first one does not send it. Nothing went
-    /// out; the same request on a TLS transport, or to a `sip:` target, is
-    /// sent.
+    /// A `sips:` URI (Request-URI, first `Route`, `Contact`, or REGISTER AOR)
+    /// on a transport that is not TLS or secure WebSocket. RFC 3261 §26.2.2.
+    /// Nothing went out.
     SipsNeedsTls,
 }
 
@@ -176,22 +141,17 @@ pub enum RespondError {
     NoSuchTransaction,
     /// The response could not be assembled from what was given.
     Build(BuildError),
-    /// The transaction is past the point where this response could go out:
-    /// §17.2.2 discards a second final response rather than sending it.
+    /// Past the point where this response could go out (§17.2.2 discards a
+    /// second final response).
     TooLate,
-    /// The INVITE carried `Require: 100rel`, so a non-100 provisional response
-    /// to it has to be sent reliably (RFC 3262 §3). Use
-    /// [`super::Endpoint::respond_reliable`].
+    /// The INVITE required `100rel`, so this provisional response must be
+    /// reliable (RFC 3262 §3). Use [`super::Endpoint::respond_reliable`].
     MustBeReliable,
-    /// Only 101 to 199 may be sent reliably. A 100 is hop by hop, and the
-    /// mechanism is end to end.
+    /// Only 101 to 199 may be sent reliably; 100 is hop by hop.
     NotProvisional,
-    /// The INVITE listed `100rel` in neither `Supported` nor `Require`, so the
-    /// far end has not agreed to acknowledge one.
+    /// The INVITE did not offer `100rel` in `Supported` or `Require`.
     NotOffered,
-    /// A reliable provisional response is still unacknowledged. §3: "The UAS
-    /// MUST NOT send a second reliable provisional response until the first is
-    /// acknowledged."
+    /// A reliable provisional response is still unacknowledged (§3).
     StillUnacknowledged,
 }
 
@@ -219,18 +179,14 @@ impl From<BuildError> for RespondError {
     }
 }
 
-/// Why a call could not be given up on.
-///
-/// There is no "too early" here. A CANCEL that cannot go yet is held until
-/// the first provisional response arrives (§9.1), so asking too soon is not a
-/// failure and the caller never has to time it.
+/// Why a call could not be given up on. Asking too early is fine: the
+/// CANCEL waits for the first provisional response (§9.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CancelError {
     /// The handle names a transaction that has ended, or never existed.
     NoSuchTransaction,
-    /// A final response has already arrived, and "a CANCEL has no effect on
-    /// requests that have already generated a final response".
+    /// A final response already arrived; CANCEL has no effect (§9.1).
     AlreadyAnswered,
     /// The CANCEL could not be assembled from the INVITE.
     Build(BuildError),
@@ -260,17 +216,15 @@ impl From<BuildError> for CancelError {
 pub enum AckError {
     /// The handle names a dialog that has ended, or never existed.
     NoSuchDialog,
-    /// The dialog was opened by a call somebody made to us. The ACK for a 2xx
-    /// is the caller's to send, and this end is not the caller.
+    /// The dialog was opened by an incoming call; its ACK is not ours to send.
     NotOurCall,
     /// No 2xx has arrived on this dialog yet.
     NotAnswered,
-    /// It has already been acknowledged. Retransmissions of the 2xx are
-    /// answered by the endpoint from the stored bytes (§13.2.2.4).
+    /// Already acknowledged. 2xx retransmissions are answered from the stored
+    /// bytes (§13.2.2.4).
     AlreadyAcknowledged,
-    /// The ACK could not be assembled, or could not go:
-    /// [`SendError::NeedsStreamTransport`] when §18.1.1 refused it a datagram
-    /// and there is no stream to move it to.
+    /// The ACK could not be assembled or sent, for example
+    /// [`SendError::NeedsStreamTransport`].
     Build(SendError),
 }
 
@@ -298,8 +252,7 @@ impl From<SendError> for AckError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PrackError {
-    /// The handle names a response that is no longer outstanding — a final
-    /// response arrived, or it was acknowledged already.
+    /// The response is no longer outstanding: final response or already acked.
     NoSuchResponse,
     /// The dialog it belonged to has ended.
     NoSuchDialog,
@@ -329,10 +282,9 @@ impl From<SendError> for PrackError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthRetryError {
-    /// No challenge is being held under this handle. It was answered already,
-    /// the refusal carried nothing this stack can answer, or the same nonce
-    /// came back a second time — §22.1 does not re-try credentials that were
-    /// just refused, because repeating them only locks the account.
+    /// No challenge is held under this handle. Also returned when the same
+    /// nonce comes back: retrying refused credentials only locks the account
+    /// (§22.1).
     NoChallenge,
     /// The credentials produced nothing to send.
     NothingToAnswer,

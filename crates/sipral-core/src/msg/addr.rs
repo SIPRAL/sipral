@@ -14,25 +14,13 @@
 //!                  ( STAR / (contact-param *(COMMA contact-param)))
 //! ```
 //!
-//! Four things decide whether this is right.
-//!
-//! The angle brackets say where the URI ends. Inside them `;transport=tcp` is
-//! a URI parameter; without them the same text is a parameter of the header
-//! field (§20.10). RFC 4475 `cparam01` and `cparam02` are one address written
-//! both ways, and a stack that reports the same thing for both is wrong twice.
-//!
-//! `LAQUOT` is `SWS "<"` and `RAQUOT` is `">" SWS`, so the whitespace lives
-//! outside the brackets. `< sip:t.watson@example.org >` is malformed, which is
-//! the whole of RFC 4475 §3.1.2.14.
-//!
-//! A display name is a run of tokens or a quoted string, and nothing else.
-//! `Bell, Alexander <sip:...>` is neither, because a comma is not a token
-//! character (§3.1.2.15) — and accepting it would mean disagreeing with the
-//! comma that separates `Contact` values two lines later.
-//!
-//! `caller<sip:caller@example.com>` has no whitespace where `*(token LWS)`
-//! demands it. RFC 4475 §3.1.1.6 calls that a defect in RFC 3261 and says to
-//! accept the message, so the token branch stops at the `<`.
+//! Inside angle brackets `;transport=tcp` belongs to the URI; outside, to the
+//! header field (§20.10, RFC 4475 `cparam01`/`cparam02`). `LAQUOT` and
+//! `RAQUOT` hold the whitespace outside the brackets, so
+//! `< sip:a@example.org >` is malformed (RFC 4475 §3.1.2.14). A display name
+//! is a token run or a quoted string, so `Bell, Alexander` is refused
+//! (§3.1.2.15). `caller<sip:...>` lacks the LWS the grammar wants, but RFC
+//! 4475 §3.1.1.6 says to accept it.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -55,14 +43,13 @@ pub struct NameAddrRef<'a> {
 }
 
 impl<'a> NameAddrRef<'a> {
-    /// Read one address. Split a `Contact` line into values with
-    /// [`super::CommaList`] first; `From` and `To` carry exactly one.
+    /// Read one address. Split a `Contact` line with [`super::CommaList`]
+    /// first.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] for a display name that is neither a token
-    /// run nor a quoted string, an unterminated quoted string, whitespace
-    /// inside the addr-spec, an unbracketed addr-spec that had to be
-    /// bracketed, or an addr-spec that is not a URI.
+    /// [`HeaderError::Malformed`] for a bad display name or quoted string,
+    /// whitespace inside the addr-spec, a missing required bracket, or an
+    /// addr-spec that is not a URI.
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let head = trim(Params::split(value).0);
         if head.is_empty() {
@@ -98,9 +85,7 @@ impl<'a> NameAddrRef<'a> {
                     "a display name needs angle brackets",
                 ));
             }
-            // §20.10 and §20.20: the name-addr form is required when the
-            // addr-spec holds one of these, because nothing else says where
-            // the URI stops
+            // §20.10, §20.20: these characters require the name-addr form
             if rest.iter().any(|&b| b == b'?' || b == b',') {
                 return Err(HeaderError::Malformed(
                     "an addr-spec with a comma or a question mark needs angle brackets",
@@ -112,8 +97,7 @@ impl<'a> NameAddrRef<'a> {
         if uri_bytes.is_empty() {
             return Err(HeaderError::Malformed("no addr-spec"));
         }
-        // RFC 4475 3.1.2.14: LAQUOT and RAQUOT absorb the whitespace, so none
-        // of it may be left inside
+        // RFC 4475 3.1.2.14
         if uri_bytes.iter().copied().any(is_lws) {
             return Err(HeaderError::Malformed("whitespace inside the addr-spec"));
         }
@@ -128,11 +112,7 @@ impl<'a> NameAddrRef<'a> {
         })
     }
 
-    /// The display name, unfolded and unquoted.
-    ///
-    /// Quoted text is returned as it was meant: `"Mr. \"Big\" Watson"` comes
-    /// back as `Mr. "Big" Watson`, and a fold inside the quotes becomes the
-    /// single space it stands for.
+    /// The display name, unfolded and unquoted: `"Mr. \"Big\""` is `Mr. "Big"`.
     #[must_use]
     pub fn display_name(&self) -> Option<Cow<'a, [u8]>> {
         let raw = self.display?;
@@ -160,18 +140,13 @@ impl<'a> NameAddrRef<'a> {
         self.uri_bytes
     }
 
-    /// Whether the URI came wrapped in `<...>`.
-    ///
-    /// This is what decides who owns the parameters, so it is not cosmetic:
-    /// with brackets, `;lr` before the `>` is on the URI and
-    /// [`NameAddrRef::params`] does not see it.
+    /// Whether the URI came in `<...>`, which decides who owns the parameters.
     #[must_use]
     pub const fn is_name_addr(&self) -> bool {
         self.angled
     }
 
-    /// The parameters of the header field, in the order written. Never the
-    /// URI's own.
+    /// The header field's parameters, in order. Never the URI's own.
     #[must_use]
     pub fn params(&self) -> Params<'a> {
         Params::split(self.raw).1
@@ -187,20 +162,17 @@ impl<'a> NameAddrRef<'a> {
     /// The `expires` parameter of a `Contact` (RFC 3261 §20.10), in seconds.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when the value is not `1*DIGIT`. A number
-    /// too large for 32 bits parses; [`Digits::require`] is where that becomes
-    /// an error, if the caller wants it to.
+    /// [`HeaderError::Malformed`] when not `1*DIGIT`. Overflow is checked by
+    /// [`Digits::require`].
     pub fn expires(&self) -> Result<Option<Digits>, HeaderError> {
         self.params().get("expires").map(|v| digits(&v)).transpose()
     }
 
-    /// The `q` parameter, in thousandths: `q=0.7` is `700`.
-    ///
-    /// `qvalue` is at most three decimals and at most 1.0, so thousandths hold
-    /// every legal value exactly and a float would only add rounding.
+    /// The `q` parameter, in thousandths: `q=0.7` is `700`. Exact for every
+    /// legal `qvalue`.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when the value is outside
+    /// [`HeaderError::Malformed`] outside
     /// `("0" ["." 0*3DIGIT]) / ("1" ["." 0*3("0")])`.
     pub fn q(&self) -> Result<Option<u16>, HeaderError> {
         self.params().get("q").map(|v| qvalue(&v)).transpose()
@@ -232,9 +204,8 @@ impl fmt::Display for NameAddrRef<'_> {
 /// The `Contact` field of one message.
 #[derive(Clone, Debug)]
 pub enum Contacts<'a> {
-    /// `Contact: *`. RFC 3261 §10.2.2 allows it only in a REGISTER that also
-    /// carries `Expires: 0`, which one header value cannot know; that check
-    /// belongs to whoever handles the request.
+    /// `Contact: *`. RFC 3261 §10.2.2 also requires `Expires: 0`; the request
+    /// handler checks that.
     Star,
     /// The addresses, in wire order, across every `Contact` line.
     Addrs(ContactIter<'a>),
@@ -260,16 +231,14 @@ impl<'a> Iterator for ContactIter<'a> {
     }
 }
 
-/// Where the quoted string starting at byte 0 ends, one past its closing
-/// quote, refusing anything `qdtext` and `quoted-pair` do not cover.
+/// One past the closing quote of the quoted string at byte 0.
 fn quoted_end(v: &[u8]) -> Result<usize, HeaderError> {
     let mut i = 1;
     while let Some(&b) = v.get(i) {
         match b {
             b'"' => return Ok(i + 1),
             b'\\' => {
-                // quoted-pair = "\" (%x00-09 / %x0B-0C / %x0E-7F): CR and LF
-                // are carved out so an escape can never look like a fold
+                // quoted-pair excludes CR and LF, so an escape never looks like a fold
                 let next = *v
                     .get(i + 1)
                     .ok_or(HeaderError::Malformed("quoted string ends in a backslash"))?;
@@ -289,8 +258,7 @@ fn quoted_end(v: &[u8]) -> Result<usize, HeaderError> {
             _ => i += 1,
         }
     }
-    // RFC 4475 3.1.2.6: there is no addr-spec in this value, only unfinished
-    // qdtext, so guessing where the quote should have closed invents one
+    // RFC 4475 3.1.2.6: unbalanced quote, do not guess
     Err(HeaderError::Malformed("unterminated quoted string"))
 }
 
@@ -396,8 +364,7 @@ mod tests {
 
     #[test]
     fn a_token_display_name_may_sit_against_the_bracket() {
-        // RFC 4475 3.1.1.6 lwsdisp: a known defect in the 3261 grammar, and a
-        // valid message
+        // RFC 4475 3.1.1.6 lwsdisp, a valid message
         let a = addr(b"caller<sip:caller@example.com>;tag=323");
         assert_eq!(a.display_name().as_deref(), Some(&b"caller"[..]));
         assert_eq!(a.tag().as_deref(), Some(&b"323"[..]));
@@ -428,8 +395,7 @@ mod tests {
 
     #[test]
     fn brackets_decide_who_owns_the_parameters() {
-        // RFC 4475 3.3.12 cparam01 and 3.3.13 cparam02: the same address, and
-        // unknownparam belongs to a different object in each
+        // RFC 4475 3.3.12 cparam01 and 3.3.13 cparam02
         let bare = addr(b"sip:+19725552222@gw1.example.net;unknownparam");
         assert!(!bare.is_name_addr());
         assert!(bare.params().has("unknownparam"));
@@ -479,12 +445,10 @@ mod tests {
 
     #[test]
     fn whitespace_inside_the_brackets_is_refused() {
-        // RFC 4475 3.1.2.14 badaspec: LAQUOT is SWS "<", so the space belongs
-        // outside
+        // RFC 4475 3.1.2.14 badaspec
         assert!(refused(br#""Watson, Thomas" < sip:t.watson@example.org >"#));
         assert!(refused(b"<sip:a@b.example >"));
         assert!(refused(b"< sip:a@b.example>"));
-        // and the same rule catches a fold that landed inside the URI
         assert!(refused(b"<sip:a@\r\n b.com>"));
     }
 
@@ -504,8 +468,7 @@ mod tests {
 
     #[test]
     fn an_unbracketed_addr_spec_with_a_comma_is_refused() {
-        // the comma is legal in userinfo, which is exactly why the brackets
-        // become mandatory
+        // a comma in userinfo makes the brackets mandatory
         assert!(refused(b"sip:a,b@example.com"));
     }
 

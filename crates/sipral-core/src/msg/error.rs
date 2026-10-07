@@ -7,8 +7,7 @@ use core::fmt;
 
 /// Why a message could not be parsed.
 ///
-/// Every variant carries enough to point at the offending byte, because the
-/// first question about a rejected message on a live port is always "where".
+/// Every variant points at the offending byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseError {
     /// Nothing to parse.
@@ -56,11 +55,8 @@ pub enum ParseError {
         /// The bound that was exceeded.
         limit: u32,
     },
-    /// A message arrived on a stream transport without a `Content-Length`.
-    ///
-    /// RFC 3261 §18.3 makes the field mandatory there, because it is the only
-    /// thing that says where one message ends and the next begins. A datagram
-    /// may leave it out; a stream may not.
+    /// A message arrived on a stream transport without a `Content-Length`,
+    /// which RFC 3261 §18.3 makes mandatory there.
     MissingContentLength,
 }
 
@@ -92,9 +88,8 @@ impl core::error::Error for ParseError {}
 
 /// Why one header field's value could not be interpreted.
 ///
-/// A message whose framing is sound can still carry a header nobody can read.
-/// That is not a reason to have refused the message: it is a decision for the
-/// layer that wanted the field.
+/// The message itself is fine; what to do is up to the layer that wanted
+/// the field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderError {
     /// The field is not in the message.

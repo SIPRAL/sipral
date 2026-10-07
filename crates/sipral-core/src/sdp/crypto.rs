@@ -1,29 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What an `a=crypto` line actually says, read out of the text (RFC 4568).
+//! What an `a=crypto` line says, read as values (RFC 4568).
 //!
-//! [`Crypto`](super::Crypto) keeps the line as it arrived, because a
-//! description that is read and written back has to come out as it went in.
-//! This is the other half: the suite as a value rather than a token, and the
-//! key parameter decoded into the master key and salt SRTP wants, with the
-//! lifetime and the master key identifier that travel beside them.
-//!
-//! Nothing here encrypts anything. `sipral-core` opens no sockets and knows
-//! no transforms; it reads the offer and says what was agreed, and the crate
-//! that owns the media does the rest.
+//! [`Crypto`](super::Crypto) keeps the line as text for round-tripping;
+//! this decodes the suite, master key and salt, lifetime and MKI. Nothing
+//! here encrypts: the media crate does that.
 
 use core::fmt;
 use core::sync::atomic::{Ordering, compiler_fence};
 
-/// Master key length, which is 128 bits for every suite RFC 4568 itself
-/// defines. RFC 6188's and RFC 7714's suites carry a wider one; a caller that
-/// cares which suite it is reads [`CryptoSuite::key_len`] instead.
+/// Master key length, 128 bits for every RFC 4568 suite. Wider suites
+/// (RFC 6188, RFC 7714): see [`CryptoSuite::key_len`].
 pub const MASTER_KEY: usize = 16;
 
-/// Master salt length: 112 bits, for the same suites `MASTER_KEY` is exact
-/// for. RFC 7714's two AEAD suites use a 96-bit one; see
-/// [`CryptoSuite::salt_len`].
+/// Master salt length, 112 bits for the same suites. RFC 7714 AEAD uses
+/// 96: see [`CryptoSuite::salt_len`].
 pub const MASTER_SALT: usize = 14;
 
 /// §6.2: the master key lifetime in SRTP packets.
@@ -33,18 +25,15 @@ const SRTP_LIFETIME: u64 = 1 << 48;
 const SRTCP_LIFETIME: u64 = 1 << 31;
 
 /// The transforms this stack implements: RFC 4568 §6.2's three, RFC 6188's
-/// two wider `AES_CM` suites, and RFC 7714's two AEAD ones.
+/// two `AES_CM` 256 suites, and RFC 7714's two AEAD ones.
 ///
-/// The names are the tokens on the wire. The formal grammar in RFC 4568
-/// §9.2 prints `F8_128_HMAC_SHA1_32`, which no section defines and which
-/// erratum 6808 corrects to `F8_128_HMAC_SHA1_80`; §6.2.3 and the IANA
-/// registration both say 80, so that is what this reads and writes.
+/// The §9.2 grammar prints `F8_128_HMAC_SHA1_32`; erratum 6808, §6.2.3
+/// and IANA all say 80, which is what this uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoSuite {
     /// `AES_CM_128_HMAC_SHA1_80`, the default.
     AesCm80,
-    /// `AES_CM_128_HMAC_SHA1_32`, the same with a shorter tag on SRTP —
-    /// SRTCP's stays at eighty bits.
+    /// `AES_CM_128_HMAC_SHA1_32`: a shorter SRTP tag; SRTCP's stays 80 bits.
     AesCm32,
     /// `F8_128_HMAC_SHA1_80`.
     AesF8,
@@ -59,11 +48,9 @@ pub enum CryptoSuite {
 }
 
 impl CryptoSuite {
-    /// Every suite this stack implements, strongest first: the order an
-    /// offer names them in, and the order an answerer would pick among a
-    /// peer's own offer if RFC 4568 let it (§5.1.2 does not -- see
-    /// `sipral::keying::acceptable`, which keeps to the offerer's order for
-    /// that reason).
+    /// Every suite this stack implements, strongest first, the order an offer
+    /// names them in. An answerer keeps the offerer's order (§5.1.2); see
+    /// `sipral::keying::acceptable`.
     pub const STRENGTH: [Self; 7] = [
         Self::AeadAes256Gcm,
         Self::AeadAes128Gcm,
@@ -90,16 +77,15 @@ impl CryptoSuite {
         }
     }
 
-    /// The master salt length: RFC 7714 §8.1's twelve octets for the AEAD
-    /// suites, RFC 3711 §5.1's fourteen for the rest.
+    /// The master salt length: 12 octets for AEAD (RFC 7714 §8.1), 14 for the
+    /// rest (RFC 3711 §5.1).
     #[must_use]
     pub const fn salt_len(self) -> usize {
         if self.is_aead() { 12 } else { MASTER_SALT }
     }
 
-    /// §6.2.1: "The length of the base64-decoded key and salt value for this
-    /// crypto-suite MUST be" this many characters, and §6.2.2, §6.2.3 and RFC
-    /// 6188/7714's own registrations repeat it for their own suites.
+    /// §6.2.1: the required length of the base64-decoded key and salt
+    /// (likewise §6.2.2, §6.2.3, RFC 6188, RFC 7714).
     #[must_use]
     pub const fn key_salt_len(self) -> usize {
         self.key_len() + self.salt_len()
@@ -119,9 +105,7 @@ impl CryptoSuite {
         }
     }
 
-    /// The suite a token names, if it is one this stack implements.
-    ///
-    /// §4: "The values of each of these fields is case-insensitive."
+    /// The suite a token names, if implemented. Case-insensitive (§4).
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::STRENGTH
@@ -129,9 +113,8 @@ impl CryptoSuite {
             .find(|suite| suite.name().eq_ignore_ascii_case(name))
     }
 
-    /// The largest lifetime a key may declare: the smaller of the two limits
-    /// in §6.2, since one master key covers both streams. The same for every
-    /// suite -- RFC 6188 and RFC 7714 do not move it.
+    /// The largest lifetime a key may declare: the smaller §6.2 limit, since
+    /// one master key covers both streams. Same for every suite.
     #[must_use]
     pub const fn max_lifetime(self) -> u64 {
         if SRTP_LIFETIME < SRTCP_LIFETIME {
@@ -142,30 +125,20 @@ impl CryptoSuite {
     }
 }
 
-/// A master key and salt, and the promise not to print them.
+/// A master key and salt that cannot be printed.
 ///
-/// No `Debug` and no way to read the bytes except by asking: a value that
-/// cannot be printed cannot be printed by accident. Overwritten on drop, best
-/// effort and said so plainly, exactly as `Secret` is — a volatile write needs
-/// `unsafe`, which this crate denies.
-///
-/// The key and salt are stored one after the other rather than as two
-/// separate buffers, and `key_len` is where the join is — every suite this
-/// stack implements has a key at least as wide as its salt, so nothing here
-/// needs to store both lengths. Grown rather than fixed, because RFC 6188 and
-/// RFC 7714 add suites whose key and salt are not RFC 4568's original
-/// sixteen and fourteen octets.
+/// No `Debug`, and the bytes only on request. Overwritten on drop, best
+/// effort like `Secret`: a volatile write needs `unsafe`, denied here.
+/// Key and salt are stored back to back, split at `key_len`.
 #[derive(Clone)]
 pub struct KeySalt {
     bytes: Vec<u8>,
     key_len: usize,
 }
 
-/// Every octet compared, whatever the first difference: two keys are
-/// compared where one of them came from the far end (an answer's key held to
-/// the offer's, a re-offer's to the key in force), and a comparison that
-/// stopped at the first difference would time how much of a guess was
-/// right. The widths are not secret, and differing widths answer at once.
+/// Constant time over all octets: one side often comes from the far end,
+/// and an early exit would leak how much of a guess was right. Widths are
+/// not secret.
 impl PartialEq for KeySalt {
     fn eq(&self, other: &Self) -> bool {
         if self.key_len != other.key_len || self.bytes.len() != other.bytes.len() {
@@ -221,8 +194,7 @@ impl fmt::Debug for KeySalt {
     }
 }
 
-/// A master key identifier and the width of the field it occupies in every
-/// packet (§6.1).
+/// A master key identifier and its field width in every packet (§6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyIdentifier {
     /// "a positive decimal integer that is encoded as a big-endian integer in
@@ -245,8 +217,7 @@ pub struct Inline {
 }
 
 impl Inline {
-    /// A key parameter with no lifetime and no identifier, which is what an
-    /// offer carries unless there is a reason for more.
+    /// A key parameter with no lifetime and no identifier.
     #[must_use]
     pub const fn new(keys: KeySalt) -> Self {
         Self {
@@ -263,8 +234,6 @@ impl Inline {
         out.push_str(&base64_encode(&self.keys.bytes));
         if let Some(lifetime) = self.lifetime {
             out.push('|');
-            // the power-of-two form when it is one, since that is what the
-            // examples in §6.1 use and it is shorter
             if lifetime.is_power_of_two() {
                 out.push_str("2^");
                 out.push_str(&lifetime.trailing_zeros().to_string());
@@ -281,18 +250,13 @@ impl Inline {
         out
     }
 
-    /// Read one key parameter for `suite`.
-    ///
-    /// Every rule here is one the RFC states as making the whole crypto
-    /// attribute invalid: a decoded length that is not the suite's, a
-    /// lifetime past the suite's maximum, an identifier without a length or
-    /// with one above 128.
+    /// Read one key parameter for `suite`. Wrong decoded length, a lifetime
+    /// past the maximum, or an MKI without a length or above 128 all make the
+    /// attribute invalid.
     fn parse(text: &str, suite: CryptoSuite) -> Option<Self> {
         let rest = strip_prefix_ignore_case(text, "inline:")?;
         let mut fields = rest.split('|');
 
-        // dropped, it is wiped: a key of the wrong width is as secret as one
-        // of the right width
         let decoded = base64_decode(fields.next()?)?;
         if decoded.len() != suite.key_salt_len() {
             return None;
@@ -302,9 +266,7 @@ impl Inline {
             bytes: decoded.take(),
         };
 
-        // §6.1: "the lifetime field never includes a colon, whereas the third
-        // field always does", which is how the two optional fields are told
-        // apart when only one is present
+        // §6.1: a lifetime never has a colon, an MKI always does
         let mut lifetime = None;
         let mut mki = None;
         for field in fields {
@@ -338,12 +300,11 @@ impl Inline {
 pub struct SessionParams {
     /// `UNENCRYPTED_SRTP`: send and expect RTP payloads in the clear.
     pub unencrypted_rtp: bool,
-    /// `UNENCRYPTED_SRTCP`: the same for RTCP. §6.3.2 adds that the SRTCP E
-    /// bit "MUST be clear (0) in all SRTCP messages" when this is signalled,
-    /// and MUST be set otherwise.
+    /// `UNENCRYPTED_SRTCP`: the same for RTCP. The SRTCP E bit must then be
+    /// clear (§6.3.2), and set otherwise.
     pub unencrypted_rtcp: bool,
-    /// `UNAUTHENTICATED_SRTP`: no tag on RTP. Never on RTCP, whose tag RFC
-    /// 3711 §3.4 makes required.
+    /// `UNAUTHENTICATED_SRTP`: no tag on RTP. RTCP always has one (RFC 3711
+    /// §3.4).
     pub unauthenticated_rtp: bool,
     /// `KDR=n`, the key derivation rate as the exponent of two. Absent means
     /// a single derivation (§6.3.1).
@@ -354,8 +315,7 @@ pub struct SessionParams {
 }
 
 impl SessionParams {
-    /// What §6.3 says applies when nothing is signalled: everything
-    /// encrypted, everything authenticated, one derivation.
+    /// The §6.3 defaults: all encrypted, all authenticated, one derivation.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -369,27 +329,15 @@ impl SessionParams {
 
     /// Read the session parameters of a crypto line.
     ///
-    /// `None` for a line this stack cannot be held to. §6.3.7 is the opposite
-    /// of the usual extension rule and is worth quoting, because reading it
-    /// the usual way produces a stack that silently ignores what a peer
-    /// required: "New SRTP session parameters are by default mandatory. A
-    /// newly defined SRTP session parameter that is prefixed with the dash
-    /// character ('-'), however, is considered optional and MAY be ignored.
-    /// If an SDP crypto attribute is received with an unknown session
-    /// parameter that is not prefixed with a '-' character, that crypto
-    /// attribute MUST be considered invalid."
-    ///
-    /// So an unknown parameter is fatal to the line unless it opted out of
-    /// being. A line that is invalid is one that cannot be accepted, and
-    /// §7.1.2 has an answerer that can accept none refuse the stream rather
-    /// than fall back to something weaker.
+    /// `None` if a parameter is unknown and not prefixed with `-`: §6.3.7
+    /// makes new parameters mandatory by default, so the line is invalid.
+    /// §7.1.2 then has the answerer refuse the stream rather than fall back.
     #[must_use]
     pub fn parse(parameters: &[String]) -> Option<Self> {
         let mut params = Self::new();
         for parameter in parameters {
             let text = parameter.as_str();
             if text.starts_with('-') {
-                // said to be safe to ignore by whoever defined it
                 continue;
             }
             if text.eq_ignore_ascii_case("UNENCRYPTED_SRTP") {
@@ -445,15 +393,14 @@ impl Default for SessionParams {
     }
 }
 
-/// An `a=crypto` line read as values rather than as text.
+/// An `a=crypto` line read as values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CryptoPolicy {
     /// The tag, which is how an answer says which offered line it took.
     pub tag: u32,
     /// The transform.
     pub suite: CryptoSuite,
-    /// The keys, in the order they were offered. §6.1 allows more than one
-    /// when they carry identifiers to tell them apart.
+    /// The keys, in offered order. §6.1 allows several when each has an MKI.
     pub keys: Vec<Inline>,
     /// What else the line asked for.
     pub params: SessionParams,
@@ -462,11 +409,8 @@ pub struct CryptoPolicy {
 impl super::Crypto {
     /// Read this line as values.
     ///
-    /// `None` where the RFC says the crypto attribute "MUST be considered
-    /// invalid": an unknown suite, a key that is not the suite's length, a
-    /// lifetime past its maximum, a malformed identifier. A line that cannot
-    /// be read is one that cannot be accepted, and §7.1.2 says an answerer
-    /// that accepts none refuses the stream rather than falling back.
+    /// `None` where RFC 4568 makes the attribute invalid: unknown suite, wrong
+    /// key length, lifetime too large, malformed MKI.
     #[must_use]
     pub fn policy(&self) -> Option<CryptoPolicy> {
         let suite = CryptoSuite::from_name(&self.suite)?;
@@ -479,9 +423,7 @@ impl super::Crypto {
         if keys.is_empty() {
             return None;
         }
-        // §6.1: every master key "MUST be unique ... with respect to other
-        // master keys in the entire SDP message", and more than one on a line
-        // is only meaningful when each carries an identifier
+        // §6.1: several keys on a line need an MKI each
         if keys.len() > 1 && keys.iter().any(|key| key.mki.is_none()) {
             return None;
         }
@@ -536,8 +478,6 @@ fn parse_mki(field: &str) -> Option<KeyIdentifier> {
     }
     Some(KeyIdentifier {
         value: value.parse().ok()?,
-        // a value wider than sixteen octets has nowhere to come from, since
-        // the number itself is parsed as one
         length: u8::try_from(length).ok()?,
     })
 }
@@ -558,12 +498,8 @@ fn parse_lifetime(field: &str) -> Option<u64> {
     (value > 0).then_some(value)
 }
 
-/// "leading zeroes MUST NOT be used", which the RFC says of the tag, the
-/// lifetime, the identifier and its length alike.
-///
-/// `pub(super)` because [`Crypto`](super::plan::Crypto) owns the one of those
-/// four fields that lives outside this module and has to check it the same
-/// way.
+/// "leading zeroes MUST NOT be used" (§6.1), for tag, lifetime, MKI and
+/// length. Shared with [`Crypto`](super::plan::Crypto), which owns the tag.
 pub(super) fn leading_zero(text: &str) -> bool {
     text.len() > 1 && text.starts_with('0')
 }
@@ -589,8 +525,6 @@ fn base64_encode(bytes: &[u8]) -> String {
             let index = usize::try_from((word >> shift) & 0x3f).unwrap_or(0);
             out.push(char::from(*ALPHABET.get(index).unwrap_or(&b'A')));
         }
-        // one padding character for every octet the chunk was short, and the
-        // characters come off before any go on
         let short = 3 - chunk.len();
         out.truncate(out.len() - short);
         for _ in 0..short {
@@ -600,16 +534,14 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// The inverse. §6.1: "padding characters ... at the end of the base64-encoded
-/// data are discarded", so trailing `=` is accepted and so is its absence;
-/// anything else outside the alphabet is not.
+/// The inverse. Trailing `=` is optional (§6.1); anything else outside the
+/// alphabet is refused.
 fn base64_decode(text: &str) -> Option<Decoded> {
     let body = text.trim_end_matches('=');
     if body.len() % 4 == 1 {
         return None;
     }
-    // every character carries six bits, so this is the exact count of whole
-    // octets: the buffer never grows, and never leaves a copy behind growing
+    // exact size up front, so the buffer never reallocates and leaves copies
     let mut out = Decoded(Vec::with_capacity(body.len() * 3 / 4));
     let mut word = 0_u32;
     let mut bits = 0_u32;
@@ -622,14 +554,12 @@ fn base64_decode(text: &str) -> Option<Decoded> {
             out.0.push(u8::try_from((word >> bits) & 0xff).unwrap_or(0));
         }
     }
-    // whatever is left over has to be zero, or the encoding named bits that
-    // no octet carries
+    // leftover bits must be zero
     (word & ((1 << bits) - 1) == 0).then_some(out)
 }
 
-/// Decoded key material on its way into a [`KeySalt`]: overwritten when it
-/// is dropped, so a decode that fails part way, or a key of the wrong width,
-/// leaves nothing of itself behind. Best effort, as [`KeySalt`] is.
+/// Decoded key material on its way into a [`KeySalt`], wiped on drop so a
+/// failed decode leaves nothing behind.
 struct Decoded(Vec<u8>);
 
 impl Decoded {
@@ -699,10 +629,8 @@ mod tests {
         );
     }
 
-    /// D7: equality reads every octet and still answers right: equal keys,
-    /// a first octet that differs, a last one that differs, and two keys of
-    /// different widths. The decode of a key is held in a buffer sized once,
-    /// so it never grows and leaves a copy of itself behind.
+    /// Equality reads every octet and still answers right. Decoding never
+    /// reallocates.
     #[test]
     fn keys_are_equal_by_every_octet_and_decoded_without_growing() {
         let key = KeySalt::new(&[7; 16], &[9; 14]);
@@ -784,9 +712,7 @@ mod tests {
         assert_eq!(key.keys.key().len() + key.keys.salt().len(), 30);
     }
 
-    // §6.1: "the lifetime field never includes a colon, whereas the third
-    // field always does". So a bare "|1" is a lifetime of one packet, not an
-    // identifier missing its length — there is nothing to refuse
+    // §6.1: "|1" is a lifetime, not an MKI without a length
     #[test]
     fn a_bare_number_is_a_lifetime() {
         let keys = base64_encode(&[0x41; 30]);
@@ -844,8 +770,7 @@ mod tests {
         );
     }
 
-    // RFC 6188 §4, RFC 7714 §14.1: the widths the new suites carry, and their
-    // own names round-tripping through `from_name`.
+    // RFC 6188 §4, RFC 7714 §14.1: widths and names of the new suites
     #[test]
     fn the_new_suites_have_the_widths_their_rfcs_give_them() {
         assert_eq!(CryptoSuite::Aes256Cm80.key_len(), 32);
@@ -869,8 +794,7 @@ mod tests {
         }
     }
 
-    /// A line for each new suite, with a key and salt of its own width,
-    /// round-trips exactly as the three RFC 4568 suites already do.
+    /// Each new suite round-trips like the RFC 4568 ones.
     #[test]
     fn the_new_suites_round_trip_a_key_and_salt_of_their_own_width() {
         for suite in [
@@ -888,8 +812,6 @@ mod tests {
             assert_eq!(key.keys.key().len(), suite.key_len(), "{}", suite.name());
             assert_eq!(key.keys.salt().len(), suite.salt_len(), "{}", suite.name());
 
-            // one octet short of the suite's own width is refused, not
-            // silently accepted under some other suite's length
             let short = base64_encode(&vec![0x5a_u8; suite.key_salt_len() - 1]);
             assert!(
                 line(&format!("1 {} inline:{short}", suite.name()))
@@ -994,9 +916,7 @@ mod tests {
         );
     }
 
-    /// §6.3.7 is the opposite of the usual extension rule, and reading it the
-    /// usual way produces a stack that quietly ignores what a peer required.
-    /// A parameter that did not opt out of mattering makes the line invalid.
+    /// §6.3.7: an unknown parameter without a dash makes the line invalid.
     #[test]
     fn a_parameter_we_do_not_know_makes_the_line_one_we_cannot_be_held_to() {
         let keys = base64_encode(&[0x41; 30]);
@@ -1010,8 +930,7 @@ mod tests {
         );
     }
 
-    /// And the half that keeps the rule usable: whoever defines a parameter
-    /// can say it is safe to ignore, by writing it with a leading dash.
+    /// A leading dash marks a parameter as safe to ignore.
     #[test]
     fn a_parameter_written_as_optional_is_ignored_rather_than_refused() {
         let keys = base64_encode(&[0x41; 30]);

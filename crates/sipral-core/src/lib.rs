@@ -3,16 +3,15 @@
 
 //! Sans-I/O SIP protocol core.
 //!
-//! Parsing and serialization of SIP messages, the transaction layer (RFC 3261
-//! timers A through K), the dialog layer, SDP offer/answer and digest
-//! authentication.
+//! Message parsing and serialization, the transaction layer (RFC 3261 timers
+//! A through K), dialogs, SDP offer/answer and digest authentication.
 //!
 //! Nothing here opens a socket, spawns a thread or reads a clock. The caller
-//! feeds bytes and the current time, and gets back bytes and events. Every
-//! state machine is therefore reproducible in a unit test without a network.
+//! feeds bytes and the current time and gets back bytes and events, so every
+//! state machine is testable without a network.
 //!
-//! Written from the RFCs listed in `docs/09-rfc-index.md`. See
-//! `docs/02-clean-room.md` for why that matters here.
+//! Written from the RFCs listed in `docs/09-rfc-index.md`; see
+//! `docs/02-clean-room.md` for why.
 
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",

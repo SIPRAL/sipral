@@ -18,26 +18,15 @@
 //!                     / generic-param
 //! ```
 //!
-//! **`Event` is the one SIP token compared with case.** §8.2.1: "the
-//! event-type portion of the `Event` header field is compared byte by byte,
-//! and the `id` parameter token (if present) is compared byte by byte", and it
-//! spells out the consequence — `Event: Foo; id=1234` does not match
-//! `Event: foo; id=1234`. Everything else in this crate folds case on a token,
-//! so [`EventRef::matches`] exists to keep that rule in one place instead of
-//! letting it be forgotten at each call site.
+//! `Event` is the one SIP token compared with case (§8.2.1): `Foo` does not
+//! match `foo`, and an `Event` with an `id` never matches one without. Two
+//! subscriptions to one package on a dialog differ only by `id`.
+//! [`EventRef::matches`] keeps that rule in one place.
 //!
-//! The other half of that rule is the one that bites: an `Event` with an `id`
-//! never matches one without. Two subscriptions to the same package on one
-//! dialog are told apart by nothing else, and a subscriber that ignores `id`
-//! feeds one notifier's state into the other's machine.
-//!
-//! **A `Subscription-State` value is not read the same way in every state.**
-//! §4.1.3 gives `expires` meaning only under `active` and `pending`, and
-//! `reason` and `retry-after` meaning only under `terminated` — and it says a
-//! subscriber "MUST ignore" an `expires` on a terminated one. This reads the
-//! parameters as written and says which state they came with; refusing to act
-//! on the wrong ones is the subscriber's, because it is behaviour rather than
-//! syntax.
+//! In `Subscription-State`, `expires` means something only under `active`
+//! and `pending`, `reason` and `retry-after` only under `terminated`
+//! (§4.1.3). They are read as written; ignoring the wrong ones is the
+//! subscriber's job.
 
 use std::borrow::Cow;
 
@@ -57,16 +46,13 @@ impl<'a> EventRef<'a> {
     ///
     /// # Errors
     /// [`HeaderError::Malformed`] when the event type is empty or holds a byte
-    /// `token-nodot` does not allow. A package name is what decides which
-    /// machine a NOTIFY is handed to, so one that is not a token is refused
-    /// rather than matched loosely.
+    /// `token-nodot` does not allow.
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let (package, _) = Params::split(value);
         if package.is_empty() {
             return Err(HeaderError::Malformed("Event names no package"));
         }
-        // "." separates a package from its templates, and every other byte has
-        // to be one token-nodot allows
+        // "." separates package from templates
         if !package.iter().all(|byte| is_nodot(*byte) || *byte == b'.') {
             return Err(HeaderError::Malformed("Event is not an event-type"));
         }
@@ -82,11 +68,8 @@ impl<'a> EventRef<'a> {
         self.package
     }
 
-    /// The `id` parameter, when there is one.
-    ///
-    /// §8.4 calls its use deprecated and keeps it for compatibility, which is
-    /// exactly why it has to be read: a notifier that sends one expects it
-    /// back, and §8.2.1 makes its absence and its presence different values.
+    /// The `id` parameter, when there is one. Deprecated by §8.4 but still
+    /// sent, and its presence changes the value (§8.2.1).
     #[must_use]
     pub fn id(&self) -> Option<Cow<'a, [u8]>> {
         self.params().get("id")
@@ -100,7 +83,7 @@ impl<'a> EventRef<'a> {
 
     /// Whether two `Event` values name the same subscription (§8.2.1).
     ///
-    /// Byte for byte on both halves, and no other parameter is looked at.
+    /// Byte for byte on type and `id`, nothing else.
     #[must_use]
     pub fn matches(&self, other: &EventRef<'_>) -> bool {
         self.package == other.package
@@ -121,8 +104,7 @@ pub enum Substate<'a> {
     Pending,
     /// Over. `reason` says whether trying again is worth anything.
     Terminated,
-    /// A value some other specification defined. §8.4's `extension-substate`
-    /// is any token, so one that is not known is carried rather than refused.
+    /// A value another specification defined (§8.4 `extension-substate`).
     Other(&'a [u8]),
 }
 
@@ -137,17 +119,14 @@ impl<'a> SubscriptionStateRef<'a> {
     /// Read one `Subscription-State` value.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when there is no substate value at all.
-    /// Every NOTIFY has to carry one (§4.1.3), and a notification that does
-    /// not say where the subscription is says nothing a subscriber can act on.
+    /// [`HeaderError::Malformed`] when there is no substate value (§4.1.3).
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let (head, _) = Params::split(value);
         let head = trim(head);
         if head.is_empty() {
             return Err(HeaderError::Malformed("Subscription-State names no state"));
         }
-        // §8.4's substate-value is a token, and tokens fold case; only the
-        // event-type of §8.2.1 is compared with case
+        // substate-value is a token, so case folds here
         let state = if head.eq_ignore_ascii_case(b"active") {
             Substate::Active
         } else if head.eq_ignore_ascii_case(b"pending") {
@@ -168,10 +147,8 @@ impl<'a> SubscriptionStateRef<'a> {
 
     /// The `expires` parameter, in seconds.
     ///
-    /// §4.1.3 makes this authoritative over what the SUBSCRIBE transaction
-    /// negotiated, under `active` and `pending`. Under `terminated` it has no
-    /// meaning and subscribers "MUST ignore any such parameter, if present" —
-    /// which is the caller's to do, because this reads the field.
+    /// Authoritative under `active` and `pending` (§4.1.3). Under `terminated`
+    /// the caller MUST ignore it.
     #[must_use]
     pub fn expires(&self) -> Option<Digits> {
         self.number("expires")
@@ -293,7 +270,6 @@ mod tests {
 
     #[test]
     fn a_number_that_does_not_fit_says_so_rather_than_wrapping() {
-        // scalar02 of RFC 4475 is the same shape one field along
         let value = substate(b"active;expires=100000000000");
         assert_eq!(
             value.expires().map(super::Digits::require),

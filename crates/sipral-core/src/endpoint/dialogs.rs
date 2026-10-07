@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Where the endpoint keeps dialogs, and why they are kept in two shapes.
+//! Where the endpoint keeps dialogs, in two shapes.
 //!
-//! A dialog we opened by calling somebody is never alone. One INVITE can be
-//! forked by a proxy to a desk phone, a mobile and a voicemail box, and each
-//! branch that answers is a dialog of its own on the same request — so what
-//! the endpoint holds is not a dialog but a [`DialogSet`], which knows how to
-//! tell the branches apart and which of them a late 2xx belongs to.
-//!
-//! A dialog somebody opened by calling us has no such problem: we answered one
-//! request once, and there is exactly one. It is held on its own.
-//!
-//! Both are reached by the same [`DialogId`], so nothing above here has to
-//! know which shape a particular dialog is in.
+//! An INVITE we sent can fork, so its dialogs live in a [`DialogSet`] that
+//! tells the branches apart. A dialog we answered is alone and held on its
+//! own. Both are reached by [`DialogId`].
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,8 +18,7 @@ use crate::transaction::{DialogId, InviteClient, InviteServer, Raw, TransactionI
 /// Which of the two shapes a dialog is in.
 #[derive(Debug)]
 enum Home {
-    /// One branch of an INVITE we sent, held by the set that knows its
-    /// siblings.
+    /// One branch of an INVITE we sent.
     Branch(Raw),
     /// A dialog we answered a request into.
     Answered(Box<Dialog>),
@@ -38,41 +29,24 @@ enum Home {
 struct Entry {
     key: DialogKey,
     home: Home,
-    /// Where in-dialog requests leave from. The route set says which hop
-    /// first, but not which socket, and the socket is the caller's.
+    /// Where in-dialog requests leave from.
     flow: Flow,
-    /// Addresses [`super::Endpoint::resolved`] was handed beside the one
-    /// `flow` now names, in the order they came in, for
-    /// [`super::Endpoint::failover`] to try in turn if `flow` goes on to
-    /// fail. Empty whenever the dialog has never been resolved, has used up
-    /// what it was given, or the caller's last answer named only one address.
+    /// Further addresses from [`super::Endpoint::resolved`], in order, for
+    /// [`super::Endpoint::failover`].
     failover: Vec<SocketAddr>,
-    /// Where the ACK to the 2xx that confirmed this dialog left from, for a
-    /// dialog of an INVITE we sent. Not always `flow`: §18.1.1 moves an ACK
-    /// too large for a datagram onto a stream, and every retransmission of
-    /// the 2xx has to be answered on that stream too.
+    /// Where our ACK to the 2xx left from. Not always `flow`: §18.1.1 can
+    /// move a large ACK onto a stream.
     acked_on: Option<Flow>,
-    /// How many non-INVITE server transactions this dialog has open right
-    /// now — the budget `endpoint::inbound::MAX_DIALOG_NON_INVITE_TRANSACTIONS`
-    /// counts against. A dialog is exempt from the endpoint-wide ceiling, but
-    /// not from having a ceiling of its own: this is the count that ceiling
-    /// reads, raised at every server transaction this dialog admits and
-    /// lowered when it retires, on every transport and in an early dialog
-    /// exactly as in a confirmed one.
+    /// Open non-INVITE server transactions, counted against
+    /// `endpoint::inbound::MAX_DIALOG_NON_INVITE_TRANSACTIONS`.
     non_invite_transactions: usize,
-    /// The `CSeq` number of the INVITE whose 2xx this end sent last in this
-    /// dialog, which is the number the ACK it is owed carries (§13.2.2.4).
-    /// Not the dialog's remote sequence number: a PRACK or an UPDATE the far
-    /// end sends before its ACK moves that one on.
+    /// The `CSeq` of the INVITE we last sent a 2xx to (§13.2.2.4). Not the
+    /// remote sequence number, which a PRACK or UPDATE can move on.
     answered_invite: Option<u32>,
-    /// The server transaction that sent that 2xx. RFC 6026 keeps it in
-    /// Accepted for 64·T1 after, and the ACK that ends the wait is sent under
-    /// a branch of its own (§17.1.1.3), so it never matches the transaction:
-    /// this is how the transaction learns it came.
+    /// The server transaction that sent that 2xx. The ACK has its own branch
+    /// (§17.1.1.3), so this is how the transaction learns it came (RFC 6026).
     answered_by: Option<TransactionId<InviteServer>>,
-    /// The `CSeq` number of the last ACK reported for such a 2xx, so that a
-    /// repeat of it, sent for a retransmission of the 2xx, is not reported
-    /// again.
+    /// The `CSeq` of the last ACK reported, so a repeat is not reported.
     acknowledged_invite: Option<u32>,
 }
 
@@ -80,21 +54,16 @@ struct Entry {
 #[derive(Debug)]
 struct Branches {
     set: DialogSet,
-    /// The transaction, until it terminates. A confirmed dialog outlives it
-    /// by the length of the call.
+    /// The transaction, until it terminates.
     invite: Option<TransactionId<InviteClient>>,
     /// How many dialog entries still point here.
     live: usize,
-    /// Whether the set is counted in [`Dialogs::unopened`]: its INVITE is
-    /// running, nothing has answered it with a dialog, and nothing has
-    /// refused it.
+    /// Whether the set is counted in [`Dialogs::unopened`].
     awaiting: bool,
-    /// A final response other than a 2xx has arrived: whatever the set still
-    /// holds is ending, and nothing will open it again.
+    /// A non-2xx final response has arrived.
     refused: bool,
-    /// A 2xx has come for one of its dialogs: the call it placed was
-    /// answered, and once the dialogs it holds have ended the call is over,
-    /// however long RFC 6026's timer M keeps the INVITE's transaction.
+    /// A 2xx has come: once its dialogs end the call is over, whatever
+    /// timer M (RFC 6026) still holds.
     answered: bool,
 }
 
@@ -105,10 +74,7 @@ pub(crate) struct Dialogs {
     sets: Slab<Branches>,
     by_key: HashMap<DialogKey, DialogId>,
     by_invite: HashMap<TransactionId<InviteClient>, Raw>,
-    /// Sets whose INVITE is still running and which hold no dialog yet: the
-    /// calls this end placed that nothing has answered or refused. Kept as a
-    /// count, moved wherever a set's `awaiting` changes, so that asking costs
-    /// nothing whatever the number of calls.
+    /// Placed calls with no dialog and no refusal yet, kept as a count.
     unopened: usize,
 }
 
@@ -228,8 +194,7 @@ impl Dialogs {
     pub(crate) fn get_mut(&mut self, id: DialogId) -> Option<&mut Dialog> {
         let entry = self.entries.get_mut(id.raw)?;
         match entry.home {
-            // the key is cloned rather than borrowed because the borrow of
-            // `entry` has to end before the set can be reached
+            // cloned so the borrow of `entry` ends before the set is reached
             Home::Branch(set) => {
                 let key = entry.key.clone();
                 self.sets.get_mut(set)?.set.get_mut(&key)
@@ -251,12 +216,7 @@ impl Dialogs {
         }
     }
 
-    /// Replace what is kept for [`super::Endpoint::failover`] to try next, in
-    /// the order it should try them.
-    ///
-    /// Called only from [`super::Endpoint::resolved`], beside [`Self::set_flow`]
-    /// rather than folded into it: the two are set from different fields of
-    /// the same answer, and a dialog that has ended takes neither.
+    /// Replace what [`super::Endpoint::failover`] tries next, in order.
     pub(crate) fn set_failover(&mut self, id: DialogId, addresses: Vec<SocketAddr>) {
         if let Some(entry) = self.entries.get_mut(id.raw) {
             entry.failover = addresses;
@@ -265,9 +225,7 @@ impl Dialogs {
 
     /// The next address kept for this dialog, taking it off the list.
     ///
-    /// `None` once every address a resolver offered has been tried, which
-    /// leaves the dialog on the flow it was last given — RFC 3263 names no
-    /// further server to fail over to, and neither does this.
+    /// `None` once all are tried; the dialog stays on its last flow.
     pub(crate) fn take_failover(&mut self, id: DialogId) -> Option<SocketAddr> {
         let entry = self.entries.get_mut(id.raw)?;
         entry.failover.first().copied().inspect(|_| {
@@ -291,9 +249,7 @@ impl Dialogs {
     }
 
     /// The transaction [`Dialogs::reserve_non_invite_transaction`] counted has
-    /// retired; give its place back. A no-op for a dialog already forgotten —
-    /// nothing can match it any more either, so its budget stops mattering the
-    /// same instant.
+    /// retired. A no-op for a forgotten dialog.
     pub(crate) fn release_non_invite_transaction(&mut self, id: DialogId) {
         if let Some(entry) = self.entries.get_mut(id.raw) {
             entry.non_invite_transactions = entry.non_invite_transactions.saturating_sub(1);
@@ -320,10 +276,8 @@ impl Dialogs {
         self.entries.get(id.raw).and_then(|entry| entry.answered_by)
     }
 
-    /// Whether an ACK numbered `seq` is the one the last 2xx this end sent in
-    /// the dialog is still owed, taking it when it is. An ACK for an earlier
-    /// INVITE is stale, and one for an INVITE already acknowledged is a repeat
-    /// (§17.1.1.3): neither is.
+    /// Whether an ACK numbered `seq` is the one still owed, taking it if so.
+    /// Stale ACKs and repeats are not (§17.1.1.3).
     pub(crate) fn take_ack(&mut self, id: DialogId, seq: u32) -> bool {
         let Some(entry) = self.entries.get_mut(id.raw) else {
             return false;
@@ -377,8 +331,7 @@ impl Dialogs {
 
     /// The INVITE that opened this dialog, while it is still running.
     ///
-    /// §14.1 forbids a second INVITE transaction in a dialog while one is in
-    /// progress, and the INVITE that opened an early dialog counts.
+    /// §14.1 forbids a second INVITE while this one runs.
     pub(crate) fn opening_invite(&self, id: DialogId) -> Option<TransactionId<InviteClient>> {
         let set = self.branch_set(id)?;
         self.sets.get(set)?.invite
@@ -402,9 +355,7 @@ impl Dialogs {
         }
     }
 
-    /// The INVITE was refused: the call it placed is over, even while its
-    /// transaction stands for timer D to absorb the refusal again. A retry
-    /// with credentials is a new INVITE and counted as one.
+    /// The INVITE was refused: the call is over, even while timer D runs.
     pub(crate) fn refused(&mut self, set: Raw) {
         let Some(branches) = self.sets.get_mut(set) else {
             return;
@@ -437,9 +388,7 @@ impl Dialogs {
                 if branches.invite.is_none() {
                     self.sets.remove(set);
                 } else if !branches.refused && !branches.answered {
-                    // the INVITE is still running with nothing but early
-                    // dialogs to show for it, and whatever answers it next
-                    // opens a dialog again
+                    // only early dialogs ended; the next answer opens one again
                     branches.awaiting = true;
                     self.unopened += 1;
                 }
@@ -450,11 +399,7 @@ impl Dialogs {
 
     /// Every dialog a set has named, found through the set's own branches.
     ///
-    /// Retiring an INVITE transaction ends what its set is still holding, and
-    /// that happens on the timer path, for every call whose timer M fires at
-    /// the same instant. Visiting every dialog the endpoint holds on each
-    /// retirement made that quadratic in the number of calls; this visits the
-    /// branches of one INVITE and nothing else.
+    /// Runs on the timer path; scanning every dialog here would be quadratic.
     pub(crate) fn branches_of(&self, set: Raw) -> Vec<DialogId> {
         let Some(branches) = self.sets.get(set) else {
             return Vec::new();
@@ -605,8 +550,6 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_set_outlives_its_transaction_but_not_its_last_dialog() {
-        // the transaction ends 64*T1 after the answer; the call it opened can
-        // last an hour
         let mut dialogs = Dialogs::new();
         let set = dialogs.watch(DialogSet::new(owned(INVITE), false), invite_id());
         let key = with(&ringing("desk"), |response| {

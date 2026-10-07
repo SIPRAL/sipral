@@ -22,13 +22,8 @@ use super::via::ViaRef;
 
 /// A `From` or `To` whose tag is a token, or the field is malformed.
 ///
-/// §25.1: `tag-param = "tag" EQUAL token`. The tag read here is the one a
-/// dialog is named by and the one it writes back after `;tag=` on every request
-/// it sends, so it has to be something that goes back out as one parameter
-/// value. [`NameAddrRef::tag`] undoes quoting, which keeps `tag="a1"` readable
-/// as `a1`; a quoted value holding a `;`, an unquoted one running on to a
-/// comma, or an empty one would each be written back as parameters or an
-/// address the peer added.
+/// §25.1: `tag-param = "tag" EQUAL token`. The dialog writes this tag back
+/// after `;tag=`, so anything that would not go out as one value is refused.
 fn tagged_by_a_token(addr: NameAddrRef<'_>) -> Result<NameAddrRef<'_>, HeaderError> {
     match addr.tag() {
         Some(tag) if tag.is_empty() || !tag.iter().copied().all(is_token_byte) => {
@@ -53,9 +48,8 @@ pub(crate) enum StartLine {
     Response { code: StatusCode, reason: Span },
 }
 
-/// A parsed message. Every accessor locates and validates a span; none
-/// allocates and none copies. The view borrows both the message buffer and the
-/// index built by [`super::parse`], so it never outlives either.
+/// A parsed message. Accessors locate and validate spans without copying.
+/// Borrows both the buffer and the index built by [`super::parse`].
 #[derive(Clone, Copy)]
 pub struct RawMessage<'a> {
     pub(crate) buf: &'a [u8],
@@ -115,9 +109,8 @@ impl<'a> RawMessage<'a> {
         }
     }
 
-    /// The Request-URI, parsed. `None` for a response; `Some(Err(_))` when the
-    /// message is a request whose URI does not parse, which is a rejection the
-    /// layer above has to make, not a reason to have refused the message.
+    /// The Request-URI, parsed. `None` for a response. A URI that does not
+    /// parse is for the layer above to reject.
     #[must_use]
     pub fn request_uri(&self) -> Option<Result<UriRef<'a>, UriError>> {
         self.request_uri_bytes().map(UriRef::parse)
@@ -135,9 +128,7 @@ impl<'a> RawMessage<'a> {
         self.headers
     }
 
-    /// Name and value of every header field, in wire order. A folded value
-    /// still carries its interior CRLF; unfolding belongs to the typed
-    /// accessors.
+    /// Name and value of every header field, in wire order. Folds are kept.
     pub fn raw_headers(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + use<'a> {
         let buf = self.buf;
         self.headers
@@ -151,8 +142,7 @@ impl<'a> RawMessage<'a> {
             .filter_map(|(n, _)| HeaderName::from_bytes(n))
     }
 
-    /// Every value of one field, in wire order. Compact and long forms are the
-    /// same field, so asking for `Via` finds a `v:` line too.
+    /// Every value of one field, in wire order. Compact forms match too.
     pub fn header_values<'n>(
         &self,
         name: HeaderName<'n>,
@@ -168,18 +158,14 @@ impl<'a> RawMessage<'a> {
         self.header_values(name).next()
     }
 
-    /// How many times a field appears. Several `Via` lines are normal; several
-    /// `Call-ID` lines are a malformed message the layers above must refuse.
+    /// How many times a field appears.
     #[must_use]
     pub fn header_count(&self, name: HeaderName<'_>) -> usize {
         self.header_values(name).count()
     }
 
-    /// Every value of one comma-separated field, in wire order.
-    ///
-    /// RFC 3261 §7.3.1 makes several lines of such a field and one line with
-    /// commas the same message, so this walks both: line by line, and within
-    /// each line comma by comma, with quotes and `<...>` respected.
+    /// Every value of one comma-separated field, in wire order, across lines
+    /// and commas alike (RFC 3261 §7.3.1).
     #[must_use]
     pub fn field_values(&self, name: HeaderName<'a>) -> FieldValues<'a> {
         FieldValues {
@@ -193,10 +179,9 @@ impl<'a> RawMessage<'a> {
     /// The one value of a field that may appear only once.
     ///
     /// # Errors
-    /// [`HeaderError::Missing`] when it is absent, [`HeaderError::UnexpectedRepeat`]
-    /// when it appears more than once — RFC 4475 §3.3.8 is a message that does
-    /// exactly that, and picking one of the values silently is how a stack ends
-    /// up disagreeing with the proxy in front of it.
+    /// [`HeaderError::Missing`] when absent, [`HeaderError::UnexpectedRepeat`]
+    /// when repeated (RFC 4475 §3.3.8). Picking one silently would disagree
+    /// with the proxy in front.
     pub fn single(&self, name: HeaderName<'_>) -> Result<&'a [u8], HeaderError> {
         let mut it = self.header_values(name);
         let first = it.next().ok_or(HeaderError::Missing)?;
@@ -206,11 +191,7 @@ impl<'a> RawMessage<'a> {
         Ok(first)
     }
 
-    /// Every `Via` value, in the order that decides where a response goes.
-    ///
-    /// Header lines in wire order, and within each line the comma-separated
-    /// values in wire order, because RFC 3261 §7.3.1 says the two spellings
-    /// have to mean the same thing. The top one is the first item.
+    /// Every `Via` value, top first, across lines and commas (RFC 3261 §7.3.1).
     pub fn via(&self) -> impl Iterator<Item = Result<ViaRef<'a>, HeaderError>> + use<'a> {
         self.field_values(HeaderName::Via).map(ViaRef::parse)
     }
@@ -232,11 +213,7 @@ impl<'a> RawMessage<'a> {
         self.single(HeaderName::CallId).map(trim)
     }
 
-    /// `From` (RFC 3261 §20.20).
-    ///
-    /// One value, never a list: `from-spec` has no `COMMA` alternative, so a
-    /// second address on the line is a malformed field rather than a second
-    /// caller.
+    /// `From` (RFC 3261 §20.20). One value: `from-spec` has no list form.
     ///
     /// # Errors
     /// See [`NameAddrRef::parse`] and [`RawMessage::single`], and
@@ -245,7 +222,7 @@ impl<'a> RawMessage<'a> {
         tagged_by_a_token(NameAddrRef::parse(self.single(HeaderName::From)?)?)
     }
 
-    /// `To` (RFC 3261 §20.39). One value, for the same reason as `From`.
+    /// `To` (RFC 3261 §20.39). One value, like `From`.
     ///
     /// # Errors
     /// As [`RawMessage::from`].
@@ -253,15 +230,11 @@ impl<'a> RawMessage<'a> {
         tagged_by_a_token(NameAddrRef::parse(self.single(HeaderName::To)?)?)
     }
 
-    /// `Contact` (RFC 3261 §20.10): the addresses, or the `*` wildcard.
-    ///
-    /// A message with no `Contact` gives an empty iterator, not an error —
-    /// most requests carry none.
+    /// `Contact` (RFC 3261 §20.10): the addresses, or `*`. Empty when absent.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when `*` arrives alongside an address. The
-    /// grammar offers `STAR` *or* the list, so the two together are outside
-    /// it, however sensible each half looks on its own.
+    /// [`HeaderError::Malformed`] when `*` comes with an address: the grammar
+    /// offers one or the other.
     pub fn contact(&self) -> Result<Contacts<'a>, HeaderError> {
         let values = self.field_values(HeaderName::Contact);
         let mut count = 0_usize;
@@ -281,12 +254,8 @@ impl<'a> RawMessage<'a> {
         Ok(Contacts::Addrs(ContactIter::new(values)))
     }
 
-    /// `WWW-Authenticate` (RFC 3261 §20.44): the challenges a UAS, registrar
-    /// or redirect server sent with a 401, most preferred first.
-    ///
-    /// One line is one challenge. RFC 8760 §2.3 offers several algorithms as
-    /// several lines in preference order, and joining them would produce a
-    /// value with two scheme keywords that the grammar cannot read back.
+    /// `WWW-Authenticate` (RFC 3261 §20.44), most preferred first. One line is
+    /// one challenge (RFC 8760 §2.3).
     pub fn www_authenticate(
         &self,
     ) -> impl Iterator<Item = Result<ChallengeRef<'a>, HeaderError>> + use<'a> {
@@ -294,12 +263,8 @@ impl<'a> RawMessage<'a> {
             .map(ChallengeRef::parse)
     }
 
-    /// `Proxy-Authenticate` (RFC 3261 §20.27): the challenges a proxy sent
-    /// with a 407.
-    ///
-    /// A separate credential space from `WWW-Authenticate` — different status
-    /// code, different role (§22.1) — so answering one with the other is
-    /// wrong however alike they read.
+    /// `Proxy-Authenticate` (RFC 3261 §20.27). A separate credential space from
+    /// `WWW-Authenticate` (§22.1).
     pub fn proxy_authenticate(
         &self,
     ) -> impl Iterator<Item = Result<ChallengeRef<'a>, HeaderError>> + use<'a> {
@@ -307,10 +272,8 @@ impl<'a> RawMessage<'a> {
             .map(ChallengeRef::parse)
     }
 
-    /// `Authorization` (RFC 3261 §20.7).
-    ///
-    /// One line each: §20.7 exempts this field from the comma-joining rule of
-    /// §7.3.1 explicitly.
+    /// `Authorization` (RFC 3261 §20.7). One per line: §20.7 exempts it from
+    /// comma joining.
     pub fn authorization(
         &self,
     ) -> impl Iterator<Item = Result<CredentialsRef<'a>, HeaderError>> + use<'a> {
@@ -318,10 +281,8 @@ impl<'a> RawMessage<'a> {
             .map(CredentialsRef::parse)
     }
 
-    /// `Proxy-Authorization` (RFC 3261 §20.28).
-    ///
-    /// A proxy must not consume a value whose `realm` is not its own (§22.3),
-    /// so these are read as a list rather than searched by scheme.
+    /// `Proxy-Authorization` (RFC 3261 §20.28). Read as a list since a proxy
+    /// only takes its own realm (§22.3).
     pub fn proxy_authorization(
         &self,
     ) -> impl Iterator<Item = Result<CredentialsRef<'a>, HeaderError>> + use<'a> {
@@ -329,10 +290,7 @@ impl<'a> RawMessage<'a> {
             .map(CredentialsRef::parse)
     }
 
-    /// `Require` (RFC 3261 §20.32): the extensions the peer insists on.
-    ///
-    /// Must not be ignored when present — a UAS that cannot honour one of
-    /// these answers 420 and lists it in `Unsupported`.
+    /// `Require` (RFC 3261 §20.32). An unknown entry gets a 420.
     #[must_use]
     pub fn require(&self) -> TokenIter<'a> {
         TokenIter::new(self.field_values(HeaderName::Require))
@@ -344,9 +302,7 @@ impl<'a> RawMessage<'a> {
         TokenIter::new(self.field_values(HeaderName::ProxyRequire))
     }
 
-    /// `Supported` (RFC 3261 §20.37): the extensions the peer can do.
-    ///
-    /// Present and empty means none, which is not the same as absent.
+    /// `Supported` (RFC 3261 §20.37). Present and empty is not absent.
     #[must_use]
     pub fn supported(&self) -> TokenIter<'a> {
         TokenIter::new(self.field_values(HeaderName::Supported))
@@ -364,32 +320,21 @@ impl<'a> RawMessage<'a> {
         TokenIter::new(self.field_values(HeaderName::ContentEncoding))
     }
 
-    /// `Accept` (RFC 3261 §20.1): the body types the peer will take, as
-    /// written.
-    ///
-    /// Absent means `application/sdp` is assumed; present and empty means
-    /// nothing is acceptable, so the two cannot be collapsed.
+    /// `Accept` (RFC 3261 §20.1). Absent assumes `application/sdp`; present and
+    /// empty accepts nothing.
     #[must_use]
     pub fn accept(&self) -> TokenIter<'a> {
         TokenIter::new(self.field_values(HeaderName::Accept))
     }
 
-    /// `Allow` (RFC 3261 §20.5): the methods the peer implements.
-    ///
-    /// The six RFC 3261 verbs are fixed-case literals in the grammar, so
-    /// `Allow: invite` yields [`Method::Extension`], not [`Method::Invite`].
-    /// Absent says nothing about what is supported (§20.5); it is not a claim
-    /// that nothing is.
+    /// `Allow` (RFC 3261 §20.5). The grammar's verbs are case-sensitive, so
+    /// `invite` is [`Method::Extension`]. Absent says nothing.
     pub fn allow(&self) -> impl Iterator<Item = Method<'a>> + use<'a> {
         TokenIter::new(self.field_values(HeaderName::Allow)).filter_map(Method::from_bytes)
     }
 
-    /// `Allow-Events` (RFC 6665 §8.2.2): the event packages the peer can
-    /// notify for.
-    ///
-    /// §4.4.4 makes the list "comprehensive and inclusive", so a package that
-    /// is not in a list that is present is one the peer will refuse with a
-    /// 489. Absent says nothing at all.
+    /// `Allow-Events` (RFC 6665 §8.2.2). A present list is complete (§4.4.4):
+    /// other packages get a 489. Absent says nothing.
     #[must_use]
     pub fn allow_events(&self) -> TokenIter<'a> {
         TokenIter::new(self.field_values(HeaderName::AllowEvents))
@@ -398,9 +343,8 @@ impl<'a> RawMessage<'a> {
     /// `Event` (RFC 6665 §8.2.1).
     ///
     /// # Errors
-    /// See [`EventRef::parse`] and [`RawMessage::single`]. §8.2.1: "There MUST
-    /// be exactly one event type listed per `Event` header field. Multiple
-    /// events per message are disallowed."
+    /// See [`EventRef::parse`] and [`RawMessage::single`]. One event type per
+    /// field (§8.2.1).
     pub fn event(&self) -> Result<EventRef<'a>, HeaderError> {
         EventRef::parse(self.single(HeaderName::Event)?)
     }
@@ -416,8 +360,7 @@ impl<'a> RawMessage<'a> {
     /// `Content-Type` (RFC 3261 §20.15).
     ///
     /// # Errors
-    /// See [`MediaTypeRef::parse`] and [`RawMessage::single`]. One media type,
-    /// never a list, so a second one is a repeat rather than another value.
+    /// See [`MediaTypeRef::parse`] and [`RawMessage::single`].
     pub fn content_type(&self) -> Result<MediaTypeRef<'a>, HeaderError> {
         MediaTypeRef::parse(self.single(HeaderName::ContentType)?)
     }
@@ -428,11 +371,8 @@ impl<'a> RawMessage<'a> {
         RouteIter::new(self.field_values(HeaderName::Route))
     }
 
-    /// `Record-Route` (RFC 3261 §20.30), in wire order.
-    ///
-    /// Wire order, not dialog order: §12.1.1 has the UAS take these as they
-    /// come and §12.1.2 has the UAC reverse them, so reversing here would make
-    /// one of the two wrong.
+    /// `Record-Route` (RFC 3261 §20.30), in wire order: §12.1.1 takes it as is
+    /// and §12.1.2 reversed.
     #[must_use]
     pub fn record_route(&self) -> RouteIter<'a> {
         RouteIter::new(self.field_values(HeaderName::RecordRoute))
@@ -462,10 +402,7 @@ impl<'a> RawMessage<'a> {
         digits(self.single(HeaderName::Expires)?)
     }
 
-    /// `Content-Length` (RFC 3261 §20.14).
-    ///
-    /// The parser already used this to frame the body; this is the field as
-    /// written, for a layer that wants to reason about it.
+    /// `Content-Length` (RFC 3261 §20.14), as written.
     ///
     /// # Errors
     /// See [`digits`] and [`RawMessage::single`].
@@ -497,17 +434,11 @@ impl<'a> RawMessage<'a> {
         RAck::parse(self.single(HeaderName::RAck)?)
     }
 
-    /// The method the transaction table is keyed on for this message.
+    /// The method the transaction table is keyed on.
     ///
-    /// A request answers with its own method, except an ACK, which answers
-    /// INVITE: the INVITE server transaction absorbs the ACK to a non-2xx
-    /// (RFC 3261 §17.2.1), and an ACK to a 2xx simply finds no transaction
-    /// under that key and belongs to the dialog instead. A response answers
-    /// with its `CSeq` method, because that is what §17.1.3 matches on
-    /// alongside the branch — a response carries no method of its own.
-    ///
-    /// CANCEL stays CANCEL: it shares the branch of the request it cancels
-    /// but forms a transaction of its own (§9.1).
+    /// A request uses its own, except ACK, which uses INVITE (RFC 3261
+    /// §17.2.1). A response uses its `CSeq` method (§17.1.3). CANCEL keeps its
+    /// own: it forms a separate transaction (§9.1).
     ///
     /// # Errors
     /// See [`RawMessage::cseq`], for a response.
@@ -519,18 +450,11 @@ impl<'a> RawMessage<'a> {
         }
     }
 
-    /// Whether this is a message the stack can act on, or one that draws a
-    /// 400.
+    /// Whether the stack can act on this message, or it draws a 400.
     ///
-    /// A message can be framed correctly and still be unusable: a `From` whose
-    /// display name is not a display name, a `CSeq` that names a different
-    /// method than the start line, a `Date` in a time zone nobody can read.
-    /// The parser has no business refusing those — it does not know which
-    /// fields the caller will read — so the question is asked here, once, by
-    /// whoever is about to answer.
-    ///
-    /// Only the fields that carry the message are checked, and only when they
-    /// are present. An extension header nobody understands is not a fault.
+    /// The parser does not know which fields the caller reads, so field
+    /// content is checked here. Only present fields that carry the message are
+    /// checked; unknown extensions are not faults.
     ///
     /// # Errors
     /// [`Invalid`], naming the field and what was wrong with it.
@@ -538,9 +462,7 @@ impl<'a> RawMessage<'a> {
         if let Some(uri) = self.request_uri() {
             let uri =
                 uri.map_err(|_| Invalid::field("Request-URI", HeaderError::Malformed("URI")))?;
-            // 8.1.3.4 has a UAC copy a target URI into the Request-URI
-            // "except for the method-param and header URI parameters", so
-            // headers have no business arriving in one (RFC 4475 §3.1.2.11)
+            // §8.1.3.4: no URI headers in a Request-URI (RFC 4475 §3.1.2.11)
             if uri.sip().is_some_and(|u| !u.headers_raw().is_empty()) {
                 return Err(Invalid::field(
                     "Request-URI",
@@ -549,8 +471,7 @@ impl<'a> RawMessage<'a> {
             }
         }
 
-        // every one, not just the top: a response walks the whole list back,
-        // and RFC 4475 §3.1.2.1 hides its fault in the second value
+        // all values: RFC 4475 §3.1.2.1 hides its fault in the second
         let mut seen_via = false;
         for via in self.via() {
             via.map_err(|e| Invalid::field("Via", e))?;
@@ -564,8 +485,7 @@ impl<'a> RawMessage<'a> {
         if let Some(method) = self.method()
             && cseq.method != method
         {
-            // 8.1.1.5: the method part of CSeq is case-sensitive and matches
-            // the request's own (RFC 4475 §3.1.2.17 and §3.1.2.18)
+            // §8.1.1.5: case-sensitive, matches the start line (RFC 4475 §3.1.2.17-18)
             return Err(Invalid::field(
                 "CSeq",
                 HeaderError::Malformed("CSeq names a different method than the start line"),
@@ -644,10 +564,8 @@ impl<'a> RawMessage<'a> {
         self.buf
     }
 
-    /// How many bytes of the buffer this message takes up.
-    ///
-    /// Less than the buffer when something followed it — a second request
-    /// sharing a datagram, or the next message on a stream.
+    /// How many bytes of the buffer this message takes up. Less when another
+    /// message followed it.
     #[must_use]
     pub fn len(&self) -> usize {
         self.body.end as usize
@@ -659,12 +577,10 @@ impl<'a> RawMessage<'a> {
         self.len() == 0
     }
 
-    /// The one seam where a borrowed view becomes something the stack can keep.
+    /// Copy the message into a refcounted buffer the stack can keep.
     ///
-    /// The bytes are copied once into a refcounted buffer and the header index
-    /// is moved alongside them; every span stays valid because it was already
-    /// an offset from the start of the message. Anything past the body — a
-    /// second request sharing the datagram, say — is left behind.
+    /// Spans are offsets, so the index moves as is. Bytes past the body stay
+    /// behind.
     #[must_use]
     pub fn to_owned(&self) -> OwnedMessage {
         let end = (self.body.end as usize).min(self.buf.len());
@@ -700,8 +616,7 @@ impl core::fmt::Display for Invalid {
 
 impl core::error::Error for Invalid {}
 
-/// Every value of one field, across the lines it appears on and across the
-/// commas within them, in wire order.
+/// Every value of one field, across lines and commas, in wire order.
 #[derive(Clone, Debug)]
 pub struct FieldValues<'a> {
     buf: &'a [u8],
@@ -729,12 +644,8 @@ impl<'a> Iterator for FieldValues<'a> {
     }
 }
 
-/// A message the stack owns.
-///
-/// The same bytes and the same header index as the [`RawMessage`] it came
-/// from, so every accessor works unchanged through [`OwnedMessage::as_raw`].
-/// Cloning is two refcount bumps; a retransmission never re-copies and never
-/// re-parses.
+/// A message the stack owns. Same bytes and index as the [`RawMessage`] it
+/// came from (see [`OwnedMessage::as_raw`]); cloning is two refcount bumps.
 #[derive(Clone)]
 pub struct OwnedMessage {
     bytes: Arc<[u8]>,
@@ -744,12 +655,8 @@ pub struct OwnedMessage {
 }
 
 impl OwnedMessage {
-    /// Take ownership of a buffer that was just parsed, without copying it a
-    /// second time.
-    ///
-    /// `bytes` has to be the buffer `raw` was parsed from, which is why this
-    /// is not public: every span is an offset into it. The builders use it so
-    /// that writing a message costs one allocation rather than two.
+    /// Take ownership of the buffer `raw` was parsed from, without a copy.
+    /// Private because every span is an offset into `bytes`.
     pub(super) fn adopt(bytes: Arc<[u8]>, raw: &RawMessage<'_>) -> Self {
         Self {
             bytes,

@@ -3,10 +3,8 @@
 
 //! Feeding a recording back.
 //!
-//! The replay is the smaller half of this feature, and that is the point of
-//! having built the stack sans-I/O: there is nothing to simulate. The calls
-//! that a session enters through are the calls a replay makes, in the order
-//! and at the offsets the recording holds.
+//! Sans-I/O leaves nothing to simulate: a replay makes the same calls at the
+//! recorded offsets.
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -18,11 +16,8 @@ use crate::transaction::DialogId;
 
 /// Something a recording can be fed into.
 ///
-/// The entry points every layer of this stack shares. A replay does not know
-/// or care whether it is driving the endpoint, the user agent above it or an
-/// application's own wrapper around either, which is what lets a recording
-/// taken from a phone in the field be replayed into whichever layer the bug
-/// is thought to be in.
+/// Shared by every layer, so a field recording can be replayed into the
+/// endpoint, the user agent or an application wrapper.
 pub trait Driven {
     /// Bytes, or news about a transport.
     ///
@@ -69,19 +64,15 @@ pub enum Played<'a> {
     Fed,
     /// The application did something of its own here, under this name.
     ///
-    /// The caller does it again — places the call, answers it, registers the
-    /// account — before stepping on. A replay that ignores its cues is a
-    /// replay of a different session, and will usually show it by having
-    /// nothing to answer the next message with.
+    /// The caller repeats it before stepping on; ignoring cues replays a
+    /// different session.
     Cue(&'a str),
 }
 
 /// A recording, being fed back.
 ///
-/// Pull rather than push, because between two frames the caller has work to
-/// do: draining what the stack wants written, reading the events, and acting
-/// on a cue. [`Replay::next_at`] gives the instant the next frame happens at,
-/// which is the `now` everything in between is done with.
+/// Pull, not push: between frames the caller drains output, reads events and
+/// acts on cues, at [`Replay::next_at`].
 #[derive(Clone, Copy, Debug)]
 pub struct Replay<'a> {
     frames: &'a [Frame],
@@ -92,9 +83,7 @@ pub struct Replay<'a> {
 impl<'a> Replay<'a> {
     /// A replay of `recording`, with its first frame at `origin`.
     ///
-    /// The origin is the caller's: a recording holds offsets and no absolute
-    /// time, so the session can be replayed at any instant and the schedule
-    /// between the frames is the one that was recorded.
+    /// A recording holds only offsets, so any origin works.
     #[must_use]
     pub fn new(recording: &'a Recording, origin: Instant) -> Self {
         Self {
@@ -117,9 +106,8 @@ impl<'a> Replay<'a> {
     /// `Ok(None)` is the end of the session.
     ///
     /// # Errors
-    /// Whatever the stack says about the bytes: a recording holds what
-    /// arrived, malformed messages included, and a replay that hid the
-    /// refusal would hide the bug.
+    /// Whatever the stack says: malformed messages are replayed too, and
+    /// hiding the refusal would hide the bug.
     pub fn step<T: Driven>(&mut self, target: &mut T) -> Result<Option<Played<'a>>, ReceiveError> {
         let Some(frame) = self.frames.get(self.next) else {
             return Ok(None);

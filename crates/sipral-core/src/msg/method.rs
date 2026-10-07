@@ -5,11 +5,10 @@
 
 use core::fmt;
 
-/// A request method. Well-known verbs are recognised; anything else is an
-/// extension carried as a borrowed slice of the start line.
+/// A request method. Unknown methods are borrowed from the start line.
 ///
-/// Methods are case-sensitive tokens (RFC 3261 §7.1), so `Invite` and an
-/// `Extension("invite")` are deliberately different values.
+/// Methods are case-sensitive (RFC 3261 §7.1): `Invite` and
+/// `Extension("invite")` differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method<'a> {
     /// RFC 3261.
@@ -131,15 +130,11 @@ impl StatusCode {
     pub const SESSION_PROGRESS: Self = Self(183);
     /// 200 OK.
     pub const OK: Self = Self(200);
-    /// 202, which RFC 3428 §7 has a MESSAGE relay send instead of a 200: "the
-    /// message was accepted, but end to end delivery has not been
-    /// guaranteed".
+    /// 202 Accepted, sent by a MESSAGE relay (RFC 3428 §7).
     pub const ACCEPTED: Self = Self(202);
-    /// 302 Moved Temporarily: the user is reachable at the `Contact` the
-    /// response names, for now (§21.3.3).
+    /// 302 Moved Temporarily (§21.3.3).
     pub const MOVED_TEMPORARILY: Self = Self(302);
-    /// 400, "the request could not be understood due to malformed syntax"
-    /// (§21.4.1).
+    /// 400 Bad Request (§21.4.1).
     pub const BAD_REQUEST: Self = Self(400);
     /// 401 Unauthorized.
     pub const UNAUTHORIZED: Self = Self(401);
@@ -149,44 +144,31 @@ impl StatusCode {
     pub const BUSY_HERE: Self = Self(486);
     /// 487 Request Terminated.
     pub const REQUEST_TERMINATED: Self = Self(487);
-    /// 413, "the server is refusing to process a request because the request
-    /// entity is larger than the server is willing or able to process"
-    /// (§21.4.11). This stack answers a MESSAGE with it when the body is
-    /// larger than the policy limit RFC 3428 leaves to the UAS.
+    /// 413 Request Entity Too Large (§21.4.11), for a MESSAGE past the policy
+    /// limit RFC 3428 leaves to the UAS.
     pub const REQUEST_ENTITY_TOO_LARGE: Self = Self(413);
-    /// 415, "The server is refusing to service the request because the
-    /// message body of the request is in a format not supported by the server
-    /// for the requested method" (§21.4.13).
+    /// 415 Unsupported Media Type (§21.4.13).
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
-    /// 488, which refuses a session description rather than the request that
-    /// carried it (RFC 3264 §6, RFC 3311 §5.2).
+    /// 488, refusing a session description (RFC 3264 §6, RFC 3311 §5.2).
     pub const NOT_ACCEPTABLE_HERE: Self = Self(488);
-    /// 422, which refuses a session interval as too short and says in
-    /// `Min-SE` what would be accepted (RFC 4028 §6).
+    /// 422, session interval too small; `Min-SE` says the minimum (RFC 4028 §6).
     pub const SESSION_INTERVAL_TOO_SMALL: Self = Self(422);
-    /// 491, which §14.2 answers an INVITE that crossed one of our own inside
-    /// the same dialog with.
+    /// 491, for a re-INVITE that crossed one of ours (§14.2).
     pub const REQUEST_PENDING: Self = Self(491);
-    /// 481, which answers a request naming a dialog or a transaction that is
-    /// not there (§12.2.2, RFC 3262 §3).
+    /// 481, no such dialog or transaction (§12.2.2, RFC 3262 §3).
     pub const CALL_DOES_NOT_EXIST: Self = Self(481);
-    /// 482, which §8.2.2.2 answers a request that reached this end twice, by
-    /// two different paths — most often a proxy's fork.
+    /// 482, a request that arrived twice by different paths (§8.2.2.2).
     pub const LOOP_DETECTED: Self = Self(482);
-    /// 408, which the endpoint answers a non-INVITE server transaction with,
-    /// on the application's behalf, when 64·T1 passes with no final response
-    /// of its own (§17.2.2 gives that state no timer at all).
+    /// 408, sent for the application when a non-INVITE server transaction gets
+    /// no final response within 64·T1 (§17.2.2 has no timer for it).
     pub const REQUEST_TIMEOUT: Self = Self(408);
-    /// 420, which §8.2.2.3 makes the only answer to a `Require` naming an
-    /// extension this end has not implemented.
+    /// 420, for a `Require` naming an unknown extension (§8.2.2.3).
     pub const BAD_EXTENSION: Self = Self(420);
-    /// 500, which §12.2.2 answers a request whose `CSeq` runs backwards with.
+    /// 500, for a `CSeq` running backwards (§12.2.2).
     pub const SERVER_ERROR: Self = Self(500);
-    /// 503, "temporarily unable to process the request due to a temporary
-    /// overloading" (§21.5.4).
+    /// 503 Service Unavailable (§21.5.4).
     pub const SERVICE_UNAVAILABLE: Self = Self(503);
-    /// 513, "unable to process the request since the message length exceeded
-    /// its capabilities" (§21.5.14): the answer to a request longer than
+    /// 513 Message Too Large (§21.5.14), for a request past
     /// [`crate::msg::Limits::max_message_bytes`].
     pub const MESSAGE_TOO_LARGE: Self = Self(513);
     /// 504 Server Time-out.
@@ -228,12 +210,8 @@ impl StatusCode {
         !self.is_provisional()
     }
 
-    /// The reason phrase RFC 3261 §21 registers for this code, if it
-    /// registers one.
-    ///
-    /// The phrase is for a person to read (§7.2), so a caller is free to send
-    /// something else; this is the default so that nobody has to invent one.
-    /// 422 comes from RFC 4028 §6.
+    /// The reason phrase registered for this code (RFC 3261 §21, and RFC 4028
+    /// §6 for 422). Callers may send another (§7.2).
     #[must_use]
     #[expect(
         clippy::match_same_arms,

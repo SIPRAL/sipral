@@ -3,22 +3,15 @@
 
 //! The non-INVITE client transaction (RFC 3261 §17.1.2).
 //!
-//! Everything a REGISTER, OPTIONS, BYE, MESSAGE or CANCEL runs on. Simpler
-//! than the INVITE machine: no ACK, no `Accepted` state, and a final response
-//! of any class does the same thing.
+//! REGISTER, OPTIONS, BYE, MESSAGE and CANCEL run on this. No ACK, no
+//! `Accepted`, and every final response class is handled alike.
 //!
-//! Two differences from the INVITE machine are easy to miss.
+//! Retransmissions cap at T2 (`MIN(2*T1, T2)`, ...): 500 ms, 1 s, 2 s, 4 s,
+//! 4 s with the defaults.
 //!
-//! Retransmissions cap at T2 rather than doubling forever —
-//! `MIN(2*T1, T2)`, then `MIN(4*T1, T2)` — which for the default values is
-//! 500 ms, 1 s, 2 s, 4 s, 4 s, 4 s. T2 is "the amount of time a non-INVITE
-//! server transaction will take to respond to a request, if it does not
-//! respond immediately", so there is no point spacing them wider.
-//!
-//! And a provisional response does *not* stop the retransmissions. It moves
-//! the machine to `Proceeding`, where timer E is reset to T2 flat and keeps
-//! going, and timer F still ends the transaction. A non-INVITE request has to
-//! finish; only an INVITE gets to ring indefinitely.
+//! A provisional does *not* stop retransmissions, unlike INVITE: in
+//! `Proceeding` timer E runs at T2 flat and timer F still ends the
+//! transaction. A non-INVITE request has to finish.
 
 use std::time::Instant;
 
@@ -34,8 +27,7 @@ pub(crate) struct NonInviteClientMachine {
     request: OwnedMessage,
     config: TimerConfig,
     reliable: bool,
-    /// How many times the request has been retransmitted, which is what the
-    /// doubling counts.
+    /// Retransmissions so far; the doubling counts these.
     attempt: u32,
     timer_e: Option<Instant>,
     timer_f: Option<Instant>,
@@ -94,8 +86,7 @@ impl NonInviteClientMachine {
         if self.timer_e == Some(due) {
             self.attempt = self.attempt.saturating_add(1);
             let interval = match self.state {
-                // in Proceeding the interval is T2 flat: the server has said
-                // it is working on it, so the doubling has done its job
+                // in Proceeding the interval is T2 flat
                 NonInviteClientState::Proceeding => self.config.t2,
                 _ => self.config.retransmit(self.attempt, Some(self.config.t2)),
             };
@@ -142,8 +133,8 @@ impl NonInviteClientMachine {
                 if status.is_provisional() {
                     if self.state == NonInviteClientState::Trying {
                         self.state = NonInviteClientState::Proceeding;
-                        // reset to T2 flat rather than cancelled: a non-INVITE
-                        // request still has to finish
+                        // reset, not cancelled: the request still has to
+                        // finish
                         self.timer_e = self.timer_e.map(|_| now + self.config.t2);
                     }
                     return Effects {
@@ -158,8 +149,7 @@ impl NonInviteClientMachine {
                 self.timer_k = Some(now + wait);
                 Effects {
                     notify: Some(Notify::Response),
-                    // nothing retransmits on a reliable transport, so there is
-                    // nothing for Completed to buffer
+                    // reliable transport: nothing to absorb in Completed
                     terminated: wait.is_zero(),
                     ..Effects::default()
                 }

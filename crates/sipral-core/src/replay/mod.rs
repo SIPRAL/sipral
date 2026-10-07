@@ -3,48 +3,26 @@
 
 //! A session written down, and fed back.
 //!
-//! The failures that cost the most happen on one PBX, on one carrier, behind
-//! one NAT, and do not happen in a laboratory. They are diagnosed today by
-//! reasoning about a capture, shipping a guess, and waiting a week to find
-//! out. A recording ends that: the session that failed comes back as a file,
-//! the fix is proved against the conditions that produced the bug, and the
-//! file stays in the tree afterwards as a test that the bug does not come
-//! back.
+//! A failure seen on one PBX comes back as a file, the fix is proved against
+//! it, and the file stays as a regression test.
 //!
-//! This is nearly free here, and that is an argument for the architecture
-//! rather than for this module. Everything that enters the stack enters
-//! through [`Endpoint::receive`](crate::endpoint::Endpoint::receive) and
+//! Everything enters the stack through
+//! [`Endpoint::receive`](crate::endpoint::Endpoint::receive) and
 //! [`Endpoint::handle_timeout`](crate::endpoint::Endpoint::handle_timeout),
-//! and the time those are given is the caller's rather than the clock's
-//! (`docs/13-client-requirements.md`, D9). So a recording is the sequence of
-//! those calls with the offsets they were made at, and a replay is making
-//! them again.
+//! with the caller's time (`docs/13-client-requirements.md`, D9). A recording
+//! is those calls with their offsets; a replay makes them again.
 //!
 //! # What is in one, and what cannot be
 //!
-//! The seed, because everything the stack draws — every branch, tag,
-//! `Call-ID` and `cnonce` — is derived from it, and a replay under a
-//! different seed writes different requests that the recorded answers no
-//! longer belong to. Then the frames: what arrived, when a deadline was
-//! taken, and the names of the things the application did on its own
-//! ([`Step::Cue`]).
+//! The seed, since every branch, tag, `Call-ID` and `cnonce` derives from it.
+//! Then the frames: arrivals, deadlines, and [`Step::Cue`] names.
 //!
-//! What cannot be in one is audio, and it is the format that makes it so
-//! rather than the code that writes it. The transcript is text — one line of
-//! a message to a line of the file, four escapes and no others — so there is
-//! no binary frame, no length-prefixed blob and no base64 to smuggle a media
-//! frame through. [`Payload`] is the whole of that rule: it is the only way
-//! to put bytes in a frame, and it refuses anything that is not text. Media
-//! never reaches this layer in the first place — RTP arrives at another crate
-//! on another socket — so the format does not omit a media frame, it has none
-//! to define.
+//! Audio cannot be in one. The format is text with four escapes and no
+//! binary form, and [`Payload`] refuses anything else.
 //!
 //! # Driving one
 //!
-//! The instants are parameters here for the same reason they are parameters
-//! everywhere else in these crates: whoever owns the sockets owns the clock,
-//! and a recorder that read one of its own would be recording a session
-//! slightly different from the one the stack saw.
+//! Instants are parameters: whoever owns the sockets owns the clock.
 //!
 //! ```
 //! use sipral_core::endpoint::{Endpoint, EndpointConfig, Input, TransportId, TransportProtocol};
@@ -79,10 +57,8 @@
 //! }
 //! ```
 //!
-//! What replay reproduces and what it does not is in `docs/18-replay.md`, and
-//! the short of it is that a recording is a script rather than a peer: the
-//! answers in it were written for the requests the recorded build sent, so a
-//! change to what this end writes can leave them answering nothing.
+//! A recording is a script, not a peer (`docs/18-replay.md`): change what
+//! this end writes and the recorded answers may match nothing.
 
 mod driven;
 mod error;
@@ -102,9 +78,7 @@ impl Recording {
     /// Read one back.
     ///
     /// # Errors
-    /// [`ReadError`], and a recording written by a later version of the
-    /// format is one of them: the reader refuses it rather than reading the
-    /// lines it recognises.
+    /// [`ReadError`], including a later format version.
     pub fn parse(text: &str) -> Result<Self, ReadError> {
         read::read(text)
     }

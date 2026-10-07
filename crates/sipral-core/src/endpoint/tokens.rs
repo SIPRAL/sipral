@@ -1,40 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The unguessable strings a SIP stack has to produce, from entropy it is
-//! given rather than entropy it goes looking for.
+//! Unguessable strings (branch §8.1.1.7, `Call-ID` §8.1.1.4, tag §19.3,
+//! `cnonce`) from entropy the caller gives.
 //!
-//! A `branch` has to be unique across space and time (RFC 3261 §8.1.1.7), a
-//! `Call-ID` "cryptographically random" (§8.1.1.4), a tag likewise (§19.3),
-//! and a `cnonce` unpredictable or the digest exchange loses the protection
-//! the counter gives it. That is four kinds of value with one requirement
-//! between them, and none of it can be met by reading a clock or counting.
-//!
-//! Nothing here draws a random number. The caller supplies thirty-two bytes
-//! once, and every value after that is `SHA-256(seed || counter)`: unique
-//! because the counter never repeats, unpredictable to anyone who does not
-//! have the seed, and reproducible in a test that supplies a fixed one. The
-//! seed is the caller's problem for the same reason the clock and the socket
-//! are — a library that opens `/dev/urandom` behind the caller's back is a
-//! library that cannot run where the caller needs it to.
+//! The caller supplies 32 bytes once; each value is `SHA-256(seed ||
+//! counter)`. Unique, unpredictable without the seed, and reproducible in
+//! tests. The library never opens `/dev/urandom` itself.
 
 use std::time::Duration;
 
 use crate::auth::KeySource;
 use crate::auth::digest::hex;
 
-/// A stream of tokens derived from one seed.
-///
-/// The seed lives inside the [`KeySource`], which does not print it and wipes
-/// it on the way out. That matters here rather than being tidiness: this is
-/// reached by `{:?}` on an `Endpoint`, and through that on a `UserAgent`.
+/// A stream of tokens derived from one seed. The seed sits in a
+/// [`KeySource`], which does not print it: `{:?}` on an `Endpoint` reaches here.
 #[derive(Debug)]
 pub(crate) struct Tokens {
     keys: KeySource,
-    /// Where every seed after the caller's comes from ([`Tokens::reseed`]):
-    /// derived one way from the caller's seed, and never drawn for the wire
-    /// or written anywhere, so no seed handed out lets anyone work out the
-    /// ones handed out after it.
+    /// Source of the seeds after the caller's ([`Tokens::reseed`]). Never drawn
+    /// for the wire, so a handed-out seed does not predict later ones.
     ratchet: KeySource,
 }
 
@@ -49,25 +34,15 @@ impl Tokens {
         Self { keys, ratchet }
     }
 
-    /// Carry on from a seed of its own, and say what it is.
-    ///
-    /// The stream starts over, counter at zero, from the next block of the
-    /// ratchet: a seed nothing before it predicts, and one that predicts
-    /// nothing drawn after the next reseed. What a replay recording carries
-    /// is one of these and never the caller's seed, so a recording replays
-    /// from its own first frame and stops predicting the moment the
-    /// recording ends and this is called again.
+    /// Restart from the next ratchet block and return the new seed. Replay
+    /// recordings carry this, never the caller's seed.
     pub(crate) fn reseed(&mut self) -> [u8; 32] {
         let seed = self.ratchet.block();
         self.keys = KeySource::new(seed);
         seed
     }
 
-    /// A fresh token: 32 hexadecimal characters.
-    ///
-    /// Half a SHA-256 digest, which is 128 bits — more than enough that no
-    /// two ever collide, and short enough that putting one in every `Via` of
-    /// every retransmitted request does not cost a fragment.
+    /// A fresh token: 32 hex characters (128 bits of a SHA-256 digest).
     pub(crate) fn token(&mut self) -> Box<[u8]> {
         let digest = self.draw();
         hex(digest.get(..16).unwrap_or_default())
@@ -83,11 +58,8 @@ impl Tokens {
         out.into_boxed_slice()
     }
 
-    /// A number in `1..=upper`, drawn evenly.
-    ///
-    /// RFC 3262 §3 asks for the first `RSeq` of a transaction to be "chosen
-    /// uniformly" in a range, so that a number on the wire says nothing about
-    /// how many calls this endpoint has taken.
+    /// A number in `1..=upper`. RFC 3262 §3 wants the first `RSeq` "chosen
+    /// uniformly", so it does not leak a call count.
     pub(crate) fn number(&mut self, upper: u32) -> u32 {
         if upper == 0 {
             return 0;
@@ -100,14 +72,8 @@ impl Tokens {
         value % upper + 1
     }
 
-    /// An interval drawn evenly from `low..=high`, in steps of ten
-    /// milliseconds.
-    ///
-    /// RFC 3261 §14.1 asks for the 491 back-off "in units of 10 ms", and
-    /// §14.2 for a `Retry-After` "randomly chosen ... between 0 and 10
-    /// seconds". Two implementations that back off by the same amount collide
-    /// again, which is the whole reason the interval is drawn rather than
-    /// fixed.
+    /// An interval in `low..=high`, in 10 ms steps: the 491 back-off (§14.1)
+    /// and random `Retry-After` (§14.2). Fixed back-offs collide again.
     pub(crate) fn interval(&mut self, low: Duration, high: Duration) -> Duration {
         const STEP: Duration = Duration::from_millis(10);
         let steps = |span: Duration| u32::try_from(span.as_millis() / 10).unwrap_or(u32::MAX);
@@ -116,13 +82,8 @@ impl Tokens {
         STEP * (low + self.number(span.saturating_add(1)).saturating_sub(1))
     }
 
-    /// An interval at or just under `upper`.
-    ///
-    /// RFC 5626 §4.4.1: "The UA MUST select a random number between a fixed
-    /// or configurable upper bound and a lower bound, where the lower bound
-    /// is 20% less then the upper bound." Without it every client that
-    /// registered during the same outage pings the server in the same
-    /// millisecond for as long as they all stay up.
+    /// An interval in the top fifth below `upper`. RFC 5626 §4.4.1 requires
+    /// this so clients registered together do not ping in lockstep.
     pub(crate) fn jitter(&mut self, upper: Duration) -> Duration {
         let digest = self.draw();
         let mut fraction = 0_u32;
@@ -173,8 +134,7 @@ mod tests {
 
     #[test]
     fn two_endpoints_with_different_seeds_share_nothing() {
-        // the whole point of the seed: two softphones behind one NAT must not
-        // put the same branch on the wire
+        // two softphones behind one NAT must not share a branch
         let mut left = tokens(1);
         let mut right = tokens(2);
         let mine: HashSet<_> = (0..100).map(|_| left.token()).collect();
@@ -185,7 +145,6 @@ mod tests {
 
     #[test]
     fn the_same_seed_replays_the_same_stream() {
-        // which is what makes a test that asserts on bytes possible at all
         let first: Vec<_> = (0..5).map(|_| tokens(3).token()).collect();
         let mut source = tokens(3);
         assert_eq!(first.first().map(AsRef::as_ref), Some(&*source.token()));

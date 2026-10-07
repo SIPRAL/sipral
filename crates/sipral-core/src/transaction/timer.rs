@@ -3,12 +3,9 @@
 
 //! Time, as a value the caller supplies.
 //!
-//! Nothing here reads a clock. The caller says what time it is, asks what the
-//! next deadline is, and comes back when it has passed — so a timer diagram
-//! from RFC 3261 §17 is an ordinary test that runs in microseconds rather than
-//! a wait.
-//!
-//! RFC 3261 Table 4, and RFC 6026 §7.1 and §8.1 for the last two:
+//! The caller says what time it is, asks for the next deadline, and comes
+//! back when it has passed. RFC 3261 Table 4, and RFC 6026 §7.1 and §8.1 for
+//! L and M:
 //!
 //! ```text
 //! T1  500 ms   round-trip estimate
@@ -29,17 +26,15 @@
 //! M   64*T1             absorb further 2xx from other forks
 //! ```
 //!
-//! The `/ 0` ones are zero on a reliable transport: nothing retransmits there,
-//! so there is nothing to absorb and the machine can terminate at once.
+//! `/ 0`: zero on a reliable transport, where nothing retransmits.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// T1, T2 and T4, from which every other timer is derived.
 ///
-/// The defaults are RFC 3261 Table 4. T1 is an RTT estimate: raising it on a
-/// satellite link and lowering it on a LAN are both reasonable, and everything
-/// else moves with it.
+/// Defaults are RFC 3261 Table 4. T1 is an RTT estimate: raise it on a
+/// satellite link, lower it on a LAN, and the rest follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimerConfig {
     /// Round-trip estimate. 500 ms.
@@ -70,11 +65,10 @@ impl TimerConfig {
         self.t1.saturating_mul(64)
     }
 
-    /// Timer A or G: the *n*-th retransmit interval, doubling from T1.
+    /// Timer A, E or G: the *n*-th retransmit interval, doubling from T1.
     ///
-    /// `cap` is T2 for timer G and for timer E; timer A has no cap, because
-    /// timer B ends the transaction long before doubling would matter (RFC
-    /// 3261 §17.1.1.2).
+    /// `cap` is T2 for E and G. A has none: timer B ends the transaction first
+    /// (RFC 3261 §17.1.1.2).
     #[must_use]
     pub fn retransmit(&self, attempt: u32, cap: Option<Duration>) -> Duration {
         let interval = self
@@ -87,10 +81,8 @@ impl TimerConfig {
     }
 
     /// Timer D: how long a client INVITE transaction absorbs retransmissions
-    /// of a non-2xx final response.
-    ///
-    /// "MUST be equal to at least 32 seconds" on an unreliable transport, and
-    /// zero on a reliable one.
+    /// of a non-2xx final response. "at least 32 seconds" on an unreliable
+    /// transport, zero on a reliable one.
     #[must_use]
     pub const fn d(&self, reliable: bool) -> Duration {
         if reliable {
@@ -116,16 +108,12 @@ impl TimerConfig {
         }
     }
 
-    /// Whether timers A, E and G can ever move: refused otherwise.
+    /// Whether timers A, E and G can ever move.
     ///
-    /// [`Self::retransmit`] is `t1 * 2^attempt`, capped at `t2` for E and G.
-    /// `t1` zero makes attempt 0 already zero — the interval A, E and G are
-    /// first armed with — and `t2` zero clamps every attempt of E and G down
-    /// to zero the moment it is capped, whatever `t1` is. Either way the timer
-    /// re-arms at the exact instant it just fired: `Endpoint::handle_timeout`
-    /// asks its transactions what is due at `now` in a loop that stops only
-    /// when nothing is, and a timer that is always due at `now` again never
-    /// lets it stop.
+    /// `t1` zero makes the first interval zero; `t2` zero caps every E and G
+    /// interval to zero. Either way the timer re-arms at the instant it fired,
+    /// and `Endpoint::handle_timeout`, which loops until nothing is due at
+    /// `now`, never stops.
     ///
     /// # Errors
     /// [`TimerConfigError::Unarmable`] when `t1` or `t2` is zero.
@@ -143,11 +131,10 @@ impl TimerConfig {
 pub enum TimerConfigError {
     /// `t1` or `t2` is zero, which [`TimerConfig::validate`]'s doc explains.
     Unarmable,
-    /// The endpoint's keep-alive interval is zero. RFC 5626 §4.4.1's next
-    /// ping is armed at the instant the last one went plus a jitter of that
-    /// interval, which is then nothing, so `Endpoint::handle_timeout` would
-    /// send pings at one instant forever. No interval at all is how
-    /// keep-alives are turned off.
+    /// The endpoint's keep-alive interval is zero. The next RFC 5626 §4.4.1
+    /// ping would be armed at the same instant forever, so
+    /// `Endpoint::handle_timeout` would never return. To turn keep-alives off,
+    /// set no interval at all.
     KeepaliveUnarmable,
 }
 
@@ -168,11 +155,8 @@ impl core::fmt::Display for TimerConfigError {
 
 impl core::error::Error for TimerConfigError {}
 
-/// Which timer a firing belongs to, by its RFC 3261 letter.
-///
-/// The letters are the RFC's, kept as they are: a log line saying "timer B
-/// fired" can be read straight against §17.1.1.2 by whoever is holding the
-/// capture.
+/// Which timer a firing belongs to, by its RFC 3261 letter, so a log line
+/// reads straight against §17.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TimerName {
     /// Retransmit the INVITE (§17.1.1.2).
@@ -229,12 +213,11 @@ pub(crate) struct TimerHandle {
     seq: u64,
 }
 
-/// Deadlines in order, with whatever the caller wants to hang on them.
+/// Deadlines in order, each with a caller value.
 ///
-/// A `BTreeMap` rather than a heap with lazy deletion, so that the earliest
-/// deadline can be read through a shared reference and is never a cancelled
-/// one. Two timers due at the same instant fire in the order they were
-/// scheduled, which keeps a test's expectations stable.
+/// A `BTreeMap`, not a heap with lazy deletion: the earliest deadline is read
+/// through `&self` and is never a cancelled one. Equal deadlines fire in
+/// scheduling order.
 #[derive(Debug)]
 pub(crate) struct Timers<T> {
     due: BTreeMap<TimerHandle, T>,
@@ -271,10 +254,8 @@ impl<T> Timers<T> {
         self.due.keys().next().map(|handle| handle.at)
     }
 
-    /// The next timer that is due at `now`, earliest first.
-    ///
-    /// Call until it returns `None`: firing one timer can schedule another,
-    /// and a caller that comes back late has several to work through.
+    /// The next timer due at `now`, earliest first. Call until `None`: one
+    /// firing can schedule another, and a late caller has several due.
     pub(crate) fn fire(&mut self, now: Instant) -> Option<T> {
         let handle = *self.due.keys().next()?;
         if handle.at > now {
@@ -313,8 +294,7 @@ mod tests {
 
     #[test]
     fn a_retransmit_interval_doubles_and_stops_at_its_cap() {
-        // timer E and timer G double up to T2; timer A has no cap because
-        // timer B ends the transaction first
+        // E and G double up to T2; A has no cap because B ends it first
         let c = TimerConfig::default();
         let capped = |n| c.retransmit(n, Some(c.t2));
         assert_eq!(capped(0), Duration::from_millis(500));
@@ -407,8 +387,8 @@ mod tests {
 
     #[test]
     fn a_timer_scheduled_in_the_past_is_due_at_once() {
-        // timers D, I, J and K are zero on a reliable transport, which means
-        // "terminate now" rather than "never"
+        // D, I, J and K are zero on a reliable transport: "terminate now",
+        // not "never"
         let base = Instant::now();
         let mut timers = Timers::new();
         timers.schedule(base, Fired(TimerName::K));
@@ -445,21 +425,12 @@ mod tests {
 
     #[test]
     fn a_zero_t1_would_have_timer_a_re_arm_at_the_same_instant_forever() {
-        // the hang `TimerConfig::validate` exists to refuse, shown without a
-        // wall clock: an unreliable INVITE client transaction's timer A,
-        // driven the way `Endpoint::handle_timeout` drives every transaction's
-        // timers — fire whatever is due at `now`, feed the result back in,
-        // stop only once nothing is due — for a bounded number of rounds
-        // rather than a real one, because a config that is actually broken
-        // must not be given the chance to hang the test that proves it
+        // the hang `TimerConfig::validate` refuses, without a wall clock:
+        // timer A driven the way `Endpoint::handle_timeout` drives it
         use crate::msg::{Method, RequestBuilder};
         use crate::transaction::invite_client::InviteClientMachine;
-        // bounded rather than "until it stops", because a config that is
-        // genuinely broken must not be given the chance to hang the test
-        // that proves it: a thousand rounds at the same `now`, all still
-        // finding timer A due, is the hang `TimerConfig::validate` exists to
-        // refuse — `Endpoint::handle_timeout`'s own loop has nothing else
-        // to tell it to stop
+        // bounded so a broken config cannot hang the test: a thousand rounds
+        // at the same `now`, timer A still due, is the hang
         const ROUNDS: u32 = 1_000;
 
         let broken = TimerConfig {

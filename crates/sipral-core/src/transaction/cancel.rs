@@ -3,23 +3,16 @@
 
 //! Building a CANCEL, and knowing when it may go (RFC 3261 §9.1).
 //!
-//! A CANCEL is built to look exactly like the INVITE it cancels — same
-//! Request-URI, `Call-ID`, `To`, `From` and `CSeq` number, tags and all, and
-//! the same single top `Via` with the same branch — so that whoever receives
-//! it can pair the two. Only the `CSeq` method differs, which is what makes it
-//! a transaction in its own right rather than a retransmission.
+//! A CANCEL copies the INVITE's Request-URI, `Call-ID`, `To`, `From`, `CSeq`
+//! number and top `Via` (same branch) so the receiver can pair them. Only the
+//! `CSeq` method differs, which makes it its own transaction.
 //!
-//! `Route` is copied, "so that stateless proxies are able to route CANCEL
-//! requests properly". `Require` and `Proxy-Require` are not copied at all:
-//! §9.1 forbids them here outright, and a CANCEL that demands an extension is
-//! a CANCEL a proxy is entitled to reject.
+//! `Route` is copied "so that stateless proxies are able to route CANCEL
+//! requests properly". `Require` and `Proxy-Require` are forbidden by §9.1.
 //!
-//! The timing is the part that catches people out. A CANCEL may not be sent
-//! before a provisional response has arrived, because the server could then
-//! receive the CANCEL before the INVITE it refers to and have nothing to
-//! cancel. So the user is never made to wait for the right moment: asking to
-//! cancel is always accepted while the transaction is open, and the request is
-//! held until the first provisional arrives.
+//! A CANCEL may not go before a provisional response arrives, or the server
+//! could get it before the INVITE. So a cancel request is always accepted
+//! while the transaction is open, and held until the first provisional.
 
 use super::super::msg::{BuildError, HeaderName, Method, OwnedMessage, RawMessage, RequestBuilder};
 
@@ -54,8 +47,8 @@ pub(crate) fn cancel_for_request(
     let from = request
         .header(HeaderName::From)
         .ok_or(BuildError::MissingField("From"))?;
-    // the To of the request, tag and all: a CANCEL is paired with the request
-    // it cancels, not with the dialog a response would have started
+    // the request's To, tag and all: a CANCEL pairs with the request, not
+    // with a dialog
     let to = request
         .header(HeaderName::To)
         .ok_or(BuildError::MissingField("To"))?;
@@ -71,8 +64,6 @@ pub(crate) fn cancel_for_request(
         .from(from)
         .to(to)
         .call_id(call_id)
-        // the number is the INVITE's; only the method changes, which is what
-        // makes this its own transaction
         .cseq(cseq.seq);
 
     builder = match request.header(HeaderName::MaxForwards) {

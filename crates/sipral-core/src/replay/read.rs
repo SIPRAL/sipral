@@ -3,16 +3,8 @@
 
 //! Reading a recording back.
 //!
-//! Strict on purpose, and the version line is the reason. A recording is fed
-//! into a state machine, so a reader that shrugged at a line it did not
-//! understand would replay a session that nobody recorded and report the
-//! result as if it meant something. Every line either says what it says or
-//! stops the read.
-//!
-//! A carriage return at the end of a line is dropped before anything else
-//! looks at it. That is not laxity: the file travels by mail and through
-//! ticket systems, and a payload's own carriage returns are spelled `\r` and
-//! are never the last character of a line of the file.
+//! Strict: every line parses or stops the read. A trailing CR is dropped,
+//! since files pass through mail and tickets, and payload CRs are escaped.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -56,8 +48,7 @@ pub(super) fn read(text: &str) -> Result<Recording, ReadError> {
     let mut pending: Option<Pending> = None;
 
     for (offset, line) in lines.enumerate() {
-        // the header line was line one, and the enumeration starts at the one
-        // after it
+        // the header was line one
         let at = offset + 2;
         if line.is_empty() {
             continue;
@@ -86,9 +77,7 @@ pub(super) fn read(text: &str) -> Result<Recording, ReadError> {
             continue;
         }
         if !frames.is_empty() {
-            // a header after the transcript has started is either a file that
-            // was pasted into another one or a version this reader is not
-            // reading correctly
+            // a header mid-transcript is a pasted file or a misread version
             return Err(ReadError::Syntax { line: at });
         }
         match line.split_once(' ') {
@@ -143,8 +132,7 @@ fn frame(line: &str, at: usize, last: Duration) -> Result<Taken, ReadError> {
         return Err(ReadError::Backwards { line: at });
     }
     let (keyword, args) = rest.split_once(' ').unwrap_or((rest, ""));
-    // the two frames whose argument is prose the application wrote, taken
-    // whole before anything starts splitting on spaces
+    // prose frames, taken whole before splitting on spaces
     match keyword {
         "wake" if args.is_empty() => {
             return Ok(Taken::Done(Frame {
@@ -228,9 +216,7 @@ fn frame(line: &str, at: usize, last: Duration) -> Result<Taken, ReadError> {
     Ok(Taken::Done(Frame { at: when, step }))
 }
 
-/// A `resolved` line's own words: the dialog it answers for, the protocol
-/// (`-` for none), then the addresses
-/// [`Recorder::resolved`](super::Recorder::resolved) was handed.
+/// A `resolved` line's words: dialog, protocol (`-` for none), addresses.
 fn resolved<'a>(
     word: &mut impl Iterator<Item = &'a str>,
     bad: ReadError,
@@ -273,8 +259,7 @@ fn settle(held: &Pending) -> Result<Frame, ReadError> {
     })
 }
 
-/// `+12.000000000`, to the nanosecond, which is the resolution an `Instant`
-/// has and therefore the resolution a session was driven at.
+/// `+12.000000000`, to the nanosecond, the resolution of an `Instant`.
 fn offset(stamp: &str) -> Option<Duration> {
     let (secs, nanos) = stamp.strip_prefix('+')?.split_once('.')?;
     if nanos.len() != 9 || !nanos.bytes().all(|byte| byte.is_ascii_digit()) {

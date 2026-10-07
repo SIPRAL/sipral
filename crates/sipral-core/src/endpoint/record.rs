@@ -3,16 +3,9 @@
 
 //! Where the endpoint writes its decisions down.
 //!
-//! The decisions themselves are made in the modules beside this one and were
-//! made before any of this existed; what is here is the reading end and the
-//! four helpers the writing end calls, so that a decision site costs one line
-//! and cannot get the bookkeeping wrong.
-//!
-//! Every record is found by `Call-ID`, which is the only name a call has that
-//! both ends, every proxy and every capture agree on. What belongs to no call
-//! — a transport that failed before anything was sent on it, a stranger's
-//! request refused for want of room — goes to the endpoint's own record, which
-//! is never the one evicted when the set is full.
+//! Records are keyed by `Call-ID`, the one name every party and capture
+//! agrees on. Decisions outside any call go to the endpoint's own record,
+//! which is never evicted.
 
 use std::time::Instant;
 
@@ -24,11 +17,8 @@ use crate::dialog::CallId;
 use crate::msg::RawMessage;
 use crate::transaction::{AnyTransactionId, DialogId};
 
-/// The code for a failure the layer above is being told about.
-///
-/// One family of three, shared by an INVITE that will not connect and by an
-/// ordinary request that will not be answered, because the question a reader
-/// asks of both is the same one.
+/// The code for a failure reported to the layer above, shared by INVITEs
+/// and plain requests.
 const fn failure_code(reason: FailureReason) -> Reason {
     match reason {
         FailureReason::Timeout => Reason::FailedTimeout,
@@ -38,37 +28,26 @@ const fn failure_code(reason: FailureReason) -> Reason {
 }
 
 impl Endpoint {
-    /// What this endpoint decided about one call.
-    ///
-    /// Readable at any moment: while the call is ringing, while it is up, and
-    /// after it has failed, for as long as the record has not been evicted to
-    /// make room for a newer one
+    /// What this endpoint decided about one call, until the record is evicted
     /// ([`EndpointConfig::diagnostics`](super::EndpointConfig::diagnostics)).
     #[must_use]
     pub fn call_record(&self, call: &CallId) -> Option<&Record> {
         self.diag.record(call)
     }
 
-    /// What this endpoint decided outside any call.
-    ///
-    /// Transports, floods, and everything else that happens before a call
-    /// exists or after the last one has gone.
+    /// What this endpoint decided outside any call (transports, floods).
     #[must_use]
     pub const fn endpoint_record(&self) -> &Record {
         self.diag.endpoint()
     }
 
-    /// Every call with a record, least recently written first — so the front
-    /// of this is what the endpoint is about to forget.
+    /// Every call with a record, least recently written (next to evict) first.
     pub fn recorded_calls(&self) -> impl Iterator<Item = &CallId> {
         self.diag.calls()
     }
 
-    /// How many records were made and have since been evicted.
-    ///
-    /// Not the same number as [`Record::dropped`], which counts decisions
-    /// inside one record. This one climbing means the endpoint is holding more
-    /// calls at once than it is configured to remember.
+    /// How many records were evicted. Unlike [`Record::dropped`], which counts
+    /// inside one record; a rising value means too many concurrent calls.
     #[must_use]
     pub const fn records_dropped(&self) -> u64 {
         self.diag.dropped()
@@ -80,30 +59,20 @@ impl Endpoint {
         self.diag.to_json()
     }
 
-    /// The time the caller is driving the endpoint at.
-    ///
-    /// Called by every entry point that takes one. Nothing here reads a clock,
-    /// and no time passes inside a call into the endpoint, so this is the
-    /// instant every decision that call makes is stamped with.
+    /// The caller's time for this entry point. Nothing reads a clock, so every
+    /// decision in the call is stamped with it.
     pub(super) const fn mark(&mut self, now: Instant) {
         self.diag.mark(now);
     }
 
-    /// One decision, against a call or against the endpoint.
     pub(super) fn note(&mut self, call: Option<&[u8]>, decision: Decision) {
         self.diag.note(call, decision);
     }
 
     /// A decision the layer above made about a message this endpoint handed
-    /// it, written into the record of the call the message names.
-    ///
-    /// The endpoint delivers a response to a REGISTER and has no opinion about
-    /// most of what is in it; the user agent reads further, and what it
-    /// refuses to trust belongs in the same record as the send and the
-    /// arrival around it rather than in a second one a reader has to line up
-    /// by hand. The entry carries what every other one does — the reason, and
-    /// the message by method or status and size — and never a header value,
-    /// which is the rule that keeps a record safe to send unread.
+    /// it, written into that call's record. Like every entry it carries the
+    /// method or status and size, never a header value, so a record is safe
+    /// to send unread.
     pub fn note_arrival(&mut self, message: &RawMessage<'_>, reason: Reason, now: Instant) {
         self.mark(now);
         let bytes = message.as_bytes().len();
@@ -118,7 +87,6 @@ impl Endpoint {
         self.diag.note(message.call_id().ok(), decision);
     }
 
-    /// One decision about a message, which names the call it belongs to.
     pub(super) fn note_wire(
         &mut self,
         message: &RawMessage<'_>,
@@ -126,8 +94,6 @@ impl Endpoint {
         direction: Direction,
         flow: Flow,
     ) {
-        // the length of the message as it stands is the length the caller
-        // writes, which is what B1 asks to be readable without a capture
         let bytes = message.as_bytes().len();
         let wire = if let Some(status) = message.status() {
             WireEvent::response(status, direction, bytes)
@@ -162,10 +128,8 @@ impl Endpoint {
         self.diag.note(message.call_id().ok(), decision);
     }
 
-    /// The call a transaction belongs to, taken off the request it carries.
-    ///
-    /// Owned rather than borrowed because every caller of this is about to
-    /// take `&mut self` to write the decision down.
+    /// The call a transaction belongs to. Owned, since callers then take
+    /// `&mut self`.
     pub(super) fn call_of(&self, id: AnyTransactionId) -> Option<CallId> {
         let store = self.store();
         let message = match id {
@@ -183,7 +147,6 @@ impl Endpoint {
         message.as_raw().call_id().ok().map(CallId::new)
     }
 
-    /// The call a dialog belongs to, while the dialog is still there.
     pub(super) fn call_of_dialog(&self, dialog: DialogId) -> Option<CallId> {
         self.dialogs
             .get(dialog)

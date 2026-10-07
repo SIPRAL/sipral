@@ -3,17 +3,12 @@
 
 //! One thing that happened to the stack, and when.
 //!
-//! Most of what drives a sans-I/O stack enters through two calls —
+//! A session is mostly calls to
 //! [`Endpoint::receive`](crate::endpoint::Endpoint::receive) and
-//! [`Endpoint::handle_timeout`](crate::endpoint::Endpoint::handle_timeout) —
-//! so most of a session is the sequence of those calls and the instants they
-//! were made at. [`Endpoint::resolved`](crate::endpoint::Endpoint::resolved) is
-//! a third way in: an answer from outside — a resolver, today — to a question
-//! the stack asked. It carries data rather than a decision, so unlike the
-//! fourth kind below it can be written down and fed back exactly, and
-//! [`Step::Resolved`] is where it goes. What is left over, and cannot be any
-//! of the three, is the application acting on its own, which a recording
-//! cannot repeat for it and therefore names instead.
+//! [`Endpoint::handle_timeout`](crate::endpoint::Endpoint::handle_timeout).
+//! [`Endpoint::resolved`](crate::endpoint::Endpoint::resolved) carries data,
+//! so [`Step::Resolved`] replays it exactly. The application acting on its
+//! own cannot be replayed, so it is only named.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -24,21 +19,15 @@ use crate::transaction::DialogId;
 
 /// Bytes a recording can hold: text, or nothing.
 ///
-/// This is where the format's promise about audio stops being a habit and
-/// becomes a type. There is one way to make a payload, it is
-/// [`Payload::new`], and it refuses anything the transcript's alphabet cannot
-/// spell. A frame of media, a codec's output, a binary body — none of them can
-/// be put in a frame, at the writing end or the reading end, because none of
-/// them can be made into one of these.
+/// The only constructor is [`Payload::new`], which refuses what the alphabet
+/// cannot spell. Media and binary bodies cannot become one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Payload(Box<[u8]>);
 
 impl Payload {
     /// Take bytes, if the format can hold them.
     ///
-    /// It can hold text: UTF-8 with no control characters in it other than
-    /// the carriage return, line feed and horizontal tab that SIP itself is
-    /// made of. Everything else is refused here and nowhere else.
+    /// UTF-8 with no control characters except CR, LF and tab.
     #[must_use]
     pub fn new(bytes: &[u8]) -> Option<Self> {
         writable(bytes).then(|| Self(Box::from(bytes)))
@@ -53,9 +42,7 @@ impl Payload {
 
 /// What arrived, kept rather than borrowed.
 ///
-/// The mirror of [`Input`], which borrows the bytes it carries because the
-/// caller owns the buffer they were read into. A recording outlives that
-/// buffer.
+/// [`Input`] borrows the caller's buffer; a recording outlives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Arrival {
     /// One message in one packet.
@@ -105,9 +92,7 @@ impl Arrival {
     /// Keep what the caller is about to hand to the stack, when the format
     /// can hold it.
     ///
-    /// `None` for bytes that are not text, which is the same refusal
-    /// [`Payload::new`] makes and the reason it is made here: the frame is
-    /// never built, so there is no half-recorded arrival to notice later.
+    /// `None` for non-text bytes, so no half-recorded arrival is ever built.
     #[must_use]
     pub fn of(input: &Input<'_>) -> Option<Self> {
         Some(match *input {
@@ -206,17 +191,12 @@ pub enum Step {
     /// A dialog's next hop was answered from outside
     /// ([`Endpoint::resolved`](crate::endpoint::Endpoint::resolved)).
     ///
-    /// Unlike [`Step::Cue`] this is data, not a name: the addresses and the
-    /// protocol a resolver returned are everything `resolved` needs, so a
-    /// replay can make the same call again itself rather than asking the
-    /// caller to.
+    /// Data, not a name like [`Step::Cue`], so a replay makes the call itself.
     Resolved {
         /// Which dialog the answer was for.
         dialog: DialogId,
-        /// The addresses that were resolved, in the order they were handed
-        /// to `resolved`. The first one this endpoint has a transport for is
-        /// taken; the rest are kept for a later failure to fall back to, so
-        /// none of them is folded away the way a retransmitted datagram is.
+        /// The addresses in the order given. The first with a transport is
+        /// taken; the rest stay for failover, so none is deduplicated.
         addresses: Box<[SocketAddr]>,
         /// The transport the lookup named, when it named one (RFC 3263
         /// §4.1). `None` replays as whatever the dialog's flow already spoke.
@@ -224,20 +204,15 @@ pub enum Step {
     },
     /// The application did something of its own here, under a name it chose.
     ///
-    /// Placing a call, answering one, registering an account: none of those
-    /// arrive from anywhere, so none of them can be replayed by feeding bytes
-    /// back. What a recording can do is say when they happened and what the
-    /// application called them, and hand that back at the same instant so the
-    /// replay does the same thing again in the same order.
+    /// Placing, answering or registering arrives from nowhere, so a replay
+    /// hands the name back at the same instant for the caller to repeat.
     Cue(Box<str>),
 }
 
 /// One frame: what happened, and how far into the session it was.
 ///
-/// The offset is from the first frame, not from an instant, for the reason
-/// `docs/14-diagnostics.md` gives about the diagnostic record: an absolute
-/// time is a thing this stack never reads, and a session that is replayed
-/// starts whenever the replay says it does.
+/// The offset is from the first frame: this stack never reads absolute time
+/// (`docs/14-diagnostics.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     /// How far into the session, from the first frame.
@@ -248,9 +223,7 @@ pub struct Frame {
 
 /// The token a transport failure is written as.
 ///
-/// Its own vocabulary rather than the `Display` of
-/// [`TransportErrorKind`], which is prose with spaces in it and is meant for
-/// a person reading a log.
+/// Not the `Display` of [`TransportErrorKind`], which is prose with spaces.
 pub(super) const fn failure_token(error: TransportErrorKind) -> &'static str {
     match error {
         TransportErrorKind::ConnectionRefused => "refused",

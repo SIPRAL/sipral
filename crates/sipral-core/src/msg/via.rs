@@ -13,25 +13,11 @@
 //! ttl           =  1*3DIGIT ; 0 to 255
 //! ```
 //!
-//! Four things here are easy to get wrong.
-//!
-//! `SLASH` and `COLON` are `SWS "/" SWS` and `SWS ":" SWS`, so `SIP / 2.0 /
-//! UDP host : 5060` is as legal as the compact spelling, and a parser that
-//! splits on whitespace first never finds the transport.
-//!
-//! `via-received` is `(IPv4address / IPv6address)`, not `host`: an IPv6
-//! address arrives there **without** brackets, unlike everywhere else. A
-//! routine shared with `sent-by` that insists on brackets rejects a correct
-//! value.
-//!
-//! `ttl` is `1*3DIGIT`, so `;ttl=1234` is not an out-of-range ttl, it is not a
-//! ttl at all.
-//!
-//! And the two `MUST`s about `branch` in §8.1.1.7 bind whoever writes a
-//! message, not whoever reads one. `via-parm`'s parameter list is
-//! `*( SEMI via-params )` — zero is allowed — so a Via with no branch, or a
-//! branch without the magic cookie, is an RFC 2543 peer to be handled per
-//! §17.2.3, not a malformed header.
+//! `SLASH` and `COLON` allow whitespace around them (`SIP / 2.0 / UDP h : 5060`
+//! is legal). `via-received` is a bare IP, so IPv6 comes without brackets.
+//! `ttl` is `1*3DIGIT`, so `;ttl=1234` is no ttl at all. The `branch` MUSTs of
+//! §8.1.1.7 bind the writer: a Via without a branch or cookie is an RFC 2543
+//! peer (§17.2.3), not a malformed header.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -47,8 +33,7 @@ use super::uri::{HostRef, parse_hostport};
 /// response-port = "rport" [EQUAL 1*DIGIT]
 /// ```
 ///
-/// The `EQUAL` and the digits are one optional unit: `;rport` is a request and
-/// `;rport=5060` is an answer, but `;rport=` is neither and is refused.
+/// `;rport` asks, `;rport=5060` answers, `;rport=` is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rport {
     /// No `rport` parameter.
@@ -66,8 +51,7 @@ pub struct ViaRef<'a> {
     pub protocol_name: &'a str,
     /// `2.0`, normally. The grammar says `token`, with no special case for it.
     pub protocol_version: &'a str,
-    /// `UDP`, `TCP`, `TLS`, `SCTP`, or anything else: `other-transport` is an
-    /// open extension point, and RFC 4475 `transports` exercises it.
+    /// `UDP`, `TCP`, `TLS`, `SCTP`, or any token (RFC 4475 `transports`).
     pub transport: &'a str,
     /// Where the sender wants the response.
     pub host: HostRef<'a>,
@@ -89,8 +73,7 @@ impl<'a> ViaRef<'a> {
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let (head, _) = Params::split(value);
 
-        // the two SLASHes first: whitespace may sit on either side of each,
-        // so splitting on whitespace before finding them loses the transport
+        // the SLASHes first: whitespace may surround them
         let first = head
             .iter()
             .position(|&b| b == b'/')
@@ -107,8 +90,7 @@ impl<'a> ViaRef<'a> {
         let protocol_version = as_str(trim(rest.get(..second).unwrap_or_default()))?;
         let tail = rest.get(second + 1..).unwrap_or_default();
 
-        // transport LWS sent-by: the transport is the first piece, everything
-        // after it is the sent-by, which may carry whitespace around its colon
+        // the transport, then the sent-by, which may have whitespace around ':'
         let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
         let start = tail
             .iter()
@@ -138,21 +120,14 @@ impl<'a> ViaRef<'a> {
         })
     }
 
-    /// The `branch` parameter, if there is one.
-    ///
-    /// Absent is not an error: an RFC 2543 peer sends none, and RFC 3261
-    /// §17.2.3 says how to match its transactions instead.
+    /// The `branch` parameter, if any. RFC 2543 peers send none (§17.2.3).
     #[must_use]
     pub fn branch(&self) -> Option<Cow<'a, [u8]>> {
         self.params().get("branch")
     }
 
-    /// Whether the branch carries the RFC 3261 magic cookie.
-    ///
-    /// Compared case-sensitively: §8.1.1.7 says the value "MUST always begin
-    /// with the characters z9hG4bK" and gives them as characters, not as a
-    /// case-insensitive token. The RFC does not settle it, so this does the
-    /// literal thing and says so rather than guessing.
+    /// Whether the branch carries the RFC 3261 magic cookie. Case-sensitive:
+    /// §8.1.1.7 gives the characters literally.
     #[must_use]
     pub fn has_magic_cookie(&self) -> bool {
         self.branch().is_some_and(|b| b.starts_with(MAGIC_COOKIE))
@@ -160,8 +135,8 @@ impl<'a> ViaRef<'a> {
 
     /// The `received` parameter (RFC 3261 §18.2.1).
     ///
-    /// The grammar is `(IPv4address / IPv6address)`, so an IPv6 address is
-    /// written bare. Brackets are accepted anyway, because they are sent.
+    /// The grammar wants a bare IPv6 address; brackets are accepted since
+    /// peers send them.
     #[must_use]
     pub fn received(&self) -> Option<IpAddr> {
         let v = self.params().get("received")?;
@@ -176,9 +151,8 @@ impl<'a> ViaRef<'a> {
     /// The `rport` parameter (RFC 3581).
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] for `;rport=` with nothing after the equals,
-    /// which is neither the flag nor a value, and for a port that is not a
-    /// number.
+    /// [`HeaderError::Malformed`] for `;rport=` with no value, or a port that is
+    /// not a number.
     pub fn rport(&self) -> Result<Rport, HeaderError> {
         let mut found = None;
         for (name, value) in self.params() {
@@ -206,8 +180,7 @@ impl<'a> ViaRef<'a> {
     /// The `ttl` parameter, for a request sent to a multicast address.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when the value is not `1*3DIGIT`, which
-    /// makes `;ttl=1234` a grammar mismatch rather than an out-of-range ttl.
+    /// [`HeaderError::Malformed`] when not `1*3DIGIT`.
     pub fn ttl(&self) -> Result<Option<u8>, HeaderError> {
         let Some(v) = self.params().get("ttl") else {
             return Ok(None);
@@ -384,8 +357,7 @@ mod tests {
 
     #[test]
     fn a_branch_that_is_only_the_cookie_is_syntactically_fine() {
-        // RFC 4475 3.1.2.1 badbranch: the cookie and nothing else. Unique it
-        // is not, but that is the transaction layer's problem.
+        // RFC 4475 3.1.2.1 badbranch: just the cookie; uniqueness is not checked here
         let v = via(b"SIP/2.0/UDP host;branch=z9hG4bK");
         assert_eq!(v.branch().as_deref(), Some(MAGIC_COOKIE));
         assert!(v.has_magic_cookie());

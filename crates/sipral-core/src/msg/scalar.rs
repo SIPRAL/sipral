@@ -4,20 +4,12 @@
 //! The header fields that carry a number, and CSeq, which carries one and a
 //! method.
 //!
-//! Two things here are not obvious.
+//! The separator in `CSeq` and `RAck` is `LWS` (RFC 3261 §25.1), so it may
+//! fold: RFC 4475 `wsinv` sends `cseq: 0009\r\n  INVITE` as a valid message.
 //!
-//! The separator inside `CSeq` and `RAck` is `LWS = [*WSP CRLF] 1*WSP`
-//! (RFC 3261 §25.1), not a space. RFC 4475's `wsinv` sends
-//! `cseq: 0009\r\n  INVITE`, with the fold sitting between the digits and the
-//! method, and it is a *valid* message.
-//!
-//! And overflow is not one rule. A `CSeq` sequence number that does not fit in
-//! 32 bits has to be refused, because RFC 3261 §8.1.1.5 requires the value to
-//! be expressible in 32 bits and RFC 4475 §3.1.2.4 says such a message draws a
-//! 400. An over-large `Expires` is a range problem the application can recover
-//! from — the same RFC section says an element "could treat them as if they
-//! contained the default values" — so it parses, and says the value did not
-//! fit rather than pretending it did.
+//! Overflow depends on the field. A `CSeq` past 32 bits is refused
+//! (§8.1.1.5, RFC 4475 §3.1.2.4). An over-large `Expires` is recoverable, so
+//! it parses and reports that it did not fit.
 
 use super::error::HeaderError;
 use super::lex::{fields, trim};
@@ -25,10 +17,8 @@ use super::method::Method;
 
 /// A `1*DIGIT` run, and whether it fits.
 ///
-/// `value` is `None` when every byte was a digit but the number is larger than
-/// `u32::MAX`. Nothing is wrapped or saturated: RFC 4475 `scalar02` carries an
-/// `Expires` over a hundred digits long and a `CSeq` of about 2^65, and a
-/// truncating conversion turns both into a plausible small number.
+/// `value` is `None` when the digits exceed `u32::MAX`. Nothing wraps or
+/// saturates (RFC 4475 `scalar02`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Digits {
     /// The number, if it fits in 32 bits.
@@ -52,9 +42,7 @@ impl Digits {
 
 /// Read a `1*DIGIT` run. No sign, no whitespace, no other byte.
 ///
-/// A leading `-` is a grammar mismatch at the first byte, not a negative
-/// number: `1*DIGIT` has no sign, and RFC 4475 `ncl` exists to catch a parser
-/// that reaches for a signed conversion.
+/// `1*DIGIT` has no sign, so `-` is a mismatch (RFC 4475 `ncl`).
 ///
 /// # Errors
 /// [`HeaderError::Malformed`] when the value is empty or holds a non-digit.
@@ -80,9 +68,8 @@ pub fn digits(value: &[u8]) -> Result<Digits, HeaderError> {
 pub struct CSeq<'a> {
     /// The sequence number. Always fits: a larger one is refused.
     pub seq: u32,
-    /// The method, compared case-sensitively, and deliberately not checked
-    /// against the request line — RFC 4475 `mismatch01` and `mismatch02` are
-    /// about a disagreement the transaction layer notices, not the grammar.
+    /// The method, compared case-sensitively. Not checked against the request
+    /// line here (RFC 4475 `mismatch01`, `mismatch02`).
     pub method: Method<'a>,
 }
 
@@ -91,8 +78,7 @@ impl<'a> CSeq<'a> {
     ///
     /// # Errors
     /// [`HeaderError::Malformed`] on a grammar mismatch, or
-    /// [`HeaderError::OutOfRange`] when the sequence number needs more than 32
-    /// bits, which RFC 3261 §8.1.1.5 does not allow.
+    /// [`HeaderError::OutOfRange`] past 32 bits (RFC 3261 §8.1.1.5).
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let mut parts = fields(value);
         let (Some(num), Some(method), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -139,8 +125,7 @@ impl<'a> RAck<'a> {
 
 /// Read an `RSeq` value (RFC 3262 §7.1).
 ///
-/// The range is 1 to 2^32-1, not 0 to 2^32-1: "It contains a single numeric
-/// value from 1 to 2**32 - 1." Zero is a legal digit run and not a legal RSeq.
+/// The range is 1 to 2^32-1, so zero is refused.
 ///
 /// # Errors
 /// [`HeaderError::Malformed`], or [`HeaderError::OutOfRange`] for zero or for
@@ -160,14 +145,10 @@ pub fn rseq(value: &[u8]) -> Result<u32, HeaderError> {
 /// time          =  2DIGIT ":" 2DIGIT ":" 2DIGIT
 /// ```
 ///
-/// Only GMT, and only this one format — §20.17 narrows RFC 1123, which allows
-/// any zone, down to the one that needs no table to interpret. The names are
-/// case-sensitive, which the same section says outright: `EST` is not a zone
-/// this can read, and neither is `UT`, `UTC` or `GMt`.
+/// GMT only, names case-sensitive (§20.17): `EST`, `UTC` or `GMt` are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SipDate {
-    /// Monday is 0. Not checked against the date, which is the sender's
-    /// business.
+    /// Monday is 0. Not checked against the date.
     pub weekday: u8,
     /// 1 to 31.
     pub day: u8,
@@ -192,9 +173,8 @@ impl SipDate {
     /// Read a `Date` value.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] for anything that is not exactly an RFC 1123
-    /// date in GMT. RFC 4475 §3.1.2.9 is an INVITE whose only fault is the
-    /// zone.
+    /// [`HeaderError::Malformed`] for anything but an RFC 1123 date in GMT
+    /// (RFC 4475 §3.1.2.9).
     pub fn parse(value: &[u8]) -> Result<Self, HeaderError> {
         let mut parts = fields(value);
         let mut next = || {
@@ -233,7 +213,7 @@ impl SipDate {
             year: fixed(year, 4)?,
             hour: small(hour, 0, 23)?,
             minute: small(minute, 0, 59)?,
-            // 60 is a leap second, which is a real value on a real wire
+            // leap second
             second: small(second, 0, 60)?,
         })
     }
@@ -256,8 +236,7 @@ fn split_at_colon(v: &[u8]) -> Result<(&[u8], &[u8]), HeaderError> {
     ))
 }
 
-/// A run of exactly `width` digits. The grammar counts them, so `1 Jan` and
-/// `001 Jan` are both wrong.
+/// Exactly `width` digits, as the grammar counts them.
 fn fixed(v: &[u8], width: usize) -> Result<u16, HeaderError> {
     if v.len() != width || !v.iter().all(u8::is_ascii_digit) {
         return Err(HeaderError::Malformed("Date has a malformed number"));
@@ -312,8 +291,7 @@ mod tests {
 
     #[test]
     fn a_cseq_method_is_not_checked_against_the_request_line() {
-        // RFC 4475 3.1.2.17 and 3.1.2.18: the disagreement is real, but it is
-        // the transaction layer's to notice, not this grammar's
+        // RFC 4475 3.1.2.17 and 3.1.2.18: for the transaction layer to notice
         let c = CSeq::parse(b"8 INVITE").expect("a CSeq");
         assert_eq!(c.method, Method::Invite);
         let c = CSeq::parse(b"8 NEWMETHOD").expect("a CSeq");
@@ -331,7 +309,7 @@ mod tests {
 
     #[test]
     fn an_overlarge_expires_parses_and_says_it_did_not_fit() {
-        // the same RFC section calls this recoverable, so it is not a refusal
+        // recoverable per the same section
         let d = digits(b"4294967296").expect("digits");
         assert_eq!(d.value, None);
         assert_eq!(d.require(), Err(HeaderError::OutOfRange));

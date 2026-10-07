@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The ACK a client transaction sends for a final response that is not a 2xx.
-//!
-//! RFC 3261 §17.1.1.3. Half of it comes from the request and half from the
-//! response, and getting the halves the wrong way round is how an ACK ends up
-//! unroutable:
+//! The ACK a client transaction sends for a non-2xx final response
+//! (RFC 3261 §17.1.1.3).
 //!
 //! - Request-URI, `Call-ID`, `From` and `Route`: the original request's.
-//! - `To`: the *response's*, which is where the remote tag is.
+//! - `To`: the *response's*, which holds the remote tag.
 //! - `Via`: exactly one, the request's topmost.
-//! - `CSeq`: the request's number, with the method replaced by `ACK`.
+//! - `CSeq`: the request's number, method `ACK`.
 //!
-//! An ACK for a 2xx is a different thing entirely — it belongs to the dialog,
-//! not to the transaction, and RFC 3261 §13 builds it — so it is not here.
+//! The ACK for a 2xx belongs to the dialog (§13) and is built there.
 
 use super::super::msg::{BuildError, HeaderName, Method, OwnedMessage, RawMessage, RequestBuilder};
 
@@ -38,8 +34,8 @@ pub(crate) fn ack_for_response(
     let call_id = request
         .header(HeaderName::CallId)
         .ok_or(BuildError::MissingField("Call-ID"))?;
-    // the To of the response, not of the request: that is where the tag the
-    // far end chose lives, and an ACK without it is not the same dialog
+    // the response's To carries the remote tag; without it the ACK does not
+    // match
     let to = response
         .header(HeaderName::To)
         .ok_or(BuildError::MissingField("To"))?;
@@ -48,8 +44,6 @@ pub(crate) fn ack_for_response(
         .map_err(|_| BuildError::MissingField("CSeq"))?;
 
     let mut builder = RequestBuilder::new(Method::Ack, uri)
-        // exactly one Via, the topmost: the ACK is a hop-by-hop matter for the
-        // transaction that sent the INVITE, not a new end-to-end request
         .via(via)
         .from(from)
         .to(to)

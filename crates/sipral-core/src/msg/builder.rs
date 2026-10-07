@@ -3,28 +3,16 @@
 
 //! Writing a message out.
 //!
-//! Two builders, one output rule: the same inputs produce the same bytes,
-//! every time. A retransmission has to be the identical datagram (RFC 3261
-//! §17.1.1.2), and a test that compares bytes is only worth writing if the
-//! order is not up to the hash map's mood.
+//! The same inputs always produce the same bytes: a retransmission has to be
+//! the identical datagram (RFC 3261 §17.1.1.2). Field order is fixed: `Via`
+//! first (§7), then routing and dialog fields, then the caller's fields in
+//! the order added, then `Content-Type` and `Content-Length`.
 //!
-//! Field order is therefore fixed rather than insertion-driven: `Via` first,
-//! because a proxy reads it first and §7 recommends putting it there, then
-//! the routing and dialog fields, then whatever else the caller added in the
-//! order it was added, then `Content-Type` and `Content-Length` around the
-//! body.
+//! Inputs are borrowed and copied once at [`RequestBuilder::build`].
 //!
-//! The inputs are borrowed and copied once at [`RequestBuilder::build`]. The
-//! owned forms in `docs/12-core-api.md` are for state a dialog keeps between
-//! calls; a builder lives inside one step of a state machine and would only
-//! make the caller allocate twice.
-//!
-//! A header value is written on one line. A fold is the one line break a value
-//! may hold, and it goes out as the single space RFC 3261 §7.3.1 says it
-//! stands for, which is how a value copied from a message that arrived folded
-//! can be written back at all. Any other CR or LF is refused: a caller that
-//! passes one would otherwise be injecting a header, or a body, into a message
-//! someone else's data went into.
+//! A fold in a value goes out as one space (§7.3.1), so a value copied from
+//! a folded message can be written back. Any other CR or LF is refused: it
+//! would inject a header or a body.
 
 use std::sync::Arc;
 
@@ -42,12 +30,10 @@ pub enum BuildError {
     MissingField(&'static str),
     /// A value holds something that cannot go on a header line.
     IllegalValue(&'static str),
-    /// A field added by name is one the layer building the message writes
-    /// itself, from state it keeps. A second line of it is a message the two
-    /// ends read differently, so it is refused rather than written twice.
+    /// A field the building layer writes itself was added by name. Two lines
+    /// of it would be read differently by the two ends.
     OwnedField(&'static str),
-    /// The bytes that came out do not parse, which is a bug here rather than
-    /// anything the caller did.
+    /// The output does not parse: a bug here, not in the caller.
     NotWellFormed(ParseError),
 }
 
@@ -125,8 +111,7 @@ impl Fields<'_> {
         if let Some(ct) = self.content_type {
             write_header(out, HeaderName::ContentType, Value::Bytes(ct))?;
         }
-        // always written: a stream transport has no other way to find the end
-        // of the message, and RFC 3261 §20.14 asks a UA to send it regardless
+        // always written: a stream needs it, and §20.14 asks for it anyway
         let len = u32::try_from(self.body.len())
             .map_err(|_| BuildError::IllegalValue("body does not fit in 32 bits"))?;
         write_header(out, HeaderName::ContentLength, Value::Number(len))?;
@@ -166,12 +151,8 @@ fn write_header(
 
 /// One header value, on one line.
 ///
-/// RFC 3261 §7.3.1: "The line break and the whitespace at the beginning of the
-/// next line are treated as a single SP character." A value copied out of a
-/// message that arrived folded — every `Via`, `From`, `To`, `Call-ID` and
-/// `CSeq` of a response, the `To` of an ACK — still holds that line break, so
-/// each fold goes out as the space it stands for. A CR or LF that does not
-/// begin a fold ends the line early instead, and is refused.
+/// RFC 3261 §7.3.1: a fold stands for a single SP, so each fold goes out as
+/// a space. Any other CR or LF is refused.
 fn write_value(out: &mut Vec<u8>, value: &[u8]) -> Result<(), BuildError> {
     let mut i = 0;
     while let Some(&byte) = value.get(i) {
@@ -220,14 +201,11 @@ fn check(value: &[u8]) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// Read back what was written, strictly, so that nothing leaves that this
-/// stack would not itself call a message.
+/// Read back what was written, strictly, so nothing leaves that this stack
+/// would not accept.
 ///
-/// One of the receive bounds is lifted for it: how long one value may be.
-/// That bound is there to limit what a stranger's field makes a reader walk,
-/// and a response has to carry the request's `From`, `To` and `Via` back as
-/// they arrived (§8.2.6.2) — including the one that was past it, when that is
-/// why the request is being refused. The message bound still holds.
+/// The per-value bound is lifted: a response must carry back the request's
+/// fields as they arrived (§8.2.6.2), even the one that was too long.
 fn finish(out: Vec<u8>) -> Result<OwnedMessage, BuildError> {
     let bytes: Arc<[u8]> = Arc::from(out);
     let mut scratch = ParseScratch::new();
@@ -369,17 +347,13 @@ pub struct ResponseBuilder<'a> {
 }
 
 impl<'a> ResponseBuilder<'a> {
-    /// Start a response, copying from the request what RFC 3261 §8.2.6.2 says
-    /// must be equal: every `Via` in order, `From`, `To`, `Call-ID`, `CSeq`.
+    /// Start a response, copying what RFC 3261 §8.2.6.2 says must be equal:
+    /// every `Via` in order, `From`, `To`, `Call-ID`, `CSeq`.
     ///
-    /// The `To` tag is not added here. It belongs to the responding user
-    /// agent, has to be the same on every response to this request, and is
-    /// absent from a 100 Trying — so [`ResponseBuilder::to_tag`] adds it, and
-    /// only when the request did not already carry one.
-    ///
-    /// `Record-Route` is not copied either. §12.1.1 requires it only of a
-    /// response that establishes a dialog, and only whoever is answering
-    /// knows whether this is one: [`ResponseBuilder::copy_record_route`].
+    /// The `To` tag is added by [`ResponseBuilder::to_tag`], since a 100 Trying
+    /// has none. `Record-Route` is added by
+    /// [`ResponseBuilder::copy_record_route`], since only the answerer knows if
+    /// this response establishes a dialog (§12.1.1).
     #[must_use]
     pub fn for_request(request: &super::message::RawMessage<'a>, status: StatusCode) -> Self {
         let mut fields = Fields::default();
@@ -417,8 +391,7 @@ impl<'a> ResponseBuilder<'a> {
 
     /// Add a tag to `To`, unless the request already carried one.
     ///
-    /// §8.2.6.2 makes the whole `To` field equal to the request's when the
-    /// request had a tag, so appending a second one would be wrong.
+    /// §8.2.6.2: with a tag in the request, `To` is copied whole.
     #[must_use]
     pub fn to_tag(mut self, tag: &'a [u8]) -> Self {
         let already = self
@@ -483,23 +456,16 @@ impl<'a> ResponseBuilder<'a> {
         self.build_refusal()
     }
 
-    /// Write a refusal of a request that lacks some of what a response
-    /// copies: whichever of `From`, `To`, `Call-ID` and `CSeq` the request
-    /// had, and no invented stand-in for the rest.
+    /// Write a refusal of a request that lacks some of what a response copies,
+    /// copying whichever of `From`, `To`, `Call-ID`, `CSeq` it had.
     ///
     /// RFC 4475 §3.3.1 sends a request with no `From`, `To` or `Call-ID` and
-    /// asks that it be answered 400. §8.2.6.2 has every response copy those
-    /// fields, and a request that has none leaves nothing to copy; what the
-    /// answer cannot do without is the `Via` (§18.2.2 sends it where the top
-    /// one says, and §17.1.3 matches it on that one's branch). So the `Via`
-    /// is still required and the rest is copied when it is there. For a
-    /// stateless 4xx or 5xx only: no dialog and no transaction can come of
-    /// an answer like this one.
+    /// expects a 400. The `Via` is still required: the answer is routed
+    /// (§18.2.2) and matched (§17.1.3) by it. For stateless 4xx or 5xx only.
     ///
     /// # Errors
-    /// [`BuildError::MissingField`] when the request had no `Via`, and
-    /// [`BuildError::IllegalValue`] for a value with a line break in it that
-    /// is not a fold.
+    /// [`BuildError::MissingField`] without a `Via`, and
+    /// [`BuildError::IllegalValue`] for a line break that is not a fold.
     pub fn build_refusal(self) -> Result<OwnedMessage, BuildError> {
         self.fields.require(HeaderName::Via, "Via")?;
 
@@ -522,13 +488,9 @@ impl<'a> ResponseBuilder<'a> {
 
 /// The fields RFC 3261 itself gives a one-letter form (§7.3.3, §20).
 ///
-/// The extensions registered more since — `o`, `u`, `r`, `b`, `x`, `y` and the
-/// rest — are left long on purpose. A field an extension defines is read by
-/// that extension's module in the far end, and a module that looks for the
-/// long name only does not refuse the message: it misses the field, and a
-/// session timer, a transfer target or an `Identity` silently goes unread.
-/// The ten below are in every parser that reads SIP at all, because §7.3.3
-/// makes accepting them a MUST.
+/// Later extensions' compact forms are left long on purpose: a far end that
+/// only knows the long name silently misses the field. These ten are a MUST
+/// to accept (§7.3.3).
 const RFC3261_COMPACT: &[HeaderName<'static>] = &[
     HeaderName::CallId,
     HeaderName::Contact,
@@ -552,29 +514,16 @@ const TOKEN_LISTS: &[HeaderName<'static>] = &[
     HeaderName::Unsupported,
 ];
 
-/// The same request in fewer bytes: RFC 3261 §7.3.3's compact form for every
-/// field that has one, no space after a colon, and no whitespace around the
-/// commas of a list of tokens. "A compact form MAY be substituted for the
-/// longer form of a header field name at any time without changing the
-/// semantics of the message", and §7.3.1 makes the space after a colon a
-/// matter of style; both are there for a request that would "otherwise become
-/// too large to be carried on the transport available to it".
+/// The same request in fewer bytes, for one too large for its transport.
 ///
-/// The fields named in `leave_out` are not written at all. That is for
-/// `Allow`, the one field a request bound for a datagram has that RFC 3261
-/// both expects and lets go: §13.2.1 says it SHOULD be in an INVITE, and
-/// §20.5 says its absence "implies that the UA is not providing any
-/// information on what methods it supports". Trimming it instead would break
-/// §20.5's MUST that every method the UA understands is listed when it is
-/// there.
-///
-/// The body, the start line and the order of the fields are left exactly as
-/// they were.
+/// Uses the compact forms of §7.3.3, no space after colons (§7.3.1) and no
+/// whitespace around commas in token lists. Fields in `leave_out` are
+/// dropped: meant for `Allow`, which §13.2.1 only recommends and §20.5 lets
+/// be absent, but not trimmed. Body, start line and field order are kept.
 ///
 /// # Errors
-/// [`BuildError::IllegalValue`] for a value with a line break in it that is
-/// not a fold, and [`BuildError::NotWellFormed`] if what comes out does not
-/// parse, which would be a bug here.
+/// [`BuildError::IllegalValue`] for a line break that is not a fold, and
+/// [`BuildError::NotWellFormed`] if the output does not parse (a bug here).
 pub fn compact_request(
     request: &super::message::RawMessage<'_>,
     leave_out: &[HeaderName<'_>],
@@ -829,9 +778,7 @@ Content-Length: 0\r\n\
 
     #[test]
     fn a_response_to_a_folded_request_writes_each_fold_as_one_space() {
-        // RFC 3261 §7.3.1: "The line break and the whitespace at the beginning
-        // of the next line are treated as a single SP character." Every field
-        // a response copies may arrive that way, and it is still the field
+        // RFC 3261 §7.3.1: a fold is a single SP
         let folded = b"INVITE sip:bob@example.com SIP/2.0\r\n\
 Via: SIP/2.0/UDP\r\n first;branch=z9hG4bK1\r\n\
 Record-Route:\r\n <sip:p1.example.com;lr>\r\n\
@@ -964,8 +911,7 @@ CSeq: 2 BYE\r\n\
 
     #[test]
     fn a_refusal_copies_what_the_request_had_and_invents_nothing() {
-        // RFC 4475 §3.3.1's insuf, down to the fields: a `Via` and a `CSeq`,
-        // and none of `From`, `To` or `Call-ID`
+        // RFC 4475 §3.3.1 insuf: only a `Via` and a `CSeq`
         let request = b"INVITE sip:user@example.com SIP/2.0\r\n\
 CSeq: 193942 INVITE\r\n\
 Via: SIP/2.0/UDP 192.0.2.95;branch=z9hG4bKkdj.insuf\r\n\
@@ -985,8 +931,7 @@ CSeq: 193942 INVITE\r\n\
 Content-Length: 0\r\n\
 \r\n"
         );
-        // and a request that had all of them gets all of them back, tag
-        // included, exactly as `build` writes them
+        // a complete request gets the same fields as `build` writes
         let whole = |refusal: bool| {
             with_request(REQUEST, |m| {
                 let builder =

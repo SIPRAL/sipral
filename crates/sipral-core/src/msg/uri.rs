@@ -9,11 +9,8 @@
 //! SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 //! ```
 //!
-//! The order the pieces are found in matters. `user` may contain `;` and `?`
-//! unescaped (§25.1 `user-unreserved`), so the userinfo boundary has to be
-//! settled first: `sip:user;par=u%40example.net@example.com` has a user of
-//! `user;par=u%40example.net` and a host of `example.com`, and a parser that
-//! splits on the first `;` gets both wrong.
+//! `user` may contain unescaped `;` and `?` (§25.1 `user-unreserved`), so the
+//! userinfo boundary is settled first: `sip:a;b@example.com` has user `a;b`.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -29,8 +26,7 @@ pub enum UriScheme<'a> {
     Sips,
     /// `tel:` (RFC 3966).
     Tel,
-    /// Anything else. A Request-URI may legally carry a scheme we do not
-    /// know; answering it is the user agent's business, not the parser's.
+    /// Anything else. A Request-URI may carry a scheme we do not know.
     Other(&'a str),
 }
 
@@ -89,9 +85,8 @@ pub enum UriError {
     NotSip,
     /// More than 4 GiB of URI, which [`Uri`] records offsets into.
     TooLong,
-    /// A space, a control byte, or one of `"` `<` `>`, unescaped. RFC 3261
-    /// §19.1.2 has all of them escaped, and each one would end the URI early
-    /// in the line or the brackets it is written back into.
+    /// A space, a control byte, or one of `"` `<` `>`, unescaped (RFC 3261
+    /// §19.1.2).
     IllegalByte,
 }
 
@@ -115,11 +110,8 @@ impl core::error::Error for UriError {}
 
 /// A URI, borrowed from the message it appeared in.
 ///
-/// Only `sip:` and `sips:` have the `userinfo hostport parameters headers`
-/// shape. A `tel:` URI carries a telephone subscriber and a Request-URI may
-/// carry a scheme we have never heard of (RFC 4475 §3.3.2 and §3.3.4 are both
-/// well-formed messages), so those are kept whole rather than forced into a
-/// shape they do not have.
+/// Only `sip:` and `sips:` are split into parts. Other schemes are kept
+/// whole (RFC 4475 §3.3.2 and §3.3.4 are well-formed messages).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UriRef<'a> {
     /// A SIP or SIPS URI, in parts.
@@ -181,12 +173,9 @@ impl<'a> UriRef<'a> {
 
     /// Keep this URI past the buffer it points into.
     ///
-    /// The URI is written out again from its parts, so a scheme spelled in
-    /// another case and an IPv6 literal written the long way come back
-    /// canonical. Those are equivalent spellings of the same URI (§19.1.4),
-    /// but when the bytes themselves matter — a route set entry that has to go
-    /// back on the wire exactly as it arrived — build the owned form from the
-    /// original slice with [`Uri::parse`] instead.
+    /// The text is rebuilt from the parts, so it comes back canonical
+    /// (§19.1.4). When the exact bytes matter, as for a route set entry, use
+    /// [`Uri::parse`] on the original slice instead.
     #[must_use]
     pub fn to_owned(&self) -> Uri {
         Uri::from_rendered(self.to_string())
@@ -212,18 +201,9 @@ fn split_scheme(s: &str) -> Result<(UriScheme<'_>, &str), UriError> {
     Ok((classify_scheme(scheme_str), rest))
 }
 
-/// Refuse the bytes that would change the shape of whatever a URI is written
-/// back into (RFC 3261 §19.1.2: "URIs MUST NOT contain unescaped space and
-/// control characters", and RFC 2396's delimiters are escaped too).
-///
-/// Whitespace ends a Request-URI, a control byte or a line break ends a header
-/// line, `<` and `>` are the brackets of a `name-addr`, and `"` opens a quoted
-/// string that runs past the closing bracket. Every URI this stack keeps from
-/// a peer — a remote target, a route, a `Refer-To` target — is written into
-/// another message later, so it is refused here, once, rather than escaped at
-/// each of those places. Bytes the grammar also excludes but that shape
-/// nothing (`#`, `{`, `|`, bytes above 0x7F) are left to the leniency the
-/// field needs.
+/// Refuse bytes that would change the shape of the line a URI is written
+/// back into (RFC 3261 §19.1.2). Every URI kept from a peer ends up in
+/// another message, so it is refused once here rather than escaped later.
 fn check_bytes(s: &str) -> Result<(), UriError> {
     if s.bytes()
         .any(|b| matches!(b, 0x00..=0x20 | 0x7f | b'"' | b'<' | b'>'))
@@ -245,18 +225,15 @@ fn classify_scheme(s: &str) -> UriScheme<'_> {
     }
 }
 
-/// A `sip:` or `sips:` URI, in parts.
-///
-/// Parameters and headers are kept as unparsed slices and walked on demand;
-/// most callers ever ask for one or two of them.
+/// A `sip:` or `sips:` URI, in parts. Parameters and headers stay unparsed
+/// until asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SipUriRef<'a> {
     /// `sip`, `sips`, `tel`, or whatever was written.
     pub scheme: UriScheme<'a>,
     /// The user part, still escaped.
     pub user: Option<&'a str>,
-    /// The password, still escaped. Deprecated by RFC 3261 §19.1.1 and
-    /// carried only because it is still seen in the field.
+    /// The password, still escaped. Deprecated by RFC 3261 §19.1.1.
     pub password: Option<&'a str>,
     /// The host.
     pub host: HostRef<'a>,
@@ -297,7 +274,6 @@ impl<'a> SipUriRef<'a> {
             },
         };
 
-        // then headers, then parameters, then what is left is the hostport
         let (before_headers, headers) = match after_user.find('?') {
             Some(q) => (
                 after_user.get(..q).unwrap_or_default(),
@@ -326,8 +302,8 @@ impl<'a> SipUriRef<'a> {
         })
     }
 
-    /// The value of one URI parameter, matched case-insensitively on the
-    /// name. `Some("")` for a parameter written without a value.
+    /// The value of one URI parameter, name matched case-insensitively.
+    /// `Some("")` for a parameter without a value.
     #[must_use]
     pub fn param(&self, name: &str) -> Option<&'a str> {
         self.params()
@@ -464,18 +440,12 @@ impl<'a> Iterator for UriHeaderIter<'a> {
 
 /// A URI kept past the buffer it arrived in.
 ///
-/// The text is held once, in an `Arc<str>`, and the parts are recorded as
-/// offsets into it. Borrowing the parsed form back out is therefore free and
-/// cannot fail, and a clone shares the text instead of copying it — a dialog's
-/// route set and every request built from it end up pointing at the same bytes.
+/// The text is held once in an `Arc<str>` and the parts are offsets into
+/// it, so clones share the bytes.
 ///
-/// There is deliberately no `PartialEq`. "Same bytes" and "same resource" are
-/// different questions and `==` can only answer one of them. Worse, the second
-/// one is not transitive, as RFC 3261 §19.1.4 points out itself: a URI is
-/// equivalent to itself with `;security=on` and to itself with
-/// `;security=off`, while those two are not equivalent to each other. So the
-/// question has to be asked by name — [`Uri::as_str`] for the bytes,
-/// [`Uri::equivalent`] for the resource.
+/// There is no `PartialEq` on purpose: URI equivalence is not transitive
+/// (RFC 3261 §19.1.4, the `;security=` example). Use [`Uri::as_str`] for the
+/// bytes and [`Uri::equivalent`] for the resource.
 #[derive(Clone)]
 pub struct Uri {
     text: Arc<str>,
@@ -517,9 +487,8 @@ struct Slice {
 impl Slice {
     const EMPTY: Self = Self { start: 0, end: 0 };
 
-    /// `part` is always a subslice of `base` here: both come out of one parse
-    /// of one string. A part that is not lands on the empty slice, which is
-    /// wrong but bounded, rather than on some other part's bytes.
+    /// `part` is always a subslice of `base`. If not, it lands on the empty
+    /// slice rather than on other bytes.
     fn of(base: &str, part: &str) -> Self {
         let offset = (part.as_ptr() as usize).wrapping_sub(base.as_ptr() as usize);
         let end = offset.saturating_add(part.len());
@@ -570,9 +539,7 @@ impl Uri {
         let text: Arc<str> = Arc::from(text);
         let parts = match UriRef::parse_str(&text) {
             Ok(parsed) => Parts::of(&text, parsed),
-            // Unreachable: the text was written from a URI that parsed. If it
-            // ever is reached, keeping the whole thing opaque hands back every
-            // byte it was given and claims nothing about them.
+            // Unreachable: the text came from a URI that parsed. Opaque keeps every byte.
             Err(_) => Parts::Other {
                 scheme: Slice::EMPTY,
                 opaque: Slice::whole(&text),
@@ -665,14 +632,10 @@ impl Uri {
         self.has_param("lr")
     }
 
-    /// The same URI, in the form it may take as a Request-URI (§19.1.5).
+    /// The same URI in the form it may take as a Request-URI (§19.1.5).
     ///
-    /// The `method` parameter is dropped — "The method parameter MUST NOT be
-    /// placed in the Request-URI" — and so are the URI headers, which name
-    /// header fields for the message rather than parts of the address.
-    /// Everything else stays, known or not: §19.1.5 requires the transport,
-    /// maddr, ttl and user parameters to be carried over, and unknown
-    /// parameters with them.
+    /// Drops `method` ("MUST NOT be placed in the Request-URI") and the URI
+    /// headers. Every other parameter is carried over.
     #[must_use]
     pub fn as_request_uri(&self) -> Self {
         let Some(sip) = self.sip() else {
@@ -722,27 +685,16 @@ impl Uri {
 
     /// Whether two URIs address the same resource (RFC 3261 §19.1.4).
     ///
-    /// Escapes are compared decoded, which is what "characters other than
-    /// those in the reserved set are equivalent to their `%HEX HEX` encoding"
-    /// asks for — with the one restriction that an escape standing for a
-    /// character that is not unreserved stays escaped. Decoding `%3B` would
-    /// turn a piece of a user name into a parameter separator, and decoding
-    /// `%25` would produce a bare `%`, which is not legal in a URI at all.
-    ///
-    /// One simplification, said out loud because it is a deviation: URI header
-    /// values are compared as text, not by the per-field rules §20 defines for
-    /// each header, and the text keeps its case. Some of those rules ignore
-    /// case and some do not — a `Call-ID`, the user of a URI in `to=` — and
-    /// when the field's own rule is not applied, the answer that never
-    /// matches where that rule would not is the one given.
+    /// Escapes are compared decoded, except those of reserved characters:
+    /// decoding `%3B` would create a separator. Deviation: URI header values are
+    /// compared as case-sensitive text, not by the per-field rules of §20, so
+    /// the result never claims a match those rules would refuse.
     #[must_use]
     pub fn equivalent(&self, other: &Self) -> bool {
         match (self.as_uri_ref(), other.as_uri_ref()) {
             (UriRef::Sip(a), UriRef::Sip(b)) => sip_equivalent(a, b),
-            // §19.1.4 is written for SIP and SIPS. Other schemes have their own
-            // rules — RFC 3966 §4 for tel: — and until those are implemented the
-            // only honest answer is the one that never claims a match that has
-            // not been proven.
+            // §19.1.4 covers SIP and SIPS only. Other schemes (RFC 3966 §4 for tel:)
+            // are not implemented, so they never match.
             (
                 UriRef::Other {
                     scheme: a,
@@ -774,9 +726,7 @@ impl Parts {
                 params: Slice::of(base, u.params_raw()),
                 headers: Slice::of(base, u.headers_raw()),
             },
-            // The scheme is whatever precedes the colon the opaque part starts
-            // after; taking it from the text rather than from `UriScheme` keeps
-            // `tel:`, whose name is a constant, pointing at the right bytes.
+            // Take the scheme from the text so `tel:` points at the right bytes.
             UriRef::Other { opaque, .. } => {
                 let opaque = Slice::of(base, opaque);
                 Self::Other {
@@ -803,10 +753,9 @@ impl fmt::Debug for Uri {
     }
 }
 
-/// Present in only one URI, and then the two never match (§19.1.4). The list
-/// is the RFC's `user`, `ttl` and `method`, plus `maddr`, which gets its own
-/// sentence, plus `transport`, which the RFC leaves out of the list and then
-/// uses in its own example of two URIs that are *not* equivalent.
+/// Present in only one URI, and then the two never match (§19.1.4): the
+/// RFC's `user`, `ttl`, `method`, plus `maddr` and `transport`, which its
+/// own examples treat the same way.
 const DECISIVE_PARAMS: [&str; 5] = ["user", "ttl", "method", "maddr", "transport"];
 
 fn sip_equivalent(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
@@ -851,12 +800,8 @@ fn names_match(a: &str, b: &str) -> bool {
 }
 
 fn headers_match(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
-    // "URI header components are never ignored. Any present header component
-    // MUST be present in both URIs and match for the URIs to match." A name
-    // may be given more than once, and fields of one name keep their order
-    // (§7.3.1), so the n-th field of a name is held against the n-th field of
-    // that name in the other URI. Asked both ways, that also makes the counts
-    // agree.
+    // "URI header components are never ignored." Fields of one name keep
+    // their order (§7.3.1), so the n-th is matched against the n-th.
     a.headers().enumerate().all(|(at, (name, value))| {
         let nth = a
             .headers()
@@ -908,9 +853,7 @@ fn text_matches(a: &str, b: &str, case: Case) -> bool {
 /// Undo the escapes that stand for unreserved characters, and write the rest
 /// in one case so that `%2f` and `%2F` compare equal.
 ///
-/// A `%` that does not start an escape is the octet `%` and comes out as
-/// `%25`. Copied through bare, it would join whatever a decoded escape puts
-/// after it: `%%33B` would read as `%3B`, the escape of a semicolon.
+/// A lone `%` comes out as `%25`, or `%%33B` would read as `%3B`.
 fn decode_unreserved(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -959,11 +902,9 @@ const fn is_unreserved(b: u8) -> bool {
 
 /// Undo `%` escaping (RFC 3261 §25.1 `escaped`).
 ///
-/// Borrows when there is nothing to undo. Works on bytes because an escape
-/// may legally produce one that is not valid UTF-8 on its own, and because
-/// `%00` is legal and appears in the RFC 4475 corpus. A `%` that is not
-/// followed by two hex digits is left alone rather than refused: that case is
-/// in the corpus as a *valid* message.
+/// Borrows when there is nothing to undo. Works on bytes since `%00` is
+/// legal (RFC 4475). A `%` without two hex digits is left alone: the corpus
+/// has that case as a valid message.
 #[must_use]
 pub fn unescape(bytes: &[u8]) -> Cow<'_, [u8]> {
     if !bytes.contains(&b'%') {
@@ -1019,7 +960,6 @@ pub(super) fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriE
     }
 
     let (host, tail) = match s.rfind(':') {
-        // COLON is SWS ":" SWS where this is shared with Via's sent-by
         Some(i) => (
             s.get(..i).unwrap_or_default().trim_ascii_end(),
             s.get(i..).unwrap_or_default(),
@@ -1039,10 +979,8 @@ pub(super) fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriE
     Ok((host, parse_port(tail)?))
 }
 
-/// The IPv6 reference RFC 3261's own grammar produces and RFC 4291 does not
-/// allow: `hexpart ":" IPv4address` with a `hexpart` ending in `::`, as in
-/// `2001:db8:::192.0.2.1`. RFC 5118 §4.10 has an implementation tolerate it
-/// and read it as the address without the extra colon.
+/// The IPv6 form RFC 3261's grammar allows and RFC 4291 does not, as in
+/// `2001:db8:::192.0.2.1`. RFC 5118 §4.10 says to tolerate it.
 fn rfc3261_three_colons(literal: &str) -> Option<Ipv6Addr> {
     let (head, tail) = literal.split_once(":::")?;
     let v4: Ipv4Addr = tail.parse().ok()?;
@@ -1081,8 +1019,7 @@ fn parse_port(tail: &str) -> Result<Option<u16>, UriError> {
     }
 }
 
-/// Domain labels, permissive about a leading digit because the field is full
-/// of hosts like `1.example.com`.
+/// Domain labels, allowing a leading digit (`1.example.com` is common).
 fn is_hostname(s: &str) -> bool {
     let s = s.strip_suffix('.').unwrap_or(s);
     !s.is_empty()
@@ -1158,8 +1095,7 @@ mod tests {
 
     #[test]
     fn a_non_sip_scheme_is_kept_whole_rather_than_forced_into_a_hostport() {
-        // RFC 4475 3.3.2 and 3.3.4 are well-formed messages: refusing an
-        // unknown scheme is the user agent's job, not the parser's
+        // RFC 4475 3.3.2 and 3.3.4 are well-formed
         let tel = UriRef::parse_str("tel:+1-201-555-0123").expect("a URI");
         assert_eq!(tel.scheme(), UriScheme::Tel);
         assert_eq!(tel.sip(), None);
@@ -1193,8 +1129,7 @@ mod tests {
 
     #[test]
     fn the_three_colon_form_rfc_3261s_grammar_allows_is_tolerated() {
-        // RFC 5118 §4.10: "an implementation must tolerate both of the above
-        // constructs", reading the address without the extra colon
+        // RFC 5118 §4.10
         assert_eq!(
             uri("sip:user@[2001:db8:::192.0.2.1]").host,
             HostRef::Ipv6("2001:db8::192.0.2.1".parse::<Ipv6Addr>().expect("v6"))
@@ -1203,7 +1138,6 @@ mod tests {
             uri("sip:[:::192.0.2.1]:5060").host,
             HostRef::Ipv6("::192.0.2.1".parse::<Ipv6Addr>().expect("v6"))
         );
-        // and nothing else that is not an IPv6 address comes in with it
         for bad in [
             "sip:[2001:db8:::1]",
             "sip:[1:2:3:4:5:6:::192.0.2.1]",
@@ -1293,12 +1227,7 @@ mod tests {
 
     #[test]
     fn a_uri_holds_no_byte_that_would_end_what_it_is_written_into() {
-        // §19.1.2: "URIs MUST NOT contain unescaped space and control
-        // characters", and the delimiters RFC 2396 excludes have to be escaped
-        // too. These are the ones that change the shape of the line a URI is
-        // written back into: whitespace ends a Request-URI, a control byte or
-        // a line break ends the header, '<' and '>' are the brackets of a
-        // name-addr, and '"' opens a quoted string that swallows the rest.
+        // §19.1.2: no unescaped space, control bytes or RFC 2396 delimiters
         for uri in [
             "sip:carol>;tag=abc@example.com",
             "sip:a\"b@example.com",
@@ -1324,15 +1253,12 @@ mod tests {
                 "{uri:?}"
             );
         }
-        // the escaped forms are the way to carry those bytes, and still parse
         assert!(Uri::parse_str("sip:a%22b%3C%3E%20%00@example.com").is_ok());
     }
 
     #[test]
     fn whatever_a_uri_accepts_comes_back_whole_from_between_brackets() {
-        // the property the refusal above buys: a URI kept from one message can
-        // be written into another as <uri>;tag=t and read back as the same URI
-        // with the same one parameter
+        // a kept URI round-trips through <uri>;tag=t
         let candidates = [
             "sip:carol>;tag=abc@example.com",
             "sip:a\"b@example.com;tag=x",
@@ -1394,10 +1320,7 @@ mod tests {
         }
     }
 
-    // The vectors below are the ones RFC 3261 §19.1.4 gives, with the domains
-    // moved to the names RFC 2606 reserves: the RFC's own examples read as
-    // harvestable addresses to the tree check, and the comparison rules do not
-    // care which name is written.
+    // RFC 3261 §19.1.4 vectors, with RFC 2606 domains.
     fn owned(s: &str) -> Uri {
         Uri::parse_str(s).expect("a URI")
     }
@@ -1451,8 +1374,7 @@ mod tests {
     fn to_owned_writes_the_uri_out_from_its_parts() {
         let borrowed = UriRef::parse_str("SIP:bob@[0:0:0:0:0:0:0:1]:5060;lr").expect("a URI");
         let kept = borrowed.to_owned();
-        // canonical rather than byte for byte, which is why a route set is
-        // built with Uri::parse from the bytes as they arrived
+        // canonical, not byte for byte
         assert_eq!(kept.as_str(), "sip:bob@[::1]:5060;lr");
         assert!(kept.equivalent(&owned("SIP:bob@[0:0:0:0:0:0:0:1]:5060")));
         assert!(kept.is_loose_route());
@@ -1465,8 +1387,6 @@ mod tests {
                 "sip:%61lice@example.com;transport=TCP",
                 "sip:alice@example.com;Transport=tcp",
             ),
-            // the host is the case-insensitive half; the user is not, so the
-            // two halves are shown apart rather than in one vector
             ("sip:ExAmPle.CoM;lr", "sip:example.com;LR"),
             ("sip:carol@example.org", "sip:carol@example.org;newparam=5"),
             ("sip:carol@example.org", "sip:carol@example.org;security=on"),
@@ -1544,16 +1464,12 @@ mod tests {
     fn an_escape_for_a_reserved_character_is_not_the_character() {
         // decoding %3B would turn a piece of the user name into a separator
         assert!(!owned("sip:a%3Bb@example.com").equivalent(&owned("sip:a;b@example.com")));
-        // and case in an escape is not case in the value
         assert!(owned("sip:a%2Fb@example.com").equivalent(&owned("sip:a%2fb@example.com")));
     }
 
     #[test]
     fn a_user_or_a_password_present_in_only_one_uri_never_matches() {
-        // §19.1.4: "A URI omitting the user component will not match a URI
-        // that includes one. A URI omitting the password component will not
-        // match a URI that includes one." And the password is userinfo, so its
-        // case counts.
+        // §19.1.4: a missing user or password never matches; password case counts
         for (a, b, why) in [
             (
                 "sip:example.com",
@@ -1575,7 +1491,6 @@ mod tests {
             assert!(!a.equivalent(&b), "{why}: {a} vs {b}");
             assert!(!b.equivalent(&a), "{why}, reversed: {b} vs {a}");
         }
-        // an escape of an unreserved character is that character there too
         assert!(
             owned("sip:alice:%73ecret@example.com")
                 .equivalent(&owned("sip:alice:secret@example.com"))
@@ -1584,11 +1499,7 @@ mod tests {
 
     #[test]
     fn a_user_ttl_method_or_maddr_parameter_in_only_one_uri_never_matches() {
-        // §19.1.4: "A user, ttl, or method uri-parameter appearing in only one
-        // URI never matches, even if it contains the default value", and "A URI
-        // that includes an maddr parameter will not match a URI that contains
-        // no maddr parameter". The values are the defaults of Table 1 where
-        // there is one, which is the case the rule is written for.
+        // §19.1.4: user, ttl, method or maddr in only one URI never matches
         let plain = owned("sip:alice@example.com");
         let matched: Vec<String> = [
             "sip:alice@example.com;user=ip",
@@ -1608,7 +1519,6 @@ mod tests {
     fn a_header_named_twice_is_compared_occurrence_by_occurrence() {
         const TWO_HOPS: &str =
             "sip:alice@example.com?Route=%3Csip:p1.example.com%3E&Route=%3Csip:p2.example.com%3E";
-        // a URI is equivalent to itself, whatever it carries
         assert!(owned(TWO_HOPS).equivalent(&owned(TWO_HOPS)), "{TWO_HOPS}");
 
         for (a, b, why) in [
@@ -1629,7 +1539,6 @@ mod tests {
             assert!(!b.equivalent(&a), "{why}, reversed: {b} vs {a}");
         }
 
-        // while fields of different names may still come in any order
         let a = owned(
             "sip:alice@example.com?Route=%3Csip:p1.example.com%3E&subject=x&Route=%3Csip:p2.example.com%3E",
         );
@@ -1642,10 +1551,7 @@ mod tests {
 
     #[test]
     fn a_uri_header_value_keeps_its_case() {
-        // §19.1.4 hands URI headers to "the matching rules ... defined for each
-        // header field in Section 20", and several of those are not blind to
-        // case: a Call-ID is "case-sensitive" (§20.8), and a URI in a To has a
-        // userinfo §19.1.4 itself compares with case
+        // §19.1.4 defers URI headers to §20; a Call-ID is case-sensitive (§20.8)
         for (a, b) in [
             (
                 "sip:alice@example.com?to=sip:Bob%40example.com",
@@ -1660,8 +1566,7 @@ mod tests {
             assert!(!a.equivalent(&b), "{a} vs {b}");
             assert!(!b.equivalent(&a), "reversed: {b} vs {a}");
         }
-        // the name is still a header field name, which never has case (§7.3.1),
-        // and the digits of an escape are still not the value's case
+        // header names have no case (§7.3.1)
         for (a, b) in [
             (
                 "sip:alice@example.com?Subject=lunch",
@@ -1680,29 +1585,22 @@ mod tests {
 
     #[test]
     fn a_percent_that_starts_no_escape_is_not_half_of_the_next_one() {
-        // "%%33B" is a lone '%', then %33 (the digit 3), then B. Decoding the
-        // %33 must not glue the lone '%' to "3B" and produce the escape of a
-        // semicolon, which is a different user name
+        // "%%33B" is '%', '3', 'B', not an escaped semicolon
         let stray = owned("sip:a%%33B@example.com");
         let semicolon = owned("sip:a%3B@example.com");
         assert!(!stray.equivalent(&semicolon), "{stray} vs {semicolon}");
         assert!(!semicolon.equivalent(&stray), "{semicolon} vs {stray}");
-        // the lone '%' is the octet it is, which is what %25 writes
         assert!(stray.equivalent(&owned("sip:a%253B@example.com")));
     }
 
     #[test]
     fn an_escaped_parameter_or_header_name_is_the_name_it_spells() {
-        // §19.1.4: "Characters other than those in the reserved set ... are
-        // equivalent to their "%" HEX HEX encoding", and a name is made of
-        // them. %6D is 'm', so this URI carries an maddr the other one does
-        // not, which is a URI that routes somewhere else.
+        // §19.1.4: %6D is 'm', so this is an maddr
         let plain = owned("sip:alice@example.com");
         let routed = owned("sip:alice@example.com;%6Daddr=198.51.100.66");
         assert!(!plain.equivalent(&routed), "{plain} vs {routed}");
         assert!(!routed.equivalent(&plain), "{routed} vs {plain}");
 
-        // and the same name spelled two ways is one parameter, compared once
         for (a, b) in [
             (
                 "sip:alice@example.com;%74ransport=tcp",
@@ -1725,11 +1623,7 @@ mod tests {
 
     #[test]
     fn an_escape_in_the_host_is_not_the_character_it_stands_for() {
-        // §19.1.2: "Current implementations MUST NOT attempt to improve
-        // robustness by treating received escaped characters in the host
-        // component as literally equivalent to their unescaped counterpart."
-        // The host grammar has no '%', so the URI does not get as far as a
-        // comparison.
+        // §19.1.2: escapes in the host are not decoded
         assert_eq!(
             Uri::parse_str("sip:alice@ex%61mple.com").map(|u| u.to_string()),
             Err(UriError::BadHost)
@@ -1738,8 +1632,7 @@ mod tests {
 
     #[test]
     fn rfc_5954_compares_address_literals_by_value() {
-        // RFC 5954 §4.2 rewrites the host rule of §19.1.4: textual forms that
-        // "yield the same binary IP address" match, and these are its vectors
+        // RFC 5954 §4.2 vectors
         for (a, b) in [
             ("sip:bob@[::ffff:192.0.2.128]", "sip:bob@[::ffff:c000:280]"),
             ("sip:bob@[2001:db8::9:1]", "sip:bob@[2001:db8::9:01]"),
@@ -1763,7 +1656,6 @@ mod tests {
             u.as_request_uri().as_str(),
             "sip:bob@example.com;transport=tcp"
         );
-        // and carries every other parameter over, known or not
         let u = owned("sip:bob@example.com:5060;maddr=192.0.2.1;ttl=1;unknown=7");
         assert_eq!(u.as_request_uri().as_str(), u.as_str());
     }

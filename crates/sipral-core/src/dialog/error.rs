@@ -21,12 +21,10 @@ pub enum DialogError {
     /// The response neither opens an early dialog nor confirms one: RFC 3261
     /// §12.1 gives that power to 101-199 and 2xx alone.
     NotDialogCreating,
-    /// No `Contact` to set the remote target from, or a `Contact: *`, which
-    /// names every binding rather than an address to send to.
+    /// No `Contact` to set the remote target from, or a `Contact: *`.
     NoRemoteTarget,
-    /// ACK and CANCEL do not get a sequence number of their own — theirs is
-    /// the number of the request they answer (§12.2.1.1) — so they are built
-    /// from that request, not from the dialog.
+    /// ACK and CANCEL reuse the sequence number of the request they answer
+    /// (§12.2.1.1), so they are built from that request.
     NotItsOwnRequest,
     /// The local sequence number has reached the 2**31 ceiling of §8.1.1.5.
     SequenceExhausted,

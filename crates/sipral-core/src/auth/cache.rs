@@ -3,26 +3,21 @@
 
 //! What the client remembers about who challenged it (RFC 3261 §22.1).
 //!
-//! A challenge is worth keeping. Without it every request costs two round
-//! trips — one to be refused, one to be believed — and a registrar that
-//! refreshes every few minutes pays that forever. So a challenge is kept per
-//! protection domain, and the next request carries credentials before anyone
-//! asks.
+//! A challenge is kept per protection domain so the next request carries
+//! credentials up front, instead of paying two round trips on every refresh.
 //!
-//! Three things this refuses to do. It never uses one realm's challenge to
-//! answer another, because "each such protection domain has its own set of
-//! usernames and passwords". It never answers the same nonce twice after a
-//! refusal: §22.1 says "A UAC MUST NOT re-attempt requests with the
-//! credentials that have just been rejected (though the request may be retried
-//! if the nonce was stale)", so a second challenge with the same nonce and no
-//! `stale` means the password is wrong, and trying again would only lock the
-//! account. And it never offers a proxy's credentials to a request that is not
-//! the conversation they were earned in: §22.3 makes the `Call-ID` the limit —
-//! "it should incorporate credentials for that realm in all subsequent
-//! requests that contain the same Call-ID. These credentials MUST NOT be
-//! cached across dialogs" — while §22.2 puts no such limit on a registrar's or
-//! a callee's own challenge, which belongs to the destination rather than to
-//! one conversation with it.
+//! Three rules:
+//! - One realm's challenge never answers another: "each such protection
+//!   domain has its own set of usernames and passwords".
+//! - A nonce is not answered again after a refusal. §22.1: "A UAC MUST NOT
+//!   re-attempt requests with the credentials that have just been rejected
+//!   (though the request may be retried if the nonce was stale)". The same
+//!   nonce back without `stale` means a wrong password; retrying would only
+//!   lock the account.
+//! - A proxy's credentials stay within their `Call-ID` (§22.3: "These
+//!   credentials MUST NOT be cached across dialogs"). A registrar's or
+//!   callee's challenge (§22.2) belongs to the destination and has no such
+//!   limit.
 
 use std::sync::Arc;
 
@@ -39,9 +34,9 @@ pub enum Learned {
     /// The same nonce came back without `stale`, so the credentials were
     /// refused rather than missing. §22.1 says not to try them again.
     Refused,
-    /// Nothing here can be answered: no Digest challenge with an algorithm
-    /// this stack has, and no `Bearer` one. "The client MUST ignore any challenge it does not
-    /// understand" (RFC 8760 §2.4).
+    /// Nothing here can be answered: no Digest challenge with a supported
+    /// algorithm and no `Bearer` one. "The client MUST ignore any challenge
+    /// it does not understand" (RFC 8760 §2.4).
     Unusable,
 }
 
@@ -52,13 +47,11 @@ pub struct AuthCache {
     bearer: Vec<BearerEntry>,
 }
 
-/// An answer to the challenges a destination has made, and which of them it
-/// covers.
+/// An answer to a destination's challenges, and which of them it covers.
 ///
-/// Two halves because the nonce count may not move until the bytes do. The
-/// fields go on the request; the rest is what [`AuthCache::spend`] needs to
-/// move the counter on afterwards, and names the nonce each answer was made
-/// to so that a challenge relearned in between is left alone.
+/// The nonce count may not move until the bytes are sent. The fields go on
+/// the request; the rest lets [`AuthCache::spend`] move the counter later,
+/// and names each nonce so a challenge relearned in between is left alone.
 #[derive(Debug, Default)]
 #[must_use = "the fields have to go on a request, and the count spent once they have"]
 pub struct Answered {
@@ -84,10 +77,9 @@ impl Answered {
 #[derive(Debug)]
 struct BearerEntry {
     challenge: BearerChallenge,
-    /// The SHA-256 of the last token this domain refused: a request that
-    /// carried one and was challenged again is the token turned down,
-    /// whatever `error` says, and it is not offered here again. The value
-    /// itself is never kept.
+    /// SHA-256 of the last token this domain refused. A request that carried
+    /// it and was challenged again means the token was turned down, whatever
+    /// `error` says, so it is not offered here again. The value is never kept.
     rejected: Option<[u8; 32]>,
     refused: bool,
     /// As [`Entry::call_id`]: how far a proxy's challenge may travel.
@@ -101,8 +93,8 @@ struct Entry {
     /// How many times this client nonce has been used with this challenge.
     count: u32,
     refused: bool,
-    /// The `Call-ID` of the request this was learned from, which is how far a
-    /// proxy's challenge may travel (§22.3).
+    /// The `Call-ID` this was learned from: how far a proxy's challenge may
+    /// travel (§22.3).
     call_id: Arc<[u8]>,
 }
 
@@ -116,23 +108,19 @@ impl AuthCache {
         }
     }
 
-    /// Take in a 401 or a 407, answering `request`.
+    /// Take in a 401 or a 407 answering `request`.
     ///
-    /// `request` is the one that was refused, as it went out: its `Call-ID`
-    /// is how far a proxy's challenge may be re-used (§22.3), and the
-    /// credentials it carried say whether a nonce coming back was a verdict
-    /// on them. `cnonce` is the client nonce to use for whatever is learned
-    /// here; the core draws no random numbers, so it arrives from the caller.
-    /// Per realm, the topmost challenge that can be answered wins — RFC 8760
-    /// §2.3 has the server list them "in the order in which it would prefer
-    /// to see them used", and §2.4 has the client "use the topmost header
-    /// field that it supports".
+    /// `request` is the refused request as sent: its `Call-ID` bounds a
+    /// proxy's challenge (§22.3), and its credentials say whether a repeated
+    /// nonce is a verdict on them. `cnonce` comes from the caller because the
+    /// core draws no random numbers. Per realm the topmost answerable
+    /// challenge wins: servers list them "in the order in which it would
+    /// prefer to see them used" (RFC 8760 §2.3), and the client uses "the
+    /// topmost header field that it supports" (§2.4).
     ///
     /// A `Bearer` challenge (RFC 8898) is kept beside the Digest ones, one
-    /// per protection domain, and is always worth answering once the
-    /// application has a token: a token refused — the request carried one
-    /// and was challenged again — is remembered and not offered to that
-    /// domain again, so the answer has to be a different token.
+    /// per protection domain. A token that was refused is not offered to
+    /// that domain again; only a different token answers it.
     pub fn learn(
         &mut self,
         response: &RawMessage<'_>,
@@ -160,8 +148,7 @@ impl AuthCache {
             };
             let realm = (is_proxy, Arc::clone(&challenge.realm));
             if seen.contains(&realm) {
-                // a lower one for a realm already answered: the server's
-                // preference is the order it wrote them in
+                // the server's preference is the order it wrote them in
                 continue;
             }
             seen.push(realm);
@@ -175,23 +162,19 @@ impl AuthCache {
         outcome
     }
 
-    /// The header fields to put on the request going out, one per challenge
-    /// still worth answering.
+    /// The header fields for the outgoing request, one per challenge still
+    /// worth answering.
     ///
-    /// Working out the answer does not move the counter. `nc` "MUST" be
-    /// different for every request sent with the same nonce, so the number
-    /// belongs to the request that actually leaves: a request that is built
-    /// and then refused — §18.1.1 asking for a stream is the one that
-    /// happens — would otherwise take a number with it into the bin, and
-    /// whoever is asked next either repeats it, which the server reads as a
-    /// replay, or steps over it. [`Self::spend`] is what moves the counter,
-    /// and belongs immediately after the bytes are committed to a
-    /// transaction.
+    /// This does not move the counter. `nc` must differ for every request
+    /// sent with a nonce, so it belongs to the request that actually leaves.
+    /// A request built and then dropped (§18.1.1 asking for a stream) would
+    /// otherwise burn a number, and the next request would repeat it (seen
+    /// as a replay) or skip it. Call [`Self::spend`] right after the bytes
+    /// are committed to a transaction.
     ///
-    /// `call_id` is the one the request going out carries. A proxy's challenge
-    /// is answered only inside the conversation it was made in (§22.3); a
-    /// registrar's or a callee's own goes on any request to that destination,
-    /// which is what §22.2 asks for and what spares a refresh its refusal.
+    /// `call_id` is the outgoing request's. A proxy's challenge is answered
+    /// only within its conversation (§22.3); a registrar's or callee's goes
+    /// on any request to that destination (§22.2).
     pub fn authorize(
         &self,
         credentials: &Credentials,
@@ -201,9 +184,8 @@ impl AuthCache {
     ) -> Answered {
         let mut answered = Answered::default();
         // RFC 8898 §2.1.1: offered both schemes for one realm, the client
-        // "provides credentials for one of the schemes that it supports,
-        // based on local policy". The policy here is the token: an
-        // application that supplied one did so for this server.
+        // picks "based on local policy". Ours: an application that supplied
+        // a token did so for this server.
         let mut by_token: Vec<(bool, &str)> = Vec::new();
         let token = bearer::fingerprint_of(credentials);
         for entry in &self.bearer {
@@ -246,12 +228,10 @@ impl AuthCache {
     }
 
     /// Move the counter on for every challenge the answer covered, now that
-    /// the request carrying it is on its way.
+    /// the request is on its way.
     ///
-    /// An entry that has changed since the answer was drawn — a new challenge
-    /// learned in between, which resets the count — is left alone: the answer
-    /// was to a nonce this cache no longer holds, and moving a count that
-    /// belongs to a different nonce is worse than leaving it where it is.
+    /// An entry relearned since the answer was drawn (which resets its count)
+    /// is left alone: the count now belongs to a different nonce.
     pub fn spend(&mut self, answered: &Answered) {
         for (proxy, realm, nonce) in &answered.answered {
             let Some(entry) = self.entries.iter_mut().find(|entry| {
@@ -273,8 +253,7 @@ impl AuthCache {
             .map(|entry| &entry.challenge)
     }
 
-    /// The `Bearer` challenges being answered, in the order they were
-    /// learned.
+    /// The `Bearer` challenges being answered, in the order they were learned.
     pub fn bearer_challenges(&self) -> impl Iterator<Item = &BearerChallenge> {
         self.bearer
             .iter()
@@ -282,9 +261,9 @@ impl AuthCache {
             .map(|entry| &entry.challenge)
     }
 
-    /// The first `Bearer` challenge still open that `credentials` cannot
-    /// answer: there are none, they hold no token, or only the one that
-    /// domain refused. What the application needs a new token for.
+    /// The first open `Bearer` challenge `credentials` cannot answer: no
+    /// token, or only the one that domain refused. The application needs a
+    /// new token for it.
     #[must_use]
     pub fn token_wanted(&self, credentials: Option<&Credentials>) -> Option<&BearerChallenge> {
         let token = credentials.and_then(bearer::fingerprint_of);
@@ -306,26 +285,21 @@ impl AuthCache {
         self.bearer.clear();
     }
 
-    /// Stop answering these challenges, and stop offering the credentials
-    /// ahead of one.
+    /// Stop answering the challenges in `response`, and stop sending the
+    /// credentials up front for them.
     ///
-    /// For when an answer has been given as many times as it is going to be.
-    /// §22.1's guard — the same nonce back without `stale` means the password
-    /// was wrong — turns on the nonce being the same, and a server that draws
-    /// a fresh one for every refusal walks straight past it. Stopping the
-    /// retries alone would not be enough: [`Self::authorize`] would go on
-    /// putting the same wrong password on every later request to this
-    /// destination, which is the same lock-out at a slower rate.
+    /// For when the retry allowance is spent. §22.1's guard relies on the
+    /// nonce repeating, and a server that issues a fresh nonce per refusal
+    /// bypasses it. Stopping retries alone is not enough: [`Self::authorize`]
+    /// would keep sending the wrong password on later requests, locking the
+    /// account more slowly.
     ///
-    /// It is not permanent. A later challenge carrying a nonce this cache has
-    /// not answered starts the entry again, which is what lets a password
-    /// corrected while the process runs take effect.
+    /// Not permanent: a later challenge with an unanswered nonce reopens the
+    /// entry, so a password corrected at runtime takes effect.
     ///
-    /// Only the protection domains `response` is challenging are closed. One
-    /// destination can hold a registrar's realm and a proxy's at once, with
-    /// different passwords and only one of them wrong; refusing the lot
-    /// because one ran out of answers would stop sending credentials that
-    /// were working and had never been refused by anybody.
+    /// Only the domains `response` challenges are closed. A destination can
+    /// hold a registrar's and a proxy's realm with different passwords, and
+    /// the working one must keep going.
     pub fn refuse(&mut self, response: &RawMessage<'_>) {
         let www = response.www_authenticate().map(|c| (c, false));
         let proxy = response.proxy_authenticate().map(|c| (c, true));
@@ -350,15 +324,12 @@ impl AuthCache {
         }
     }
 
-    /// The same for one protection domain named outright: stop answering it,
-    /// and stop offering the credentials ahead of it.
+    /// Like [`Self::refuse`], for one protection domain named outright.
     ///
-    /// For a challenge the caller decided not to answer at all — one from
-    /// somebody the password is not for. Learning it already put it here,
-    /// and left there [`Self::authorize`] would hand that party an answer
-    /// on the next request to the same destination without being asked. A
-    /// later challenge with a nonce not answered opens the entry again, and
-    /// the caller decides about that one too.
+    /// For a challenge the caller chose not to answer, e.g. from a party the
+    /// password is not for. Learning already stored it, and
+    /// [`Self::authorize`] would otherwise answer that party unasked on the
+    /// next request. A later challenge with a new nonce reopens it.
     pub fn refuse_realm(&mut self, proxy: bool, realm: &str) {
         for entry in &mut self.entries {
             if entry.challenge.proxy == proxy && *entry.challenge.realm == *realm {
@@ -373,8 +344,7 @@ impl AuthCache {
     }
 
     /// Keep a `Bearer` challenge. `carried` is the fingerprint of the token
-    /// the refused request carried in that space, if it carried one: being
-    /// challenged again is that token turned down.
+    /// the refused request carried there, if any: that token was turned down.
     fn take_bearer(
         &mut self,
         challenge: BearerChallenge,
@@ -403,8 +373,8 @@ impl AuthCache {
         Learned::Retry
     }
 
-    /// `answered` is whether the refused request carried an answer to this
-    /// very challenge — its realm and its nonce.
+    /// `answered`: whether the refused request answered this very challenge
+    /// (same realm and nonce).
     fn take(
         &mut self,
         challenge: Challenge,
@@ -426,33 +396,26 @@ impl AuthCache {
             return Learned::Retry;
         };
 
-        // "though the request may be retried if the nonce was stale". A nonce
-        // the server has expired comes back with `stale`, and answering the
-        // new one is what it is asking for; the same nonce without it, on a
-        // request that answered it, means the password was wrong, whether it
-        // went out after a refusal or ahead of one.
+        // "though the request may be retried if the nonce was stale". The
+        // same nonce without `stale`, on a request that answered it, means
+        // the password was wrong.
         if entry.challenge.nonce == challenge.nonce && !challenge.stale {
             if answered || entry.refused {
                 entry.refused = true;
                 return Learned::Refused;
             }
-            // §22.1 forbids re-sending "the credentials that have just been
-            // rejected", and a request that carried none had nothing
-            // rejected: a server that draws its nonce from the clock hands
-            // the same one to every request in the same second, so the
-            // SUBSCRIBE that follows a REGISTER is challenged with the nonce
-            // the REGISTER already answered. It is still good, so it is
-            // answered again — and the count is left where it is, since `nc`
-            // numbers every request sent with one nonce (RFC 7616 §3.4).
-            // The request's own allowance still caps how often.
+            // A request that carried no credentials had nothing rejected
+            // (§22.1). Servers that derive the nonce from the clock reuse it
+            // within a second, so a SUBSCRIBE after a REGISTER gets the nonce
+            // the REGISTER answered. It is still good: answer it again and
+            // keep the count, since `nc` numbers every request sent with one
+            // nonce (RFC 7616 §3.4). The request's own allowance caps retries.
             entry.call_id = Arc::clone(call_id);
             return Learned::Retry;
         }
         // a new nonce starts its own count; the same one marked stale does
-        // not, for the reason the branch above keeps it: `nc` counts the
-        // requests sent "with the nonce value", and starting it again would
-        // send 00000001 under the same nonce and cnonce a second time — to
-        // the server, the first request replayed
+        // not: resending 00000001 with the same nonce and cnonce would look
+        // like a replay
         if entry.challenge.nonce != challenge.nonce {
             entry.cnonce = Arc::from(cnonce);
             entry.count = 0;
@@ -464,9 +427,8 @@ impl AuthCache {
     }
 }
 
-/// The realm and nonce of every set of credentials `request` carried, with
-/// which of the two spaces each answered. Values that do not parse carried
-/// nothing anyone could have refused.
+/// The realm and nonce of every credential set `request` carried, and which
+/// space each answered. Unparseable values count as nothing carried.
 fn carried(request: &RawMessage<'_>) -> Vec<(bool, Vec<u8>, Vec<u8>)> {
     let www = request.authorization().map(|c| (c, false));
     let proxy = request.proxy_authorization().map(|c| (c, true));
@@ -591,10 +553,8 @@ CSeq: 1 REGISTER\r\n",
 
     #[test]
     fn running_out_of_answers_in_one_realm_leaves_the_other_alone() {
-        // A destination can hold a registrar's realm and a proxy's at once,
-        // with different passwords and only one of them wrong. Closing the
-        // lot because one ran out of answers would stop sending credentials
-        // that were working and that nobody had refused.
+        // a registrar's realm and a proxy's, different passwords, one wrong:
+        // only the exhausted one closes
         let mut cache = AuthCache::new();
         assert_eq!(
             learn(
@@ -781,11 +741,10 @@ CSeq: 1 REGISTER\r\n",
 
     #[test]
     fn the_same_nonce_on_a_request_that_did_not_answer_it_is_answered() {
-        // A server that draws its nonce from the clock challenges every
-        // request in one second with the same one: the SUBSCRIBE that follows
-        // a REGISTER is refused with the nonce the REGISTER already answered.
-        // Nothing was rejected — the SUBSCRIBE carried no credentials — so the
-        // nonce is answered again, counting on from where it was.
+        // a clock-derived nonce repeats within a second: the SUBSCRIBE after
+        // a REGISTER is refused with the nonce the REGISTER answered. It
+        // carried no credentials, so the nonce is answered again and the
+        // count continues.
         let mut cache = AuthCache::new();
         let refused = refusal(
             401,
@@ -858,11 +817,9 @@ uri=\"sip:example.com\", response=\"00\""
         );
         assert_eq!(learn(&mut cache, &stale), Learned::Retry);
         let value = authorize(&mut cache);
-        // RFC 7616 §3.4: nc is the "count of the number of requests
-        // (including the current request) that the client has sent with the
-        // nonce value in this request". Two went with n1 already, so this is
-        // the third, stale or not; a second nc=00000001 with n1 is the same
-        // nc value "seen twice", which the server reads as a replay
+        // RFC 7616 §3.4: nc counts the requests "sent with the nonce value".
+        // Two went with n1 already, so this is the third, stale or not; a
+        // second nc=00000001 would be read as a replay
         assert!(
             value.first().expect("one").1.contains("nc=00000003"),
             "the same nonce carries on its own count: {value:?}"

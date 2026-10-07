@@ -9,15 +9,12 @@ use std::sync::Arc;
 
 /// A password.
 ///
-/// There is no `Debug`, no `Display` and no way to get the bytes out from
-/// outside this module — a value that cannot be printed cannot be printed by
-/// accident, which is the only kind of leak that actually happens.
+/// No `Debug`, no `Display`, and no way to read the bytes from outside this
+/// module, so it cannot be printed by accident.
 ///
-/// The bytes are overwritten when the value is dropped. That is best effort
-/// and said so plainly: only a volatile write is guaranteed to survive an
-/// optimiser, and a volatile write needs `unsafe`, which this crate denies. A
-/// compiler fence after the overwrite is what is available without it, and it
-/// is what every other safe implementation does.
+/// The bytes are overwritten on drop. Best effort only: a guaranteed write
+/// needs a volatile write, hence `unsafe`, which this crate denies. An
+/// overwrite plus a compiler fence is what safe code can do.
 pub struct Secret(Box<[u8]>);
 
 impl Secret {
@@ -27,15 +24,11 @@ impl Secret {
         Self(Box::from(password.as_bytes()))
     }
 
-    /// The parts joined with colons, in a buffer that is wiped on drop.
+    /// The parts joined with colons, in a buffer wiped on drop.
     ///
-    /// One exact allocation, on purpose. A `Vec` grown part by part
-    /// reallocates as it goes and leaves every intermediate copy in freed
-    /// memory, which is the thing this type exists to prevent, so the length
-    /// is worked out first and the buffer is never grown. The `join` in
-    /// `super::digest` cannot be used for it: its capacity is deliberately
-    /// one byte longer than the result, so `into_boxed_slice` on what it
-    /// returns would reallocate and leave a copy behind.
+    /// Allocated once at its final length: a growing `Vec` would leave copies
+    /// in freed memory. The `join` in `super::digest` is unsuitable because
+    /// its capacity is one byte too long, so `into_boxed_slice` would copy.
     pub(super) fn joined(parts: &[&[u8]]) -> Self {
         let total =
             parts.iter().map(|part| part.len()).sum::<usize>() + parts.len().saturating_sub(1);
@@ -57,8 +50,8 @@ impl Secret {
         Self(bytes)
     }
 
-    /// `digest` in lower-case hexadecimal (RFC 8760 §2.2), in a buffer that
-    /// is wiped on drop and allocated once at its final length.
+    /// `digest` in lower-case hex (RFC 8760 §2.2), in a buffer wiped on drop
+    /// and allocated once.
     pub(super) fn hex(digest: &[u8]) -> Self {
         let mut bytes = vec![0_u8; digest.len().saturating_mul(2)].into_boxed_slice();
         for ([high, low], byte) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(digest) {
@@ -81,32 +74,22 @@ impl Drop for Secret {
 
 /// Overwrite a buffer that held secret material.
 ///
-/// The same best effort [`Secret`] makes for itself, and said as plainly:
-/// only a volatile write is guaranteed to survive an optimiser, a volatile
-/// write needs `unsafe`, and this crate denies it. What is available without
-/// it is an ordinary overwrite and a fence the compiler may not reorder
-/// across, which is what every other safe implementation does.
-///
-/// It takes any word the digests work in — bytes, and the 32- and 64-bit
-/// words a message schedule is the message read back as — so that one rule
-/// covers every buffer rather than each of them repeating it differently.
+/// Same best effort as [`Secret`]: an overwrite and a fence, since a volatile
+/// write needs `unsafe`. Generic over the word sizes the digests use, so one
+/// rule covers every buffer.
 pub(super) fn wipe<T: Copy + Default>(buffer: &mut [T]) {
     buffer.fill(T::default());
     compiler_fence(Ordering::SeqCst);
 }
 
-/// A user name and the password that goes with it, for one realm — and, for a
-/// server that takes OAuth 2.0 (RFC 8898), the access token that answers a
-/// `Bearer` challenge.
+/// A user name and password for one realm, and, for an OAuth 2.0 server
+/// (RFC 8898), the access token that answers a `Bearer` challenge.
 ///
-/// The realm is not part of this: which credentials belong to which realm is
-/// the caller's book-keeping, and a device with one account uses the same pair
-/// for the registrar and for the proxy in front of it.
+/// The realm is the caller's book-keeping; one account usually serves both
+/// the registrar and its proxy.
 ///
-/// The token is as secret as the password. RFC 6750 §5.3 makes a bearer token
-/// something whoever holds it can use, so it gets the same treatment: no
-/// `Debug` of it, no way to read it back from outside, and a buffer wiped on
-/// drop.
+/// The token is as secret as the password (RFC 6750 §5.3: whoever holds it
+/// can use it): no `Debug`, no read-back, wiped on drop.
 pub struct Credentials {
     /// The user name, which does go in the message and is not a secret.
     pub username: Arc<str>,
@@ -165,10 +148,9 @@ impl Credentials {
         Ok(self)
     }
 
-    /// A copy carrying `token` as the access token — or none, for `None` —
-    /// with the same user name and password. For a token renewed while the
-    /// credentials are shared: the password is copied into a buffer of its
-    /// own, wiped on drop like the first.
+    /// A copy with `token` as the access token (or none), same user name and
+    /// password. For renewing a token while the credentials are shared; the
+    /// password copy is wiped on drop too.
     ///
     /// # Errors
     /// [`NotAToken`], as [`Self::bearer`].
@@ -252,8 +234,6 @@ mod tests {
 
     #[test]
     fn a_joined_secret_is_the_colon_separated_parts() {
-        // the A1 of RFC 3261 §22.4, in a buffer that wipes itself rather than
-        // in one grown a part at a time
         assert_eq!(
             Secret::joined(&[b"alice", b"example.com", b"hunter2"]).expose(),
             b"alice:example.com:hunter2"

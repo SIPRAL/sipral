@@ -16,31 +16,21 @@
 //! request-digest =  LDQUOT *LHEX RDQUOT
 //! ```
 //!
-//! The separator is a comma, not a semicolon: these fields carry a parameter
-//! list where every other field carries a value plus parameters.
+//! Parameters are comma-separated here, not semicolon-separated. `qop` is a
+//! quoted list in a challenge and a bare token in credentials; the RFC's own
+//! example writes `qop=auth`.
 //!
-//! Two shapes for one name. In a challenge, `qop` is a quoted, comma-separated
-//! list; in credentials it is one bare token. A stack that insists on quotes
-//! in both directions rejects the RFC's own worked example, which writes
-//! `qop=auth` in the `Authorization` field.
+//! `realm`, `nonce`, `cnonce`, `username` and `opaque` are `quoted-string`,
+//! so backslash escapes. `uri` and `response` are only wrapped in quotes
+//! (§22.4, RFC 8760 §2.6) and come back as written.
 //!
-//! Quoting is not decoration either. `realm`, `nonce`, `cnonce`, `username`
-//! and `opaque` are `quoted-string`, so a backslash escapes the byte after it.
-//! `uri` and `response` are wrapped in quotes without being `quoted-string`
-//! (§22.4 and RFC 8760 §2.6), so their contents are handed back exactly as
-//! written: a Request-URI is not a place to be resolving escapes.
+//! Each line is read on its own: §20.7 and §20.28 exempt these fields from
+//! comma-joining, and several `WWW-Authenticate` lines are several challenges
+//! (RFC 8760 §2.3).
 //!
-//! `Authorization` and `Proxy-Authorization` are the two fields RFC 3261
-//! §20.7 and §20.28 exempt from comma-joining, and several
-//! `WWW-Authenticate` lines are several challenges in preference order (RFC
-//! 8760 §2.3). So each line is read on its own, and nothing here joins them.
-//!
-//! Where the grammar names a parameter twice — once with a type, once through
-//! the `auth-param` catch-all — this parses the value and lets the accessor
-//! object. `nc=0000001` is seven digits, which is not `8LHEX` but is a
-//! perfectly good `token`, so the field parses and [`CredentialsRef::nc`]
-//! refuses. Rejecting the whole header there is a policy the RFC does not
-//! ask for, and it would drop a REGISTER over a parameter nobody had to send.
+//! A typed parameter that fails its type still parses through `auth-param`;
+//! the accessor refuses it. `nc=0000001` parses, [`CredentialsRef::nc`]
+//! rejects it, and a REGISTER is not dropped over an optional parameter.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -51,8 +41,8 @@ use super::method::is_token_byte;
 
 /// The parameters of one challenge or one set of credentials, in order.
 ///
-/// Values come back as written, quotes included; [`ChallengeRef::param`] and
-/// [`CredentialsRef::param`] are the unquoting way in.
+/// Values come back as written; [`ChallengeRef::param`] and
+/// [`CredentialsRef::param`] unquote.
 #[derive(Clone, Debug)]
 pub struct AuthParams<'a> {
     list: CommaList<'a>,
@@ -62,8 +52,7 @@ impl<'a> Iterator for AuthParams<'a> {
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // parse() has already checked every field, so anything unsplittable
-        // here cannot happen
+        // parse() already checked every field
         self.list.next().and_then(split_param)
     }
 }
@@ -89,8 +78,7 @@ struct Auth<'a> {
 impl<'a> Auth<'a> {
     fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let v = trim(value);
-        // both branches of the grammar put LWS between the scheme and the
-        // first parameter, so "Digestrealm=..." matches neither
+        // the grammar requires LWS after the scheme
         let end = v
             .iter()
             .copied()
@@ -161,13 +149,11 @@ impl fmt::Display for Auth<'_> {
 }
 
 impl<'a> ChallengeRef<'a> {
-    /// Read one challenge. One line is one challenge: RFC 8760 §2.3 offers
-    /// several algorithms as several lines, in preference order.
+    /// Read one challenge (one line, RFC 8760 §2.3).
     ///
     /// # Errors
     /// [`HeaderError::Malformed`] when the scheme is not a token followed by
-    /// whitespace, when there are no parameters, or when a parameter is not
-    /// `name=(token / quoted-string)`.
+    /// whitespace, or a parameter is missing or not `name=(token / quoted-string)`.
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         Ok(Self {
             inner: Auth::parse(value)?,
@@ -180,8 +166,7 @@ impl<'a> ChallengeRef<'a> {
         self.inner.scheme
     }
 
-    /// Whether the scheme is `Digest`, matched without case as §25.1 requires
-    /// of every token.
+    /// Whether the scheme is `Digest`, matched without case (§25.1).
     #[must_use]
     pub fn is_digest(&self) -> bool {
         self.inner.scheme.eq_ignore_ascii_case(b"Digest")
@@ -217,20 +202,17 @@ impl<'a> ChallengeRef<'a> {
         self.inner.param("opaque")
     }
 
-    /// The digest algorithm. Absent means MD5; the grammar ends in `/ token`,
-    /// so an unregistered name is syntax, not an error.
+    /// The digest algorithm. Absent means MD5; unknown names are allowed.
     #[must_use]
     pub fn algorithm(&self) -> Option<Cow<'a, [u8]>> {
         self.inner.algorithm()
     }
 
-    /// Whether the nonce is stale, meaning the credentials were otherwise
-    /// good and only need retrying against a fresh nonce.
+    /// Whether the nonce is stale: retry the same credentials on a new nonce.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] for a value that is neither `true` nor
-    /// `false`. Matched without case: RFC 3261 §20.27's own example writes
-    /// `stale=FALSE` against a lowercase literal.
+    /// [`HeaderError::Malformed`] for anything but `true` or `false`, matched
+    /// without case (§20.27's example writes `stale=FALSE`).
     pub fn stale(&self) -> Result<Option<bool>, HeaderError> {
         let Some(v) = self.inner.param("stale") else {
             return Ok(None);
@@ -245,9 +227,6 @@ impl<'a> ChallengeRef<'a> {
     }
 
     /// The offered protection qualities, in the order written.
-    ///
-    /// A challenge writes these as one quoted, comma-separated list, which is
-    /// the shape credentials do not use.
     pub fn qop(&self) -> impl Iterator<Item = &'a [u8]> + use<'a> {
         dequote(self.inner.param_raw("qop").unwrap_or_default())
             .split(|&b| b == b',')
@@ -255,10 +234,7 @@ impl<'a> ChallengeRef<'a> {
             .filter(|v| !v.is_empty())
     }
 
-    /// The URIs this challenge's protection space covers.
-    ///
-    /// Separated by spaces inside one pair of quotes, which is the only
-    /// space-separated list in the family.
+    /// The URIs this challenge covers, space-separated inside one quoted value.
     #[must_use]
     pub fn domain(&self) -> LwsFields<'a> {
         fields(dequote(self.inner.param_raw("domain").unwrap_or_default()))
@@ -276,8 +252,7 @@ impl<'a> CredentialsRef<'a> {
         })
     }
 
-    /// The scheme, as written. RFC 4475 §3.3.7 is a well-formed REGISTER with
-    /// a scheme nobody knows; refusing it is policy, not parsing.
+    /// The scheme, as written. Unknown schemes parse (RFC 4475 §3.3.7).
     #[must_use]
     pub const fn scheme(&self) -> &'a [u8] {
         self.inner.scheme
@@ -307,8 +282,7 @@ impl<'a> CredentialsRef<'a> {
         self.inner.param("username")
     }
 
-    /// The protection space these credentials answer. A proxy must not
-    /// consume a value whose realm is not its own (RFC 3261 §22.3).
+    /// The protection space these credentials answer (RFC 3261 §22.3).
     #[must_use]
     pub fn realm(&self) -> Option<Cow<'a, [u8]>> {
         self.inner.param("realm")
@@ -338,28 +312,20 @@ impl<'a> CredentialsRef<'a> {
         self.inner.algorithm()
     }
 
-    /// The protection quality, one bare token here rather than the quoted
-    /// list a challenge carries.
+    /// The protection quality, a bare token.
     #[must_use]
     pub fn qop(&self) -> Option<Cow<'a, [u8]>> {
         self.inner.param("qop")
     }
 
-    /// The URI the digest was computed over, exactly as written.
-    ///
-    /// Quoted, but not a `quoted-string`: the quotes come off and nothing
-    /// else is touched, because the contents are a Request-URI and a
-    /// backslash in one is a byte, not an escape.
+    /// The URI the digest was computed over. Quotes removed, no unescaping.
     #[must_use]
     pub fn uri(&self) -> Option<&'a [u8]> {
         self.inner.param_raw("uri").map(dequote)
     }
 
-    /// The digest itself, exactly as written.
-    ///
-    /// Length is the algorithm's business, not the grammar's: RFC 8760 §2.7
-    /// replaced `32LHEX` with `*LHEX` so a SHA-256 response fits, and allows
-    /// an empty value from a client that has not been challenged yet.
+    /// The digest itself, exactly as written. Any length, even empty (RFC 8760
+    /// §2.7).
     #[must_use]
     pub fn response(&self) -> Option<&'a [u8]> {
         self.inner.param_raw("response").map(dequote)
@@ -368,11 +334,8 @@ impl<'a> CredentialsRef<'a> {
     /// The nonce count.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when the value is not exactly eight
-    /// lowercase hex digits. `nc-value = 8LHEX`, and `LHEX` is `DIGIT /
-    /// %x61-66`, so `nc=1` and `nc=ABCDEF12` are both refused here — the
-    /// field still parses, since both are good tokens, and this is where the
-    /// stricter rule is applied.
+    /// [`HeaderError::Malformed`] unless exactly eight lowercase hex digits
+    /// (`8LHEX`).
     pub fn nc(&self) -> Result<Option<u32>, HeaderError> {
         let Some(v) = self.inner.param_raw("nc") else {
             return Ok(None);
@@ -413,8 +376,7 @@ fn dequote(v: &[u8]) -> &[u8] {
         .unwrap_or(v)
 }
 
-/// The name is a token, so it cannot hold a quote, so the first `=` is the
-/// one that separates.
+/// The name is a token, so the first `=` separates.
 fn split_param(field: &[u8]) -> Option<(&[u8], &[u8])> {
     let at = field.iter().position(|&b| b == b'=')?;
     Some((
@@ -610,8 +572,7 @@ opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"";
 
     #[test]
     fn two_challenges_joined_by_a_comma_are_refused() {
-        // RFC 8760 2.3 wants them as two header lines, and the grammar has
-        // room for exactly one scheme keyword
+        // RFC 8760 2.3: one scheme per line
         assert!(bad_challenge(
             br#"Digest realm="a", nonce="a1", Digest realm="a", nonce="a2""#
         ));
@@ -625,9 +586,7 @@ opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"";
 
     #[test]
     fn an_unquoted_value_that_is_a_token_still_parses() {
-        // structurally it arrived through the auth-param catch-all rather
-        // than through realm-value, which is a distinction the grammar makes
-        // and the wire does not
+        // arrived through the auth-param catch-all, same on the wire
         let c = challenge(b"Digest realm=atlanta.example.com, nonce=abc");
         assert_eq!(c.realm().as_deref(), Some(&b"atlanta.example.com"[..]));
     }

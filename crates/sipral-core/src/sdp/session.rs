@@ -8,9 +8,8 @@ use std::net::IpAddr;
 
 use super::media::{Direction, MediaDescription};
 
-/// RFC 3611 §5.1's `xr-format` token for the VoIP Metrics Report Block
-/// (§4.7): `"voip-metrics"`, the only one this stack ever writes or reads
-/// out of an `a=rtcp-xr` line.
+/// RFC 3611 §5.1 `xr-format` token for the VoIP Metrics block (§4.7), the
+/// only one this stack uses.
 const VOIP_METRICS_XR_FORMAT: &str = "voip-metrics";
 
 /// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
@@ -32,12 +31,8 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// An origin for one of our addresses.
-    ///
-    /// The user name is `-`, which §5.2 allows when "the originating host does
-    /// not support the concept of user IDs" — and which is the only sane thing
-    /// for a softphone to write, since whoever is logged in to this machine is
-    /// nobody else's business.
+    /// An origin for one of our addresses. The user name is `-`, which §5.2
+    /// allows; the local login is nobody else's business.
     #[must_use]
     pub fn new(session_id: u64, version: u64, address: IpAddr) -> Self {
         Self {
@@ -73,9 +68,8 @@ pub struct Connection {
     pub network: String,
     /// `IP4` or `IP6`.
     pub address_type: String,
-    /// As written. A multicast address carries its TTL and count here, and
-    /// dropping them would change the line's meaning, so the text is kept
-    /// whole and [`Connection::ip`] reads the address out of it.
+    /// As written: a multicast address carries TTL and count here, so the text
+    /// is kept whole. [`Connection::ip`] reads the address out of it.
     pub address: String,
 }
 
@@ -97,12 +91,8 @@ impl Connection {
         address.parse().ok()
     }
 
-    /// Whether this is the old way of putting a call on hold: an address that
-    /// goes nowhere.
-    ///
-    /// RFC 3264 §8.4 replaced it with `a=sendonly` and `a=inactive`, but a
-    /// peer that predates that convention still says it this way, and a stack
-    /// that does not recognise it will send audio into the dark.
+    /// Whether this is the old hold: an address that goes nowhere. RFC 3264
+    /// §8.4 replaced it, but older peers still send it.
     #[must_use]
     pub fn is_black_hole(&self) -> bool {
         self.ip().is_some_and(|ip| ip.is_unspecified())
@@ -132,8 +122,7 @@ pub struct Timing {
 }
 
 impl Timing {
-    /// `t=0 0`: "the session is not bounded, though it will not become active
-    /// until after the `<start-time>`" — which is what a call is.
+    /// `t=0 0`: unbounded, which is what a call is.
     #[must_use]
     pub const fn permanent() -> Self {
         Self {
@@ -164,27 +153,13 @@ pub struct Attribute {
 }
 
 impl fmt::Debug for Attribute {
-    /// Everything as it was read, except the two things an attribute can
-    /// carry that must never reach a log: the master key on an `a=crypto`
-    /// line, and the password on an `a=ice-pwd` one.
+    /// Everything as read, except the master key of `a=crypto` and the
+    /// password of `a=ice-pwd`, which must never reach a log (RFC 4568 §9.2).
     ///
-    /// Written here rather than on the descriptions above it because there is
-    /// no way to hold one of those without holding these: a redaction on
-    /// `SessionDescription` is one a user agent, a call, an engine and an
-    /// event each have to remember to route through, and the first one that
-    /// forgets prints every key on the machine. RFC 4568 §9.2 is explicit —
-    /// "the SDP MUST be protected" — and a `{:?}` on a live stack is not
-    /// protection.
-    ///
-    /// The two are redacted differently because they are shaped differently.
-    /// An `a=crypto` line names a tag and a suite before its key, and both are
-    /// what a reader needs when a negotiation has gone wrong; neither is
-    /// secret, so both stay. An `a=ice-pwd` line is the password and nothing
-    /// else (RFC 8839 §5.4), so there is nothing in it to keep. It is the
-    /// short-term credential every connectivity check on the call is signed
-    /// with (RFC 8445 §7.1.2.3): a reader who has it can answer checks as
-    /// either end and can steer the media to itself, which is the whole of
-    /// what ICE decides.
+    /// Done here rather than on the descriptions, so no caller can forget it.
+    /// An `a=crypto` keeps its tag and suite, which are not secret and help
+    /// debugging. An `a=ice-pwd` is only the password (RFC 8839 §5.4), the
+    /// credential that signs every connectivity check (RFC 8445 §7.1.2.3).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut shown = f.debug_struct("Attribute");
         shown.field("name", &self.name);
@@ -200,14 +175,11 @@ impl fmt::Debug for Attribute {
     }
 }
 
-/// The value of a `k=` line (§5.12), kept as it was read and never printed.
+/// The value of a `k=` line (§5.12), kept as read and never printed.
 ///
-/// The line is deprecated — §5.12 says so itself, and this stack neither
-/// writes one nor reads any meaning from one — but a description parsed from a
-/// peer keeps every line it arrived with, and this one is by definition the
-/// peer's key. `Display` writes it, because that is the wire format and the
-/// wire format is what it came from; `Debug` does not, because a log is not
-/// the wire.
+/// The line is deprecated and unused here, but a parsed description keeps
+/// every line, and this one is the peer's key. `Display` writes it (wire
+/// format); `Debug` does not.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KeyLine(String);
 
@@ -264,11 +236,8 @@ impl Attribute {
             .then(|| Direction::from_name(&self.name))?
     }
 
-    /// Whether this is an `a=rtcp-xr` line (RFC 3611 §5.1) that lists
-    /// `format` among its space-separated `xr-format` tokens — `format`
-    /// bare, such as `"voip-metrics"`, never one of the tokens that takes
-    /// its own `=` argument (`"rcvr-rtt"`, `"stat-summary"`, ...), which
-    /// this never matches since it compares whole tokens.
+    /// Whether this is an `a=rtcp-xr` line (RFC 3611 §5.1) listing the bare
+    /// token `format`. Whole tokens only, so `name=value` tokens never match.
     #[must_use]
     pub fn requests_xr_format(&self, format: &str) -> bool {
         self.name == "rtcp-xr"
@@ -290,16 +259,13 @@ impl fmt::Display for Attribute {
 
 /// A session description.
 ///
-/// The fields are in the order §5 puts the lines in, and writing one out walks
-/// them in that order, so the same description always produces the same bytes.
-/// Everything that was read is kept, including the lines this stack has no use
-/// for: a description that is parsed and written back comes out as it went in.
+/// Fields follow §5's line order and are written in it, so output is
+/// deterministic. Unused lines are kept and round-trip unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionDescription {
     /// `o=`
     pub origin: Origin,
-    /// `s=`, which §5.3 says "MUST NOT be empty"; `-` when there is nothing
-    /// to say.
+    /// `s=`, which §5.3 says "MUST NOT be empty"; `-` when there is nothing.
     pub name: String,
     /// `i=`
     pub information: Option<String>,
@@ -321,8 +287,7 @@ pub struct SessionDescription {
     pub key: Option<KeyLine>,
     /// `a=` at session level.
     pub attributes: Vec<Attribute>,
-    /// The `m=` blocks, in the order they were written — which is the order
-    /// an answer has to keep (RFC 3264 §6).
+    /// The `m=` blocks in written order, which an answer keeps (RFC 3264 §6).
     pub media: Vec<MediaDescription>,
 }
 
@@ -359,10 +324,8 @@ impl SessionDescription {
         self.attributes.iter().find_map(Attribute::direction)
     }
 
-    /// The direction that applies to one stream: the stream's own, else the
-    /// session's, else `sendrecv` — "if there is no direction attribute at the
-    /// media or session level ... the stream is sendrecv by default"
-    /// (RFC 3264 §6.1).
+    /// The direction for one stream: its own, else the session's, else
+    /// `sendrecv` (RFC 3264 §6.1).
     #[must_use]
     pub fn direction_of(&self, media: &MediaDescription) -> Direction {
         media
@@ -378,12 +341,8 @@ impl SessionDescription {
         media.connection.as_ref().or(self.connection.as_ref())
     }
 
-    /// Whether this description asks for the RFC 3611 `voip-metrics` XR
-    /// block on one stream: RFC 3611 §5.1, "It is both a session and a
-    /// media level attribute ... Any media level specification MUST
-    /// replace a session level specification, if one is present, for
-    /// that media block" — so a stream with its own `a=rtcp-xr` line
-    /// (whatever it lists) never falls back to the session's.
+    /// Whether one stream asks for the RFC 3611 `voip-metrics` XR block. A
+    /// media-level `a=rtcp-xr` replaces the session one (§5.1), whatever it lists.
     #[must_use]
     pub fn wants_voip_metrics_xr(&self, media: &MediaDescription) -> bool {
         media.attribute("rtcp-xr").map_or_else(
@@ -405,7 +364,6 @@ impl SessionDescription {
 
 impl fmt::Display for SessionDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // "v=0", and the order below is the one §5 fixes
         f.write_str("v=0\r\n")?;
         write!(f, "{}", self.origin)?;
         write!(f, "s={}\r\n", self.name)?;
@@ -457,8 +415,7 @@ fn address_type_of(address: IpAddr) -> &'static str {
 mod tests {
     use super::Attribute;
 
-    /// A key that would open the media if it reached a log, written the way
-    /// RFC 4568 §9.1 writes one.
+    /// A key that would open the media if logged, in RFC 4568 §9.1 form.
     const KEY: &str =
         "1 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR|2^20|1:32";
 
@@ -475,8 +432,6 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
     }
 
-    /// The tag and the suite are what a reader needs when a negotiation has
-    /// gone wrong, and neither is secret.
     #[test]
     fn what_an_inline_key_keeps_is_what_a_reader_needs() {
         let printed = format!("{:?}", Attribute::with_value("crypto", KEY));
@@ -484,8 +439,6 @@ mod tests {
         assert!(printed.contains("AES_CM_128_HMAC_SHA1_80"), "{printed}");
     }
 
-    /// The short-term credential every connectivity check on the call is
-    /// signed with. A reader who has it can answer checks as either end.
     #[test]
     fn an_ice_password_does_not_reach_a_log() {
         let printed = format!("{:?}", Attribute::with_value("ice-pwd", PWD));
@@ -493,17 +446,15 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
     }
 
-    /// Only the password. A username fragment is carried in every check on
-    /// the wire and is how a reader tells one session's checks from another's.
+    /// A username fragment is not secret: it is on every check on the wire.
     #[test]
     fn a_username_fragment_is_not_a_secret_and_stays() {
         let printed = format!("{:?}", Attribute::with_value("ice-ufrag", "8hhY"));
         assert!(printed.contains("8hhY"), "{printed}");
     }
 
-    /// The redaction is on the name, so a description a peer sent is covered
-    /// as surely as one this stack wrote, and at whichever level it sits:
-    /// RFC 8839 §5.4 allows `a=ice-pwd` at the session level too.
+    /// Redaction goes by name, at either level: RFC 8839 §5.4 allows
+    /// `a=ice-pwd` at session level.
     #[test]
     fn an_ordinary_attribute_is_printed_as_it_was_read() {
         let printed = format!("{:?}", Attribute::with_value("rtpmap", "0 PCMU/8000"));

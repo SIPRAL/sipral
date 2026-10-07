@@ -9,9 +9,8 @@ use core::fmt;
 /// built from one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SdpError {
-    /// Bytes that are not UTF-8. RFC 4566 §5 makes the text ISO-10646 in
-    /// UTF-8 unless `a=charset` says otherwise, and that attribute is not
-    /// implemented here.
+    /// Bytes that are not UTF-8. RFC 4566 §5 requires UTF-8 unless
+    /// `a=charset` says otherwise, and that attribute is not implemented.
     NotUtf8,
     /// Nothing to read.
     Empty,
@@ -20,12 +19,8 @@ pub enum SdpError {
         /// Which line, counted from one.
         line: usize,
     },
-    /// A type letter that is not one of the fourteen §5 defines.
-    ///
-    /// The whole description is refused rather than the line: "The set of type
-    /// letters is deliberately small and not intended to be extensible — an
-    /// SDP parser MUST completely ignore any session description that contains
-    /// a type letter that it does not understand."
+    /// A type letter that is not one of the fourteen §5 defines. The whole
+    /// description is refused: §5 says a parser "MUST completely ignore" it.
     UnknownType {
         /// Which line, counted from one.
         line: usize,
@@ -90,8 +85,7 @@ pub enum SdpError {
         /// The bound that was exceeded.
         limit: u16,
     },
-    /// More `a=` lines than the configured bound in one section alone — the
-    /// session level, or one `m=` block.
+    /// More `a=` lines than the configured bound in one section alone.
     TooManyAttributesInSection {
         /// The bound that was exceeded.
         limit: u16,
@@ -108,8 +102,7 @@ pub enum SdpError {
         stream: usize,
     },
     /// Two descriptions of one session with different numbers of streams.
-    /// RFC 3264 §6 matches them up by position, so there is no way to tell
-    /// which stream is which.
+    /// RFC 3264 §6 matches streams by position.
     StreamMismatch {
         /// How many this end wrote.
         local: usize,
@@ -129,25 +122,19 @@ pub enum SdpError {
         stream: usize,
     },
     /// An `a=crypto` in one description that answers nothing in the other.
-    /// RFC 4568 §5.1.2 has the answer carry "the tag and crypto-suite from the
-    /// accepted crypto attribute in the offer", so a tag that was never
-    /// offered means the two ends are not talking about the same key.
+    /// RFC 4568 §5.1.2: the answer carries the tag of an offered attribute.
     CryptoNotOffered {
         /// Which stream, counted from zero.
         stream: usize,
     },
-    /// A stream on a secure profile that ended up with no keying material at
-    /// all. Sending in the clear because the keys did not arrive is the one
-    /// outcome worse than dropping the stream.
+    /// A stream on a secure profile that ended up with no keying material.
+    /// Sending in the clear would be worse than dropping the stream.
     CryptoMissing {
         /// Which stream, counted from zero.
         stream: usize,
     },
-    /// The far end sent back a master key we offered. RFC 4568 §7.1.2: "the
-    /// master key(s) included in the answer MUST be different from those in
-    /// the offer", because the default transform is insecure when one key
-    /// protects two streams — the same keystream would encrypt both
-    /// directions.
+    /// The far end sent back a master key we offered. RFC 4568 §7.1.2 forbids
+    /// it: one key on both directions reuses the keystream.
     CryptoKeyReused {
         /// Which stream, counted from zero.
         stream: usize,

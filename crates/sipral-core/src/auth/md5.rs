@@ -3,30 +3,23 @@
 
 //! MD5 (RFC 1321), because SIP digest was built on it.
 //!
-//! It is broken for signatures and has been for twenty years, and it is still
-//! what every SIP registrar on the planet challenges with. RFC 8760 adds the
-//! SHA-2 algorithms next to it, and this stack prefers those wherever the peer
-//! offers them — but a client that cannot answer an MD5 challenge cannot
-//! register anywhere.
+//! Broken for signatures, yet still what nearly every registrar challenges
+//! with. SHA-2 (RFC 8760) is preferred when offered, but without MD5 a
+//! client cannot register in most places.
 //!
-//! The table is `floor(2^32 * abs(sin(i + 1)))`, which is the definition in
-//! §3.4 rather than a magic list; the known-answer tests are what prove it was
-//! transcribed correctly.
+//! The table is `floor(2^32 * abs(sin(i + 1)))` as defined in §3.4; the
+//! known-answer tests check the transcription.
 //!
-//! What goes through here is a password — [`super::digest`] hashes an A1 that
-//! holds one — so the buffers the message is copied into are overwritten
-//! before the digest returns, the same best effort [`super::secret`] makes for
-//! the A1 itself.
+//! The input is an A1 holding a password, so the copies of the message are
+//! overwritten before returning, the same best effort as [`super::secret`].
 
 use super::secret::wipe;
 
 /// Where one digest writes the message it is reading.
 ///
-/// A named buffer rather than two locals, because what passes through here is
-/// the caller's secret: the A1 of RFC 3261 §22.4 is `user:realm:password`,
-/// shorter than one block, so the whole of it ends up in `tail` — and the
-/// words below are that same block read back as numbers. A type is what gives
-/// the overwrite one place to live and a test somewhere to look at it from.
+/// A named type so the wipe has one place. An A1 (`user:realm:password`) is
+/// shorter than a block, so all of it lands in `tail`, and `words` is that
+/// block read back as numbers.
 pub(super) struct Scratch {
     /// The last part-block, its padding, and the length field.
     tail: [u8; 128],
@@ -60,7 +53,7 @@ pub(super) fn md5(data: &[u8]) -> [u8; 16] {
     md5_in(data, &mut Scratch::new())
 }
 
-/// The same, in a buffer the caller owns and can read back.
+/// [`md5`] with a scratch buffer the caller owns and can inspect.
 fn md5_in(data: &[u8], scratch: &mut Scratch) -> [u8; 16] {
     let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 
@@ -90,8 +83,6 @@ fn md5_in(data: &[u8], scratch: &mut Scratch) -> [u8; 16] {
             compress(&mut state, chunk, &mut scratch.words);
         }
     }
-    // the message has been read; what is left of it here is a copy nobody
-    // needs and the digest below does not come from
     scratch.wipe();
 
     let mut out = [0_u8; 16];
@@ -218,12 +209,9 @@ mod tests {
 
     #[test]
     fn the_message_is_not_left_behind_in_the_buffers_it_was_read_into() {
-        // the A1 of RFC 3261 §22.4 is `user:realm:password`, and this is the
-        // level below the buffer that wipes itself: the last block of it is
-        // copied in here in the clear. Both lengths matter -- one that fits
-        // in a single block, and one long enough to go round the loop first.
-        // The digests are asserted against known answers rather than against
-        // this module, so a wipe that broke the hash could not pass
+        // an A1 is copied into this level in the clear. One length fits a
+        // single block, one goes round the loop first. Checked against known
+        // answers, so a wipe that broke the hash would fail
         for (message, expected) in [
             (
                 &b"alice:example.com:hunter2"[..],

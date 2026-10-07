@@ -25,38 +25,23 @@
 //! transport-padding := *LWSP-char
 //! ```
 //!
-//! The CRLF in front of a delimiter belongs to the delimiter, not to the part
-//! before it, so an SDP body that ends in CRLF comes back out ending in CRLF.
-//! A line that starts with the boundary but carries anything other than
-//! padding after it is not a delimiter, and is read as content. That is the
-//! grammar's reading; §5.1.1 forbids such a line in a part at all, and its
-//! note to implementors would take the boundary at the start of any line as
-//! a delimiter whatever follows it. No conforming sender writes one. The preamble
-//! and the epilogue are skipped, as §5.1.1 says they are. A body without the
-//! close delimiter is refused rather than guessed at: a part cut short by a
-//! lost segment is not a part.
+//! The CRLF before a delimiter belongs to the delimiter, so a body ending in
+//! CRLF keeps it. A line that starts with the boundary and carries more than
+//! padding is content, as the grammar reads it. Preamble and epilogue are
+//! skipped (§5.1.1). A body without its close delimiter is refused: a part
+//! cut short is not a part.
 //!
-//! **What a part is.** Its own `Content-Type` (absent, it is
-//! `text/plain; charset=us-ascii`, §5.1, except in a `multipart/digest`,
-//! where it is `message/rfc822`, §5.1.5), its own `Content-Disposition`
-//! (RFC 3261 §20.11) and its own `Content-ID` (RFC 2045 §7). A part whose
-//! type is itself `multipart` is read too, down to [`MultipartLimits`]'
-//! depth; every other header field of a part is kept as written and can be
-//! asked for by name.
+//! Each part has its own `Content-Type` (default `text/plain`, §5.1, or
+//! `message/rfc822` in a digest, §5.1.5), `Content-Disposition` (RFC 3261
+//! §20.11) and `Content-ID` (RFC 2045 §7). Nested multipart is read down to
+//! [`MultipartLimits`]' depth.
 //!
-//! **What a receiver has to refuse.** The `handling` parameter of a part's
-//! disposition says whether the part may be ignored (RFC 3261 §20.11,
-//! RFC 5621 §8.2). A part that is required and not understood makes the whole
-//! request one the user agent cannot process, and RFC 3261 §8.2.3 makes that a
-//! 415 (Unsupported Media Type). [`Multipart::check`] walks the tree and returns
-//! that part as an [`Unsupported`], whose status is the 415. The parts of a
-//! `multipart/alternative` are one choice rather than several bodies (RFC 2046
-//! §5.1.4): their own handling is not consulted, and the alternative as a
-//! whole fails only when none of them is understood.
+//! A required part that is not understood makes the request a 415 (RFC 3261
+//! §8.2.3, RFC 5621 §8.2); [`Multipart::check`] finds it. The parts of a
+//! `multipart/alternative` are one choice (RFC 2046 §5.1.4), which fails only
+//! when none is understood.
 //!
-//! **Writing one.** [`MultipartBuilder`] chooses a boundary that occurs
-//! nowhere in any part — not merely nowhere at the start of a line — so no
-//! part can end the body early whatever it holds.
+//! [`MultipartBuilder`] picks a boundary that occurs nowhere in any part.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -82,10 +67,8 @@ pub struct MultipartLimits {
 impl MultipartLimits {
     /// The defaults: 32 parts, 4 levels, 64 KiB, 16 fields per part.
     ///
-    /// The byte bound is the one a whole message is read within
-    /// ([`super::Limits::DEFAULT`]), so no body that arrived in a message is
-    /// refused for its size alone. A recording session's INVITE carries two
-    /// parts at one level (RFC 7866 §9.1); the rest is room.
+    /// The byte bound matches [`super::Limits::DEFAULT`], so no body that fit
+    /// in a message is refused for size alone.
     pub const DEFAULT: Self = Self {
         max_parts: 32,
         max_depth: 4,
@@ -235,11 +218,8 @@ impl<'a> DispositionRef<'a> {
         Params::split(self.raw).1
     }
 
-    /// The `handling` parameter.
-    ///
-    /// Absent, it is required (RFC 3261 §20.11). An `other-handling` value is
-    /// one this stack does not know the meaning of, and the only reading that
-    /// cannot lose a body the sender needed read is required.
+    /// The `handling` parameter. Absent or unknown, it is required (RFC 3261
+    /// §20.11): that reading never drops a body the sender needed.
     #[must_use]
     pub fn handling(&self) -> Handling {
         match self.params().get("handling") {
@@ -419,8 +399,7 @@ impl<'a> Multipart<'a> {
     }
 
     /// The part with this `Content-ID` at any level, depth first, compared
-    /// exactly: a `cid:` URL is resolved against it once its `cid:` prefix is
-    /// dropped and its %-escapes are undone (RFC 2392 §2).
+    /// exactly. Strip `cid:` and undo escapes first (RFC 2392 §2).
     #[must_use]
     pub fn by_content_id(&self, id: &[u8]) -> Option<&BodyPart<'a>> {
         self.parts.iter().find_map(|part| {
@@ -431,9 +410,8 @@ impl<'a> Multipart<'a> {
         })
     }
 
-    /// For `multipart/alternative`, the most preferred part this receiver
-    /// understands: the last one, since the parts come in increasing order of
-    /// preference (RFC 2046 §5.1.4). For any other subtype, the first.
+    /// For `multipart/alternative`, the last part, being the most preferred
+    /// (RFC 2046 §5.1.4). For any other subtype, the first.
     #[must_use]
     pub fn preferred(&self, understood: impl Fn(&BodyPart<'a>) -> bool) -> Option<&BodyPart<'a>> {
         match self.kind {
@@ -445,9 +423,8 @@ impl<'a> Multipart<'a> {
     /// Whether every part the sender requires is one this receiver
     /// understands (RFC 5621 §8.2 and §8.3; answered with the 415 of §8.4).
     ///
-    /// `understood` is asked about every part that is not itself multipart,
-    /// and can judge its type, its disposition or both. A nested multipart
-    /// part is checked by the same rule, one level down.
+    /// `understood` is asked about every non-multipart part. Nested multipart
+    /// parts follow the same rule.
     ///
     /// # Errors
     /// The part that cannot be processed. Answer the request with
@@ -461,8 +438,7 @@ impl<'a> Multipart<'a> {
         understood: &F,
     ) -> Result<(), Unsupported<'a>> {
         if self.kind == MultipartKind::Alternative {
-            // the handling of each alternative is not consulted: the choice
-            // as a whole is what the enclosing disposition makes required
+            // alternatives' own handling is not consulted
             let mut refused = None;
             for part in &self.parts {
                 match part_check(part, understood) {
@@ -623,11 +599,8 @@ impl Reader {
         depth: usize,
         in_digest: bool,
     ) -> Result<BodyPart<'a>, MultipartError> {
-        // body-part := MIME-part-headers [CRLF *OCTET]; the CRLF that ends
-        // the last field is part of that field, so a part with no fields
-        // starts with the separating CRLF, and a part with no content has no
-        // separating CRLF at all
-        // and every piece stays a span of the caller's bytes, empty or not
+        // body-part := MIME-part-headers [CRLF *OCTET]: a part with no fields
+        // starts with the separating CRLF
         let (headers, body) = if let Some(body) = raw.strip_prefix(b"\r\n") {
             (raw.get(..0).unwrap_or_default(), body)
         } else if let Some(at) = find(raw, b"\r\n\r\n") {
@@ -703,10 +676,8 @@ fn content_id(value: &[u8]) -> Result<&[u8], MultipartError> {
     Ok(id)
 }
 
-/// Where the first part starts: past the first delimiter line.
-///
-/// `dash` is `CRLF "--" boundary`. The first delimiter may open the body, in
-/// which case it has no CRLF of its own in front of it.
+/// Where the first part starts: past the first delimiter line, which may
+/// open the body without a CRLF of its own.
 fn opening(body: &[u8], dash: &[u8]) -> Result<usize, MultipartError> {
     let bare = dash.get(2..).unwrap_or_default();
     if body.starts_with(bare) {
@@ -737,8 +708,7 @@ fn next_delimiter(
         if let Some((end, close)) = after_boundary(body, at + dash.len()) {
             return Ok((at, end, close));
         }
-        // the boundary starts this line but more than padding follows it:
-        // content, not a delimiter
+        // boundary followed by more than padding: content
         search = at + 1;
     }
 }
@@ -783,8 +753,7 @@ fn valid_boundary(boundary: &[u8]) -> bool {
 
 type Field<'a> = (&'a [u8], &'a [u8]);
 
-/// The next `name: value` field of a part's header section, with any fold
-/// inside the value, and what follows it.
+/// The next `name: value` field of a part header, folds included.
 fn next_field(rest: &[u8]) -> Result<Option<(Field<'_>, &[u8])>, MultipartError> {
     if rest.is_empty() {
         return Ok(None);
@@ -915,8 +884,7 @@ impl BuiltMultipart {
     }
 }
 
-/// How many boundaries are tried before the builder gives up. Each is 64 bits
-/// drawn from the content, so a second attempt is already one in 2^64.
+/// Boundaries tried before giving up. Each is 64 bits drawn from the content.
 const BOUNDARY_ATTEMPTS: u64 = 16;
 
 impl<'a> MultipartBuilder<'a> {
@@ -952,10 +920,9 @@ impl<'a> MultipartBuilder<'a> {
     /// Write the body.
     ///
     /// # Errors
-    /// [`MultipartError::NoParts`] with no part, [`MultipartError::IllegalValue`]
-    /// for a subtype, type, disposition or content ID that cannot be written,
-    /// and [`MultipartError::NoBoundaryAvailable`] if every boundary tried
-    /// occurs in some part.
+    /// [`MultipartError::NoParts`], [`MultipartError::IllegalValue`] for a value
+    /// that cannot be written, [`MultipartError::NoBoundaryAvailable`] if every
+    /// candidate occurs in some part.
     pub fn build(&self) -> Result<BuiltMultipart, MultipartError> {
         if self.parts.is_empty() {
             return Err(MultipartError::NoParts);
@@ -1181,7 +1148,6 @@ Content-ID: <meta@example.com>\r\n\
             refused.to_string(),
             "required body part message/rfc822 is not understood"
         );
-        // and everywhere else it stays text/plain
         let mixed = read(b"multipart/mixed;boundary=b", body).expect("a body");
         assert!(mixed.parts().first().is_some_and(|p| p.is("text", "plain")));
     }
@@ -1225,7 +1191,6 @@ Content-ID: <meta@example.com>\r\n\
         let part = parsed.parts().first().expect("a part");
         assert!(part.is("text", "plain"));
         assert!(part.body().is_empty());
-        // still a span of the input, not an empty slice from elsewhere
         let input = body.as_ptr_range();
         let span = part.body().as_ptr_range();
         assert!(input.start <= span.start && span.end <= input.end);
@@ -1603,8 +1568,7 @@ new\r\n\
 
     #[test]
     fn a_long_run_of_empty_parameters_does_not_exhaust_the_stack() {
-        // a part's Content-Type of one type and 60 000 empty parameters: the
-        // boundary lookup walks every one of them
+        // 60 000 empty parameters on one part
         let mut body = b"--b\r\nContent-Type: multipart/mixed".to_vec();
         body.extend(std::iter::repeat_n(b';', 60_000));
         body.extend_from_slice(b"\r\n\r\nx\r\n--b--");
@@ -1627,8 +1591,7 @@ new\r\n\
             b"x",
             b"\r",
         ];
-        // every sequence of four pieces: a cheap exhaustive sweep of the
-        // shapes the delimiter scanner has to tell apart
+        // every sequence of four pieces, exhaustively
         for a in pieces {
             for b in pieces {
                 for c in pieces {

@@ -3,34 +3,25 @@
 
 //! The INVITE server transaction (RFC 3261 §17.2.1, RFC 6026 §8.1).
 //!
-//! The answering side. Four things here are the ones that go wrong.
+//! A 100 Trying goes out at once. The RFC allows skipping it if the user is
+//! known to answer within 200 ms, but only the user knows that. The 100
+//! "quenches request retransmissions"; a redundant one costs one datagram, a
+//! missing one six retransmitted INVITEs.
 //!
-//! A 100 Trying goes out immediately. The RFC lets a transaction skip it if it
-//! *knows* the user will answer within 200 ms, but the transaction layer never
-//! knows that — only the user does — and the 100 is what "quenches request
-//! retransmissions rapidly in order to avoid network congestion". A redundant
-//! 100 costs one datagram; a missing one costs six retransmitted INVITEs.
+//! A 2xx moves to `Accepted` (RFC 6026) for timer L, where INVITE
+//! retransmissions are absorbed. §13.3.1.4 has the user retransmit the 2xx
+//! until the ACK; this machine does it for the user on timer G's schedule,
+//! since otherwise a 2xx lost on UDP leaves the caller ringing. The ACK stops
+//! it, whether it reaches this transaction or arrives on its own branch
+//! (§17.1.1.3) at the dialog, which then tells the transaction. A fresh copy
+//! from the user is still sent.
 //!
-//! A 2xx does not end this transaction either. RFC 6026 puts it in `Accepted`
-//! for timer L, where retransmissions of the INVITE are absorbed rather than
-//! answered again — the far end is retransmitting because it has not seen the
-//! 2xx. §13.3.1.4 has the user retransmit that 2xx until the ACK arrives, and
-//! this machine does it on the user's behalf, on timer G's schedule, because
-//! every layer above would otherwise have to and none did: a 2xx lost on UDP
-//! left the caller ringing until it gave up. The ACK stops it, whether it
-//! reaches this transaction or, sent under a branch of its own as §17.1.1.3
-//! has it, the dialog, which tells the transaction. A fresh copy the user
-//! passes down is still sent as it comes.
+//! After a non-2xx final response the ACK is the transaction's own: it moves
+//! to `Confirmed` and the user never sees it. After a 2xx it is the dialog's
+//! and "MUST be passed directly to the TU and not absorbed" (RFC 6026).
 //!
-//! An ACK means two different things depending on where the machine is. After
-//! a non-2xx final response it is the transaction's own, and it moves to
-//! `Confirmed` without the user ever seeing it. After a 2xx it belongs to the
-//! dialog, and RFC 6026 says it "MUST be passed directly to the TU and not
-//! absorbed".
-//!
-//! And a final response that is not a 2xx *is* retransmitted here, by timer G,
-//! doubling up to T2 — but only on an unreliable transport. RFC 2543
-//! retransmitted over TCP too; RFC 3261 stopped.
+//! Non-2xx final responses are retransmitted by timer G, doubling up to T2,
+//! on unreliable transports only.
 
 use std::time::Instant;
 
@@ -43,9 +34,8 @@ use super::timer::{TimerConfig, TimerName};
 #[derive(Debug)]
 pub(crate) struct InviteServerMachine {
     state: InviteServerState,
-    /// The last thing sent, which is what a retransmitted INVITE gets back:
-    /// the most recent provisional while proceeding, the final response after
-    /// that.
+    /// The last thing sent, which a retransmitted INVITE gets back: the latest
+    /// provisional, then the final response.
     last_response: Option<OwnedMessage>,
     config: TimerConfig,
     reliable: bool,
@@ -54,9 +44,8 @@ pub(crate) struct InviteServerMachine {
     timer_h: Option<Instant>,
     timer_i: Option<Instant>,
     timer_l: Option<Instant>,
-    /// Whether the ACK for a 2xx arrived. §13.3.1.4 has the user send a BYE
-    /// when it never does, and timer L running out is the only moment anyone
-    /// can know that.
+    /// Whether the ACK for a 2xx arrived. If timer L expires without it the
+    /// user is told, so it can send the BYE §13.3.1.4 asks for.
     acked: bool,
 }
 
@@ -68,9 +57,7 @@ impl InviteServerMachine {
         config: TimerConfig,
         _now: Instant,
     ) -> (Self, Effects) {
-        // "constructed according to the procedures in Section 8.2.6, except
-        // that the insertion of tags in the To header field ... is downgraded
-        // from MAY to SHOULD NOT" — so no tag here
+        // §17.2.1: no To tag on the 100 ("downgraded from MAY to SHOULD NOT")
         let trying = ResponseBuilder::for_request(request, StatusCode::TRYING)
             .build()
             .ok();
@@ -130,14 +117,12 @@ impl InviteServerMachine {
     /// A retransmission of the INVITE arrived.
     pub(crate) fn on_request(&mut self) -> Effects {
         match self.state {
-            // the most recent provisional, or the final response: whatever was
-            // last sent is what the far end failed to hear
+            // whatever was sent last is what the far end missed
             InviteServerState::Proceeding | InviteServerState::Completed => Effects {
                 send: self.last_response.clone(),
                 ..Effects::default()
             },
-            // RFC 6026 8.1: absorbed, and not passed to the user. The user is
-            // the one retransmitting the 2xx
+            // RFC 6026 8.1: absorbed; the user is retransmitting the 2xx
             InviteServerState::Accepted
             | InviteServerState::Confirmed
             | InviteServerState::Terminated => Effects::default(),
@@ -148,8 +133,8 @@ impl InviteServerMachine {
     pub(crate) fn on_ack(&mut self, now: Instant) -> Effects {
         match self.state {
             InviteServerState::Completed => {
-                // the transaction's own ACK: timer G stops, and Confirmed sits
-                // out the retransmissions of it
+                // the transaction's own ACK: timer G stops, and Confirmed
+                // absorbs its retransmissions
                 self.state = InviteServerState::Confirmed;
                 self.timer_g = None;
                 self.timer_h = None;
@@ -173,10 +158,10 @@ impl InviteServerMachine {
         }
     }
 
-    /// The dialog took the ACK to this transaction's 2xx, which arrived under
-    /// a branch of its own and so never reached [`Self::on_ack`]: the 2xx
-    /// stops going out again, and timer L ends the transaction quietly
-    /// rather than as a 2xx nobody acknowledged.
+    /// The dialog took the ACK for this 2xx (it arrived on its own branch, so
+    /// never reached [`Self::on_ack`]). The 2xx stops being resent, and timer
+    /// L ends the transaction quietly instead of reporting an unacknowledged
+    /// 2xx.
     pub(crate) const fn acknowledged_elsewhere(&mut self) {
         if matches!(self.state, InviteServerState::Accepted) {
             self.acked = true;
@@ -217,8 +202,7 @@ impl InviteServerMachine {
         }
         if self.timer_l == Some(due) {
             // §13.3.1.4: "If the UAS generates a 2xx response and never
-            // receives an ACK, it SHOULD generate a BYE" — which the user can
-            // only do if it is told, and this is the moment it can be
+            // receives an ACK, it SHOULD generate a BYE". The user is told now.
             let acked = self.acked;
             self.terminate();
             return Some((
@@ -239,10 +223,9 @@ impl InviteServerMachine {
 
     /// The transport could not deliver a response.
     ///
-    /// The machine stays where it is: RFC 6026 §8.2 says a server transaction
-    /// "MUST NOT discard transaction state based only on encountering a
-    /// non-recoverable transport error", because the far end may still be
-    /// reachable by another route and the timers will end it anyway.
+    /// The state stays: RFC 6026 §8.2 says a server transaction "MUST NOT
+    /// discard transaction state based only on encountering a non-recoverable
+    /// transport error". The timers end it.
     pub(crate) fn on_transport_error(&self) -> Effects {
         if self.state == InviteServerState::Terminated {
             return Effects::default();
@@ -269,8 +252,8 @@ impl InviteServerMachine {
         if status.is_success() {
             self.state = InviteServerState::Accepted;
             self.timer_l = Some(now + self.config.sixty_four_t1());
-            // §13.3.1.4: the 2xx goes again, T1 doubling up to T2, until its
-            // ACK arrives; over a reliable transport the transport sees to it
+            // §13.3.1.4: resend the 2xx, T1 doubling up to T2, until the ACK;
+            // a reliable transport handles it itself
             self.attempt = 0;
             self.timer_g =
                 (!self.reliable).then(|| now + self.config.retransmit(0, Some(self.config.t2)));
@@ -399,8 +382,7 @@ Content-Length: 0\r\n\
         assert!(absorbed.send.is_none(), "not answered again");
         assert!(absorbed.notify.is_none(), "and not passed up");
 
-        // a fresh copy the user passes down goes on the wire, and the
-        // machine stays where it is
+        // a fresh copy from the user is sent, and the state stays
         let again = machine.respond(response(200), now);
         assert!(again.send.is_some());
         assert_eq!(machine.state(), InviteServerState::Accepted);
@@ -470,7 +452,7 @@ Content-Length: 0\r\n\
     #[test]
     fn a_2xx_that_is_never_acknowledged_says_so_when_the_wait_runs_out() {
         // 13.3.1.4: "If the UAS generates a 2xx response and never receives an
-        // ACK, it SHOULD generate a BYE" — which needs somebody to be told
+        // ACK, it SHOULD generate a BYE", so the user must be told
         let (mut machine, _, now, config) = start(false);
         machine.respond(response(200), now);
         let mut fired = Vec::new();
@@ -560,8 +542,7 @@ Content-Length: 0\r\n\
         let (name, effects) = last.expect("timer H");
         assert_eq!(name, TimerName::H);
         // §17.2.1: "timer H MUST be set to fire in 64*T1 seconds for all
-        // transports" when the response takes the transaction to Completed;
-        // 32 s at the default T1 of 500 ms
+        // transports"; 32 s at the default T1
         assert_eq!(when - now, Duration::from_secs(32), "timer H fired then");
         assert_eq!(effects.notify, Some(Notify::TimedOut));
         assert!(effects.terminated);

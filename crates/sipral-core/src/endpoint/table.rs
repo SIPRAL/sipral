@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The transports the caller has opened, and what the endpoint remembers
-//! about each.
-//!
-//! Three things per transport, and each earns its place. The protocol,
-//! because everything the RFCs make conditional on the transport is derived
-//! from it. The local address, because that is what goes into `sent-by` and
-//! the caller is the only one who knows which of its addresses the far end
-//! can reach. And, on a byte stream, a framer: RFC 3261 §18.3 makes
-//! `Content-Length` the only way to find where a message ends, and a read off
-//! a socket has no relationship to a message boundary.
+//! The transports the caller has opened: protocol, local address (for
+//! `sent-by`), and on a byte stream a framer, since RFC 3261 §18.3 makes
+//! `Content-Length` the only message boundary.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -23,20 +16,16 @@ use crate::transaction::TimerHandle;
 /// Where a message goes, and where it goes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Flow {
-    /// The transport to write to.
     pub(crate) transport: TransportId,
-    /// The address to write to. A connected transport has only one, and
-    /// carries it anyway so that a log line says where a message went.
+    /// The address to write to, kept on connected transports too for logging.
     pub(crate) destination: SocketAddr,
-    /// The local address a request arrived on, for the responses that have to
-    /// go back out of it (RFC 3581 §4). `None` on a flow we started.
+    /// The local address a request arrived on, for responses that must leave
+    /// from it (RFC 3581 §4). `None` on a flow we started.
     pub(crate) source: Option<SocketAddr>,
-    /// What that transport speaks.
     pub(crate) protocol: TransportProtocol,
 }
 
 impl Flow {
-    /// The bytes, addressed.
     pub(crate) fn transmit(&self, payload: Arc<[u8]>) -> Transmit {
         Transmit {
             transport: self.transport,
@@ -51,60 +40,40 @@ impl Flow {
 /// One open transport.
 #[derive(Debug)]
 pub(crate) struct Bound {
-    /// What it speaks.
     pub(crate) protocol: TransportProtocol,
     /// The address to advertise as `sent-by`.
     pub(crate) local: SocketAddr,
-    /// The far end, for a connection.
     pub(crate) remote: Option<SocketAddr>,
-    /// A name advertised as `sent-by` instead of `local`, when the layer
-    /// above set one: a WebSocket client's `.invalid` host (RFC 7118
-    /// Appendix B.1). Cleared by every bind.
+    /// A `sent-by` name overriding `local`, such as a WebSocket `.invalid` host
+    /// (RFC 7118 Appendix B.1). Cleared by every bind.
     pub(crate) sent_by: Option<Box<str>>,
-    /// Reassembly, on a byte stream only.
     pub(crate) framer: Option<StreamFramer>,
-    /// The keep-alive scheduled for this connection, so that losing the
-    /// connection can take its deadline down with it rather than leaving one
-    /// to fire on a transport that is gone.
+    /// The keep-alive deadline, cancelled when the connection goes.
     pub(crate) keepalive: Option<TimerHandle>,
-    /// When the pong for a ping already sent stops being late and starts
-    /// meaning the flow is dead (RFC 5626 §4.4.1). Armed by the ping, cancelled
-    /// by the answer.
+    /// Pong deadline after a ping (RFC 5626 §4.4.1).
     pub(crate) pong: Option<TimerHandle>,
-    /// Whether the far end has answered a ping on this connection at least
-    /// once. RFC 5626 §4.4: a UA that did not register with outbound "cannot
-    /// expect a CRLF in response (a \"pong\") unless the UA has an explicit
-    /// indication that CRLF keep-alives are supported", and a pong already
-    /// received is that indication. Until then the pings go (RFC 3261 §7.5
-    /// allows them on any stream) and no deadline hangs on their answer.
+    /// Whether the far end has answered a ping at least once. RFC 5626 §4.4:
+    /// without outbound, only a pong already seen justifies expecting one.
+    /// Until then pings still go (RFC 3261 §7.5) with no deadline.
     pub(crate) answers_pings: bool,
 }
 
 /// Every transport the caller has told the endpoint about.
 #[derive(Debug, Default)]
 pub(crate) struct Transports {
-    /// Ordered rather than hashed, so that "any transport speaking TCP"
-    /// answers with the same one twice running and a test can assert on it.
+    /// Ordered, so "any TCP transport" is deterministic.
     open: BTreeMap<TransportId, Bound>,
 }
 
 impl Transports {
-    /// An endpoint with no transports yet.
     pub(crate) const fn new() -> Self {
         Self {
             open: BTreeMap::new(),
         }
     }
 
-    /// Take a transport the caller has opened.
-    ///
-    /// Binding an identifier that is already in use replaces what was there:
-    /// the caller has reused the name, and the bytes half-read on the old
-    /// connection belong to a connection that is gone.
-    ///
-    /// The entry that was replaced is handed back rather than dropped. It
-    /// carries the keep-alive and pong timer handles of the connection that
-    /// is gone, and only the caller holds the schedule they were hung on.
+    /// Take a transport the caller has opened. Reusing an id replaces the entry,
+    /// which is returned because it owns timer handles only the caller can cancel.
     #[must_use = "the entry that was replaced owns the keepalive and pong timer handles"]
     pub(crate) fn bind(
         &mut self,
@@ -131,7 +100,6 @@ impl Transports {
         )
     }
 
-    /// Forget a transport that has closed or failed.
     pub(crate) fn unbind(&mut self, transport: TransportId) -> Option<Bound> {
         self.open.remove(&transport)
     }
@@ -141,30 +109,18 @@ impl Transports {
         self.open.values().next().map(|bound| bound.local)
     }
 
-    /// What is known about a transport.
     pub(crate) fn get(&self, transport: TransportId) -> Option<&Bound> {
         self.open.get(&transport)
     }
 
-    /// What is known about a transport, mutably.
     pub(crate) fn get_mut(&mut self, transport: TransportId) -> Option<&mut Bound> {
         self.open.get_mut(&transport)
     }
 
-    /// A transport speaking `protocol` that can carry a message to
-    /// `destination`, if the caller has opened one.
-    ///
-    /// Used for the §18.1.1 switch away from a datagram: a request that has
-    /// grown too large has to leave over something congestion controlled, and
-    /// this is where the endpoint finds out whether it can.
-    ///
-    /// The destination is part of the question, not a filter applied to the
-    /// answer. A byte stream is connected, so one bound to a different far
-    /// end cannot carry this; picking a transport first and rejecting it
-    /// afterwards would report that nothing speaks the protocol whenever some
-    /// other connection happened to be opened earlier, and a caller that
-    /// opens what is asked for would then be asked for it again, forever. An
-    /// unconnected stream transport (`remote` is `None`) can reach anywhere.
+    /// A transport speaking `protocol` that can reach `destination` (used for
+    /// the §18.1.1 switch to a stream). The destination is part of the search:
+    /// a connected stream to another peer cannot carry this, and filtering after
+    /// picking would keep asking the caller for a transport it already opened.
     pub(crate) fn speaking_to(
         &self,
         protocol: TransportProtocol,
@@ -179,9 +135,8 @@ impl Transports {
             .map(|(id, _)| *id)
     }
 
-    /// Every open transport that needs a keep-alive timer, which is every
-    /// byte stream (RFC 5626 §4.4.1: "MUST only be used with connection
-    /// oriented transports").
+    /// Every byte stream still lacking a keep-alive timer (RFC 5626 §4.4.1:
+    /// connection-oriented only).
     pub(crate) fn streams_without_keepalive(&self) -> Vec<TransportId> {
         self.open
             .iter()
@@ -215,7 +170,6 @@ mod tests {
 
     #[test]
     fn a_datagram_transport_gets_no_framer_and_a_stream_does() {
-        // one message per datagram, so there is nothing to reassemble
         let mut table = Transports::new();
         bind(&mut table, 1, TransportProtocol::Udp);
         bind(&mut table, 2, TransportProtocol::Tcp);
@@ -225,7 +179,7 @@ mod tests {
 
     #[test]
     fn a_websocket_transport_gets_no_framer_either() {
-        // RFC 7118 4.2 puts exactly one SIP message in each WebSocket message
+        // RFC 7118 §4.2: one SIP message per WebSocket message
         let mut table = Transports::new();
         bind(&mut table, 1, TransportProtocol::Wss);
         assert!(table.get(TransportId(1)).unwrap().framer.is_none());
@@ -233,8 +187,6 @@ mod tests {
 
     #[test]
     fn binding_the_same_name_twice_replaces_what_was_there() {
-        // the caller reused the identifier, so the bytes half-read on the old
-        // connection belong to a connection that no longer exists
         let mut table = Transports::new();
         bind(&mut table, 1, TransportProtocol::Tcp);
         table
@@ -256,8 +208,7 @@ mod tests {
             11
         );
 
-        // and what was there comes back, because it owns the two timer
-        // handles and only the driver holds the schedule they are on
+        // the replaced entry comes back with its timer handles
         let mut timers = Timers::<()>::new();
         let armed = timers.schedule(Instant::now(), ());
         table.get_mut(TransportId(1)).unwrap().pong = Some(armed);
@@ -293,8 +244,6 @@ mod tests {
         assert_eq!(table.speaking_to(TransportProtocol::Tcp, anywhere), None);
         bind(&mut table, 5, TransportProtocol::Tcp);
         bind(&mut table, 7, TransportProtocol::Tcp);
-        // neither is connected, so either would carry this; the same one
-        // twice running, so a test can assert on it
         assert_eq!(
             table.speaking_to(TransportProtocol::Tcp, anywhere),
             Some(TransportId(5))
@@ -307,12 +256,7 @@ mod tests {
 
     #[test]
     fn a_stream_connected_somewhere_else_is_not_the_one_to_use() {
-        // The failure this guards against is not theoretical: one connected
-        // stream to a registrar used to hide every other stream, because the
-        // lowest id was picked first and only then measured against the
-        // destination. A request to anyone else then reported that nothing
-        // speaks TCP, however many connections were open, and a caller that
-        // opened what was asked for was asked for it again.
+        // regression: a stream connected to the registrar used to hide all others
         let mut table = Transports::new();
         let registrar = addr("198.51.100.9:5060");
         let far_end = addr("203.0.113.4:5060");

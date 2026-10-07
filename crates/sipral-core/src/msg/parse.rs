@@ -13,8 +13,7 @@ use super::span::{HeaderSlot, ParseScratch, Span};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseMode {
     /// Accept anything that can be understood. The default for received
-    /// traffic: real deployments emit malformed messages daily, and a stack
-    /// that rejects them loses calls a competitor completes.
+    /// traffic, where malformed messages are routine.
     Lenient,
     /// Reject anything that does not conform. Used for our own output and for
     /// the RFC 4475 corpus.
@@ -39,20 +38,11 @@ pub struct Limits {
 impl Limits {
     /// The defaults: 64 KiB, 128 headers, 16 KiB per value.
     ///
-    /// The message bound is the largest UDP payload there is, so no datagram
-    /// is refused for its size alone and a stream carries nothing a datagram
-    /// could not. The value bound is sized against the longest fields real
-    /// traffic carries on one line, not against a typical call: an RFC 8224
-    /// `Identity` carrying a full PASSporT with rich call data (RFC 9795),
-    /// icons and a jCard inline, runs to several kilobytes; a `History-Info`
-    /// (RFC 7044) that has been through a few dozen retargets, each entry
-    /// with its escaped `Reason`, comes to about as much; and a display name
-    /// is whatever the caller's switch put there. Sixteen kilobytes holds
-    /// each of those with room to spare while still being a quarter of the
-    /// message, so one field cannot claim all of it. Every value is a span
-    /// into the message buffer rather than a copy, so this bound costs no
-    /// memory of its own; what it limits is how much of one message any
-    /// single field's reader has to walk.
+    /// 64 KiB is the largest UDP payload, so no datagram is refused for size
+    /// alone. 16 KiB per value holds the longest real fields (an RFC 8224
+    /// `Identity` with RFC 9795 rich call data, a long RFC 7044 `History-Info`)
+    /// while keeping one field to a quarter of the message. Values are spans,
+    /// so the bound costs no memory; it limits how far one reader walks.
     pub const DEFAULT: Self = Self {
         max_message_bytes: 65_535,
         max_headers: 128,
@@ -194,33 +184,20 @@ pub fn parse_with_limits<'a>(
     })
 }
 
-/// What a request the parser refused still says about where an answer goes:
-/// its request line and the five fields every response copies from it —
-/// `Via`, `From`, `To`, `Call-ID` and `CSeq` (RFC 3261 §8.2.6.2) — and
-/// nothing else.
+/// What a refused request still says about where an answer goes: its
+/// request line and `Via`, `From`, `To`, `Call-ID`, `CSeq` (RFC 3261
+/// §8.2.6.2).
 ///
-/// For a message [`parse_with_limits`] refused, so that the refusal can be
-/// answered rather than left for the client to retransmit into until its
-/// timer gives up (§8.2: a UAS answers what it cannot process; §21.4.1 and
-/// §21.5.14 say with what). Every other field is passed over unread, which is
-/// what makes the answer possible when the one past a bound is one nobody
-/// needs to answer; a field the answer does copy is kept whole whatever its
-/// length, because an answer that changed it would answer nobody.
+/// Lets a message [`parse_with_limits`] refused be answered (§8.2, §21.4.1,
+/// §21.5.14) instead of retransmitted until timeout. Other fields are
+/// skipped unread; these five are kept whole whatever their length, since a
+/// changed copy answers nobody.
 ///
-/// Bounded like the parser is: one pass over `buf`, no allocation beyond the
-/// index in `scratch`, and at most `max_fields` of the five kept. Returns
-/// `None` when `buf` does not start with a request line, and when more than
-/// `max_fields` of them are there, since an answer missing a `Via` would be
-/// routed to the wrong place. A field whose line holds a CR that ends no line
-/// is left out rather than copied, for the reason [`parse_with_limits`]
-/// refuses one: no header line can be written with it. A `Via` like that is
-/// `None` for the same reason as a missing one: the `Via` below it would
-/// route the answer. Headers that never end are read as far as they go.
-///
-/// A field kept whole is kept past every bound, and that includes the `Via`
-/// an answer is routed by: whoever answers from this decides whether a top
-/// `Via` longer than [`Limits::max_header_value_bytes`] gets a say in where
-/// the answer goes (the endpoint's answer does not).
+/// One pass, no allocation beyond `scratch`. Returns `None` when `buf` is
+/// not a request, when more than `max_fields` fields are found, or when a
+/// `Via` holds a stray CR: the next `Via` down would misroute the answer.
+/// Other fields with a stray CR are dropped. The caller decides whether an
+/// oversized top `Via` may route the answer.
 #[must_use]
 pub fn salvage_request<'a>(
     buf: &'a [u8],
@@ -275,8 +252,7 @@ pub fn salvage_request<'a>(
             continue;
         }
         if !writable {
-            // a `Via` left out moves the one below it to the top, and the
-            // answer would go where that hop's `Via` says instead
+            // dropping a Via would route the answer to the hop below
             if field == Some(HeaderName::Via) {
                 return None;
             }
@@ -309,9 +285,8 @@ pub fn salvage_request<'a>(
 /// way [`parse_with_limits`] reads them, for a message that was refused for
 /// something else.
 ///
-/// A stream is framed on nothing else (§18.3), so this is what decides
-/// whether a refused message can be passed over and the connection read on,
-/// or whether the framing is lost with it.
+/// A stream is framed on nothing else (§18.3): this decides whether the
+/// connection can be read on past a refused message.
 ///
 /// # Errors
 /// [`ParseError::UnterminatedHeaders`] while the head has not ended,
@@ -365,9 +340,8 @@ pub(crate) fn declared_length(buf: &[u8]) -> Result<(usize, u32), ParseError> {
     Ok((pos, declared))
 }
 
-/// How long the value of the field whose name starts at `name_at` is, folds
-/// included and surrounding whitespace not: the number
-/// [`ParseError::HeaderValueTooLong`] measured against its bound.
+/// Length of the value starting at `name_at`, folds included, outer
+/// whitespace not: what [`ParseError::HeaderValueTooLong`] measures.
 #[must_use]
 pub(crate) fn field_value_len(buf: &[u8], name_at: u32) -> Option<usize> {
     let (line, mut pos) = read_line(buf, name_at as usize, ParseMode::Lenient)?;
@@ -500,14 +474,11 @@ fn read_line(buf: &[u8], from: usize, mode: ParseMode) -> Option<(Span, usize)> 
     }
 }
 
-/// Whether a line, terminator already cut off, still holds a CR.
+/// Whether a line, terminator cut off, still holds a CR.
 ///
-/// RFC 3261 §25.1 has a CR in the head of a message only as half of a CRLF,
-/// which ends a line or begins a fold, and `quoted-pair` leaves %x0D out, so
-/// one anywhere else has no reading in either mode. It is refused rather than
-/// kept because it could never be written back: every response copies `Via`,
-/// `From`, `To`, `Call-ID` and `CSeq`, and a header line cannot hold the byte,
-/// so a request carrying one would sit unanswered for good.
+/// RFC 3261 §25.1 allows a CR in the head only as half of a CRLF, and
+/// `quoted-pair` excludes %x0D. Refused because no response could copy the
+/// field back.
 fn holds_a_lone_cr(buf: &[u8], line: Span) -> bool {
     line.slice(buf).contains(&b'\r')
 }
@@ -632,11 +603,7 @@ v=0\n";
 
     #[test]
     fn a_cr_that_ends_no_line_and_begins_no_fold_is_refused() {
-        // §25.1: a CR in the head of a message is half of a CRLF, which ends a
-        // line or begins a fold, and `quoted-pair` leaves %x0D out, so a lone
-        // one has no reading. Taken in anyway, it is a message nobody can
-        // answer: every response copies Via, From, To, Call-ID and CSeq, and
-        // no header line can be written with that byte in it
+        // §25.1: a lone CR has no reading, and no response could copy it back
         let mut accepted: Vec<String> = Vec::new();
         for message in [
             &b"INVITE sip:bob@example.com SIP/2.0\r\nFrom: <sip:a@example.com>;x=a\rb;tag=1\r\n\r\n"[..],
@@ -870,9 +837,7 @@ v=0\n";
 
     #[test]
     fn a_from_carrying_thousands_of_bytes_of_display_name_is_read() {
-        // the headless audit's INVITEs: display names of 6000 and 9000 bytes
-        // drew no answer at all, because the one field was past the bound on a
-        // single value and the whole request was refused
+        // display names of 6000 and 9000 bytes used to get no answer at all
         for length in [6_000, 9_000] {
             let message = format!(
                 "INVITE sip:bob@example.com SIP/2.0\r\n\
@@ -962,9 +927,8 @@ CSeq: 1\r\n OPTIONS\r\n\
         use crate::msg::HeaderError;
         const PLAIN_FROM: &str = "<sip:alice@example.com>;tag=a1";
         const PLAIN_TO: &str = "<sip:bob@example.com>";
-        // §25.1: tag-param = "tag" EQUAL token. Whatever tag these accessors
-        // hand out is written back after ";tag=" by the dialog, so a value that
-        // is not a token there is a parameter or an address the peer added
+        // §25.1: tag-param = "tag" EQUAL token; the dialog writes it back after
+        // ";tag=", so anything else is refused
         let message = |from: &str, to: &str| {
             format!("OPTIONS sip:bob@example.com SIP/2.0\r\nFrom: {from}\r\nTo: {to}\r\n\r\n")
                 .into_bytes()
@@ -1000,8 +964,7 @@ CSeq: 1\r\n OPTIONS\r\n\
         }
         assert!(accepted.is_empty(), "read as a tag: {accepted:#?}");
 
-        // while a token in quotes, which is not the grammar but reads as one
-        // value, is still the token it holds
+        // a quoted token still reads as the token
         let bytes = message("<sip:alice@example.com>;tag=\"a1\"", PLAIN_TO);
         let mut scratch = ParseScratch::new();
         assert_eq!(
@@ -1196,8 +1159,7 @@ Call-ID: c\r\nCSeq: 8 INVITE\r\n\r\n",
 
     #[test]
     fn every_challenge_line_is_its_own_challenge() {
-        // RFC 8760 2.3: several algorithms, most preferred first, one line
-        // each — joining them would make a value the grammar cannot read back
+        // RFC 8760 2.3: one algorithm per line, joined would not parse back
         let mut scratch = ParseScratch::new();
         let m = ok(
             b"SIP/2.0 401 Unauthorized\r\n\

@@ -13,23 +13,12 @@
 //! route-param   =  name-addr *( SEMI rr-param )
 //! ```
 //!
-//! `name-addr`, not `(name-addr / addr-spec)`. Unlike `Contact`, `From` and
-//! `To`, a route entry has no bracket-less form: `Route: sip:p1.example.com;lr`
-//! is not a lenient spelling of anything, it is a field with no way to tell a
-//! URI parameter from a header parameter, and that distinction is the whole
-//! job here.
-//!
-//! Which is the second trap. `;lr` inside the brackets is the `lr-param` of
-//! §19.1.1 and marks a loose router; `;lr` after the `>` is an ordinary
-//! `rr-param` that happens to be spelled the same and marks nothing. So
-//! `<sip:p1.example.com>;lr` denotes a *strict* router, and §12.2.1.1 and
-//! §16.6 both branch on it: a stack that looks for the text `lr` anywhere in
-//! the value skips the rewrite and sends the request to the wrong Request-URI.
-//! Parameter names are case-insensitive (§7.3.1), so `;LR` counts.
-//!
-//! Order is data. RFC 3261 §7.3.1 gives three `Route` rows and says that the
-//! same three entries in a different order are "valid but not equivalent", so
-//! nothing here sorts, dedupes or normalises.
+//! Only `name-addr`: a route entry has no bracket-less form, since without
+//! brackets URI and header parameters cannot be told apart. `;lr` inside the
+//! brackets marks a loose router (§19.1.1); after the `>` it marks nothing, so
+//! `<sip:p1.example.com>;lr` is a strict router (§12.2.1.1, §16.6). Names are
+//! case-insensitive (§7.3.1). Order is data: reordered entries are "valid but
+//! not equivalent" (§7.3.1), so nothing is sorted or deduplicated.
 
 use core::fmt;
 
@@ -50,8 +39,7 @@ impl<'a> RouteRef<'a> {
     ///
     /// # Errors
     /// [`HeaderError::Malformed`] for anything [`NameAddrRef::parse`] refuses,
-    /// and for an entry that arrived without angle brackets, which the
-    /// grammar does not offer here.
+    /// or an entry without angle brackets.
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let addr = NameAddrRef::parse(value)?;
         if !addr.is_name_addr() {
@@ -76,10 +64,7 @@ impl<'a> RouteRef<'a> {
 
     /// Whether the *URI* carries `;lr` (RFC 3261 §19.1.1).
     ///
-    /// The parameter has to be inside the brackets. `<sip:p1.example.com>;lr`
-    /// is a strict router with a header parameter named `lr`, and answering
-    /// `true` there is how a request ends up at a strict router with a
-    /// Request-URI it cannot use.
+    /// Only inside the brackets: `<sip:p1.example.com>;lr` is a strict router.
     #[must_use]
     pub fn is_loose_route(&self) -> bool {
         self.uri().sip().is_some_and(|u| u.is_loose_route())
@@ -159,8 +144,7 @@ mod tests {
 
     #[test]
     fn unknown_uri_parameters_are_kept_in_order() {
-        // RFC 4475 3.1.1.1 wsinv, whose Route value sits entirely on a
-        // continuation line
+        // RFC 4475 3.1.1.1 wsinv: the value is on a continuation line
         let r = route(b"<sip:services.example.com;lr;unknownwith=value;unknown-no-value>");
         let params: Vec<_> = r.uri().sip().expect("sip parts").params().collect();
         assert_eq!(
@@ -261,9 +245,7 @@ mod tests {
 
     #[test]
     fn a_scheme_that_cannot_be_routed_to_is_still_syntax() {
-        // addr-spec's third alternative is absoluteURI, and 16.6 item 4's
-        // SIP-or-SIPS MUST binds the proxy that inserts a value, not a
-        // receiver reading one
+        // absoluteURI is allowed; §16.6 item 4 binds the inserting proxy
         let r = route(b"<tel:+12015550123>");
         assert_eq!(r.uri().scheme(), UriScheme::Tel);
         assert!(!r.is_loose_route());
@@ -288,8 +270,7 @@ mod tests {
 
     #[test]
     fn an_empty_entry_between_two_commas_is_refused() {
-        // route-param *(COMMA route-param): every comma is followed by an
-        // entry, so this is a rejection rather than a phantom hop
+        // every comma must be followed by an entry
         let got = entries(b"<sip:p1.example.com;lr>,,<sip:p2.example.com;lr>");
         assert_eq!(got.len(), 3);
         assert!(got.first().is_some_and(Result::is_ok));

@@ -3,42 +3,29 @@
 
 //! A TLS server certificate trusted by its SHA-256 fingerprint.
 //!
-//! A PBX on a LAN usually serves a certificate it signed itself, for a name
-//! like `localhost` or its factory hostname, and no trust anchor an
-//! application ships will ever vouch for it. The choice left to an
-//! administrator without this is to turn checking off, which accepts any
-//! certificate from anyone who can answer on the address. A pin is the
-//! narrow alternative: the one certificate the administrator read off the PBX
-//! and nothing else.
+//! A LAN PBX usually serves a self-signed certificate for a name like
+//! `localhost`, which no shipped trust anchor vouches for. Without a pin the
+//! only option is to disable checking. A pin accepts exactly the one
+//! certificate the administrator read off the PBX.
 //!
-//! TLS is the application's (`docs/22-tls.md`): the platform's library runs
-//! the handshake and this crate never sees it. So a pin is a value an account
-//! carries and a check the application's certificate verifier calls with the
-//! DER bytes of the leaf certificate the server presented. What is compared
-//! is SHA-256 over those exact bytes, the same digest `openssl x509
-//! -fingerprint -sha256` prints and RFC 8122 §5 writes for DTLS, in constant
-//! time.
+//! TLS is the application's (`docs/22-tls.md`): the platform library runs the
+//! handshake. A pin is a value on the account, checked by the application's
+//! verifier against the DER bytes of the server's leaf certificate. The
+//! comparison is SHA-256 over those bytes (what `openssl x509 -fingerprint
+//! -sha256` prints and RFC 8122 §5 uses for DTLS), in constant time.
 //!
-//! **What a pin replaces.** The whole of the platform's verdict: chain,
-//! trust anchors and name. A pinned certificate is accepted when its
-//! fingerprint matches and refused when it does not, whoever signed it.
+//! **A pin replaces the whole platform verdict**: chain, anchors and name. A
+//! match is accepted and a mismatch refused, whoever signed it.
 //!
-//! **Host names are not checked.** The pin names one certificate by every
-//! byte of it, public key included, which a matching host name cannot add
-//! to: an attacker who could present a certificate with this fingerprint
-//! already holds this key. And the name in a PBX's own certificate is the
-//! part most often wrong — `localhost`, an IP address that changed, a name
-//! the phones do not use — so checking it would refuse exactly the
-//! certificates pins exist for. RFC 5922's rules still apply to every
-//! connection that is not pinned.
+//! **Host names are not checked.** The fingerprint covers the public key, so a
+//! name adds nothing, and a PBX certificate's name is the part most often
+//! wrong (`localhost`, a changed IP). RFC 5922's rules still apply to
+//! unpinned connections.
 //!
-//! **An expired pinned certificate is accepted, and said to be expired.** Its
-//! dates were written by the same party whose key is pinned, so they add no
-//! protection against anyone else, and a PBX whose self-signed certificate
-//! lapsed — they are often issued for a year and never renewed — would
-//! otherwise go silent in the middle of a working deployment. The verdict
-//! carries the dates so that the application can warn, and an administrator
-//! who wants the old certificate refused pins the new one instead.
+//! **An expired pinned certificate is accepted, and reported expired.** Its
+//! dates come from the same party whose key is pinned, and self-signed PBX
+//! certificates often lapse after a year; refusing them would silence working
+//! deployments. The verdict carries the dates so the application can warn.
 
 use core::fmt;
 
@@ -91,11 +78,11 @@ pub struct PinnedCertificate {
     pub not_before: Option<u64>,
     /// Its `notAfter`, the same way.
     pub not_after: Option<u64>,
-    /// Whether `now` was past `notAfter`. Accepted all the same; see the
-    /// module documentation.
+    /// Whether `now` was past `notAfter`. Still accepted (see the module
+    /// docs).
     pub expired: bool,
-    /// Whether `now` was before `notBefore`, which a clock set wrong or a
-    /// certificate minted with a future date does. Accepted too.
+    /// Whether `now` was before `notBefore` (a wrong clock or a future-dated
+    /// certificate). Still accepted.
     pub not_yet_valid: bool,
 }
 
@@ -113,18 +100,16 @@ impl CertificatePin {
         Self(sha256(certificate))
     }
 
-    /// A fingerprint as an administrator copies it: 64 hexadecimal digits,
-    /// upper or lower case, colons and spaces among them ignored, either
-    /// bare or after one of the prefixes the tools that print one write,
-    /// matched without regard to case:
+    /// A fingerprint as an administrator copies it: 64 hex digits, any case,
+    /// colons and spaces ignored, bare or after one of these prefixes (case
+    /// ignored):
     ///
-    /// - `sha256 Fingerprint=` — `openssl x509 -fingerprint -sha256`, which
-    ///   OpenSSL 3 writes `sha256 Fingerprint=` and 1.1 `SHA256 Fingerprint=`;
-    /// - `sha-256 ` — RFC 8122 §5's form, the one `a=fingerprint` carries;
+    /// - `sha256 Fingerprint=`: `openssl x509 -fingerprint -sha256` (OpenSSL
+    ///   1.1 writes `SHA256 Fingerprint=`);
+    /// - `sha-256 `: RFC 8122 §5, as in `a=fingerprint`;
     /// - `SHA256=`.
     ///
-    /// The same forms, by the same rule, as every binding's own reading of a
-    /// pin, so that a fingerprint one layer takes no other refuses.
+    /// Every binding parses pins by the same rule.
     ///
     /// # Errors
     /// [`PinError::NotSha256`] for another hash named in front, and
@@ -162,10 +147,8 @@ impl CertificatePin {
         &self.0
     }
 
-    /// Whether `leaf`, the DER bytes of the certificate the server presented
-    /// first, is the pinned one. Every byte of the digest is compared
-    /// whatever the first difference, so how long this takes says nothing
-    /// about how close a certificate came.
+    /// Whether `leaf`, the DER bytes of the server's first certificate, is the
+    /// pinned one. Constant time: the duration reveals nothing.
     #[must_use]
     pub fn matches(&self, leaf: &[u8]) -> bool {
         equal(&self.0, &sha256(leaf))
@@ -212,8 +195,7 @@ impl fmt::Display for CertificatePin {
     }
 }
 
-/// What may stand in front of the digits, lower case: OpenSSL's, RFC 8122's,
-/// and the bare `SHA256=`. None of them begins another.
+/// Prefixes allowed before the digits, lower case. None begins another.
 const PREFIXES: [&str; 3] = ["sha256 fingerprint=", "sha-256 ", "sha256="];
 
 /// `text` after `prefix`, the prefix matched without regard to case.
@@ -224,9 +206,8 @@ fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str
         .flatten()
 }
 
-/// Why digits that did not read as 32 bytes were refused: another hash
-/// named in front of them — `sha-1 `, `SHA1 Fingerprint=`, `md5=` — or not a
-/// fingerprint at all.
+/// Why digits that are not 32 bytes were refused: another hash named in front
+/// (`sha-1 `, `md5=`), or not a fingerprint at all.
 fn other_hash(text: &str) -> PinError {
     let head = text.split([' ', '=']).next().unwrap_or_default();
     let name = head.to_ascii_lowercase().replace(['-', '_'], "");
@@ -249,9 +230,8 @@ const fn nibble(digit: u8) -> Result<u8, PinError> {
     }
 }
 
-/// Equal in constant time: every byte is folded in whatever the first
-/// difference, and the fold is kept from the optimiser, which would
-/// otherwise be free to stop at the first nonzero byte.
+/// Constant-time equality: every byte is folded in, and the fold is hidden
+/// from the optimiser so it cannot stop at the first difference.
 fn equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
     let mut difference = 0_u8;
     for (a, b) in left.iter().zip(right) {
@@ -289,9 +269,7 @@ const GENERALIZED_TIME: u8 = 0x18;
 const VERSION: u8 = 0xa0;
 
 /// A certificate's `validity` (RFC 5280 §4.1.2.5), as seconds since the Unix
-/// epoch: `Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { [0] version
-/// OPTIONAL, serialNumber, signature, issuer, validity SEQUENCE { notBefore,
-/// notAfter }, ... }, ... }`.
+/// epoch.
 fn validity(certificate: &[u8]) -> Option<(u64, u64)> {
     let (SEQUENCE, certificate, _) = element(certificate)? else {
         return None;
@@ -315,9 +293,9 @@ fn validity(certificate: &[u8]) -> Option<(u64, u64)> {
     Some((time(from_tag, from)?, time(until_tag, until)?))
 }
 
-/// RFC 5280 §4.1.2.5.1 and §4.1.2.5.2: `YYMMDDHHMMSSZ` in a UTCTime, the
-/// year read as 19YY from 50 up and 20YY below it, and `YYYYMMDDHHMMSSZ` in a
-/// GeneralizedTime; always Zulu, always with seconds.
+/// RFC 5280 §4.1.2.5.1 and §4.1.2.5.2: UTCTime `YYMMDDHHMMSSZ` (19YY from 50
+/// up, else 20YY) and GeneralizedTime `YYYYMMDDHHMMSSZ`; always Zulu with
+/// seconds.
 fn time(tag: u8, text: &[u8]) -> Option<u64> {
     let (year, rest) = match tag {
         UTC_TIME => {
@@ -354,9 +332,8 @@ fn digits(text: &[u8]) -> Option<u64> {
     })
 }
 
-/// Days from 1970-01-01 to a date of the proleptic Gregorian calendar, for
-/// dates from 1970 on: the civil-from-days arithmetic run backwards, over
-/// eras of 400 years that start on the first of March.
+/// Days from 1970-01-01 to a proleptic Gregorian date, from 1970 on, using
+/// 400-year eras starting on 1 March.
 fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
     let year = if month <= 2 {
         year.checked_sub(1)?
@@ -390,8 +367,8 @@ mod tests {
         out
     }
 
-    /// The shape RFC 5280 §4.1 gives a certificate, with just enough in it
-    /// to reach the dates.
+    /// The RFC 5280 §4.1 certificate shape, with just enough to reach the
+    /// dates.
     fn certificate(from: &[u8], until: &[u8], version: bool) -> Vec<u8> {
         let mut tbs = Vec::new();
         if version {
@@ -509,8 +486,7 @@ mod tests {
         let verdict = CertificatePin::of(&current).check(&current, now).unwrap();
         assert!(!verdict.expired && !verdict.not_yet_valid);
 
-        // bytes that are not a certificate still match their own pin, and
-        // then no date is claimed for them
+        // non-certificate bytes still match their own pin, with no dates
         let garbage = b"not a certificate";
         let verdict = CertificatePin::of(garbage).check(garbage, now).unwrap();
         assert_eq!((verdict.not_after, verdict.expired), (None, false));
@@ -534,8 +510,7 @@ mod tests {
         }
         assert!(equal(&base, &base));
     }
-    /// The one list of pin texts every layer's parser is held to: the
-    /// library's own takes and refuses the same, and reads the same digest.
+    /// The shared list of pin texts every layer's parser is held to.
     #[test]
     fn every_form_the_layers_take_is_taken_here_and_nothing_else() {
         let forms = include_str!("../../../bindings/fixtures/pin-forms.txt");

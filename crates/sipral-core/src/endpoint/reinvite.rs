@@ -3,33 +3,16 @@
 
 //! Renegotiating a session that is already up (RFC 3261 §14).
 //!
-//! A re-INVITE reads like an INVITE and behaves like nothing of the sort.
-//! "Unlike an INVITE, which can fork, a re-INVITE will never fork, and
-//! therefore, only ever generate a single final response" (§14.1) — its
-//! Request-URI names the one user agent the dialog was established with, not
-//! an address of record a proxy could spread across three phones. So its
-//! responses never reach a [`crate::dialog::DialogSet`] looking for branches
-//! to open. There is one dialog, it already exists, and the response is fed
-//! straight to it.
+//! A re-INVITE never forks (§14.1), so its responses go straight to the one
+//! dialog, never through a [`crate::dialog::DialogSet`]. Its ACK carries this
+//! INVITE's `CSeq` (§13.2.2.4) and is resent for every 2xx retransmission.
 //!
-//! The ACK is the dialog's, exactly as for the first 2xx, and is built from
-//! *this* INVITE: §13.2.2.4 makes its `CSeq` the acknowledged request's, and a
-//! re-INVITE carries a number the original INVITE never had. It is kept and
-//! sent again for every retransmission of the 2xx it answers.
+//! Glare (§14): the end that receives a crossing INVITE says 491, and the
+//! other waits a random interval. The endpoint draws it because it owns the
+//! entropy.
 //!
-//! Then there is glare. Both ends putting the call on hold at the same instant
-//! is the ordinary way two INVITEs cross inside one dialog, and §14 answers it
-//! from both sides: the end that receives one while its own is outstanding
-//! says 491, and the end that receives the 491 waits a random interval before
-//! trying again. Random on purpose — a fixed wait collides a second time — and
-//! drawn here because the endpoint owns the entropy and the caller owns the
-//! clock.
-//!
-//! What is *not* here is RFC 3311 §5.2's other half. Its 491 and 500 for
-//! UPDATE turn on whether an offer is outstanding, and this crate has no
-//! opinion about offers: `sdp` parses them, and which one is answered is the
-//! layer above's. Only the rule that turns on transaction state — a second
-//! UPDATE before the first is answered — can be decided here, and it is.
+//! RFC 3311 §5.2's offer-based rules for UPDATE belong to the layer above;
+//! only the second-UPDATE-before-answer rule is enforced here.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -59,18 +42,12 @@ const RETRY_AFTER_CEILING: u32 = 11;
 #[derive(Debug)]
 struct Sent {
     dialog: DialogId,
-    /// The request as it went out. The ACK takes its `CSeq` and its
-    /// credentials from here rather than from the INVITE that opened the call.
+    /// The request as it went out; the ACK takes its `CSeq` and credentials.
     request: OwnedMessage,
-    /// Whether a 2xx has arrived, which is what makes an ACK possible.
     answered: bool,
-    /// Whether any final response has. §14.1 lets a new INVITE go once the
-    /// transaction is "completed or terminated", and a refusal completes it —
-    /// the ACK for a non-2xx is the transaction's own, not the dialog's.
+    /// Whether any final response has; a refusal completes it (§14.1).
     settled: bool,
-    /// The ACK once the caller has built it, kept for the retransmissions
-    /// with the flow it left on — which §18.1.1 may have made a stream while
-    /// the 2xx keeps arriving over a datagram.
+    /// The ACK and the flow it left on (maybe a stream, §18.1.1).
     ack: Option<(OwnedMessage, Flow)>,
 }
 
@@ -236,23 +213,13 @@ impl Reinvites {
 impl Endpoint {
     /// Acknowledge the 2xx to a re-INVITE (§14.1, §13.2.2.4).
     ///
-    /// Separate from [`Endpoint::ack_2xx`] because the two acknowledge
-    /// different things. That one answers the INVITE that opened the call and
-    /// has to say which of several forked dialogs it is answering for; this
-    /// one answers a request inside a dialog that already exists, and there is
-    /// only ever one. A re-INVITE sent without an offer is answered by an
-    /// offer in the 2xx, so the answer travels in this ACK — which is why the
-    /// caller builds it and the endpoint cannot know when it is ready.
-    ///
-    /// Afterwards the ACK belongs to the dialog: every retransmission of the
-    /// 2xx is answered with the same bytes, on the flow the first one left on
-    /// for as long as it is open, and the caller hears nothing more.
+    /// Unlike [`Endpoint::ack_2xx`], there is no fork to pick from. The
+    /// `answer` is for a 2xx that carried an offer. Retransmitted 2xx get the
+    /// same ACK without involving the caller.
     ///
     /// # Errors
-    /// [`AckError`] when the handle names no re-INVITE this endpoint is
-    /// following, when no 2xx has arrived for it, or when it has already been
-    /// acknowledged. As [`Endpoint::ack_2xx`] when §18.1.1 refuses it a
-    /// datagram with no stream to move to.
+    /// [`AckError`] for an unknown handle, no 2xx yet, a second ACK, or as
+    /// [`Endpoint::ack_2xx`] when §18.1.1 finds no stream.
     pub fn ack_reinvite(
         &mut self,
         invite: TransactionId<InviteClient>,
@@ -296,15 +263,9 @@ impl Endpoint {
 
     /// Whether this end has an INVITE outstanding in the dialog (§14.1).
     ///
-    /// Outstanding is not "its client transaction still exists". §14.1 lets a
-    /// new INVITE go once the old transaction is "completed or terminated",
-    /// and both a 2xx that has been acknowledged and a refusal complete it —
-    /// the ACK for a non-2xx belongs to the transaction, not to the dialog.
-    /// Reading it any other way would hold the dialog shut for the timer that
-    /// only exists to absorb duplicates: 64·T1 after a 2xx under RFC 6026, or
-    /// 32 seconds after a refusal, which is a great deal longer than the 2.1
-    /// to 4 seconds §14.1 gives a 491 before it wants the change offered
-    /// again.
+    /// An acknowledged 2xx or a refusal completes it, even while the
+    /// transaction lingers to absorb duplicates; otherwise the dialog would
+    /// stay shut far longer than the 491 back-off.
     pub(super) fn invite_outstanding(&self, dialog: DialogId) -> bool {
         if let Some(id) = self.reinvites.ours_in(dialog) {
             return self.reinvites.outstanding(id);
@@ -339,10 +300,7 @@ impl Endpoint {
 impl Endpoint {
     /// A response to a re-INVITE this end sent.
     ///
-    /// Not a fork: §14.1 says a re-INVITE never forks, so nothing here looks
-    /// for a dialog to open. The dialog is the one the request was sent in,
-    /// and the response feeds it directly (§12.2.1.2) — the remote target from
-    /// a 2xx, and the dialog itself from a 481 or a 408.
+    /// Fed directly to the dialog (§12.2.1.2).
     pub(super) fn on_reinvite_response(
         &mut self,
         id: TransactionId<InviteClient>,
@@ -353,17 +311,12 @@ impl Endpoint {
         let Some(status) = response.status() else {
             return;
         };
-        // a 100 is hop by hop and names nothing
         if status == StatusCode::TRYING {
             return;
         }
 
-        // §13.2.2.4: "The ACK MUST be passed to the client transport every
-        // time a retransmission of the 2xx final response that triggered the
-        // ACK arrives." The caller heard about the answer once. It goes where
-        // the first one went, which is not the flow the 2xx came in on when
-        // §18.1.1 moved the ACK onto a stream, and never to a stream that has
-        // since closed
+        // §13.2.2.4: resend the kept ACK for each 2xx retransmission, on the
+        // flow the first went on
         if status.is_success()
             && let Some((ack, went_on)) = self
                 .reinvites
@@ -394,12 +347,7 @@ impl Endpoint {
         self.resolve_if_target_moved(dialog, before.as_deref());
 
         if status.is_provisional() {
-            // §3 puts sending a reliable provisional in scope for any
-            // response numbered 101-199 once 100rel was offered, with no
-            // exception for a request already inside a dialog; §4 obliges the
-            // UAC to PRACK it. `ReinviteProgress` stays the event a
-            // re-INVITE's progress reports through, but carries the handle
-            // when there is one to acknowledge.
+            // RFC 3262 §3 and §4 apply inside a dialog too
             let provisional = reliable::is_reliable(response)
                 .then(|| self.keep_reliable_provisional(dialog, response, flow))
                 .flatten()
@@ -415,12 +363,7 @@ impl Endpoint {
         }
 
         if status.is_success() {
-            // §13.2.2.4 obliges retransmitting the *ACK* for every
-            // retransmission of the 2xx it answers; it says nothing about
-            // telling the caller about the same answer twice. Before the
-            // caller has built the first ACK there is nothing cached at the
-            // branch above to retransmit, and a retransmitted 2xx would
-            // otherwise fall through to here a second time.
+            // a retransmitted 2xx before the first ACK is built: report once
             if self.reinvites.answered(id) {
                 return;
             }
@@ -436,9 +379,7 @@ impl Endpoint {
 
         self.reinvites.settle(id);
         if status == StatusCode::REQUEST_PENDING {
-            // §14.1: "it SHOULD start a timer with a value T chosen as
-            // follows" — and try once more when it fires, if the session still
-            // needs changing. Whether it does is the caller's to know
+            // §14.1: retrying is the caller's choice
             let retry_in = self.glare_backoff(dialog);
             self.push(Event::ReinviteGlare {
                 invite: id,
@@ -456,9 +397,7 @@ impl Endpoint {
             });
         }
 
-        // §12.2.1.2: a 481 or a 408 to a request inside a dialog takes the
-        // dialog with it. No BYE goes out for it — the far end has just said
-        // it has no such dialog, and a BYE would earn the same 481
+        // §12.2.1.2: a 481 or 408 ends the dialog, and no BYE goes out
         if state == Some(DialogState::Terminated) {
             self.forget_dialog(dialog, DialogEndReason::Gone);
         }
@@ -489,11 +428,8 @@ impl Endpoint {
 
     /// How long to wait before offering the same change again (§14.1).
     ///
-    /// The two ranges do not overlap, which is the point: if both ends drew
-    /// from the same one they would collide a second time as often as the
-    /// first. Which range applies is decided by who generated the `Call-ID`,
-    /// and that is the end that placed the call — the only end whose dialogs
-    /// are branches of an INVITE it sent.
+    /// The ranges do not overlap. The `Call-ID` owner is the end that placed
+    /// the call, the one whose dialogs are branches.
     fn glare_backoff(&mut self, dialog: DialogId) -> Duration {
         let (low, high) = if self.dialogs.branch_set(dialog).is_some() {
             OWNER_BACKOFF
@@ -509,12 +445,7 @@ impl Endpoint {
 impl Endpoint {
     /// Whether §14.2 answers this INVITE itself rather than handing it up.
     ///
-    /// Two cases, both MUST, told apart by who has the other INVITE in flight.
-    /// Ours means the two crossed, and 491 sends the far end away to back off
-    /// by an interval that will not collide with ours. Theirs means it sent a
-    /// second INVITE before we answered the first, which is not glare but a
-    /// peer getting ahead of itself; §14.2 answers that 500 with a
-    /// `Retry-After`, so that it does not repeat immediately.
+    /// Ours in flight: 491. Theirs still unanswered: 500 with `Retry-After`.
     pub(super) fn refuse_crossing_invite(
         &mut self,
         dialog: DialogId,
@@ -538,10 +469,8 @@ impl Endpoint {
         true
     }
 
-    /// RFC 3311 §5.2: "A UAS that receives an UPDATE before it has generated a
-    /// final response to a previous UPDATE on the same dialog MUST return a
-    /// 500 response to the new UPDATE, and MUST include a Retry-After header
-    /// field."
+    /// RFC 3311 §5.2: a second UPDATE before the first is answered gets 500
+    /// with `Retry-After`.
     pub(super) fn refuse_crossing_update(
         &mut self,
         dialog: DialogId,
@@ -562,8 +491,7 @@ impl Endpoint {
         true
     }
 
-    /// A refusal that says when to come back, with the interval drawn rather
-    /// than fixed so that two peers do not repeat the collision.
+    /// A refusal with a random `Retry-After`.
     fn too_soon(&mut self, status: StatusCode) -> OutgoingResponse {
         let seconds = self
             .tokens

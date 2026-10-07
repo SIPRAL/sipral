@@ -3,26 +3,14 @@
 
 //! What crosses between signalling and media.
 //!
-//! Two values pass the seam. [`MediaCapabilities`] goes one way: what this
-//! build can actually do, said before an offer is written, so that the stack
-//! writes the description rather than the application. [`MediaPlan`] comes
-//! back: what the negotiation settled on, read off a pair of descriptions
-//! after the answer arrives.
+//! [`MediaCapabilities`] goes in before an offer is written, so the stack
+//! writes the description. [`MediaPlan`] comes back once the answer is in.
+//! Neither names a socket, device or codec implementation, so a softphone
+//! and a headless agent drive the same user agent.
 //!
-//! Neither names a socket, a device, a thread or a codec implementation. That
-//! is the point of them: the same user agent drives a softphone that owns an
-//! audio device and an agent that puts PCM on a pipe, because neither type has
-//! anything in it that only one of the two could satisfy. Addresses are
-//! [`SocketAddr`] because that is what the negotiation produced, not because
-//! anything here binds one.
-//!
-//! The derivation reads the same both ways round. RFC 3264 §6.1 tells the
-//! offerer to "use the format with the highest preference from the answer" and
-//! the answerer to "send using the most preferred media format in the offer
-//! that is also listed in the answer" — one rule, stated twice, and it comes
-//! out as: the peer's order decides, our list filters. So [`SessionDescription::media_plan`]
-//! takes our description and the peer's without caring which of the two was
-//! the offer.
+//! RFC 3264 §6.1 gives offerer and answerer the same rule: the peer's
+//! order decides, our list filters. So [`SessionDescription::media_plan`]
+//! does not care which side made the offer.
 
 use std::net::SocketAddr;
 
@@ -31,8 +19,7 @@ use super::error::SdpError;
 use super::media::{Direction, MediaDescription, RtpMap};
 use super::session::{Attribute, Connection, SessionDescription};
 
-/// RFC 4733's named events, which ride alongside a codec rather than being
-/// one.
+/// RFC 4733 named events, carried beside a codec.
 const TELEPHONE_EVENT: &str = "telephone-event";
 
 /// RFC 3551 payload type 13, likewise not the codec of the stream.
@@ -42,19 +29,13 @@ const COMFORT_NOISE: &str = "CN";
 const DYNAMIC_PAYLOADS: core::ops::RangeInclusive<u8> = 96..=127;
 
 /// One codec: agreed with a peer, or merely on offer.
-///
-/// The mapping is an [`RtpMap`] rather than a copy of its fields, because an
-/// `a=rtpmap` line is exactly what a codec is called in a description and
-/// there is no second spelling of it worth having.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NegotiatedCodec {
     /// Payload type, encoding name, clock rate and, for audio, the channel
     /// count.
     pub rtpmap: RtpMap,
-    /// The `a=fmtp` parameters, as written. Nothing here reads them: what they
-    /// mean is the codec's business, and RFC 3264 §6.1 says as much when it
-    /// admits that "the interpretation of fmtp parameters in an offer depends
-    /// on the parameters".
+    /// The `a=fmtp` parameters, as written. Their meaning is the codec's
+    /// business (RFC 3264 §6.1).
     pub fmtp: Option<String>,
 }
 
@@ -84,10 +65,7 @@ impl NegotiatedCodec {
         self.rtpmap.clock_rate
     }
 
-    /// The channel count. "For audio streams, `<encoding parameters>` indicates
-    /// the number of audio channels. This parameter is OPTIONAL and may be
-    /// omitted if the number of channels is one" (RFC 4566 §6), so an absent
-    /// one means mono.
+    /// The channel count; absent means mono (RFC 4566 §6).
     #[must_use]
     pub fn channels(&self) -> u16 {
         self.rtpmap
@@ -98,11 +76,8 @@ impl NegotiatedCodec {
             .unwrap_or(1)
     }
 
-    /// Whether this is that encoding.
-    ///
-    /// Case does not distinguish encoding names — they are media subtype
-    /// names, and RFC 4566 §6 maps the name `L8` to the media type `audio/l8`
-    /// without comment — so a peer writing `pcmu` means PCMU.
+    /// Whether this is that encoding. Case-insensitive: these are media
+    /// subtype names (RFC 4566 §6).
     #[must_use]
     pub fn is_encoding(&self, name: &str) -> bool {
         self.rtpmap.encoding.eq_ignore_ascii_case(name)
@@ -112,57 +87,38 @@ impl NegotiatedCodec {
 /// Where RTCP goes, once the descriptions have been read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RtcpPlan {
-    /// One port carries both (RFC 5761). Only when each side asked for it:
-    /// "if the answer does not contain an a=rtcp-mux attribute, the offerer
-    /// MUST NOT multiplex RTP and RTCP packets on a single port."
+    /// One port carries both (RFC 5761), only when both sides asked for it.
     Muxed,
-    /// A port of its own at each end — the one after the media port, or the
-    /// one `a=rtcp` named.
+    /// A port of its own at each end: media port plus one, or `a=rtcp`.
     SeparatePort {
         /// Where we receive it.
         local: SocketAddr,
         /// Where we send it.
         remote: SocketAddr,
     },
-    /// None at all: the peer said it is not using RTCP, or it asked for no
-    /// packets whatsoever.
+    /// None: the peer is not using RTCP.
     Off,
 }
 
 /// The keys, or what will produce them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Keying {
-    /// SDES (RFC 4568). Two keys, because "each endpoint determines its own
-    /// transmission keys and sends those keys, in SDP, to the other endpoint":
-    /// one protects what we send, the other opens what arrives.
+    /// SDES (RFC 4568). Each end sends its own transmission keys, so there
+    /// are two.
     Sdes {
         /// Our own line, read as values: the keys that protect what we send.
-        /// Its tag and suite are the peer's too — "the same crypto-suite MUST
-        /// be used in the send and receive direction", and the tag is what
-        /// says the two lines are about the same thing.
+        /// Tag and suite are shared with the peer's line (§6.1).
         local: CryptoPolicy,
         /// The peer's, which opens what arrives.
         remote: CryptoPolicy,
     },
-    /// DTLS-SRTP (RFC 5764). The keys come out of a handshake on the media
-    /// path, which is not signalling and not this crate's; what the
-    /// description carries is the fingerprints that authenticate the peer's
-    /// certificate and the role it will take, and all of them are passed
-    /// through exactly as written.
+    /// DTLS-SRTP (RFC 5764). The keys come from a handshake outside this
+    /// crate; the description carries fingerprints and the role, passed
+    /// through as written.
     Dtls {
-        /// Every `a=fingerprint` the peer wrote, in the order it wrote them.
-        ///
-        /// A list and not one value, because RFC 8122 §5 lets a description
-        /// carry one line per hash function — "a certificate fingerprint
-        /// \[...\] MUST be calculated using the same one-way hash function
-        /// as is used in the certificate's signature algorithm" is the rule
-        /// for which one matches, and an endpoint may offer several so that
-        /// a peer which knows only one of the hashes can still check it.
-        /// Keeping only the first would kill a call over a hash the other
-        /// end happened to write first.
-        ///
-        /// Never empty: a description with no fingerprint is not keyed this
-        /// way at all.
+        /// Every `a=fingerprint` the peer wrote, in order. RFC 8122 §5 allows one
+        /// per hash function, so keeping only the first could fail a good call.
+        /// Never empty.
         fingerprints: Vec<String>,
         /// The value of its `a=setup`, when it wrote one.
         setup: Option<String>,
@@ -170,20 +126,15 @@ pub enum Keying {
 }
 
 /// One `a=crypto` line: `<tag> <crypto-suite> <key-params> [<session-params>]`
-/// (RFC 4568 §4).
-///
-/// `key_params` is key material. It is the caller's to produce — nothing in a
-/// sans-I/O core has a source of randomness — and the caller's to keep out of
-/// logs.
+/// (RFC 4568 §4). `key_params` is key material: the caller produces it
+/// and keeps it out of logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Crypto {
-    /// "A decimal number used as an identifier for a particular crypto
-    /// attribute ... The tag MUST be unique among all crypto attributes for a
-    /// given media line."
+    /// The tag, unique among the crypto attributes of one media line.
     pub tag: u32,
     /// `AES_CM_128_HMAC_SHA1_80` and the rest (§4.2).
     pub suite: String,
-    /// A key method, a colon, and the keying information: `inline:` is the
+    /// A key method, a colon, and the keying information. `inline:` is the
     /// only method §4.3 defines.
     pub key_params: String,
     /// Whatever else the line carried (§4.4).
@@ -236,36 +187,24 @@ impl Crypto {
     }
 }
 
-/// What a build will do about SRTP, and therefore what transport its offer
-/// names.
+/// What a build does about SRTP, and so which transport its offer names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SrtpSupport {
     /// None: plain `RTP/AVP` with no keys in the body.
     #[default]
     None,
-    /// SDES on `RTP/SAVP` (RFC 4568), with the attributes to offer in order:
-    /// "the ordering of multiple a=crypto lines is significant: the most
-    /// preferred crypto line is listed first."
-    ///
-    /// RFC 4568 §7 makes this safe only where the signalling itself is
-    /// protected, since the key travels in the body. Whether it is, this type
-    /// cannot know; the caller decides not to offer SDES over a transport that
-    /// leaks it.
+    /// SDES on `RTP/SAVP` (RFC 4568), lines in order of preference. The key
+    /// travels in the body, so per §7 the caller offers this only over
+    /// protected signalling.
     Sdes(Vec<Crypto>),
-    /// The same `a=crypto` lines on plain `RTP/AVP`: the stream is keyed when
-    /// the answer takes one of them, and plain when it takes none.
+    /// The same `a=crypto` lines on plain `RTP/AVP`: keyed if the answer takes
+    /// one, plain otherwise.
     ///
-    /// Not a mechanism RFC 4568 defines — it writes the attribute for the
-    /// secure profiles — but the "SRTP optional" of desk phones, for a far
-    /// end that rejects a stream on a secure profile it does not do (RFC 4568
-    /// §7.4) and ignores attribute lines it does not understand. What the
-    /// negotiation makes of it is what [`SessionDescription::media_plan`]
-    /// makes of any two descriptions: keyed where both carry a line with the
-    /// same tag and suite, plain where the answer carries none.
+    /// Not defined by RFC 4568, but the desk phones' "SRTP optional", for
+    /// peers that reject secure profiles (§7.4) and ignore unknown attributes.
     SdesOnAvp(Vec<Crypto>),
-    /// DTLS-SRTP on `UDP/TLS/RTP/SAVP` (RFC 5764 §4.1): the offer carries the
-    /// fingerprint of our certificate and the role we will take, and the keys
-    /// come from a handshake this crate has no part in.
+    /// DTLS-SRTP on `UDP/TLS/RTP/SAVP` (RFC 5764 §4.1): our fingerprint and
+    /// role in the offer; keys from a handshake outside this crate.
     Dtls {
         /// The value for `a=fingerprint`.
         fingerprint: String,
@@ -287,13 +226,9 @@ impl SrtpSupport {
 }
 
 /// What this build can do, said before an offer is written.
-///
-/// An agent build has no device and no device rate, so it lists a shorter set
-/// than a softphone does; nothing else about the two differs here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaCapabilities {
-    /// In order of preference, most preferred first, which is the order
-    /// RFC 3264 §6.1 reads an `m=` line in.
+    /// Most preferred first, the order RFC 3264 §6.1 reads.
     pub codecs: Vec<NegotiatedCodec>,
     /// Whether to offer RFC 4733 named events.
     pub dtmf: bool,
@@ -301,11 +236,8 @@ pub struct MediaCapabilities {
     pub rtcp_mux: bool,
     /// Whether to secure the stream, and how.
     pub srtp: SrtpSupport,
-    /// Whether to ask the peer for RFC 3611 XR VoIP Metrics reports
-    /// (§5.1's `a=rtcp-xr:voip-metrics`). Every build of this stack can
-    /// generate and read them, so this defaults on; the builder exists
-    /// for a caller that wants to opt out, and for tests that want an
-    /// offer without it.
+    /// Whether to ask the peer for RFC 3611 XR VoIP Metrics reports (§5.1).
+    /// On by default.
     pub voip_metrics_xr: bool,
 }
 
@@ -350,30 +282,20 @@ impl MediaCapabilities {
         self
     }
 
-    /// The payload type the first named event gets: the first number in the
-    /// dynamic range no codec has taken.
-    ///
-    /// `None` when this build does not do DTMF, and also when the codec list
-    /// has claimed all thirty-two dynamic numbers, which is not a session
-    /// anyone will hold but is a list somebody can hand us.
+    /// The payload type of the first named event: the first free dynamic
+    /// number. `None` without DTMF, or when codecs took all 32 numbers.
     #[must_use]
     pub fn dtmf_payload(&self) -> Option<u8> {
         self.dtmf_payloads().first().map(|&(payload, _)| payload)
     }
 
     /// Every named-event payload type an offer carries, with its clock rate:
-    /// one per clock rate among the codecs, in the order the codecs first
-    /// name each rate, each on the next dynamic number no codec has taken.
+    /// one per codec clock rate, in codec order, each on the next free
+    /// dynamic number.
     ///
-    /// One per rate because the events share the timestamp base of the audio
-    /// they are sent beside ("the same sequence number and timestamp base as
-    /// the regular audio channel", RFC 4733 §2.5.1.2), so an event at 48 kHz
-    /// is no use to a call that settles on PCMU at 8 kHz: an offer of Opus,
-    /// G.722 and PCMU names `telephone-event/48000` and
-    /// `telephone-event/8000` (G.722's RTP clock is 8 kHz, RFC 3551 §4.5.2),
-    /// and the answer's choice of codec picks between them. Empty when this
-    /// build does not do DTMF; shorter than the rates when the dynamic range
-    /// runs out.
+    /// Events share the audio's timestamp base (RFC 4733 §2.5.1.2), so each
+    /// rate needs its own. G.722's RTP clock is 8 kHz (RFC 3551 §4.5.2).
+    /// Empty without DTMF; short when the dynamic range runs out.
     #[must_use]
     pub fn dtmf_payloads(&self) -> Vec<(u8, u32)> {
         if !self.dtmf {
@@ -398,10 +320,6 @@ impl MediaCapabilities {
     }
 
     /// The `m=` block for one stream of an offer.
-    ///
-    /// The application says what it can do; this writes the description, down
-    /// to the payload type the named events get and the `a=rtpmap` lines that
-    /// name everything.
     #[must_use]
     pub fn offer(&self, media: &str, port: u16, direction: Direction) -> MediaDescription {
         let dtmf = self.dtmf_payloads();
@@ -425,9 +343,8 @@ impl MediaCapabilities {
             }
         }
         for (payload, clock_rate) in dtmf {
-            // "they MUST use the same sequence number and timestamp base as
-            // the regular audio channel" (RFC 4733 §2.5.1.2), so each rate
-            // among the codecs has events on its own clock
+            // RFC 4733 §2.5.1.2: events share the audio's timestamp base, so one
+            // set per clock rate
             let map = RtpMap {
                 payload,
                 encoding: TELEPHONE_EVENT.to_owned(),
@@ -437,9 +354,7 @@ impl MediaCapabilities {
             stream
                 .attributes
                 .push(Attribute::with_value("rtpmap", &map.to_value()));
-            // "if no events parameter is received, the sender SHOULD assume
-            // support for the DTMF events 0-15 but for no other events" -
-            // which is what we support, so it is written rather than implied
+            // RFC 4733: no events parameter means 0-15, written anyway
             stream
                 .attributes
                 .push(Attribute::with_value("fmtp", &format!("{payload} 0-15")));
@@ -448,8 +363,7 @@ impl MediaCapabilities {
             stream.attributes.push(Attribute::flag("rtcp-mux"));
         }
         if self.voip_metrics_xr {
-            // RFC 3611 SS5.1: presence in our own offer asks the answerer
-            // to send us the named block, "voip-metrics" here.
+            // RFC 3611 §5.1: our line asks the answerer for this block
             stream
                 .attributes
                 .push(Attribute::with_value("rtcp-xr", "voip-metrics"));
@@ -475,27 +389,23 @@ impl MediaCapabilities {
     }
 }
 
-/// What the negotiation settled on for one stream.
-///
-/// Produced once the answer is in, and again after every re-INVITE or UPDATE
-/// that moves something.
+/// What the negotiation settled on for one stream, recomputed after every
+/// re-INVITE or UPDATE.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaPlan {
     /// Where to receive. The caller chose it; this only reads it back.
     pub local: SocketAddr,
     /// Where to send, from the peer's `c=` and `m=`.
     pub remote: SocketAddr,
-    /// The one codec of the stream, under the payload type to send it with:
-    /// the peer's number for it (RFC 3264 §5.1).
+    /// The codec, under the payload type to send it with: the peer's number
+    /// (RFC 3264 §5.1).
     pub codec: NegotiatedCodec,
-    /// The payload type the codec arrives with: this end's own number for
-    /// it, which RFC 3264 §6.1 lets differ from [`MediaPlan::codec`]'s when
-    /// the answer renumbered a dynamic type.
+    /// The payload type the codec arrives with: our own number, which may
+    /// differ from [`MediaPlan::codec`]'s after renumbering (§6.1).
     pub codec_in: u8,
     /// Which way media may flow, as seen from here.
     pub direction: Direction,
-    /// The named-event payload type to send with, when both descriptions
-    /// listed one: the peer's number.
+    /// The named-event payload type to send with: the peer's number.
     pub dtmf: Option<u8>,
     /// The named-event payload type events arrive with: this end's number.
     pub dtmf_in: Option<u8>,
@@ -503,32 +413,22 @@ pub struct MediaPlan {
     pub rtcp: RtcpPlan,
     /// The keys, when the stream is secured.
     pub keying: Option<Keying>,
-    /// Whether this stream should send RFC 3611 XR VoIP Metrics reports:
-    /// the peer's description asked for them, at the media level or,
-    /// lacking that, the session level (§5.1, §5.2). Not the same
-    /// question as whether *we* offered or asked for them back — RFC
-    /// 3611 §5.2 has each side's own `a=rtcp-xr` line request XR
-    /// *from the other party*, so what decides whether this end sends is
-    /// what the peer's document said, not ours.
+    /// Whether this stream should send RFC 3611 XR VoIP Metrics reports. Per
+    /// §5.2 each side's `a=rtcp-xr` asks the other, so the peer's description
+    /// decides (media level, else session level).
     pub voip_metrics_xr: bool,
 }
 
 impl SessionDescription {
     /// The plan for one stream, given the peer's description of the same
-    /// session.
-    ///
-    /// `self` is ours and `remote` is theirs, whichever of the two was the
-    /// offer: everything below reads the same in both roles. `Ok(None)` means
-    /// the stream is not there to plan for — "to reject an offered stream, the
-    /// port number in the corresponding stream in the answer MUST be set to
-    /// zero", and a refusal by either end is a refusal.
+    /// session. `self` is ours, `remote` theirs, whichever was the offer.
+    /// `Ok(None)` when either end refused the stream (port zero).
     ///
     /// # Errors
     /// [`SdpError::NoSuchStream`] when either description is shorter than the
-    /// index; [`SdpError::NoAddress`] when a `c=` names a host rather than an
-    /// address, which a sans-I/O core cannot resolve; [`SdpError::NoCodec`]
-    /// when the two lists have no codec in common; and the two keying errors
-    /// when a secured stream did not end up with keys.
+    /// index; [`SdpError::NoAddress`] when a `c=` names a host; [`SdpError::NoCodec`]
+    /// when there is no codec in common; and the two keying errors when a
+    /// secured stream did not end up with keys.
     pub fn media_plan(&self, remote: &Self, stream: usize) -> Result<Option<MediaPlan>, SdpError> {
         let ours = self
             .media
@@ -551,10 +451,7 @@ impl SessionDescription {
             agreed_codec(ours, theirs, &payloads).ok_or(SdpError::NoCodec { stream })?;
         let dtmf = agreed_dtmf(ours, theirs, &payloads, codec.clock_rate());
 
-        // "An agent MUST be capable of receiving SDP with a connection address
-        // of 0.0.0.0, in which case it means that neither RTP nor RTCP should
-        // be sent to the peer" (RFC 3264 §8.4). It is the pre-RFC 3264 way of
-        // saying hold, and a stack that misses it sends audio into the dark.
+        // RFC 3264 §8.4: 0.0.0.0 means send nothing (old-style hold)
         let black_hole = peer_connection.is_some_and(Connection::is_black_hole);
         let theirs_says = remote.direction_of(theirs);
         let theirs_says = if black_hole {
@@ -562,8 +459,6 @@ impl SessionDescription {
         } else {
             theirs_says
         };
-        // the table that limits what an answer may claim also describes what
-        // actually flows: what we wrote, narrowed by what the peer wrote
         let direction = Direction::answer_to(theirs_says, self.direction_of(ours));
 
         let rtcp = if black_hole {
@@ -586,14 +481,11 @@ impl SessionDescription {
         }))
     }
 
-    /// A plan for every stream, in order, with `None` where a stream was
-    /// refused.
+    /// A plan for every stream, in order, `None` where a stream was refused.
     ///
     /// # Errors
-    /// [`SdpError::StreamMismatch`] when the two descriptions do not have the
-    /// same number of `m=` lines, which RFC 3264 §6 requires because that is
-    /// how the two ends match streams up, and whatever
-    /// [`SessionDescription::media_plan`] returns for one stream.
+    /// [`SdpError::StreamMismatch`] when the `m=` counts differ (RFC 3264 §6),
+    /// and whatever [`SessionDescription::media_plan`] returns for one stream.
     pub fn media_plans(&self, remote: &Self) -> Result<Vec<Option<MediaPlan>>, SdpError> {
         if self.media.len() != remote.media.len() {
             return Err(SdpError::StreamMismatch {
@@ -607,13 +499,9 @@ impl SessionDescription {
     }
 }
 
-/// The mapping a static payload type carries by definition (RFC 3551 tables 4
-/// and 5).
-///
-/// A description may leave the `a=rtpmap` out for a static type, and plenty
-/// do: `m=audio 5004 RTP/AVP 0` with nothing after it is a complete offer of
-/// G.711 mu-law. Types the tables call reserved or unassigned have no mapping
-/// and get none here.
+/// The mapping a static payload type has by definition (RFC 3551 tables 4
+/// and 5), for descriptions that omit `a=rtpmap`. Reserved and unassigned
+/// types get none.
 #[must_use]
 pub fn static_rtpmap(payload: u8) -> Option<RtpMap> {
     let (encoding, clock_rate, parameters) = match payload {
@@ -674,23 +562,17 @@ fn socket_addr(
 /// One format both `m=` lines carry, under the number each end gave it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Common {
-    /// The number in our description: what arrives here (RFC 3264 §5.1, "the
-    /// payload type numbers indicate the value of the payload type field
-    /// ... the offerer expects to receive", and the same of the answer).
+    /// The number in our description: what arrives here (RFC 3264 §5.1).
     ours: u8,
-    /// The number in the peer's: what we send with (§5.1: "the offerer MUST
-    /// send with the payload type numbers from the answer", and §6.1 has the
-    /// answerer send with the offer's).
+    /// The number in the peer's: what we send with (§5.1, §6.1).
     theirs: u8,
 }
 
 /// The formats both `m=` lines carry, in the peer's order of preference.
 ///
-/// A number both list is one format, as it always was. A dynamic number the
-/// peer lists and ours does not is matched by what it maps to — encoding,
-/// clock rate and channels — to a dynamic number of ours: RFC 3264 §6.1
-/// keeps the offer's number in the answer only as a SHOULD, and RFC 4317
-/// §2.3 answers iLBC as 99 where the offer had 97.
+/// A dynamic number only the peer lists is matched by encoding, clock and
+/// channels: §6.1 keeps the offer's number only as a SHOULD, and RFC 4317
+/// §2.3 answers iLBC as 99 for an offered 97.
 fn common_payloads(ours: &MediaDescription, theirs: &MediaDescription) -> Vec<Common> {
     let mine: Vec<u8> = ours.payload_types().collect();
     let mut common: Vec<Common> = Vec::new();
@@ -723,9 +605,8 @@ fn common_payloads(ours: &MediaDescription, theirs: &MediaDescription) -> Vec<Co
     common
 }
 
-/// Whether two mappings name one format: the same encoding, in any case
-/// (RFC 4855 §3), the same clock rate, and the same channel count, which is
-/// one where none is written (RFC 4566 §6).
+/// Whether two mappings name one format: encoding (any case, RFC 4855 §3),
+/// clock rate and channel count (absent = one, RFC 4566 §6).
 fn same_format(a: &RtpMap, b: &RtpMap) -> bool {
     let channels = |map: &RtpMap| map.parameters.clone().unwrap_or_else(|| "1".to_owned());
     a.encoding.eq_ignore_ascii_case(&b.encoding)
@@ -733,8 +614,8 @@ fn same_format(a: &RtpMap, b: &RtpMap) -> bool {
         && channels(a) == channels(b)
 }
 
-/// What a payload type maps to: the peer's line first, since it is the peer
-/// that has to decode what we send, then ours, then the profile's table.
+/// What a payload type maps to: the peer's line, then ours, then the
+/// profile's table.
 fn mapping(ours: &MediaDescription, theirs: &MediaDescription, payload: u8) -> Option<RtpMap> {
     theirs
         .rtpmap(payload)
@@ -742,8 +623,8 @@ fn mapping(ours: &MediaDescription, theirs: &MediaDescription, payload: u8) -> O
         .or_else(|| static_rtpmap(payload))
 }
 
-/// The first common format that is a codec rather than something carried
-/// beside one, under the peer's number, and the number it arrives with.
+/// The first common format that is a codec, under the peer's number, and
+/// the number it arrives with.
 fn agreed_codec(
     ours: &MediaDescription,
     theirs: &MediaDescription,
@@ -752,8 +633,6 @@ fn agreed_codec(
     payloads.iter().find_map(|common| {
         let codec = NegotiatedCodec {
             rtpmap: mapping(ours, theirs, common.theirs)?,
-            // the peer's parameters configure what we send to it; ours stand
-            // in only when it wrote none
             fmtp: theirs
                 .fmtp(common.theirs)
                 .or_else(|| ours.fmtp(common.ours))
@@ -766,11 +645,8 @@ fn agreed_codec(
 
 /// The named events both carry: the peer's number, and ours.
 ///
-/// The ones on the agreed codec's clock (`clock_rate`), because they share
-/// its timestamp base (RFC 4733 §2.5.1.2); a pair of descriptions that
-/// agreed events only on another clock still gets the first of them, which
-/// is what this end did before it offered one per rate, and what a peer that
-/// names a single rate for every codec expects.
+/// Prefers events on the agreed codec's clock (RFC 4733 §2.5.1.2), else
+/// falls back to the first pair, for peers that name a single rate.
 fn agreed_dtmf(
     ours: &MediaDescription,
     theirs: &MediaDescription,
@@ -816,9 +692,8 @@ fn rtcp_plan(
     }
 }
 
-/// Whether a description says it is not running RTCP at all: "if RTCP is not
-/// in use, the agent MUST signal that using b=RS:0 and b=RR:0" (RFC 5245 §9.1,
-/// on top of RFC 3556).
+/// Whether a description says RTCP is off: b=RS:0 and b=RR:0 (RFC 5245
+/// §9.1, RFC 3556).
 fn rtcp_refused(session: &SessionDescription, stream: &MediaDescription) -> bool {
     bandwidth(session, stream, "RS") == Some(0) && bandwidth(session, stream, "RR") == Some(0)
 }
@@ -839,9 +714,8 @@ fn bandwidth(
         })
 }
 
-/// Where one end's RTCP goes: the port `a=rtcp` names, else "the port which is
-/// one higher" (RFC 3264 §6.1), which RFC 4566 §5.14 confirms is only a
-/// default.
+/// Where one end's RTCP goes: `a=rtcp`, else the next port up (RFC 3264
+/// §6.1, RFC 4566 §5.14).
 fn rtcp_address(stream: &MediaDescription, rtp: SocketAddr) -> Option<SocketAddr> {
     match stream.attribute("rtcp").and_then(|a| a.value.as_deref()) {
         Some(value) => signalled_rtcp(value, rtp),
@@ -849,8 +723,7 @@ fn rtcp_address(stream: &MediaDescription, rtp: SocketAddr) -> Option<SocketAddr
     }
 }
 
-/// `a=rtcp:<port>`, and where a network address follows the port it is written
-/// in the shape of a `c=` line and read as one.
+/// `a=rtcp:<port>`; an address after the port is read like a `c=` line.
 fn signalled_rtcp(value: &str, rtp: SocketAddr) -> Option<SocketAddr> {
     let mut parts = value.split_ascii_whitespace();
     let port = parts.next()?.parse().ok()?;
@@ -866,9 +739,9 @@ fn signalled_rtcp(value: &str, rtp: SocketAddr) -> Option<SocketAddr> {
     Some(SocketAddr::new(address, port))
 }
 
-/// The keys for one stream. Only the peer's description is read at session
-/// level: an `a=crypto` is a media-level line by rule, and the fingerprint
-/// that matters is the one that authenticates the far end.
+/// The keys for one stream. Only the peer's description falls back to
+/// session level: `a=crypto` is media-level only, and the fingerprint
+/// that matters authenticates the far end.
 fn keying(
     our_stream: &MediaDescription,
     theirs: &SessionDescription,
@@ -878,10 +751,8 @@ fn keying(
     let mine = crypto_lines(our_stream);
     let peers = crypto_lines(their_stream);
     if let Some((local, remote)) = agreed_crypto(&mine, &peers) {
-        // §7.1.2: "the master key(s) included in the answer MUST be different
-        // from those in the offer". A peer that echoes our key back would have
-        // both directions running off one keystream, which §7.1.1 calls
-        // insecure outright
+        // §7.1.2: the answer's keys must differ from the offer's; one key on both
+        // directions is insecure (§7.1.1)
         if local
             .keys
             .iter()
@@ -894,11 +765,8 @@ fn keying(
             remote: remote.clone(),
         }));
     }
-    // "the crypto attribute in the answer MUST contain ... the tag and
-    // crypto-suite from the accepted crypto attribute in the offer"
-    // (RFC 4568 §5.1.2). Two sides that both wrote crypto lines and agree on
-    // no tag have not negotiated anything, and guessing is how a stack ends up
-    // decrypting with the wrong key.
+    // RFC 4568 §5.1.2: the answer carries an offered tag and suite. No
+    // common tag means no agreement, and guessing means a wrong key.
     if !mine.is_empty() && !peers.is_empty() {
         return Err(SdpError::CryptoNotOffered { stream });
     }
@@ -917,9 +785,8 @@ fn keying(
     Ok(None)
 }
 
-/// The `a=crypto` lines of a stream. "The crypto attribute MUST only appear at
-/// the SDP media level (not at the session level)", so nowhere else is looked
-/// at, and a line that does not parse is not a line to negotiate with.
+/// The `a=crypto` lines of a stream, media level only (RFC 4568). Lines
+/// that do not parse are skipped.
 fn crypto_lines(stream: &MediaDescription) -> Vec<CryptoPolicy> {
     stream
         .attributes
@@ -929,9 +796,8 @@ fn crypto_lines(stream: &MediaDescription) -> Vec<CryptoPolicy> {
         .collect()
 }
 
-/// The pair the two descriptions agree on, taken in the peer's order of
-/// preference. The suites have to match as well as the tags: "the same
-/// crypto-suite MUST be used in the send and receive direction".
+/// The pair both descriptions agree on, in the peer's order. Suites must
+/// match as well as tags (RFC 4568 §6.1).
 fn agreed_crypto<'a>(
     mine: &'a [CryptoPolicy],
     peers: &'a [CryptoPolicy],
@@ -942,11 +808,8 @@ fn agreed_crypto<'a>(
     })
 }
 
-/// Every value a stream carries for `name`, falling back to the session level
-/// as [`attribute_value`] does — and falling back wholesale, because §5.13's
-/// rule is that a media-level attribute "overrides" the session-level one
-/// rather than adding to it, so one `a=fingerprint` on the stream replaces
-/// every one written above it.
+/// Every value a stream carries for `name`, else the session level's, as
+/// [`attribute_value`] does. Media level replaces, not adds (§5.13).
 fn attribute_values(
     session: &SessionDescription,
     stream: &MediaDescription,
@@ -967,8 +830,8 @@ fn attribute_values(
     }
 }
 
-/// An attribute of a stream, falling back to the session-level one that
-/// RFC 4566 §5.13 lets a media-level attribute override.
+/// An attribute of a stream, falling back to the session level (RFC 4566
+/// §5.13).
 fn attribute_value<'a>(
     session: &'a SessionDescription,
     stream: &'a MediaDescription,
@@ -1033,10 +896,8 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
             .with_fmtp("useinbandfec=1")
     }
 
-    /// RFC 3264 §6.1 keeps the offer's numbers in the answer only as a
-    /// SHOULD: a peer that renumbers a dynamic codec and its named events
-    /// is matched by what the numbers map to, and each direction carries its
-    /// receiver's number (§5.1).
+    /// A peer that renumbers a dynamic codec and its events is matched by
+    /// mapping; each direction uses its receiver's number (RFC 3264 §5.1).
     #[test]
     fn a_renumbered_dynamic_codec_and_its_events_are_found_by_what_they_map_to() {
         let offer = ours(
@@ -1076,7 +937,6 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
             .expect("a plan")
             .expect("up");
         assert_eq!((plan.dtmf, plan.dtmf_in), (None, None));
-        // and the same number on both sides is still the one format
         let same = theirs(5000, "111", "a=rtpmap:111 opus/48000/2\r\n")
             .media_plan(&offer, 0)
             .expect("a plan")
@@ -1084,9 +944,8 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
         assert_eq!((same.codec.payload(), same.codec_in), (111, 111));
     }
 
-    /// An offer of Opus, G.722 and PCMU carries named events at 48 kHz and at
-    /// 8 kHz; the codec the answer settles on picks the events on its own
-    /// clock (RFC 4733 §2.5.1.2), in either role.
+    /// Opus, G.722 and PCMU offer events at 48 and 8 kHz; the agreed codec
+    /// picks the set on its clock (RFC 4733 §2.5.1.2), in either role.
     #[test]
     fn the_named_events_agreed_are_the_ones_on_the_codecs_clock() {
         let written = MediaCapabilities::new(vec![
@@ -1120,7 +979,6 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
         assert_eq!(plan.codec.rtpmap.encoding, "PCMU");
         assert_eq!((plan.dtmf, plan.dtmf_in), (Some(101), Some(97)));
 
-        // one that takes G.722 and echoes both sets: the 8 kHz ones
         let g722_answer = theirs(
             5000,
             "9 96 97",
@@ -1133,7 +991,6 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
         assert_eq!(plan.codec.rtpmap.encoding, "G722");
         assert_eq!((plan.dtmf, plan.dtmf_in), (Some(97), Some(97)));
 
-        // and Opus, the 48 kHz ones
         let opus_answer = theirs(
             5000,
             "111 97 96",
@@ -1145,7 +1002,6 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
             .expect("a plan")
             .expect("up");
         assert_eq!((plan.dtmf, plan.dtmf_in), (Some(96), Some(96)));
-        // the same, seen from the end that answered
         let back = opus_answer
             .media_plan(&offer, 0)
             .expect("a plan")
@@ -1168,8 +1024,7 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
 
         assert_eq!(plan.local, addr("192.0.2.1:5004"));
         assert_eq!(plan.remote, addr("198.51.100.9:49170"));
-        // "the offerer SHOULD use the format with the highest preference from
-        // the answer", and the peer put 8 first
+        // RFC 3264 §6.1: use the answer's top preference
         assert_eq!(plan.codec.payload(), 8);
         assert!(plan.codec.is_encoding("PCMA"));
         assert_eq!(plan.direction, Direction::SendRecv);
@@ -1240,9 +1095,7 @@ m=audio 49170 RTP/AVP 0\r\n");
             .expect("not rejected");
         assert!(plan.voip_metrics_xr);
 
-        // RFC 3611 SS5.1: "Any media level specification MUST replace a
-        // session level specification" -- an empty media-level line turns
-        // it back off even with the session-level one still present
+        // RFC 3611 §5.1: a media-level line replaces the session one, even empty
         let overridden = sdp("v=0\r\n\
 o=- 2 2 IN IP4 198.51.100.9\r\n\
 s=-\r\n\
@@ -1290,7 +1143,6 @@ a=rtcp-xr:\r\n");
             assert_eq!(map.clock_rate, clock_rate);
             assert_eq!(NegotiatedCodec::new(map).channels(), channels);
         }
-        // "1 reserved", "2 reserved", "20 unassigned", and the dynamic range
         for unmapped in [1_u8, 2, 19, 20, 24, 96, 127] {
             assert!(static_rtpmap(unmapped).is_none(), "{unmapped}");
         }
@@ -1302,7 +1154,6 @@ a=rtcp-xr:\r\n");
         let refused = theirs(0, "0", "");
         assert_eq!(local.media_plan(&refused, 0).expect("a result"), None);
 
-        // and a refusal by this end is just as final
         let we_refused = ours(0, "0", "");
         let remote = theirs(49_170, "0", "");
         assert_eq!(we_refused.media_plan(&remote, 0).expect("a result"), None);
@@ -1339,8 +1190,7 @@ m=video 5006 RTP/AVP 31\r\n");
 
     #[test]
     fn a_connection_that_is_a_name_cannot_be_planned_for() {
-        // the RFC 3264 §10.1 example writes host names, and a sans-I/O core
-        // has no way to turn one into an address
+        // the RFC 3264 §10.1 example uses host names, which cannot be resolved here
         let local = ours(5004, "0", "");
         let named = sdp("v=0\r\n\
 o=bob 2890844730 2890844730 IN IP4 host.example.com\r\n\
@@ -1383,9 +1233,7 @@ m=audio 49920 RTP/AVP 0\r\n");
 
     #[test]
     fn the_old_black_hole_stops_both_rtp_and_rtcp() {
-        // "An agent MUST be capable of receiving SDP with a connection address
-        // of 0.0.0.0, in which case it means that neither RTP nor RTCP should
-        // be sent to the peer."
+        // RFC 3264 §8.4: 0.0.0.0 means send nothing
         let local = ours(5004, "0", "");
         let held = sdp("v=0\r\n\
 o=- 2 2 IN IP4 198.51.100.9\r\n\
@@ -1415,8 +1263,7 @@ m=audio 49170 RTP/AVP 0\r\n");
             RtcpPlan::Muxed
         );
 
-        // "if the answer does not contain an a=rtcp-mux attribute, the offerer
-        // MUST NOT multiplex RTP and RTCP packets on a single port"
+        // RFC 5761: no rtcp-mux in the answer, no multiplexing
         let silent = theirs(49_170, "0", "");
         assert_eq!(
             asked
@@ -1446,8 +1293,7 @@ m=audio 49170 RTP/AVP 0\r\n");
                 remote: addr("198.51.100.10:53000"),
             }
         );
-        // "applications that are requested to send media to a <port> that is
-        // odd and where the a=rtcp: is present MUST NOT subtract 1"
+        // RFC 3605: with a=rtcp present, an odd port is not adjusted
         assert_eq!(plan.remote, addr("198.51.100.9:49171"));
     }
 
@@ -1467,8 +1313,6 @@ m=audio 49170 RTP/AVP 0\r\n");
 
     #[test]
     fn a_peer_that_says_it_runs_no_rtcp_is_believed() {
-        // "If RTCP is not in use, the agent MUST signal that using b=RS:0 and
-        // b=RR:0"
         let local = ours(5004, "0", "");
         let quiet = sdp("v=0\r\n\
 o=- 2 2 IN IP4 198.51.100.9\r\n\
@@ -1487,7 +1331,6 @@ b=RR:0\r\n");
             RtcpPlan::Off
         );
 
-        // one of the two at zero is a bandwidth figure, not a refusal
         let sender_only = sdp("v=0\r\n\
 o=- 2 2 IN IP4 198.51.100.9\r\n\
 s=-\r\n\
@@ -1525,7 +1368,6 @@ b=RR:800\r\n");
         assert_eq!(plan.dtmf, Some(101));
         assert_eq!(plan.codec.payload(), 0, "the events are not the codec");
 
-        // a peer that did not list them gets none
         let without = theirs(49_170, "0", "a=rtpmap:0 PCMU/8000\r\n");
         assert_eq!(
             local
@@ -1607,9 +1449,7 @@ a=crypto:2 AES_CM_128_HMAC_SHA1_32 {THEIRS}\r\n"
         assert_eq!(remote.to_crypto().key_params, THEIRS);
     }
 
-    // §7.1.2: "the master key(s) included in the answer MUST be different from
-    // those in the offer", because the default transform is insecure when one
-    // key protects two streams
+    // §7.1.2: the answer's keys must differ from the offer's
     #[test]
     fn a_key_that_comes_back_to_us_is_refused() {
         const KEY: &str = "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR|2^20|1:32";
@@ -1637,9 +1477,8 @@ a=crypto:1 AES_CM_128_HMAC_SHA1_80 {KEY}\r\n"
         );
     }
 
-    // §7.1.2: "Only a=crypto lines that are considered valid SRTP security
-    // descriptions ... can be accepted". A line with a key of the wrong length
-    // is not one, so the tag it carries answers nothing
+    // §7.1.2: a line with a wrong-length key is invalid, so its tag answers
+    // nothing
     #[test]
     fn an_invalid_crypto_line_is_not_a_line_to_agree_with() {
         const MINE: &str = "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR";
@@ -1695,7 +1534,6 @@ a=crypto:7 AES_CM_128_HMAC_SHA1_80 {KEY}\r\n"
             SdpError::CryptoNotOffered { stream: 0 }
         );
 
-        // the same tag under a different suite is no agreement either
         let wrong_suite = sdp(&format!(
             "v=0\r\n\
 o=- 2 2 IN IP4 198.51.100.9\r\n\
@@ -1742,7 +1580,6 @@ c=IN IP4 192.0.2.1\r\n\
 t=0 0\r\n\
 m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n\
 a=setup:actpass\r\n");
-        // written at session level, which a media-level line would override
         let remote = sdp(&format!(
             "v=0\r\n\
 o=- 2 2 IN IP4 198.51.100.9\r\n\
@@ -1768,10 +1605,7 @@ a=setup:active\r\n"
 
     #[test]
     fn every_fingerprint_a_peer_wrote_is_carried_through_in_its_own_order() {
-        // RFC 8122 §5 lets a description carry one line per hash function so
-        // that a peer which knows only one of them can still check it; taking
-        // the first and dropping the rest would fail a call over which hash
-        // the other end happened to write first
+        // RFC 8122 §5: one fingerprint per hash function, all kept
         const SHA1: &str = "sha-1 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:12:34:56:78";
         const SHA256: &str = "sha-256 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:\
 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0";
@@ -1808,9 +1642,7 @@ a=setup:active\r\n"
 
     #[test]
     fn a_fingerprint_on_the_stream_replaces_every_one_above_it() {
-        // §5.13: a media-level attribute "overrides" the session-level one.
-        // Overrides, not adds to — a stream that named one hash has not
-        // silently kept the session's other one as well
+        // §5.13: a media-level attribute replaces the session one, not adds to it
         const SESSION: &str = "sha-1 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD";
         const STREAM: &str = "sha-256 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:\
 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0";
@@ -1887,8 +1719,6 @@ KDR=1 UNENCRYPTED_SRTCP",
         assert_eq!(stream.fmtp(111), Some("useinbandfec=1"));
         assert_eq!(stream.rtpmap(0).expect("PCMU").encoding, "PCMU");
         assert!(stream.fmtp(0).is_none());
-        // the events run on the clock of the codec they interleave with:
-        // one set for Opus's 48 kHz, one for PCMU's 8 kHz
         for (payload, clock) in [(96, 48_000), (97, 8_000)] {
             let events = stream.rtpmap(payload).expect("telephone-event");
             assert_eq!(events.encoding, "telephone-event");
@@ -1920,8 +1750,7 @@ KDR=1 UNENCRYPTED_SRTCP",
         ])
         .with_dtmf(true);
         assert_eq!(taken.dtmf_payload(), Some(98));
-        // Opus's clock and G.722's, whose RTP clock is 8 kHz whatever it
-        // samples at (RFC 3551 §4.5.2)
+        // G.722's RTP clock is 8 kHz (RFC 3551 §4.5.2)
         assert_eq!(taken.dtmf_payloads(), [(98, 48_000), (99, 8_000)]);
         assert_eq!(
             taken
@@ -1931,7 +1760,6 @@ KDR=1 UNENCRYPTED_SRTCP",
             4
         );
 
-        // a build that does not do DTMF writes no events at all
         let none = MediaCapabilities::new(vec![pcmu()]);
         assert_eq!(none.dtmf_payload(), None);
         assert_eq!(
@@ -1941,8 +1769,7 @@ KDR=1 UNENCRYPTED_SRTCP",
             [0]
         );
 
-        // and a list that claims every dynamic number leaves nowhere to put
-        // them, which is a description worth writing rather than a panic
+        // all dynamic numbers taken: no events, no panic
         let crowded = MediaCapabilities::new(
             (96_u8..=127)
                 .map(|payload| {
@@ -1972,8 +1799,6 @@ KDR=1 UNENCRYPTED_SRTCP",
             Some(format!("1 AES_CM_128_HMAC_SHA1_80 {key}").as_str())
         );
 
-        // the same key offered on the plain profile: the lines are there, and
-        // the transport is the one a far end without SRTP still takes
         let optional = MediaCapabilities::new(vec![pcmu()])
             .with_srtp(SrtpSupport::SdesOnAvp(vec![Crypto::new(
                 1,
@@ -2024,7 +1849,6 @@ KDR=1 UNENCRYPTED_SRTCP",
             .media
             .push(capabilities.offer("audio", 5004, Direction::SendRecv));
 
-        // the far end keeps mu-law and the events, in the order we listed them
         let offered = offer.media.first().expect("audio");
         let answer = offer
             .answer(
@@ -2051,7 +1875,7 @@ KDR=1 UNENCRYPTED_SRTCP",
         assert_eq!(plan.local, addr("192.0.2.1:5004"));
         assert_eq!(plan.remote, addr("198.51.100.9:49170"));
 
-        // and the answerer, planning from its own side, reaches the same place
+        // the answerer reaches the same plan
         let mirrored = answer
             .media_plan(&offer, 0)
             .expect("a plan")

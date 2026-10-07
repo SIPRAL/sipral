@@ -45,31 +45,19 @@ impl Direction {
     }
 
     /// The direction an answer may carry, given what was offered and what the
-    /// answerer wants (RFC 3264 §6.1).
-    ///
-    /// The offer decides what is possible and the answerer decides within it.
-    /// A stream offered `sendonly` can only be answered `recvonly` or
-    /// `inactive` — there is nothing to argue about, because the offerer has
-    /// already said it will not listen. An offer of `inactive` leaves one
-    /// answer. Only `sendrecv` leaves the choice open, and it is the caller's.
+    /// answerer wants (RFC 3264 §6.1). Only a `sendrecv` offer leaves a choice.
     #[must_use]
     pub const fn answer_to(offer: Self, wanted: Self) -> Self {
         match offer {
             Self::SendRecv => wanted,
-            // "If a stream is offered as sendonly, the corresponding stream
-            // MUST be marked as recvonly or inactive in the answer."
             Self::SendOnly => match wanted {
                 Self::RecvOnly | Self::SendRecv => Self::RecvOnly,
                 Self::SendOnly | Self::Inactive => Self::Inactive,
             },
-            // "If a media stream is listed as recvonly in the offer, the
-            // answer MUST be marked as sendonly or inactive in the answer."
             Self::RecvOnly => match wanted {
                 Self::SendOnly | Self::SendRecv => Self::SendOnly,
                 Self::RecvOnly | Self::Inactive => Self::Inactive,
             },
-            // "If an offered media stream is listed as inactive, it MUST be
-            // marked as inactive in the answer."
             Self::Inactive => Self::Inactive,
         }
     }
@@ -138,9 +126,7 @@ pub struct MediaDescription {
     pub port_count: Option<u16>,
     /// `RTP/AVP`, `RTP/SAVP`, and so on.
     pub proto: String,
-    /// The formats, as written. For RTP they are payload type numbers; for
-    /// other transports they are whatever that transport uses, so they are
-    /// kept as text rather than forced into numbers.
+    /// The formats, as written. Kept as text: only RTP uses numbers.
     pub formats: Vec<String>,
     /// `i=`
     pub information: Option<String>,
@@ -241,12 +227,9 @@ impl MediaDescription {
         self.has_flag("rtcp-mux")
     }
 
-    /// Whether the stream is described on one of the secure profiles —
-    /// `RTP/SAVP`, `RTP/SAVPF`, `UDP/TLS/RTP/SAVP` and the rest — which is
-    /// what makes an absent key a refusal rather than a plain call.
-    ///
-    /// Token by token and without regard to case, so that `rtp/savp` is the
-    /// profile it plainly is and `RTP/AVP` is not mistaken for one.
+    /// Whether the stream uses a secure profile (`RTP/SAVP`, `RTP/SAVPF`, ...),
+    /// which turns a missing key into a refusal. Matched per token, ignoring
+    /// case.
     #[must_use]
     pub fn is_secured(&self) -> bool {
         self.proto
@@ -254,20 +237,12 @@ impl MediaDescription {
             .any(|token| token.eq_ignore_ascii_case("SAVP") || token.eq_ignore_ascii_case("SAVPF"))
     }
 
-    /// Hand the DTLS roles back to the answer, on a stream about to be
-    /// offered again (RFC 8842 §5.5).
+    /// Hand the DTLS roles back to the answer on a stream about to be offered
+    /// again (RFC 8842 §5.5): a re-offer that keeps the association says
+    /// `actpass`, and the answerer keeps the roles in force (§5.3).
     ///
-    /// "When an offerer sends a subsequent offer and does not want to
-    /// establish a new DTLS association ... the offerer MUST insert in the
-    /// offer an SDP 'setup' attribute with an 'actpass' attribute value" —
-    /// whatever role the stream has had so far, which leaves it to the
-    /// answerer, under §5.3, to answer with the roles already in force. A
-    /// stream the description last carried as an answer says `active` or
-    /// `passive`, and this is what turns that into an offer.
-    ///
-    /// Only a stream keyed by a handshake, told by its own `a=fingerprint`:
-    /// `a=setup` is RFC 4145's before it is DTLS's, and a stream with no
-    /// fingerprint is left exactly as it was.
+    /// Only streams with an `a=fingerprint` are touched; `a=setup` without one
+    /// is RFC 4145's and is left alone.
     pub fn offer_roles_again(&mut self) {
         if self.attribute("fingerprint").is_none() {
             return;
@@ -334,27 +309,18 @@ mod tests {
     fn the_answer_direction_table_of_section_6_1() {
         use Direction::{Inactive, RecvOnly, SendOnly, SendRecv};
         for (offer, wanted, expected) in [
-            // "If an offered media stream is listed as sendrecv ... the
-            // corresponding stream in the answer MAY be marked as sendonly,
-            // recvonly, sendrecv, or inactive."
             (SendRecv, SendRecv, SendRecv),
             (SendRecv, SendOnly, SendOnly),
             (SendRecv, RecvOnly, RecvOnly),
             (SendRecv, Inactive, Inactive),
-            // "If a stream is offered as sendonly, the corresponding stream
-            // MUST be marked as recvonly or inactive in the answer."
             (SendOnly, SendRecv, RecvOnly),
             (SendOnly, RecvOnly, RecvOnly),
             (SendOnly, SendOnly, Inactive),
             (SendOnly, Inactive, Inactive),
-            // "If a media stream is listed as recvonly in the offer, the
-            // answer MUST be marked as sendonly or inactive in the answer."
             (RecvOnly, SendRecv, SendOnly),
             (RecvOnly, SendOnly, SendOnly),
             (RecvOnly, RecvOnly, Inactive),
             (RecvOnly, Inactive, Inactive),
-            // "If an offered media stream is listed as inactive, it MUST be
-            // marked as inactive in the answer."
             (Inactive, SendRecv, Inactive),
             (Inactive, SendOnly, Inactive),
             (Inactive, RecvOnly, Inactive),

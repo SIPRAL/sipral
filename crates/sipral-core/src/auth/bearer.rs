@@ -3,35 +3,26 @@
 
 //! The `Bearer` scheme: OAuth 2.0 access tokens in SIP (RFC 8898, RFC 6750).
 //!
-//! A server that takes OAuth challenges with `Bearer` where it would have
-//! challenged with `Digest`, and names where a token comes from:
-//!
 //! ```text
 //! challenge  =/  ("Bearer" LWS bearer-cln *(COMMA bearer-cln))
 //! bearer-cln = realm / scope-param / authz-server-param / error-param /
 //!              auth-param
 //! ```
 //!
-//! The answer is the token itself, `Authorization: Bearer <token>` (RFC 6750
-//! §2.1), in the field §22 of RFC 3261 puts any answer in: `Authorization`
-//! for a 401, `Proxy-Authorization` for a 407. RFC 8898 §2 keeps every other
-//! rule of §22, so a `Bearer` challenge is cached per destination and per
-//! protection domain exactly as a `Digest` one is.
+//! The answer is `Authorization: Bearer <token>` (RFC 6750 §2.1), or
+//! `Proxy-Authorization` for a 407 (RFC 3261 §22). RFC 8898 §2 keeps the rest
+//! of §22, so a `Bearer` challenge is cached like a `Digest` one.
 //!
-//! What this stack does not do is fetch the token. RFC 8898 leaves the OAuth
-//! exchange "out of scope", and it is the application's: a browser, a user,
-//! and the list of authorization servers it trusts — §2.1.1 says the client
-//! "MUST check the AS URL received in the 401/407 response against a list of
-//! trusted ASs", and only the application holds that list. So a challenge is
-//! read, reported with its `authz_server`, `scope` and `error`, and answered
-//! with whatever token the application has supplied.
+//! Fetching the token is the application's job. RFC 8898 leaves the OAuth
+//! exchange out of scope, and §2.1.1 says the client "MUST check the AS URL
+//! received in the 401/407 response against a list of trusted ASs", a list
+//! only the application holds. So a challenge is reported with its
+//! `authz_server`, `scope` and `error`, and answered with whatever token the
+//! application supplied.
 //!
-//! RFC 6750 §3.1's `invalid_token` — "expired, revoked, malformed, or invalid
-//! for other reasons" — is what a server says when the token it was given no
-//! longer works. The token that earned it is remembered, by its SHA-256 and
-//! never by its value, and not offered to that protection domain again: the
-//! rule §22.1 makes for a rejected password, applied to a rejected token.
-//! A new token from the application answers at once.
+//! After an `invalid_token` (RFC 6750 §3.1) the refused token is remembered
+//! by its SHA-256, never by value, and not offered to that protection domain
+//! again: the §22.1 rule for a rejected password. A new token answers at once.
 
 use std::sync::Arc;
 
@@ -91,9 +82,8 @@ pub struct BearerChallenge {
     /// The scope the token has to carry: space-separated, case-sensitive
     /// strings the authorization server defines (RFC 6749 §3.3).
     pub scope: Option<Arc<str>>,
-    /// Where a token comes from: an `https` URI (RFC 8898 §4). A value
-    /// that is not one is dropped, since §2.2 makes it one and a client is
-    /// meant to contact it.
+    /// Where a token comes from: an `https` URI (RFC 8898 §4). Any other
+    /// value is dropped, since §2.2 requires one and the client contacts it.
     pub authz_server: Option<Arc<str>>,
     /// What was wrong with the request, when the server said.
     pub error: Option<BearerError>,
@@ -145,8 +135,8 @@ impl BearerChallenge {
     }
 }
 
-/// What a token is remembered by once it has been refused: its SHA-256,
-/// which says whether a later token is the same one without keeping it.
+/// The SHA-256 a refused token is remembered by, so it can be recognised
+/// later without being kept.
 pub(super) fn fingerprint(token: &[u8]) -> [u8; 32] {
     sha256(token)
 }

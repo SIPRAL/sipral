@@ -3,19 +3,14 @@
 
 //! What happens to bytes that arrive, and to time that passes.
 //!
-//! The order of the questions matters, and it is the RFC's order. A response
-//! is checked against our own `Via` before anything else looks at it
-//! (§18.1.2), then matched to a transaction (§17.1.3), then — only if it is a
-//! response to an INVITE — offered to the dialogs that INVITE has produced.
-//! A request is matched to a server transaction first (§17.2.3), because a
-//! retransmission has to be answered from what was already sent rather than
-//! handed up a second time; only a request that matches nothing is new.
+//! The order is the RFC's. A response is checked against our own `Via` (§18.1.2), matched to a
+//! transaction (§17.1.3), and, for an INVITE, offered to its dialogs. A request is matched to a
+//! server transaction first (§17.2.3), so a retransmission is answered from what was sent; only an
+//! unmatched request is new.
 //!
-//! Two things are done here without asking, because the RFC leaves no choice
-//! and there is no policy in either. A CANCEL that matches an INVITE gets its
-//! 200 and the INVITE gets its 487 (§9.2, two MUSTs). A request whose `CSeq`
-//! runs backwards inside a dialog gets a 500 (§12.2.2, one more). Everything
-//! else is reported and left to the layer above.
+//! Two things are done without asking, because the RFC leaves no choice: a matching CANCEL gets its
+//! 200 and the INVITE its 487 (§9.2), and a request whose `CSeq` runs backwards in a dialog gets a
+//! 500 (§12.2.2).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,56 +37,30 @@ use crate::transaction::{
 const PONG: &[u8] = b"\r\n";
 /// The ping itself.
 const PING: &[u8] = b"\r\n\r\n";
-/// §4.4.1: "If a pong is not received within 10 seconds after sending a ping
-/// ... then the client MUST treat the flow as failed."
+/// §4.4.1: no pong within 10 seconds of a ping means the flow failed.
 ///
-/// Not configurable. The interval between pings is a trade-off between battery
-/// and availability and the RFC says so; this one is the MUST, and a stack that
-/// let it be turned up would be a stack that can be configured out of
-/// conformance.
+/// Not configurable: this one is a MUST, unlike the ping interval.
 const PONG_DUE: core::time::Duration = core::time::Duration::from_secs(10);
 
 /// The most non-INVITE server transactions one dialog may have open at once.
 ///
-/// A request inside a dialog we hold is exempt from
-/// [`super::EndpointConfig::max_server_transactions`] — docs/03 says why: a
-/// stranger's flood must not starve a call that is up. That exemption has no
-/// ceiling of its own unless something gives it one, and a peer already
-/// inside the dialog — including one that has since gone hostile, or a bug on
-/// the far end that never stops sending INFO — could otherwise open as many
-/// of these as it likes, which is the endpoint-wide flood again with a
-/// friendlier address on it. Sixteen is well past what a real exchange inside
-/// one call needs live at once (DTMF, a PRACK or two, an UPDATE) and well
-/// short of turning one noisy dialog into an unbounded one.
+/// In-dialog requests are exempt from [`super::EndpointConfig::max_server_transactions`] (docs/03),
+/// so a peer inside the dialog needs a ceiling of its own. Sixteen is well past what one call needs
+/// live (DTMF, a PRACK, an UPDATE).
 ///
-/// A BYE in order never draws from this budget, however many of the sixteen
-/// are already open: RFC 3261 §15.1.1 has the caller "consider the session
-/// terminated" from the moment it sends one, whatever answer comes back, so
-/// a 503 here does not slow a flood down — it leaves the far end holding a
-/// dialog the other side has already hung up on. Only one BYE is ever worth
-/// answering per dialog in any case, since the dialog itself, and the
-/// budget with it, is gone once it is. A BYE whose `CSeq` runs backwards is
-/// the exception: §12.2.2 answers it 500 and the dialog stands, so it ends
-/// nothing and is held to the budget like any other request — otherwise a
-/// peer could open transactions past it without limit by numbering its BYEs
-/// low.
+/// A BYE in order never draws from it: §15.1.1 has its sender consider the session over anyway, so
+/// a 503 only leaves a dead dialog behind. A BYE whose `CSeq` runs backwards ends nothing (§12.2.2)
+/// and is counted, or low-numbered BYEs would bypass the limit.
 const MAX_DIALOG_NON_INVITE_TRANSACTIONS: usize = 16;
-/// `Retry-After` on the 503 [`Endpoint::refuse_when_dialog_full`] answers
-/// with. RFC 5057 does not name a value for this refusal; one second is
-/// short because the load it answers is a burst inside a call that is
-/// otherwise healthy, not a stranger to be sent away.
+/// `Retry-After` on the 503 of [`Endpoint::refuse_when_dialog_full`]. RFC 5057 names no value; one
+/// second suits a burst inside a healthy call.
 const DIALOG_BUSY_RETRY_AFTER_SECONDS: u32 = 1;
-/// `Retry-After` on the 503 an INVITE gets at
-/// [`super::EndpointConfig::max_dialogs`] (RFC 3261 §21.5.4, §20.33).
+/// `Retry-After` on the 503 an INVITE gets at [`super::EndpointConfig::max_dialogs`] (RFC 3261
+/// §21.5.4, §20.33).
 ///
-/// Room comes back the moment any one call ends. At the default ceiling, 128
-/// calls of three minutes each, that is every 1.4 seconds on average, and
-/// sooner at any ceiling raised past it; two seconds is that, rounded up to
-/// the whole seconds the header counts in. Longer would have a proxy that
-/// honours it (§21.5.4: it "SHOULD NOT forward any other requests to that
-/// server for the duration") send callers elsewhere while room is already
-/// here; with no value at all, the same section has the client "act as if it
-/// had received a 500", which says broken where the truth is full.
+/// At the default ceiling (128 calls of three minutes) room frees every 1.4 seconds, rounded up to
+/// two. Longer would send callers elsewhere while room exists; none at all reads as a 500
+/// (§21.5.4), broken rather than full.
 const DIALOG_CEILING_RETRY_AFTER_SECONDS: u32 = 2;
 
 impl Endpoint {
@@ -113,9 +82,7 @@ impl Endpoint {
         let protocol = bound.protocol;
         let advertised = bound.local;
 
-        // the scratch is taken out so that the parsed view borrows a local
-        // rather than a field, which leaves the rest of the endpoint free to
-        // be mutated while the message is being read
+        // taken out so the parsed view borrows a local, leaving `self` free to mutate
         let mut scratch = core::mem::replace(&mut self.scratch, ParseScratch::new());
         let mode = self.config.parse_mode;
         let limits = self.config.limits;
@@ -155,9 +122,7 @@ impl Endpoint {
         }
         let protocol = bound.protocol;
         let advertised = bound.local;
-        // a connected transport has one far end; the destination of anything
-        // written to it is ignored by the caller, and carried so a log line
-        // says where it went
+        // a connected transport has one far end; the destination is only for logs
         let named_far_end = bound.remote;
         let remote = bound.remote.unwrap_or(advertised);
         let Some(mut framer) = self
@@ -177,8 +142,7 @@ impl Endpoint {
                         tap.push(super::StreamMessage {
                             transport,
                             remote: named_far_end,
-                            // the framer's buffer runs on past it into
-                            // whatever arrived behind it
+                            // the framer's buffer runs on past the message
                             bytes: message
                                 .as_bytes()
                                 .get(..message.len())
@@ -207,8 +171,7 @@ impl Endpoint {
                 Err(error) => outcome = Err(ReceiveError::Malformed(error)),
             }
         }
-        // framing lost: nothing says where the message ends, so nothing can be
-        // answered, and the connection goes below. Counted all the same
+        // framing lost: nothing can be answered and the connection goes below. Still counted
         if let Err(ReceiveError::Malformed(error)) = outcome {
             self.unreadable = self.unreadable.saturating_add(1);
             let mut decision = Decision::of(Reason::MessageDroppedUnreadable)
@@ -219,10 +182,8 @@ impl Endpoint {
             }
             self.note(None, decision);
         }
-        // RFC 5626 5.4 makes answering a ping a MUST for whoever receives it,
-        // and owes one CRLF per double-CRLF. It says nothing about how many
-        // writes that is, and a segment holds thousands of pings: one write
-        // each would let a peer trade four bytes in for a syscall out
+        // RFC 5626 5.4: one CRLF per double-CRLF, but in one write, or a peer trades four bytes for
+        // a syscall
         let mut pings = 0usize;
         while framer.take_ping() {
             pings = pings.saturating_add(1);
@@ -238,7 +199,7 @@ impl Endpoint {
                 .transmit(Arc::from(PONG.repeat(pings))),
             );
         }
-        // and the answer to ours is the only thing that says the flow is alive
+        // a pong is the only proof the flow is alive
         let mut answered = false;
         while framer.take_pong() {
             answered = true;
@@ -254,8 +215,7 @@ impl Endpoint {
                 }
                 Ok(())
             }
-            // "a stream whose framing is wrong cannot be resynchronised": the
-            // connection is gone, and the framer with it
+            // a stream with broken framing cannot be resynchronised
             Err(error) => {
                 self.lose_transport(transport);
                 Err(error)
@@ -284,33 +244,20 @@ impl Endpoint {
         }
     }
 
-    /// Answer what the parser refused, when an answer can be addressed, and
-    /// leave a trace of it either way.
+    /// Answer what the parser refused when an answer can be addressed, and record it either way.
     ///
-    /// §8.2 has a UAS answer a request it cannot process instead of leaving
-    /// the client to retransmit into silence until timer B or F gives up:
-    /// §21.5.14's 513 for one longer than [`crate::msg::Limits::max_message_bytes`],
-    /// §21.4.1's 400 for anything else, with a reason phrase that names the
-    /// bound or the fault — a peer told `Subject Too Long (limit 16384 bytes)`
-    /// knows what to change, and one told `Bad Request` does not. The answer
-    /// is written from what [`salvage_request`] still recovers of it, and is
-    /// stateless for the reason [`Endpoint::refuse_as_malformed`] gives: there
-    /// is nothing worth remembering about a message this end could not read.
+    /// §8.2 has a UAS answer what it cannot process rather than leave the client retransmitting:
+    /// 513 past [`crate::msg::Limits::max_message_bytes`] (§21.5.14), 400 otherwise (§21.4.1), with
+    /// a phrase naming the bound or fault. Built statelessly from what [`salvage_request`]
+    /// recovers.
     ///
-    /// Nothing is answered when the bytes are a response, an ACK (never
-    /// answered, §17.1.1.3), or a request whose top `Via` cannot be read,
-    /// since that `Via` is where an answer goes (§18.2.2) and what the client
-    /// matches it on (§17.1.3). A `From`, `To`, `Call-ID` or `CSeq` that is
-    /// missing or cannot be read is not a reason to stay silent: the answer
-    /// copies whichever of them are there ([`ResponseBuilder::build_refusal`]),
-    /// as the answer to a request that parsed but lacks them does. Either way the
-    /// count behind [`Endpoint::unreadable`] moves and the endpoint's record
-    /// says which of the two happened, on the endpoint's record rather than a
-    /// call's for the same reason overload refusals are: a stranger's garbage
-    /// must not push the calls this endpoint carries out of the set.
+    /// Nothing is answered for a response, an ACK (§17.1.1.3), or a request whose top `Via` cannot
+    /// be read (§18.2.2, §17.1.3). Missing `From`, `To`, `Call-ID` or `CSeq` do not stop it
+    /// ([`ResponseBuilder::build_refusal`]). Recorded on the endpoint's record, not a call's, so a
+    /// stranger's garbage cannot evict real calls.
     ///
-    /// `bytes` is what was refused — the whole datagram, or only the head of
-    /// a message on a stream — and `length` how long the whole message is.
+    /// `bytes` is what was refused (a datagram, or a stream message's head); `length` is the whole
+    /// message.
     fn answer_unreadable(
         &mut self,
         bytes: &[u8],
@@ -349,8 +296,7 @@ impl Endpoint {
             .to_tag(&tag)
             .reason(phrase.as_bytes())
             .build_refusal();
-        // the copied fields, a longer status line and a tag can pass the
-        // message bound the builder still holds an answer to: nothing to send
+        // copied fields, the phrase and a tag can push past the size bound
         let Ok(message) = built else {
             self.note(None, measured(dropped));
             return;
@@ -388,8 +334,6 @@ impl Endpoint {
     }
 }
 
-// -- responses --------------------------------------------------------------
-
 impl Endpoint {
     fn on_response(
         &mut self,
@@ -398,8 +342,7 @@ impl Endpoint {
         advertised: SocketAddr,
         now: Instant,
     ) {
-        // 18.1.2: "If the value does not match, the response MUST be
-        // discarded" — before anything else looks at it
+        // §18.1.2: a response whose Via does not match MUST be discarded
         let Ok(via) = response.top_via() else {
             return;
         };
@@ -417,9 +360,7 @@ impl Endpoint {
         match self.transactions.client_for(response) {
             Some(Client::NonInvite(id)) => self.on_non_invite_response(id, response, now),
             Some(Client::Invite(id)) => self.on_invite_response(id, response, now),
-            // a response to a transaction that has already terminated, or to
-            // one that was never ours. There is nothing to do with it: 17.1.3
-            // sends it to the core, and this core has no use for a stray
+            // a stray or late response: §17.1.3 hands it to the core, which has no use for it
             None => (),
         }
     }
@@ -439,8 +380,7 @@ impl Endpoint {
         let notify = effects.notify;
         let ending =
             self.apply_deferred(effects, flow, AnyTransactionId::NonInviteClient(id), false);
-        // RFC 3263 §4.3: a 503 and the two ways a request finds nobody are
-        // what a request outside a dialog may go to the next server for
+        // RFC 3263 §4.3: a 503, a timeout or a transport failure may go to the next server
         let unreached = match notify {
             Some(Notify::Response) => response.status() == Some(StatusCode::SERVICE_UNAVAILABLE),
             Some(Notify::TimedOut | Notify::TransportFailed) => true,
@@ -458,11 +398,7 @@ impl Endpoint {
                         status,
                         response: response.to_owned(),
                     });
-                    // a challenge is not a refusal: `on_challenge`, below,
-                    // is what decides whether this one is answered, and its
-                    // own entries (`auth.challenge.received` and
-                    // `auth.challenge.answered`) already say what happened
-                    // to it
+                    // a challenge is not a refusal; `on_challenge` records its own entries
                     if status.is_final()
                         && !status.is_success()
                         && status != StatusCode::UNAUTHORIZED
@@ -512,14 +448,12 @@ impl Endpoint {
         let notify = effects.notify;
         let cancel_due = entry.machine.take_deferred_cancel();
         let renegotiated = self.reinvites.dialog_of(id);
-        // read while the request is still here and only when it is wanted:
-        // `sent` is handed to `on_challenge` further down
+        // read only when wanted, before `sent` moves into `on_challenge`
         let call = (notify == Some(Notify::TimedOut))
             .then(|| sent.as_raw().call_id().ok().map(CallId::new))
             .flatten();
         let ending = self.apply_deferred(effects, flow, AnyTransactionId::InviteClient(id), false);
-        // RFC 3263 §4.3, as for a request that is not an INVITE: a call
-        // answered 503 by a server that is not its last may go to the next
+        // RFC 3263 §4.3, as for a non-INVITE
         let unreached = match notify {
             Some(Notify::Response) => response.status() == Some(StatusCode::SERVICE_UNAVAILABLE),
             Some(Notify::TimedOut | Notify::TransportFailed) => true,
@@ -530,9 +464,7 @@ impl Endpoint {
         }
 
         if notify == Some(Notify::Response) {
-            // §14.1: a re-INVITE never forks, so its answer is not one of
-            // several a dialog set has to tell apart — it belongs to the one
-            // dialog it was sent in
+            // §14.1: a re-INVITE never forks, so its answer belongs to its dialog
             if let Some(dialog) = renegotiated {
                 self.on_reinvite_response(id, dialog, response, flow);
             } else {
@@ -543,8 +475,7 @@ impl Endpoint {
         if notify == Some(Notify::TimedOut) {
             self.invite_gave_up(id, renegotiated, FailureReason::Timeout, call.as_ref());
         }
-        // 9.1: the CANCEL was asked for before anything had come back, and
-        // the first provisional response is what releases it
+        // §9.1: the CANCEL held for the first provisional goes now
         if cancel_due {
             self.send_cancel(id, now).ok();
         }
@@ -554,19 +485,12 @@ impl Endpoint {
         }
     }
 
-    /// Whether a response to an INVITE this end sent may open a branch its
-    /// set does not have yet.
+    /// Whether a response to our INVITE may open a branch its set does not have yet.
     ///
-    /// The call the caller placed always opens: the first dialog of an
-    /// INVITE this end sent, and the first 2xx to it. Those are not always
-    /// one branch, since a forking proxy rings the desk phone and the
-    /// mobile and the mobile answers. Every branch past them is the far
-    /// end's to multiply, and opens only while max_dialogs has room: a
-    /// provisional that finds none is reported without a dialog, and a 2xx
-    /// is left unacknowledged for its sender to give up with a BYE
-    /// (§13.3.1.4). Acknowledging and hanging it up here instead would turn
-    /// every forged 2xx into two requests and their retransmissions, sent
-    /// to a Contact the sender chose.
+    /// The first dialog and the first 2xx always open (a forked call may ring one phone and be
+    /// answered on another). Further branches need room under `max_dialogs`. A 2xx without room is
+    /// left unacknowledged, so its sender gives up with a BYE (§13.3.1.4); answering it here would
+    /// let every forged 2xx trigger requests to a Contact of the sender's choice.
     fn fork_has_room(&self, set: Raw, status: StatusCode) -> bool {
         self.dialogs.set(set).is_some_and(|branches| {
             branches.is_empty()
@@ -603,13 +527,8 @@ impl Endpoint {
                 }
                 if status.is_success() {
                     self.dialogs.answered(set);
-                    // 13.2.2.4: "The ACK MUST be passed to the client
-                    // transport every time a retransmission of the 2xx final
-                    // response that triggered the ACK arrives." The caller
-                    // heard about this call once and does not hear again. It
-                    // goes where the first one went, which is not the flow
-                    // the 2xx came in on when §18.1.1 moved the ACK onto a
-                    // stream, and never to a stream that has since closed
+                    // §13.2.2.4: every retransmitted 2xx gets the ACK again, on the flow the first
+                    // ACK went, never a closed stream. The caller is not told twice
                     if let Some((ack, went_on)) = self
                         .dialogs
                         .kept_ack(dialog)
@@ -628,8 +547,7 @@ impl Endpoint {
                         return;
                     }
                     if self.was_cancelled(id) {
-                        // the CANCEL lost the race: this is a live call, and
-                        // hanging it up is the caller's decision
+                        // the CANCEL lost the race; hanging up is the caller's call
                         self.push(Event::CancelLostRace { invite: id, dialog });
                     }
                     self.push(Event::Established {
@@ -651,10 +569,7 @@ impl Endpoint {
             }
             Fork::Refused => {
                 self.end_refused_set(set);
-                // the same carve-out the non-INVITE path makes, for the same
-                // reason and so that one counter does not mean two things
-                // depending on the method: a challenge is not a refusal, and
-                // `auth.challenge.received` already says one arrived
+                // a challenge is not a refusal, as on the non-INVITE path
                 if status != StatusCode::UNAUTHORIZED && status != StatusCode::PROXY_AUTH_REQUIRED {
                     self.note_failure_for(response, FailureReason::Refused);
                 }
@@ -669,8 +584,7 @@ impl Endpoint {
                     });
                 }
             }
-            // a 100, a response with no tag to name a dialog by, or one that
-            // found no room for the dialog it would have opened
+            // a 100, a response with no tag, or one with no room for its dialog
             Fork::Ignored => {
                 let names_a_dialog = response.to().is_ok_and(|to| to.tag().is_some());
                 if status.is_provisional() {
@@ -681,10 +595,8 @@ impl Endpoint {
                         response: response.to_owned(),
                     });
                 } else if status.is_success() && !room && names_a_dialog {
-                    // §13.3.1.4 has the far end give this up with a BYE of its
-                    // own; nothing here is wrong enough to report upward, but
-                    // a call that vanishes without a trace is exactly what
-                    // this record exists to replace
+                    // §13.3.1.4: the far end gives this up with a BYE; record it so the call does
+                    // not vanish without trace
                     self.note_wire(
                         response,
                         Reason::ForkDroppedAtLimit,
@@ -697,39 +609,28 @@ impl Endpoint {
     }
 }
 
-// -- requests ---------------------------------------------------------------
-
 impl Endpoint {
     fn on_request(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
-        // §8.2.x, before anything acts on it: "If the UAS detects a syntax
-        // error, it MUST respond with a 400". The parser does not ask this
-        // question -- it does not know which fields will be read -- so this is
-        // where it is asked, once, by the end that is about to answer. Before
-        // the retransmission check too: a request this endpoint never accepted
-        // has no server transaction to be answered from, and matching one on a
-        // CSeq that disagrees with its own start line is exactly the confusion
-        // being refused.
+        // §8.2: a syntax error MUST get a 400. The parser does not know which fields will be read,
+        // so it is asked here, before the retransmission check: a request never accepted has no
+        // transaction to answer from.
         if let Err(invalid) = request.validate() {
             self.refuse_as_malformed(request, flow, &invalid);
             return;
         }
-        // 17.2.3: a retransmission is answered from what was already sent, not
-        // handed up again
+        // §17.2.3: a retransmission is answered from what was sent
         if let Some(server) = self.transactions.server_for(request) {
             self.on_known_request(server, request, flow, now);
             return;
         }
 
         let method = request.method();
-        // an ACK creates nothing and is never answered, so there is nothing to
-        // refuse and nothing to refuse it with
+        // an ACK creates nothing and is never answered
         if method != Some(Method::Ack) && self.refuse_when_full(request, flow) {
             return;
         }
         match method {
-            // "when a UAS core sends a 2xx response to INVITE, the server
-            // transaction is destroyed. This means that when the ACK arrives,
-            // there will be no matching server transaction"
+            // §17.2.1: the 2xx destroyed the server transaction, so its ACK matches none
             Some(Method::Ack) => self.on_ack_for_2xx(request),
             Some(Method::Cancel) => self.on_cancel(request, flow, now),
             Some(Method::Invite) => self.on_invite(request, flow, now),
@@ -738,32 +639,16 @@ impl Endpoint {
         }
     }
 
-    /// Answer 400 to a request that arrived whole and cannot be acted on, and
-    /// say which field it was.
+    /// Answer 400 to a request that arrived whole but cannot be acted on, naming the field.
     ///
-    /// §8.2.x asks for "a Reason-Phrase that identifies the syntax problem",
-    /// so the field's own name goes in it: a peer that gets `Bad CSeq` knows
-    /// where to look, and one that gets `Bad Request` has to guess. The
-    /// answer is stateless, for the same reason the overload refusal is: there
-    /// is nothing here worth remembering about a message this end could not
-    /// read, and a retransmission of it earns the same answer again.
-    ///
-    /// A request missing a field the answer would copy is answered all the
-    /// same, with what it had: RFC 4475 §3.3.1's `insuf` has no `From`, `To`
-    /// or `Call-ID` and "ideally" gets a 400, and the one field an answer
-    /// cannot go without is the `Via` that routes it
+    /// §8.2 wants a phrase that identifies the problem, so `Bad CSeq` rather than `Bad Request`.
+    /// Stateless, like the overload refusal. A request missing a field the answer copies is still
+    /// answered (RFC 4475 §3.3.1 `insuf`); only the `Via` is indispensable
     /// ([`ResponseBuilder::build_refusal`]).
     ///
-    /// Three of them are answered with nothing at all. An ACK is never
-    /// answered (§17.1.1.3), so a malformed one is dropped where it stands.
-    /// A request with no `Via` names no place to send an answer to, and
-    /// §18.2.2 has the response go to where the `Via` says; the builder
-    /// refuses to write one, and the refusal is the drop. And a response is
-    /// not judged here at all: §18.1.2 already
-    /// discards one whose `Via` is not ours, and each reader of a response
-    /// handles the field it reads, so a response carrying a fault in a field
-    /// nobody reads stays usable rather than becoming a call that never
-    /// connects.
+    /// Not answered: an ACK (§17.1.1.3), and a request with no `Via` (§18.2.2). Responses are not
+    /// judged here: §18.1.2 already filters them, and a fault in a field nobody reads should not
+    /// break a call.
     fn refuse_as_malformed(&mut self, request: &RawMessage<'_>, flow: Flow, invalid: &Invalid) {
         let mut decision =
             Decision::of(Reason::RequestRefusedAsMalformed).at_address(flow.destination);
@@ -791,33 +676,18 @@ impl Endpoint {
 
     /// The ceiling on what a stranger may make this endpoint hold.
     ///
-    /// A request inside a dialog we already have is never refused *for this*,
-    /// whatever the count says: it manages state that exists. It is held to
-    /// [`Endpoint::refuse_when_dialog_full`] instead, which is its own,
-    /// smaller ceiling — except a BYE in order, which that ceiling exempts too: a BYE
-    /// turned away leaves the call standing for the life of the process, and
-    /// §15.1.1 has the far end consider the session over the moment it sent
-    /// one regardless of what comes back, so refusing it buys nothing. Nor is
-    /// a CANCEL that matches a transaction of ours, for the same reason and
-    /// because §9.2 makes answering it a MUST, in or out of a dialog. A
-    /// stranger's request is the remaining case, and
-    /// past the ceiling it gets §21.5.4's 503 — "temporarily unable to
-    /// process the request due to a temporary overloading" — written straight
-    /// to the flow, because the point of refusing is not to keep anything.
+    /// A request inside one of our dialogs is held to [`Endpoint::refuse_when_dialog_full`]
+    /// instead. A CANCEL that matches one of our transactions is never refused (§9.2 makes
+    /// answering it a MUST). Everything else past the ceiling gets §21.5.4's 503, written straight
+    /// to the flow, keeping nothing.
     ///
-    /// An INVITE refused because the calls held reached `max_dialogs` carries
-    /// a `Retry-After` of [`DIALOG_CEILING_RETRY_AFTER_SECONDS`]: this end is
-    /// full rather than broken, and is sure to have room again as soon as a
-    /// call ends. A refusal for want of server transactions alone carries
-    /// none: that ceiling is met by a flood, and §21.5.4 then has the sender
-    /// treat the 503 as a 500 and go elsewhere, which is what should happen,
-    /// rather than be told when to come back.
+    /// An INVITE refused at `max_dialogs` carries `Retry-After`
+    /// [`DIALOG_CEILING_RETRY_AFTER_SECONDS`]: this end is full, not broken. A refusal for server
+    /// transactions alone carries none, since that ceiling is met by a flood and the sender should
+    /// go elsewhere.
     fn refuse_when_full(&mut self, request: &RawMessage<'_>, flow: Flow) -> bool {
-        // and neither is a CANCEL that matches something: §9.2 makes answering
-        // one a MUST, and it ends a transaction rather than starting one worth
-        // counting. A CANCEL that matches nothing is held to the same ceiling
-        // as any other request: the endpoint's outside a dialog, and inside
-        // one the dialog's own, which `on_cancel` counts it against
+        // a CANCEL that matches nothing is held to the ceiling like any request; `on_cancel` counts
+        // it against its dialog
         if request.method() == Some(Method::Cancel)
             && self.transactions.cancelled_by(request).is_some()
         {
@@ -830,12 +700,7 @@ impl Endpoint {
             return self.refuse_when_dialog_full(dialog, request, flow);
         }
         let transactions = self.transactions.servers_len() >= self.config.max_server_transactions;
-        // a call is refused before it rings rather than after it is answered:
-        // the dialog would be created by our own 2xx, and by then the far end
-        // has heard ringback
-        // and it is measured against the calls already let in as well as the
-        // dialogs already made, since each of those becomes a dialog the moment
-        // it is answered
+        // refused before it rings, counting admitted calls too: each becomes a dialog once answered
         let dialogs = request.method() == Some(Method::Invite)
             && self.dialogs_held() >= self.config.max_dialogs;
         if !transactions && !dialogs {
@@ -844,9 +709,7 @@ impl Endpoint {
 
         self.refused = self.refused.saturating_add(1);
         let refused = self.refused;
-        // on the endpoint's record rather than the call's: a flood arrives
-        // with a fresh Call-ID every time, and refusals that made records of
-        // their own would evict the calls this endpoint is actually carrying
+        // on the endpoint's record: a flood with fresh Call-IDs would otherwise evict real calls
         let mut decision =
             Decision::of(Reason::RequestRefusedWhenFull).at_address(flow.destination);
         if let Some(method) = request.method() {
@@ -858,10 +721,7 @@ impl Endpoint {
         }
         self.note(None, decision);
         self.push(Event::Overloaded { refused });
-        // §8.2.6.2 wants a tag on every response but a 100. It is minted and
-        // forgotten: nothing here holds a transaction to remember it against,
-        // so a retransmission of the request earns a second refusal with a
-        // second tag, which is what a stateless answer costs
+        // §8.2.6.2 wants a tag; minted and forgotten, since a stateless answer keeps nothing
         let tag = self.mint_tag();
         let seconds = DIALOG_CEILING_RETRY_AFTER_SECONDS.to_string();
         let mut builder =
@@ -875,26 +735,12 @@ impl Endpoint {
         true
     }
 
-    /// [`MAX_DIALOG_NON_INVITE_TRANSACTIONS`]: the ceiling a dialog we hold
-    /// gets in place of the endpoint-wide one, which never applies to it.
+    /// [`MAX_DIALOG_NON_INVITE_TRANSACTIONS`]: the ceiling for a dialog we hold, in place of the
+    /// endpoint-wide one.
     ///
-    /// A re-INVITE is an INVITE server transaction and is held to
-    /// `max_dialogs` like any other INVITE — §14.1 refuses a second one in
-    /// the same dialog anyway while one is outstanding — so only a
-    /// non-INVITE request draws from this budget, and a BYE in order never
-    /// does either: §15.1.1 has the caller "consider the session terminated"
-    /// the moment its BYE is sent, whatever answer comes back, so a 503 here
-    /// buys nothing but a far end left holding a dialog the other side has
-    /// already abandoned, and only one BYE is ever worth honouring per
-    /// dialog regardless of how many other transactions are open on it. A
-    /// BYE whose `CSeq` runs backwards ends nothing (§12.2.2 answers it 500)
-    /// and draws from the budget like any other request. Past
-    /// it, every other non-INVITE request is answered 503, statelessly
-    /// exactly as the endpoint-wide ceiling is, but *with* a `Retry-After`:
-    /// RFC 5057 classes a 503 as ending only the transaction it answers, so
-    /// the call underneath it is untouched, and `Retry-After` tells this one
-    /// peer's own client transaction to slow down rather than read the
-    /// refusal as a reason to give the call up.
+    /// A re-INVITE is held to `max_dialogs` instead, and a BYE in order is exempt (see the
+    /// constant). Past the ceiling a request gets a stateless 503 with `Retry-After`: RFC 5057 has
+    /// a 503 end only its transaction, so the peer slows down without dropping the call.
     fn refuse_when_dialog_full(
         &mut self,
         dialog: DialogId,
@@ -903,9 +749,7 @@ impl Endpoint {
     ) -> bool {
         let exempt = match request.method() {
             Some(Method::Invite) => true,
-            // only a BYE that will end the dialog: one numbered below what the
-            // dialog has already seen is answered 500 by `reject_out_of_order`
-            // and leaves the dialog, and this budget, exactly where they were
+            // only a BYE that ends the dialog; an out-of-order one gets 500 and changes nothing
             Some(Method::Bye) => {
                 let seen = self.dialogs.get(dialog).and_then(Dialog::remote_seq);
                 !matches!((seen, request.cseq()), (Some(remote), Ok(cseq)) if cseq.seq < remote)
@@ -961,15 +805,13 @@ impl Endpoint {
                     entry.machine.on_request()
                 };
                 let notify = effects.notify;
-                // the INVITE again: whatever it gets back is the answer the
-                // far end did not hear the first time
+                // the INVITE again: resend the answer the far end missed
                 if ack {
                     self.apply(effects, flow, AnyTransactionId::InviteServer(id));
                 } else {
                     self.apply_again(effects, flow, AnyTransactionId::InviteServer(id));
                 }
-                // RFC 6026 8.1: an ACK arriving in Accepted is the dialog's,
-                // and is passed up rather than absorbed
+                // RFC 6026 8.1: an ACK in Accepted belongs to the dialog
                 if notify == Some(Notify::Ack) {
                     self.on_ack_for_2xx(request);
                 }
@@ -994,22 +836,14 @@ impl Endpoint {
         let Some(state) = self.dialogs.get(dialog) else {
             return;
         };
-        // §13.3.1.4: the ACK is the one "for the response", and a dialog only
-        // a provisional has opened has had no 2xx to acknowledge. Its tag went
-        // out in that provisional, so whoever saw the 180 can write this ACK,
-        // and taking it would report a call that is still ringing as up. Every
-        // 2xx this end sends confirms its dialog on the way out
-        // (`open_uas_dialog`), so an ACK is never what confirms one.
+        // §13.3.1.4: only a confirmed dialog has had a 2xx to acknowledge. An early one's tag went
+        // out in a 180, and taking an ACK for it would report a ringing call as up
         if state.state() != DialogState::Confirmed {
             return;
         }
-        // §13.2.2.4 and §17.1.1.3: "The sequence number of the CSeq header
-        // field MUST be the same as the INVITE being acknowledged." That is
-        // the INVITE whose 2xx this end sent last, not the dialog's remote
-        // sequence number, which a PRACK or an UPDATE arriving before the ACK
-        // has already moved past it. An ACK naming an earlier INVITE is stale,
-        // and one naming an INVITE whose ACK was already reported is a repeat;
-        // both are absorbed.
+        // §13.2.2.4, §17.1.1.3: the ACK's `CSeq` is that of the INVITE whose 2xx we sent last, not
+        // the dialog's remote number, which a PRACK or UPDATE may have moved. Stale or repeated
+        // ACKs are absorbed
         let Ok(cseq) = request.cseq() else {
             return;
         };
@@ -1034,28 +868,16 @@ impl Endpoint {
             .ok()
             .and_then(|key| self.dialogs.find(&key));
 
-        // §8.2.2.2: a request with no To tag whose From tag, Call-ID and CSeq
-        // already belong to an ongoing server transaction on the same line
-        // (an equivalent Request-URI), under a branch that does not itself
-        // match it, has reached this end by a second path — almost always a
-        // fork. It is answered 482 on a transaction of its own, and the call
-        // the first copy is opening is not touched by it. A copy sent to
-        // another line of this stack is that line's call, and rings there. A
-        // To tag, even one naming no dialog here, makes it §12.2.2's case
-        // instead
+        // §8.2.2.2: no To tag, and From tag, Call-ID and CSeq of a live server transaction on the
+        // same line under another branch: a fork reaching us twice. Answered 482 on its own
+        // transaction; the first call is untouched. A To tag makes it §12.2.2's case instead
         if existing.is_none() && self.transactions.merged_with(request) {
             self.refuse_merged_invite(request, flow, now);
             return;
         }
-        // §8.1.1.8: "The Contact header field MUST be present and contain
-        // exactly one SIP or SIPS URI in any request that can result in the
-        // establishment of a dialog", and §12.1.1 takes the dialog's remote
-        // target from nowhere else. An INVITE without one could be rung and
-        // answered, and its 2xx would open no dialog for the ACK or a BYE to
-        // find: the caller would hear a call connect that this end never
-        // held. RFC 2543 did not require the field (RFC 4475 §3.4.1's
-        // inv2543 has none), and a refusal that says so is the answer that
-        // leaves both ends knowing where they stand
+        // §8.1.1.8: a dialog-creating request MUST carry exactly one Contact, the only source of
+        // the remote target (§12.1.1). Without one, a 2xx would open no dialog for the ACK or BYE.
+        // RFC 2543 did not require it (RFC 4475 §3.4.1 inv2543), so say so with a refusal
         if existing.is_none() && !names_a_contact(request) {
             self.refuse_uncontactable_invite(request, flow, now);
             return;
@@ -1070,15 +892,13 @@ impl Endpoint {
         };
         self.apply(effects, flow, AnyTransactionId::InviteServer(id));
 
-        // 14.2: a re-INVITE inside a dialog renegotiates it; the ordering
-        // check and the target refresh are the dialog's
+        // §14.2: a re-INVITE; ordering and target refresh are the dialog's
         if let Some(dialog) = existing {
             self.remember_tag(AnyTransactionId::InviteServer(id), key_tag(request));
             if self.reject_out_of_order(dialog, request, id.into(), flow, now) {
                 return;
             }
-            // 14.2 answers a crossing INVITE itself, and both answers are
-            // MUSTs; neither reaches the caller
+            // §14.2 answers a crossing INVITE itself (both MUSTs)
             if self.refuse_crossing_invite(dialog, id, flow, now) {
                 return;
             }
@@ -1100,8 +920,8 @@ impl Endpoint {
         });
     }
 
-    /// §8.2.2.2: answer a merged INVITE with 482, on a transaction of its
-    /// own, without ever naming the call the first copy already opened.
+    /// §8.2.2.2: answer a merged INVITE 482 on its own transaction, without touching the first
+    /// copy's call.
     fn refuse_merged_invite(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
         let timers = self.config.timers;
         let Ok((id, effects)) = self
@@ -1124,9 +944,8 @@ impl Endpoint {
         self.apply(effects, flow, AnyTransactionId::InviteServer(id));
     }
 
-    /// §8.1.1.8: answer an INVITE that names no `Contact` with a 400 that
-    /// says so, on a transaction of its own so that its retransmissions are
-    /// answered from it rather than refused afresh.
+    /// §8.1.1.8: answer an INVITE with no `Contact` with a 400, on its own transaction so
+    /// retransmissions are answered from it.
     fn refuse_uncontactable_invite(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
         let timers = self.config.timers;
         let Ok((id, effects)) = self
@@ -1168,9 +987,7 @@ impl Endpoint {
         else {
             return;
         };
-        // a CANCEL inside a dialog is one of that dialog's non-INVITE server
-        // transactions like any other, and holds a place in its budget until
-        // it retires, which on a stream is the answer just below
+        // an in-dialog CANCEL counts against the dialog's budget until it retires
         if let Some(dialog) = DialogKey::as_uas(request)
             .ok()
             .and_then(|key| self.dialogs.find(&key))
@@ -1179,22 +996,14 @@ impl Endpoint {
             self.remember_dialog(AnyTransactionId::NonInviteServer(cancel), dialog);
         }
 
-        // §9.2 keeps the 200 for a CANCEL that "matched an existing
-        // transaction", "regardless of the method of the original request":
-        // "If the UAS did not find a matching transaction for the CANCEL
-        // according to the procedure above, it SHOULD respond to the CANCEL
-        // with a 481". The transaction is found by §17.2.3's rules, with the
-        // CANCEL's own branch and sent-by and any method but CANCEL or ACK
+        // §9.2: 200 for a CANCEL matching a transaction of any method (by §17.2.3's rules), 481
+        // otherwise
         let owned = request.to_owned();
         let Some(matched) = self.transactions.cancelled_by(request) else {
             self.answer(cancel, &owned, StatusCode::CALL_DOES_NOT_EXIST, now);
             return;
         };
-        // §9.2: "The To tag of the response to the CANCEL and the To tag in
-        // the response to the original request SHOULD be the same." Every
-        // server transaction is given its tag when it arrives, so this is the
-        // one its 180 carried and its 487 below will; minting the CANCEL a
-        // tag of its own gave the far end two names for one dialog
+        // §9.2: the CANCEL's To tag SHOULD match the original's, so reuse the INVITE's tag
         let original = match matched {
             Server::Invite(id) => AnyTransactionId::InviteServer(id),
             Server::NonInvite(id) => AnyTransactionId::NonInviteServer(id),
@@ -1202,13 +1011,11 @@ impl Endpoint {
         let tag = self.tag_or_mint(original);
         self.remember_tag(AnyTransactionId::NonInviteServer(cancel), tag);
         self.answer(cancel, &owned, StatusCode::OK, now);
-        // "A CANCEL request has no impact on the processing of transactions
-        // with any other method defined in this specification"
+        // §9.2: a CANCEL does not affect non-INVITE transactions
         let Server::Invite(invite) = matched else {
             return;
         };
-        // "it MUST respond to the original request with a 487" — a no-op if a
-        // final response has already gone, which is exactly what 9.2 wants
+        // §9.2: 487 for the INVITE, a no-op if it already has a final response
         let Some(entry) = self.transactions.invite_server(invite) else {
             return;
         };
@@ -1225,31 +1032,23 @@ impl Endpoint {
             refused = effects.send.is_some();
             self.apply(effects, invite_flow, AnyTransactionId::InviteServer(invite));
         }
-        // §9.2: a CANCEL that reaches an INVITE already given its final
-        // response has "no effect on any session state", so there is nothing
-        // to report. Reporting it anyway told the layer above that a call
-        // which is up had been given up on.
+        // §9.2: a CANCEL after the final response has no effect, so nothing to report
         if !refused {
             return;
         }
-        // RFC 3262 §3: after a final response a reliable provisional "SHOULD
-        // NOT" go on being retransmitted, though a PRACK for it is still owed
-        // an answer
+        // RFC 3262 §3: stop retransmitting reliable provisionals; a PRACK is still answered
         self.quiet_reliable(invite);
         self.push(Event::IncomingCancel {
             invite,
             request: owned,
         });
-        // after the CANCEL is reported, so that what the caller hears first is
-        // why the call ended rather than that its dialog did
+        // after the CANCEL, so the caller hears why before the dialog ends
         self.admitted.remove(&invite);
         self.end_refused_early(invite, early);
     }
 
-    /// What [`super::EndpointConfig::max_dialogs`] is measured against: the
-    /// dialogs held, the calls let in that are still to open theirs, and the
-    /// calls placed that nothing has answered yet, each of which opens one
-    /// the moment anything does.
+    /// What [`super::EndpointConfig::max_dialogs`] counts: dialogs held, admitted calls, and placed
+    /// calls not yet answered.
     pub(super) fn dialogs_held(&self) -> usize {
         self.dialogs
             .len()
@@ -1257,19 +1056,12 @@ impl Endpoint {
             .saturating_add(self.dialogs.unopened())
     }
 
-    /// The early dialog an INVITE of theirs opened, if it opened one.
+    /// The early dialog an INVITE of theirs opened, if any.
     ///
-    /// §12.3: "if a request outside of a dialog generates a non-2xx final
-    /// response, any early dialogs created through provisional responses to
-    /// that request are terminated." Read before the refusal goes out, while
-    /// the transaction is certain to be there. Only the request that created
-    /// the dialog counts. One sent inside the dialog names it already, by the
-    /// tag this end put in `To`, and a re-INVITE refused there leaves the
-    /// dialog standing, exactly as a refused UPDATE does on the calling side.
-    /// Any other tag in `To` names a dialog this end does not have: the INVITE
-    /// carrying it was taken as a new call (§12.2.2), and it is what created
-    /// the early dialog. The dialog is named by the tag this end put on the
-    /// transaction's responses.
+    /// §12.3: a non-2xx final ends the early dialogs its provisionals created. Read before the
+    /// refusal goes out. A `To` tag equal to ours means an in-dialog re-INVITE, whose refusal
+    /// leaves the dialog standing; any other tag names a dialog we lack, so the INVITE is a new
+    /// call (§12.2.2).
     pub(super) fn early_dialog_of(
         &self,
         invite: TransactionId<crate::transaction::InviteServer>,
@@ -1296,19 +1088,11 @@ impl Endpoint {
         (self.dialogs.get(dialog)?.state() == DialogState::Early).then_some(dialog)
     }
 
-    /// End the early dialog [`Endpoint::early_dialog_of`] found, now that the
-    /// INVITE that opened it has been refused.
+    /// End the early dialog [`Endpoint::early_dialog_of`] found, now that its INVITE was refused.
     ///
-    /// Without this an INVITE that rang and was cancelled left its dialog
-    /// standing for the life of the process, and a peer that repeated the
-    /// pair filled `max_dialogs` and had every later call refused.
-    ///
-    /// Not while a reliable provisional response of that INVITE is still
-    /// unacknowledged. RFC 3262 §3 has a UAS that refuses with one outstanding
-    /// stay "prepared to process PRACK requests for those outstanding
-    /// responses", and a PRACK is matched inside the dialog. The dialog then
-    /// ends with the INVITE transaction, which retiring it sees to, so it is
-    /// held for no longer than the transaction is.
+    /// Without this, ring-and-cancel pairs would fill `max_dialogs`. Not while a reliable
+    /// provisional is unacknowledged: RFC 3262 §3 keeps the UAS ready for PRACKs, matched inside
+    /// the dialog. Retiring the transaction ends it then.
     pub(super) fn end_refused_early(
         &mut self,
         invite: TransactionId<crate::transaction::InviteServer>,
@@ -1330,8 +1114,7 @@ impl Endpoint {
         let dialog = DialogKey::as_uas(request)
             .ok()
             .and_then(|key| self.dialogs.find(&key));
-        // §8.2.2.2 for every method, as `on_invite` asks it for an INVITE:
-        // read before this request's own transaction joins the index
+        // §8.2.2.2 as in `on_invite`, read before this transaction joins the index
         let merged = dialog.is_none() && self.transactions.merged_with(request);
 
         let timers = self.config.timers;
@@ -1341,10 +1124,8 @@ impl Endpoint {
         else {
             return;
         };
-        // §17.2.2 gives Trying/Proceeding no timer of its own; this is the
-        // endpoint's, `non_invite_app_timeout` is a no-op against whatever
-        // already answered it by the time it fires, and retiring the
-        // transaction first takes it off the schedule
+        // §17.2.2 gives Trying/Proceeding no timer; this one answers 408 if the application never
+        // does
         let deadline = self.schedule(
             now + timers.sixty_four_t1(),
             Deadline::UnansweredNonInvite(id),
@@ -1354,8 +1135,7 @@ impl Endpoint {
             self.dialogs.reserve_non_invite_transaction(dialog);
             self.remember_dialog(AnyTransactionId::NonInviteServer(id), dialog);
         }
-        // a second copy of a request already being processed is answered
-        // here, on a transaction of its own, and never handed up
+        // a merged copy is answered here and never handed up
         if merged {
             self.answer(id, &request.to_owned(), StatusCode::LOOP_DETECTED, now);
             return;
@@ -1364,8 +1144,7 @@ impl Endpoint {
         let Some(dialog) = dialog else {
             let tag = self.mint_tag();
             self.remember_tag(AnyTransactionId::NonInviteServer(id), tag);
-            // a PRACK naming no dialog at all matches no outstanding response
-            // either, and §3 answers that 481 rather than handing it up
+            // a PRACK with no dialog matches nothing; §3 answers it 481
             if request.method() == Some(Method::Prack) {
                 self.on_prack(id, None, request, now);
                 return;
@@ -1382,18 +1161,14 @@ impl Endpoint {
             return;
         }
 
-        // RFC 3262 §3: a PRACK is answered here whether or not it matches
-        // something, and the matching is on three numbers rather than on the
-        // dialog alone
+        // RFC 3262 §3: a PRACK is answered here, matched on RSeq, CSeq and method
         if request.method() == Some(Method::Prack) {
             self.on_prack(id, Some(dialog), request, now);
             return;
         }
 
-        // RFC 3311 §5.2: a second UPDATE arriving before the first is answered
-        // is refused here, because that rule turns on transaction state. Its
-        // siblings turn on whether an offer is outstanding, which is not
-        // something this crate has an opinion about
+        // RFC 3311 §5.2: a second UPDATE before the first is answered is refused here; offer state
+        // is not ours to judge
         if request.method() == Some(Method::Update) {
             if self.refuse_crossing_update(dialog, id, flow, now) {
                 return;
@@ -1402,8 +1177,7 @@ impl Endpoint {
         }
 
         if request.method() == Some(Method::Bye) {
-            // 15.1.2: the dialog is over the moment the BYE is accepted, and
-            // whether to answer it 200 is still the caller's
+            // §15.1.2: the dialog ends when the BYE is accepted; the 200 is the caller's
             if let Some(state) = self.dialogs.get_mut(dialog) {
                 state.terminate();
             }
@@ -1440,10 +1214,8 @@ impl Endpoint {
             .dialogs
             .get_mut(dialog)
             .is_some_and(|state| state.on_request(request) == Ok(Incoming::OutOfOrder));
-        // §12.2.2's ordering check runs before the target-refresh mutation,
-        // so an out-of-order request never reaches it and this is a no-op
-        // for one; a target refresh that was accepted asks the caller to
-        // resolve exactly as a 2xx to one does (§12.2.1.2).
+        // an out-of-order request never reaches the target refresh; an accepted one asks the caller
+        // to resolve (§12.2.1.2)
         self.resolve_if_target_moved(dialog, before.as_deref());
         if !out_of_order {
             return false;
@@ -1458,8 +1230,6 @@ impl Endpoint {
     }
 }
 
-// -- time -------------------------------------------------------------------
-
 impl Endpoint {
     pub(super) fn fire_transaction(&mut self, id: AnyTransactionId, now: Instant) {
         match id {
@@ -1471,14 +1241,12 @@ impl Endpoint {
                 {
                     let flow = self.flow_of(id);
                     let notify = effects.notify;
-                    // read before applying: timer B terminates the
-                    // transaction, and retiring it forgets what it was
+                    // read before applying: timer B retires the transaction
                     let renegotiated = self.reinvites.dialog_of(inner);
                     let over = name == TimerName::B && notify == Some(Notify::TimedOut);
-                    // and the same for the name the record is kept under, which
-                    // is why it is read here and not where it is used
+                    // likewise the name the record is kept under
                     let call = over.then(|| self.call_of(id)).flatten();
-                    // and the request, which RFC 3263 §4.3 may send elsewhere
+                    // and the request, for RFC 3263 §4.3
                     if over {
                         self.keep_unreached_in_flight(id, flow);
                     }
@@ -1504,10 +1272,9 @@ impl Endpoint {
                     let notify = effects.notify;
                     let over = notify == Some(Notify::TimedOut);
                     let call = over.then(|| self.call_of(id)).flatten();
-                    // read before applying: retiring a non-INVITE client
-                    // transaction forgets which dialog it was inside
+                    // read before applying: retiring forgets the dialog
                     let dialog = over.then(|| self.dialog_of(id)).flatten();
-                    // and what it carried, for RFC 3263 §4.3
+                    // and the request, for RFC 3263 §4.3
                     if over {
                         self.keep_unreached_in_flight(id, flow);
                     }
@@ -1532,9 +1299,7 @@ impl Endpoint {
                     .and_then(|entry| entry.machine.handle_timeout(now))
                 {
                     let flow = self.flow_of(id);
-                    // timer H: the final response was repeated for 64*T1 and
-                    // the far end never acknowledged it. Nothing above hears
-                    // about this, so the record is the only place it exists
+                    // timer H: never acknowledged. Only the record says so
                     let unacknowledged = effects.notify == Some(Notify::TimedOut);
                     let call = unacknowledged.then(|| self.call_of(id)).flatten();
                     self.apply_again(effects, flow, id);
@@ -1587,7 +1352,7 @@ impl Endpoint {
             source: None,
             protocol: bound.protocol,
         };
-        // the next lone CRLF answers this ping, not the one before it
+        // the next lone CRLF answers this ping
         if let Some(framer) = bound.framer.as_mut() {
             framer.ping_sent();
         }
@@ -1596,13 +1361,9 @@ impl Endpoint {
             .keepalive_interval_of(transport)
             .map(|interval| now + self.tokens.jitter(interval))
             .map(|at| self.schedule(at, Deadline::Keepalive(transport)));
-        // one deadline for the flow rather than one per ping: a pong is not
-        // matched to the ping it answers, so the ten seconds run from the
-        // earliest ping still unanswered. And none at all on a flow that has
-        // never answered one: §4.4 lets a UA without an outbound registration
-        // expect a pong only once it has an explicit indication, and Asterisk
-        // answers none, so holding its connection to the ten seconds would
-        // take down every call on it half a minute in.
+        // One pong deadline per flow, from the earliest unanswered ping, since pongs are not
+        // matched to pings. None on a flow that never answered: §4.4 expects pongs only after an
+        // explicit indication, and Asterisk sends none.
         let (armed, answers) = self
             .transports
             .get(transport)
@@ -1630,8 +1391,7 @@ impl Endpoint {
             .or(self.config.keepalive_interval)
     }
 
-    /// The far end answered, so the flow is alive, the clock stops, and from
-    /// here on a ping this flow leaves unanswered counts against it.
+    /// The far end answered: the clock stops, and from now on an unanswered ping counts.
     fn pong_arrived(&mut self, transport: super::TransportId) {
         let Some(handle) = self.transports.get_mut(transport).and_then(|bound| {
             bound.answers_pings = true;
@@ -1642,25 +1402,17 @@ impl Endpoint {
         self.deadlines.cancel(handle);
     }
 
-    /// 64·T1 after a non-INVITE server transaction was created, still with no
-    /// final response of its own: §17.2.2 gives `Trying`/`Proceeding` no timer
-    /// at all, so an application that never answers would otherwise hold the
-    /// slot forever, and past `max_server_transactions` of those every
-    /// stranger gets 503 for it. The client gave this request up by now
-    /// anyway — its own Timer F is the same 64·T1 (§17.1.2.2) — so the
-    /// endpoint answers 408 on the application's behalf and lets the
-    /// transaction retire the ordinary way.
+    /// 64·T1 after a non-INVITE server transaction was created with no final response: §17.2.2
+    /// gives `Trying`/`Proceeding` no timer, so the endpoint answers 408 itself. The client's Timer
+    /// F (§17.1.2.2) has fired by now anyway.
     ///
-    /// A no-op against a transaction that already has a final response, by
-    /// the application or by this endpoint on some other path. Retiring the
-    /// transaction takes the deadline off the schedule, but one answered on a
-    /// datagram transport is still live, in `Completed`, when it fires.
+    /// A no-op once a final response was sent. A transaction answered over a datagram is still in
+    /// `Completed` when this fires.
     pub(super) fn non_invite_app_timeout(
         &mut self,
         id: TransactionId<NonInviteServer>,
         now: Instant,
     ) {
-        // the deadline that brought this here is off the schedule already
         self.unanswered.remove(&id);
         let Some(entry) = self.transactions.non_invite_server(id) else {
             return;
@@ -1684,8 +1436,7 @@ impl Endpoint {
         };
         let effects = entry.machine.respond(message, now);
         self.apply(effects, flow, AnyTransactionId::NonInviteServer(id));
-        // the 408 is the final response RFC 3311 §5.2 counts an UPDATE as
-        // pending until, exactly as one the application sends would be
+        // RFC 3311 §5.2: the 408 ends a pending UPDATE like any final
         self.reinvites
             .answered_theirs(AnyTransactionId::NonInviteServer(id));
         self.note(
@@ -1696,9 +1447,7 @@ impl Endpoint {
         );
     }
 
-    /// Ten seconds without a pong on a flow that has answered one before:
-    /// §4.4.1 makes this a dead flow, and a dead flow is taken down rather
-    /// than kept and hoped for.
+    /// Ten seconds without a pong on a flow that answered before: dead under §4.4.1, so taken down.
     pub(super) fn flow_failed(&mut self, transport: super::TransportId) {
         let Some(bound) = self.transports.get(transport) else {
             return;
@@ -1757,13 +1506,10 @@ impl Endpoint {
             | AnyTransactionId::InviteServer(_)
             | AnyTransactionId::NonInviteServer(_) => None,
         };
-        // the request a client transaction carried, before applying retires
-        // it, for RFC 3263 §4.3
+        // read before applying retires them: the request (RFC 3263 §4.3) and the dialog
         if notify == Some(Notify::TransportFailed) {
             self.keep_unreached_in_flight(id, flow);
         }
-        // read before applying, same as `renegotiated`: retiring a non-INVITE
-        // client transaction forgets which dialog it was inside
         let dialog = match id {
             AnyTransactionId::NonInviteClient(_) => self.dialog_of(id),
             AnyTransactionId::InviteClient(_)
@@ -1797,8 +1543,6 @@ impl Endpoint {
     }
 }
 
-// -- shared plumbing --------------------------------------------------------
-
 impl Endpoint {
     /// Send what a machine asked to send, and retire it if it is done.
     pub(super) fn apply(&mut self, effects: Effects, flow: Flow, id: AnyTransactionId) {
@@ -1807,31 +1551,21 @@ impl Endpoint {
         }
     }
 
-    /// The same, for a send a retransmission timer asked for.
-    ///
-    /// Split from [`Endpoint::apply`] rather than given a flag by every caller
-    /// because `fire_transaction` is the only place a timer drives one, and a
-    /// retransmission is the entry in the record that says a datagram is not
-    /// arriving.
+    /// The same, for a send a retransmission timer asked for, recorded as a retransmission.
     pub(super) fn apply_again(&mut self, effects: Effects, flow: Flow, id: AnyTransactionId) {
         if let Some(reason) = self.apply_deferred(effects, flow, id, true) {
             self.retire(id, reason);
         }
     }
 
-    /// Send what a machine asked to send, and hand back why it should be
-    /// retired rather than retiring it.
+    /// Send what a machine asked to send, and return why it should be retired instead of retiring
+    /// it.
     ///
-    /// Timer D is zero on a reliable transport (§17.1.1.2) and so is timer K
-    /// (§17.1.2.2), so a final response that arrives over TCP or TLS ends the
-    /// client transaction in the very call that delivered it. Both sections
-    /// still make passing that response to the TU a MUST, and everything that
-    /// reads it lives in state [`Endpoint::retire`] takes away: the dialogs
-    /// the INVITE forked into, the CANCEL that was racing it, the nonce a
-    /// challenge answered, the dialog an in-dialog request belongs to. A
-    /// caller that reports first and retires afterwards sees the same events
-    /// in the same order whatever the transport was; over UDP the transaction
-    /// stands for another 32 seconds and none of this shows.
+    /// Timers D and K are zero on reliable transports (§17.1.1.2, §17.1.2.2), so a final response
+    /// over TCP ends the transaction in the same call. The response must still reach the TU, and
+    /// what reads it (forks, a racing CANCEL, a nonce, the dialog) lives in state
+    /// [`Endpoint::retire`] removes. Reporting first keeps events in the same order on every
+    /// transport.
     fn apply_deferred(
         &mut self,
         effects: Effects,
@@ -1848,11 +1582,10 @@ impl Endpoint {
         ending
     }
 
-    /// Queue what a machine handed over, and write down that it went.
+    /// Queue what a machine handed over, and record it.
     ///
-    /// A client transaction's first send goes through
-    /// [`Endpoint::apply_client`], so anything a client sends from here is
-    /// either a retransmission or the ACK for a refusal.
+    /// A client's first send goes through [`Endpoint::apply_client`], so a client send here is a
+    /// retransmission or the ACK for a refusal.
     fn send_from(
         &mut self,
         message: Option<OwnedMessage>,
@@ -1864,9 +1597,7 @@ impl Endpoint {
             return;
         };
         let client = id.role() == Role::Client;
-        // the ACK a refusal gets is the one request a transaction builds
-        // itself, out of the INVITE (§17.1.1.3), and is held to the
-        // datagram's form like every request the endpoint builds
+        // the ACK to a refusal (§17.1.1.3) is compacted like any request we build
         let message = if client && message.bytes().starts_with(b"ACK ") {
             self.written_for_the_datagram(flow, message.clone())
                 .unwrap_or(message)
@@ -1903,9 +1634,7 @@ impl Endpoint {
         match id {
             AnyTransactionId::InviteClient(inner) => {
                 if let Some(set) = self.dialogs.set_for(inner) {
-                    // 13.2.2.4: 64*T1 after the first 2xx "no more new 2xx
-                    // responses are expected to arrive", and every branch
-                    // still early is over
+                    // §13.2.2.4: 64*T1 after the first 2xx no more are expected; early branches end
                     if let Some(branches) = self.dialogs.set_mut(set) {
                         branches.no_more_answers();
                     }
@@ -1913,8 +1642,7 @@ impl Endpoint {
                     self.dialogs.invite_done(set);
                 }
                 self.forget_cancelled(inner);
-                // §14: the ACK for a re-INVITE is kept for as long as a 2xx
-                // can still arrive again, which is exactly timer M
+                // §14: the re-INVITE's ACK lives until timer M
                 self.reinvites.finish(inner);
                 self.transactions.drop_invite_client(inner);
             }
@@ -1922,26 +1650,22 @@ impl Endpoint {
                 self.transactions.drop_non_invite_client(inner);
             }
             AnyTransactionId::InviteServer(inner) => {
-                // an early dialog a refusal left standing for the PRACKs
-                // RFC 3262 §3 still expects goes with the transaction; read
-                // while the transaction and its tag are still here
+                // an early dialog kept for RFC 3262 §3 PRACKs goes with the transaction; read while
+                // its tag remains
                 let early = self.early_dialog_of(inner);
                 self.forget_reliable_on(inner);
                 self.reinvites.answered_theirs(id);
-                // a call that ends unanswered gives its room back too
                 self.admitted.remove(&inner);
                 self.end_refused_early(inner, early);
                 self.transactions.release_invite_merge(inner);
                 self.transactions.drop_invite_server(inner);
             }
             AnyTransactionId::NonInviteServer(inner) => {
-                // give the per-dialog budget its place back, for a
-                // transaction that was ever admitted into one
+                // release the dialog budget slot
                 if let Some(dialog) = self.dialog_of(id) {
                     self.dialogs.release_non_invite_transaction(dialog);
                 }
-                // and the schedule the deadline an unanswered one would have
-                // been given its 408 by
+                // and the 408 deadline
                 if let Some(deadline) = self.unanswered.remove(&inner) {
                     self.deadlines.cancel(deadline);
                 }
@@ -1951,8 +1675,7 @@ impl Endpoint {
             }
         }
         self.forget_tag(id);
-        // the allowance a challenged request was carrying, when this
-        // transaction ended any way other than by being challenged again
+        // the challenge allowance, unless challenged again
         self.challenges.forget(id);
         self.dialogs_of.remove(&id);
         self.push(Event::TransactionTerminated {
@@ -1978,7 +1701,7 @@ impl Endpoint {
     }
 
     pub(super) fn forget_dialog(&mut self, dialog: DialogId, reason: DialogEndReason) {
-        // read before the forget, which is what takes the name away
+        // read before `forget` takes the name away
         let call = self.call_of_dialog(dialog);
         if self.dialogs.forget(dialog).is_some() {
             self.note(
@@ -1993,9 +1716,7 @@ impl Endpoint {
 
     /// An INVITE this end sent will not be answered.
     ///
-    /// `renegotiated` is the dialog it was sent inside, when it was a
-    /// re-INVITE, and has to be read before the transaction is retired —
-    /// retiring it is what forgets that.
+    /// `renegotiated` is the re-INVITE's dialog, read before retiring forgets it.
     fn invite_gave_up(
         &mut self,
         id: TransactionId<InviteClient>,
@@ -2028,15 +1749,12 @@ impl Endpoint {
         let request = entry.machine.request().clone();
         let reason = self.cancel_reasons.get(&invite).cloned();
         let message = cancel_for_request(&request.as_raw(), reason.as_deref())?;
-        // held to the datagram's form like every request the endpoint
-        // builds: a CANCEL is small, so only `Compaction::Always` changes it
+        // compacted like any request; a CANCEL is small, so only `Compaction::Always` matters
         let message = self
             .written_for_the_datagram(flow, message.clone())
             .unwrap_or(message);
-        // §9.1 has a CANCEL retransmitted by its own transaction. One that is
-        // already running carries this branch and this method, and a second
-        // under that key would take its responses and leave it retransmitting
-        // until timer F reported it failed
+        // §9.1: a CANCEL already running under this key retransmits itself; a second would steal
+        // its responses
         if self.transactions.has_client_for(&message.as_raw()) {
             return Ok(());
         }
@@ -2051,14 +1769,8 @@ impl Endpoint {
         Ok(())
     }
 
-    /// A dialog we open by answering a request (§12.1.1).
-    ///
-    /// Two callers, and the second is the reason this says "request" rather
-    /// than "INVITE": answering a NOTIFY is what opens a subscriber's dialog
-    /// (RFC 6665 §4.4.1), and everything §12.1.1 asks for — the route set in
-    /// the order it arrived, the remote target from the `Contact`, the two
-    /// URIs, the remote sequence number — is read off the request the same
-    /// way whichever method it was.
+    /// A dialog we open by answering a request (§12.1.1): an INVITE, or a NOTIFY for a subscriber
+    /// (RFC 6665 §4.4.1). §12.1.1 reads the same fields off either.
     pub(super) fn open_uas_dialog(
         &mut self,
         request: &OwnedMessage,
@@ -2113,8 +1825,7 @@ impl Endpoint {
 
     /// The tag this end already used on a server transaction, or a fresh one.
     ///
-    /// §8.2.6.2 makes a tag mandatory on every response but a 100, and every
-    /// response of one transaction has to carry the same one.
+    /// §8.2.6.2: one tag on every response of a transaction but a 100.
     pub(super) fn tag_or_mint(&mut self, id: AnyTransactionId) -> Box<[u8]> {
         if let Some(known) = self.tag_for(id) {
             return known;
@@ -2148,8 +1859,7 @@ impl Endpoint {
     }
 }
 
-/// Where bytes the parser refused came from: what an answer to them is
-/// routed from, before their own `Via` has had its say.
+/// Where refused bytes came from, to route an answer before their `Via` is read.
 #[derive(Clone, Copy)]
 struct Arrival {
     transport: super::TransportId,
@@ -2158,16 +1868,11 @@ struct Arrival {
     protocol: super::TransportProtocol,
 }
 
-/// Whether what [`salvage_request`] recovered is enough to answer: a request
-/// that is not an ACK, with a top `Via` that reads and is inside the bound on
-/// one value.
+/// Whether what [`salvage_request`] recovered can be answered: not an ACK, and a readable top `Via`
+/// within the value bound.
 ///
-/// The top `Via` is what routes the answer (§18.2.2) — its `maddr`, its port —
-/// and one past the bound is a field the parser refused, or would have had it
-/// got that far: nothing read from it decides where this end sends anything.
-/// `From`, `To`, `Call-ID` and `CSeq` go back whole whatever their length,
-/// since they only have to match, and an answer goes without any of them the
-/// request did not carry.
+/// The `Via` routes the answer (§18.2.2), so an oversize one is not trusted. `From`, `To`,
+/// `Call-ID` and `CSeq` are copied whole, or left out when absent.
 fn can_be_answered(request: &RawMessage<'_>, value_bound: usize) -> bool {
     request.method().is_some_and(|method| method != Method::Ack)
         && request
@@ -2202,9 +1907,8 @@ fn refusal(error: ParseError, bytes: &[u8]) -> (StatusCode, String) {
     }
 }
 
-/// The name of the field starting at `at`, as the peer wrote it, when it can
-/// go in a reason phrase as it stands: short, and nothing in it the phrase's
-/// grammar would have to escape (§25.1). `Header` otherwise.
+/// The field name at `at` as the peer wrote it, when it fits a reason phrase unescaped (§25.1);
+/// `Header` otherwise.
 fn field_name(bytes: &[u8], at: u32) -> &str {
     const LONGEST: usize = 64;
     let from = bytes.get(at as usize..).unwrap_or_default();
@@ -2232,9 +1936,7 @@ fn key_tag(request: &RawMessage<'_>) -> Box<[u8]> {
         .unwrap_or_default()
 }
 
-/// Whether a request names somewhere a dialog it opens could send to: a
-/// `Contact` with an address in it. `*` is REGISTER's alone (§10.2.2) and
-/// names nowhere.
+/// Whether a request has a `Contact` with an address. `*` is REGISTER's alone (§10.2.2).
 fn names_a_contact(request: &RawMessage<'_>) -> bool {
     match request.contact() {
         Ok(Contacts::Addrs(mut addrs)) => addrs.next().is_some_and(|addr| addr.is_ok()),

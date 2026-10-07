@@ -15,10 +15,8 @@ use crate::transaction::DialogId;
 
 /// A session, written down.
 ///
-/// What is in it is the seed the stack was given and every frame that entered
-/// it, in order, each with how far into the session it was. What is not in it
-/// is anything the stack produced: a recording is the question, and the
-/// answer is whatever the code being tested says today.
+/// The seed and every frame that entered the stack, with offsets. Nothing
+/// the stack produced: a recording is the question, today's code the answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recording {
     seed: [u8; 32],
@@ -32,38 +30,18 @@ impl Recording {
 
     /// The version this build writes, and the latest it reads.
     ///
-    /// A reader refuses a recording that says a higher number rather than
-    /// reading the lines it recognises: a later version may have changed what
-    /// one of those lines means, and a replay that quietly took a wrong turn
-    /// is worse than one that would not start.
-    ///
-    /// Raised from `1` to `2` for [`Step::Resolved`]: a version 1 reader has
-    /// no way to know what a `resolved` line means, and reading past it as if
-    /// it were one of the frames it does understand would replay a dialog to
-    /// an address nobody recorded.
-    ///
-    /// Raised again to `3` when `resolved` learned the protocol RFC 3263
-    /// §4.1 resolves alongside the address (`Endpoint::resolved`'s new third
-    /// argument): a `resolved` line now carries one more token than a version
-    /// 2 reader expects between the dialog and the addresses, and reading it
-    /// as an address would either misparse or, worse, parse as one that was
-    /// never resolved.
+    /// A higher number is refused. Raised to `2` for [`Step::Resolved`], and to
+    /// `3` when `resolved` gained the protocol of RFC 3263 §4.1: an older reader
+    /// would misparse that token as an address.
     pub const VERSION: u32 = 3;
 
     /// The signalling seed the recorded stack drew from while it recorded.
     ///
-    /// Every branch, tag, `Call-ID` and `cnonce` is derived from it
-    /// ([`Endpoint::new`](crate::endpoint::Endpoint::new)), so a replay built
-    /// with a different one writes different messages and the answers in the
-    /// recording no longer belong to them. A recording a user agent makes
-    /// carries a seed drawn for it ([`Endpoint::reseed`](crate::endpoint::Endpoint::reseed)),
-    /// not the one the stack was built with, and the stack moves off it when
-    /// the recording stops: the file predicts nothing drawn outside it.
-    ///
-    /// **And nothing else is derived from it.** Media keys come from a second
-    /// seed this format has no field for, which is why a recording can be
-    /// handed to somebody to reproduce a session without handing them the
-    /// means to decrypt the media that went with it.
+    /// Every branch, tag, `Call-ID` and `cnonce` derives from it
+    /// ([`Endpoint::new`](crate::endpoint::Endpoint::new)). A user agent draws a
+    /// fresh one per recording ([`Endpoint::reseed`](crate::endpoint::Endpoint::reseed)).
+    /// Media keys come from a second seed with no field here, so sharing a
+    /// recording does not share the means to decrypt its media.
     #[must_use]
     pub const fn seed(&self) -> [u8; 32] {
         self.seed
@@ -94,8 +72,7 @@ impl Recording {
 
     /// The recording as the text that goes in a file.
     ///
-    /// Round trips: reading this back gives the same recording, and writing
-    /// that gives the same text.
+    /// Round trips with [`Recording::parse`].
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
@@ -132,9 +109,7 @@ impl Recording {
     }
 }
 
-/// One `resolved` line: the dialog it answers for, the protocol or `-` for
-/// none, then the addresses, in the order they were handed to
-/// [`Recorder::resolved`].
+/// One `resolved` line: dialog, protocol or `-`, then the addresses.
 fn write_resolved(
     out: &mut String,
     dialog: DialogId,
@@ -160,9 +135,7 @@ fn write_resolved(
 
 /// One arrival: its line, and the payload lines under it.
 ///
-/// Nothing can be refused here. A [`Payload`](super::Payload) exists only if
-/// the alphabet accepted it, so by the time a frame is being written out the
-/// question has already been settled.
+/// Cannot fail: a [`Payload`](super::Payload) was already accepted.
 fn write_arrival(out: &mut String, arrival: &Arrival) {
     match *arrival {
         Arrival::Datagram {
@@ -206,16 +179,9 @@ fn write_arrival(out: &mut String, arrival: &Arrival) {
 
 /// Writes a session down while it runs.
 ///
-/// The driver that owns the sockets calls one of these beside every call it
-/// makes into the stack, and gets a [`Recording`] at the end. Nothing here
-/// reads a clock either: the instant comes from the same variable the stack
-/// was given, which is what makes the offsets exact rather than approximate.
-///
-/// Every method that takes a frame is infallible at the call site, and the
-/// one that refuses is [`Recorder::finish`]. That is deliberate. A refusal
-/// mid-session means the recording is no longer the session, and a driver
-/// that had to handle each one separately would end up with a recording that
-/// is missing a message and does not say so.
+/// Called beside every call into the stack, with the same instant, so the
+/// offsets are exact. Frames are infallible at the call site; refusals surface
+/// in [`Recorder::finish`], so a recording never silently misses a message.
 #[derive(Clone, Debug)]
 pub struct Recorder {
     seed: [u8; 32],
@@ -241,8 +207,7 @@ impl Recorder {
     /// One line of prose for whoever opens the file: what was being done,
     /// against what, on which build.
     ///
-    /// Not read by anything here. It is there because a recording arrives
-    /// from somebody who cannot be asked a follow-up question.
+    /// Not read by anything; a recording comes from someone you cannot ask.
     #[must_use]
     pub fn about(mut self, note: &str) -> Self {
         if one_line(note) {
@@ -269,10 +234,8 @@ impl Recorder {
     }
 
     /// A dialog's next hop was answered from outside. Called beside
-    /// [`Endpoint::resolved`](crate::endpoint::Endpoint::resolved), which
-    /// takes no `now` of its own — there is nothing in it that is timed — so
-    /// `now` here only places the frame in the recording's own timeline,
-    /// the same as it does for [`Recorder::cue`].
+    /// [`Endpoint::resolved`](crate::endpoint::Endpoint::resolved), which is
+    /// untimed; `now` only places the frame, as for [`Recorder::cue`].
     pub fn resolved(
         &mut self,
         dialog: DialogId,
@@ -292,9 +255,8 @@ impl Recorder {
 
     /// The application did something of its own, under a name it chose.
     ///
-    /// The name is the application's and means nothing here. What matters is
-    /// that it is the same name on the way back, so that a replay knows which
-    /// of its own actions to repeat.
+    /// The name must be the same on the way back, so a replay knows what to
+    /// repeat.
     pub fn cue(&mut self, label: &str, now: Instant) {
         if one_line(label) {
             self.push(Step::Cue(Box::from(label)), now);
@@ -305,8 +267,7 @@ impl Recorder {
 
     /// What the recorder has refused so far, if anything.
     ///
-    /// A long-running driver reads this to stop early rather than finding out
-    /// at the end that the last hour is not a recording.
+    /// Lets a long-running driver stop early.
     #[must_use]
     pub const fn spoiled(&self) -> Option<RecordError> {
         self.spoiled
@@ -315,8 +276,7 @@ impl Recorder {
     /// The recording, or the first thing that could not go in it.
     ///
     /// # Errors
-    /// [`RecordError`] when anything was refused. A recording holds all of a
-    /// session or none of it.
+    /// [`RecordError`] when anything was refused: all of a session or none.
     pub fn finish(self) -> Result<Recording, RecordError> {
         match self.spoiled {
             Some(error) => Err(error),
@@ -324,8 +284,7 @@ impl Recorder {
         }
     }
 
-    /// The first refusal is the one reported; a spoiled recorder keeps taking
-    /// frames rather than making the driver check.
+    /// The first refusal wins; later frames are still taken.
     const fn spoil(&mut self, error: RecordError) {
         if self.spoiled.is_none() {
             self.spoiled = Some(error);

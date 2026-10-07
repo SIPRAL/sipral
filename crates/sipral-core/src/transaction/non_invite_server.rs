@@ -3,17 +3,12 @@
 
 //! The non-INVITE server transaction (RFC 3261 §17.2.2).
 //!
-//! The simplest of the four: one timer, no ACK, no automatic response.
+//! One timer, no ACK, no automatic response. In `Trying` a retransmitted
+//! request is discarded: there is nothing to answer with yet, and a made-up
+//! 100 would be a response the user never wrote.
 //!
-//! Nothing goes out until the user says so. In `Trying` a retransmitted
-//! request is discarded rather than answered — there is nothing to answer it
-//! with, and inventing a 100 Trying here would be a response the user never
-//! wrote. That is the difference from the INVITE server machine, which sends
-//! one precisely because an INVITE may take a person's attention to answer.
-//!
-//! Once a final response is out, `Completed` re-sends it for every
-//! retransmission of the request until timer J, and discards anything else the
-//! user tries to send: the answer has been given.
+//! In `Completed` the final response is resent for every retransmission until
+//! timer J, and anything else the user sends is discarded.
 
 use std::time::Instant;
 
@@ -75,8 +70,7 @@ impl NonInviteServerMachine {
                 self.timer_j = Some(now + wait);
                 Effects {
                     send: Some(response),
-                    // nothing retransmits on a reliable transport, so there is
-                    // no reason to sit in Completed
+                    // reliable transport: no reason to sit in Completed
                     terminated: wait.is_zero(),
                     ..Effects::default()
                 }
@@ -93,7 +87,7 @@ impl NonInviteServerMachine {
     pub(crate) fn on_request(&self) -> Effects {
         match self.state {
             // "Once in the Trying state, any further request retransmissions
-            // are discarded": there is nothing to answer with yet
+            // are discarded"
             NonInviteServerState::Trying | NonInviteServerState::Terminated => Effects::default(),
             NonInviteServerState::Proceeding | NonInviteServerState::Completed => Effects {
                 send: self.last_response.clone(),

@@ -15,23 +15,14 @@
 //! media-type     =  m-type SLASH m-subtype *(SEMI m-parameter)
 //! ```
 //!
-//! An option tag is any token, registry or no registry: answering 420 to one
-//! nobody knows is the user agent's decision, taken after the field has been
-//! read (§19.2). Comparison is case-insensitive, like every SIP token.
+//! An option tag is any token, compared without case; refusing an unknown one
+//! with 420 is the user agent's call (§19.2). Methods are case-sensitive: the
+//! grammar spells the six verbs as fixed bytes, so `Allow: invite` is an
+//! extension method (see [`super::Method`]).
 //!
-//! A method is not. The six RFC 3261 verbs are written into the grammar as
-//! fixed byte sequences — `INVITEm = %x49.4E.56.49.54.45 ; INVITE in caps` —
-//! so `Allow: invite` parses as an extension method named `invite`, not as
-//! INVITE. Case-folding before the comparison claims support that was never
-//! offered, which is why [`super::Method`] compares exactly.
-//!
-//! One deliberate leniency. `Require`, `Proxy-Require`, `Unsupported` and
-//! `Content-Encoding` are written without the enclosing brackets `Supported`
-//! and `Allow` have, so one entry is grammatically mandatory and an empty
-//! value is a syntax error. Empty items are skipped here rather than refused:
-//! an empty `Require` asks for nothing, which is what an absent `Require`
-//! means too, and rejecting the message over it would cost a call to buy
-//! nothing.
+//! Leniency: `Require`, `Proxy-Require`, `Unsupported` and `Content-Encoding`
+//! need one entry by grammar, but empty items are skipped. An empty `Require`
+//! asks for nothing, the same as an absent one.
 
 use core::fmt;
 
@@ -83,9 +74,8 @@ impl<'a> MediaTypeRef<'a> {
     /// Read one media type.
     ///
     /// # Errors
-    /// [`HeaderError::Malformed`] when there is no `/`, when either half is
-    /// empty, or when either half holds whitespace. `SLASH` is `SWS "/" SWS`,
-    /// so `application / sdp` is the same value written wider.
+    /// [`HeaderError::Malformed`] when there is no `/`, either half is empty,
+    /// or either half holds whitespace (`SLASH` allows it around the `/`).
     pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError> {
         let (head, _) = Params::split(value);
         let slash = head

@@ -3,30 +3,21 @@
 
 //! Digest access authentication (RFC 3261 §22, RFC 8760).
 //!
-//! The computation is three hashes. `A1` is the user, the realm and the
-//! password; `A2` is the method and the URI; the response is those two with
-//! the nonce and the counter in between. What SIP changes about it is small
-//! and specific — the URI is a Request-URI and it is quoted, the entity body
-//! hashes as the empty string when there is none — and RFC 8760 adds the SHA-2
-//! algorithms and makes `qop` normal rather than optional.
+//! Three hashes: `A1` (user, realm, password), `A2` (method, URI), and the
+//! response combining them with the nonce and counter. SIP quotes the URI;
+//! RFC 8760 adds SHA-2 and makes `qop` the norm.
 //!
-//! The two `-sess` variants exist to bind `A1` to one nonce and one client
-//! nonce, so a stolen `A1` cannot be replayed against a later challenge. They
-//! need a client nonce, which means they need `qop`: §22.4 rule 8 says a
-//! cnonce "MUST NOT be sent ... if no qop directive has been sent", so an
-//! algorithm that depends on one cannot be used without it.
+//! The `-sess` variants bind `A1` to one nonce and client nonce, so a stolen
+//! `A1` cannot answer a later challenge. They need a cnonce, hence `qop`
+//! (§22.4 rule 8: a cnonce "MUST NOT be sent ... if no qop directive has been
+//! sent").
 //!
-//! Without `qop` there is no client nonce and no counter, and the response
-//! is the RFC 2069 shape: the server's nonce alone is all that varies, so a
-//! server whose nonces repeat gets responses that repeat. That shape is kept
-//! for `MD5` only, the legacy path RFC 3261 §22.4 kept it for, for the
-//! registrars that still challenge that way. A SHA-2 challenge comes from a
-//! server that implements RFC 8760, which follows RFC 7616 in making `qop`
-//! part of every exchange, so one that names no `qop` is not a challenge this
-//! stack answers.
+//! Without `qop` the response has the RFC 2069 shape: no cnonce, no counter,
+//! so repeating server nonces give repeating responses. That shape is kept
+//! for plain `MD5` only, for legacy registrars. A SHA-2 challenge without
+//! `qop` is not answered: RFC 8760 follows RFC 7616 in requiring it.
 //!
-//! Nothing here draws a client nonce. The core has no randomness, as it has no
-//! clock; the caller supplies both.
+//! The core has no randomness: the caller supplies the client nonce.
 
 use core::fmt;
 use std::sync::Arc;
@@ -39,7 +30,7 @@ use crate::msg::{ChallengeRef, HeaderName, Method};
 /// The hash a challenge asks for (RFC 8760 §2.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DigestAlgorithm {
-    /// RFC 3261's own, and still what most registrars challenge with.
+    /// RFC 3261's own, still what most registrars use.
     Md5,
     /// MD5 with `A1` bound to the nonce and the client nonce.
     Md5Sess,
@@ -93,8 +84,7 @@ impl DigestAlgorithm {
         )
     }
 
-    /// The hex digest, lower case, as §2.2 requires: "represented by its
-    /// familiar hexadecimal notation from the characters 0123456789abcdef".
+    /// The hex digest, lower case, as §2.2 requires.
     #[must_use]
     pub fn hash(self, data: &[u8]) -> String {
         match self {
@@ -104,9 +94,8 @@ impl DigestAlgorithm {
         }
     }
 
-    /// As [`DigestAlgorithm::hash`], into a buffer that wipes itself: for
-    /// HA1, which answers any challenge in its realm as well as the password
-    /// does, and for what is hashed from it.
+    /// As [`DigestAlgorithm::hash`], into a buffer wiped on drop. For HA1,
+    /// which is password-equivalent in its realm, and what is hashed from it.
     fn secret_hash(self, data: &[u8]) -> Secret {
         let mut digest = [0_u8; 32];
         let len = match self {
@@ -143,10 +132,9 @@ impl fmt::Display for DigestAlgorithm {
 
 /// A challenge we can answer.
 ///
-/// Built from a `WWW-Authenticate` or `Proxy-Authenticate` value that names
-/// Digest and an algorithm we have; anything else is not a challenge as far as
-/// this stack is concerned, and RFC 8760 §2.4 says so: "The client MUST ignore
-/// any challenge it does not understand."
+/// Built from a `WWW-Authenticate` or `Proxy-Authenticate` value naming
+/// Digest and a supported algorithm. Anything else is ignored: "The client
+/// MUST ignore any challenge it does not understand" (RFC 8760 §2.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
     /// The protection domain the credentials belong to.
@@ -159,11 +147,11 @@ pub struct Challenge {
     pub algorithm: DigestAlgorithm,
     /// Whether the server offered `qop=auth`.
     pub qop_auth: bool,
-    /// Whether the server said the nonce was merely old, which means the same
-    /// credentials are worth sending again against the new one.
+    /// The server said the nonce was merely old: the same credentials are
+    /// worth sending again with the new one.
     pub stale: bool,
-    /// Whether it came from a proxy (407) rather than the endpoint (401).
-    /// The two are separate spaces and separate header fields.
+    /// Whether it came from a proxy (407) rather than the endpoint (401):
+    /// separate spaces and separate header fields.
     pub proxy: bool,
 }
 
@@ -181,9 +169,8 @@ impl Challenge {
             None => DigestAlgorithm::Md5,
         };
         let qop_auth = challenge.qop().any(|q| q.eq_ignore_ascii_case(b"auth"));
-        // §22.4 rule 8: no qop, no cnonce, and no cnonce means no -sess; and
-        // the RFC 2069 shape a qop-less challenge gets is kept for plain MD5
-        // alone (see the module documentation)
+        // §22.4 rule 8: no qop means no cnonce, so no -sess; and the RFC 2069
+        // shape is kept for plain MD5 only (see the module documentation)
         if !qop_auth && algorithm != DigestAlgorithm::Md5 {
             return None;
         }
@@ -208,13 +195,11 @@ impl Challenge {
         }
     }
 
-    /// The credentials answering this challenge, ready to be a header value.
+    /// The credentials answering this challenge, as a header value.
     ///
-    /// `count` is the number of times this client nonce has been used with
-    /// this challenge, starting at one, and `cnonce` is the caller's client
-    /// nonce — unused, and omitted from the message, when the server offered
-    /// no `qop`. `None` for credentials with no password — an access token
-    /// alone, which answers `Bearer` and not this.
+    /// `count` is how many times this client nonce has been used with this
+    /// challenge, from one. `cnonce` is omitted when the server offered no
+    /// `qop`. `None` for credentials without a password (token only).
     #[must_use]
     pub fn respond(
         &self,
@@ -228,21 +213,16 @@ impl Challenge {
         let algorithm = self.algorithm;
         let nc = format!("{count:08x}");
 
-        // A1 = username:realm:password, and for -sess that hashed again with
-        // both nonces, which is what binds it to this exchange. It holds the
-        // password, so it lives in the buffer that wipes itself on drop
-        // rather than in a `Vec` that leaves the last copy of it in freed
-        // memory — and on an unwind as well, which a wipe written at the
-        // tail of this function would not give.
+        // A1 = username:realm:password, hashed again with both nonces for
+        // -sess. It holds the password, so it lives in a buffer wiped on
+        // drop, which also covers an unwind.
         let a1 = Secret::joined(&[
             credentials.username.as_bytes(),
             self.realm.as_bytes(),
             password,
         ]);
-        // HA1 answers any challenge in this realm as well as the password
-        // does, and so does the H(A1) a -sess HA1 is made from: each is hexed
-        // straight into a buffer that wipes itself, and every input built
-        // from one is joined in another
+        // HA1 and the H(A1) behind a -sess HA1 are password-equivalent: each
+        // is hexed straight into a wiping buffer
         let ha1 = if algorithm.is_session() {
             let inner = algorithm.secret_hash(a1.expose());
             algorithm.secret_hash(
@@ -253,10 +233,9 @@ impl Challenge {
             algorithm.secret_hash(a1.expose())
         };
 
-        // A2 = method:digest-uri. The other form, with the body hashed in, is
-        // qop=auth-int, which is not offered here: it needs the body of every
-        // request kept around for a retry, and no SIP server in the field
-        // asks for it.
+        // A2 = method:digest-uri. qop=auth-int (body hashed in) is not
+        // offered: it means keeping every body for retries, and no SIP
+        // server in the field asks for it.
         let ha2 = algorithm.hash(&join(&[method.as_str().as_bytes(), uri]));
 
         let response = if self.qop_auth {
@@ -272,8 +251,7 @@ impl Challenge {
                 .expose(),
             )
         } else {
-            // the RFC 2069 shape, which SIP keeps for MD5 servers that
-            // predate qop
+            // RFC 2069 shape, for MD5 servers that predate qop
             algorithm.hash(
                 Secret::joined(&[ha1.expose(), self.nonce.as_bytes(), ha2.as_bytes()]).expose(),
             )
@@ -290,13 +268,11 @@ impl Challenge {
         quoted(&mut out, "uri", uri);
         out.push_str(", ");
         quoted(&mut out, "response", response.as_bytes());
-        // the algorithm is a token and goes unquoted; naming it even when it
-        // is the default costs nothing and removes a guess
+        // a token, unquoted; named even when default, to remove a guess
         out.push_str(", algorithm=");
         out.push_str(algorithm.name());
         if self.qop_auth {
-            // in credentials qop is a single token, not the quoted list it is
-            // in the challenge
+            // a single token here, not the quoted list of the challenge
             out.push_str(", qop=auth, nc=");
             out.push_str(&nc);
             out.push_str(", ");
@@ -366,8 +342,7 @@ mod tests {
         Challenge::read(&parsed, proxy).expect("one we can answer")
     }
 
-    /// What the far end reads back out of what we wrote, through our own
-    /// parser: a value that cannot be read is not an answer.
+    /// Read back through our own parser: unreadable is not an answer.
     fn field(value: &str, name: &str) -> Option<String> {
         let parsed = CredentialsRef::parse(value.as_bytes()).expect("our own credentials");
         assert!(parsed.is_digest());
@@ -376,12 +351,10 @@ mod tests {
             .map(|value| String::from_utf8_lossy(&value).into_owned())
     }
 
-    /// The A1 buffer holds the password, so it has to be the type that wipes
-    /// itself on drop rather than one that leaves its last copy in freed
-    /// memory. A wipe is not observable from safe Rust and Miri cannot be
-    /// pointed at this, so what is asserted is the one thing that is visible:
-    /// which type the path uses. The needles are assembled at runtime, so the
-    /// test cannot pass by matching its own assertion.
+    /// The A1 buffer holds the password, so it must be the wiping type. A
+    /// wipe is not observable from safe Rust, so the test asserts which type
+    /// the path uses. The needles are built at runtime so the test cannot
+    /// match its own assertion.
     #[test]
     fn the_password_is_never_built_in_a_buffer_that_is_not_wiped() {
         let source = include_str!("digest.rs").replace("\r\n", "\n");
@@ -400,8 +373,7 @@ mod tests {
             body.contains(&wiping),
             "A1 holds the password and is built with {wiping}"
         );
-        // HA1 is password-equivalent: hexed into a wiping buffer, and never
-        // read back out as a `String` to be joined in a plain one
+        // HA1 is password-equivalent: never read back out as a `String`
         let hashed = format!("{}{}", "secret_", "hash(");
         assert!(body.contains(&hashed), "HA1 is made with {hashed}");
         for leak in [
@@ -425,13 +397,10 @@ mod tests {
 
     #[test]
     fn the_worked_example_of_the_http_specification() {
-        // The example every digest implementation is checked against: Mufasa,
-        // "Circle Of Life", that nonce and that client nonce. The realm alone
-        // is moved to a reserved domain - the published one reads as an
-        // address, and the check that keeps addresses out of this tree is
-        // worth more than the last byte of provenance. With the original realm
-        // the response is 6629fae49393a05397450978507c4ef1, which is how the
-        // vector is recognised.
+        // The classic Mufasa / "Circle Of Life" vector. Only the realm moved
+        // to a reserved domain, since the published one reads as an address
+        // and the tree is checked for addresses. With the original realm the
+        // response is 6629fae49393a05397450978507c4ef1.
         let challenge = challenge(
             "Digest realm=\"testrealm.example.com\", \
 qop=\"auth,auth-int\", \
@@ -523,8 +492,7 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
 
     #[test]
     fn a_session_algorithm_without_qop_is_not_answerable() {
-        // §22.4 rule 8: no qop, no cnonce, and -sess cannot be computed
-        // without one
+        // §22.4 rule 8: no qop, no cnonce, no -sess
         for name in ["MD5-sess", "SHA-256-sess", "SHA-512-256-sess"] {
             let value = format!("Digest realm=\"example.com\", nonce=\"abc\", algorithm={name}");
             let parsed = ChallengeRef::parse(value.as_bytes()).expect("a challenge");
@@ -534,8 +502,7 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
 
     #[test]
     fn a_sha_2_challenge_without_qop_is_not_answered() {
-        // RFC 8760 follows RFC 7616 in making qop part of every exchange; the
-        // RFC 2069 shape, no client nonce and no counter, is MD5's legacy
+        // RFC 8760 requires qop; the qop-less shape is MD5's legacy only
         for name in ["SHA-256", "sha-256", "SHA-512-256"] {
             let bare = format!("Digest realm=\"example.com\", nonce=\"abc\", algorithm={name}");
             let parsed = ChallengeRef::parse(bare.as_bytes()).expect("a challenge");

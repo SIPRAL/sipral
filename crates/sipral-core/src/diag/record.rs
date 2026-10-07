@@ -13,33 +13,26 @@ use crate::dialog::CallId;
 
 /// How much a record and a set of records may hold.
 ///
-/// Both are ceilings on memory a peer can make this endpoint spend: a call
-/// that runs for an hour keeps deciding things, and a flood arrives with a
-/// fresh `Call-ID` every time. Neither may grow without end, and neither may
-/// pretend it did not lose anything.
+/// Both bound memory a peer can make this endpoint spend: long calls keep
+/// deciding, and a flood brings a fresh `Call-ID` each time. Losses are
+/// counted, never hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordLimits {
-    /// The most decisions one record holds. Past it the oldest go and the
-    /// count of them is kept.
+    /// The most decisions one record holds. Past it the oldest go, and their
+    /// count is kept.
     pub max_decisions: usize,
-    /// The most calls that have a record at once. Past it the least recently
-    /// written record goes, and the count of those is kept too.
+    /// The most calls with a record at once. Past it the least recently
+    /// written record goes, and that count is kept too.
     pub max_records: usize,
 }
 
 impl RecordLimits {
     /// The defaults.
     ///
-    /// Sixty-four decisions is more than a call that connects and hangs up
-    /// makes, and enough to hold a registration handshake, a fork of three and
-    /// six retransmissions without losing the beginning. Thirty-two records is
-    /// more calls, registrations and subscriptions than a softphone has in the
-    /// air at once.
-    ///
-    /// Together they are the memory bound, and it is a quarter of a megabyte
-    /// at the outside — a decision is under a hundred and twenty bytes, and
-    /// nothing here holds a message. A caller on a device where that matters
-    /// turns them down; a media server turns them up.
+    /// 64 decisions hold a registration handshake, a three-way fork and six
+    /// retransmissions without losing the start. 32 records exceed what a
+    /// softphone has in the air at once. Together, at most about a quarter of
+    /// a megabyte: a decision is under 120 bytes and holds no message.
     pub const DEFAULT: Self = Self {
         max_decisions: 64,
         max_records: 32,
@@ -56,9 +49,8 @@ impl Default for RecordLimits {
 #[derive(Clone, Debug)]
 pub struct Record {
     call: Option<CallId>,
-    /// The first moment anything was written here. Every entry's offset is
-    /// measured from it, so a record read out of the endpoint means the same
-    /// thing as one pasted into a bug report.
+    /// The first moment anything was written here; entry offsets are measured
+    /// from it.
     epoch: Option<Instant>,
     limit: usize,
     entries: VecDeque<Decision>,
@@ -83,8 +75,8 @@ impl Record {
             return;
         }
         let epoch = *self.epoch.get_or_insert(now);
-        // saturating, because a caller whose clock went backwards should get a
-        // record with a flat spot in it rather than a panic
+        // saturating: a clock that went backwards gives a flat spot, not a
+        // panic
         decision.at = now.saturating_duration_since(epoch);
         while self.entries.len() >= self.limit {
             self.entries.pop_front();
@@ -116,11 +108,8 @@ impl Record {
         self.entries.is_empty()
     }
 
-    /// How many decisions were made and are no longer held.
-    ///
-    /// Never left out of the JSON. A record that quietly forgot its first
-    /// twenty entries and says nothing is a record that answers "what happened
-    /// first?" with a lie.
+    /// How many decisions were made and are no longer held. Always in the
+    /// JSON, so a truncated record does not pass for a complete one.
     #[must_use]
     pub const fn dropped(&self) -> u64 {
         self.dropped
@@ -189,15 +178,13 @@ fn write_decision(out: &mut String, decision: &Decision) {
 
 /// Every record one endpoint holds.
 ///
-/// The endpoint's own record is separate rather than being one more entry,
-/// because it must never be the one evicted: it is where a transport that
-/// failed before any call existed is written down.
+/// The endpoint's own record is kept apart so it is never evicted: it holds
+/// transport failures from before any call existed.
 #[derive(Debug)]
 pub(crate) struct Records {
     limits: RecordLimits,
-    /// The time the caller last drove the endpoint at. A sans-I/O core has no
-    /// other clock, and inside one call no time passes, so this is the instant
-    /// every decision made during that call is stamped with.
+    /// The time the caller last drove the endpoint at. Within one call into
+    /// the endpoint no time passes, so every decision made there gets it.
     now: Option<Instant>,
     endpoint: Record,
     /// Least recently written first, so the one to evict is at the front.
@@ -222,11 +209,8 @@ impl Records {
     }
 
     /// Write a decision down against a call, or against the endpoint when it
-    /// belongs to no call.
-    ///
-    /// Nothing is recorded before the caller has given the endpoint a time,
-    /// which it does on the first call that takes one. There is no decision to
-    /// make before then.
+    /// belongs to no call. Nothing is recorded before the caller has given
+    /// the endpoint a time.
     pub(crate) fn note(&mut self, call: Option<&[u8]>, decision: Decision) {
         let Some(now) = self.now else {
             return;
@@ -250,9 +234,8 @@ impl Records {
             .iter()
             .position(|record| record.call_id().is_some_and(|id| id.as_bytes() == call))
         {
-            // the one written to most recently goes to the back, so a call
-            // that has been quiet for an hour is the one evicted rather than
-            // the one that merely started first
+            // most recently written goes to the back, so a call quiet for an
+            // hour is evicted before one that merely started first
             let record = self.calls.remove(at);
             self.calls.push(record);
             return self.calls.last_mut();
@@ -389,8 +372,7 @@ mod tests {
 
     #[test]
     fn the_call_evicted_is_the_one_nothing_has_been_written_to() {
-        // an hour-long call must not be thrown away by two registrations that
-        // happened to start after it
+        // an hour-long call must not be evicted by two later registrations
         let mut records = Records::new(RecordLimits {
             max_decisions: 4,
             max_records: 2,

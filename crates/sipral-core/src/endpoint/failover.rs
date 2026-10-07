@@ -1,25 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A request outside any dialog that found no server, sent to the next one
+//! An out-of-dialog request that found no server, sent to the next one
 //! (RFC 3263 §4.3).
 //!
-//! "Failure occurs if the transaction layer reports a 503 error response or
-//! a transport failure of some sort", or "if the transaction layer times out
-//! without ever having received any response", and then "the client SHOULD
-//! create a new request, which is identical to the previous, but has a
-//! different value of the Via branch ID than the previous (and therefore
-//! constitutes a new SIP transaction)", sent "to the next element in the
-//! list". The list is the caller's — the locator runs above this layer, and
-//! the addresses it found are the account's — so what this module keeps is
-//! the other half: every request outside a dialog that failed one of those
-//! three ways, as it went out, so that [`Endpoint::send_elsewhere`] can send
-//! it again to whichever address the caller names.
-//!
-//! A dialog's own requests fail over inside the dialog (`resolve.rs`), and a
-//! re-INVITE's failure ends its dialog, so neither is kept here. The store is
-//! capped as the challenge store is: a caller that never sends anything
-//! elsewhere leaves the oldest to fall out.
+//! On a 503, transport failure or timeout, §4.3 sends an identical request
+//! with a new branch "to the next element in the list". The list belongs to
+//! the caller's locator; this module keeps the failed request so
+//! [`Endpoint::send_elsewhere`] can resend it. In-dialog requests fail over
+//! in `resolve.rs`. The store is capped like the challenge store.
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -34,7 +23,6 @@ use crate::transaction::AnyTransactionId;
 /// How many failed requests are kept at once.
 const KEPT: usize = 32;
 
-/// The requests that found no server, by the transaction that carried them.
 #[derive(Debug, Default)]
 pub(super) struct Unreached {
     entries: Vec<(AnyTransactionId, OwnedMessage, Flow)>,
@@ -66,8 +54,7 @@ impl Unreached {
     }
 }
 
-/// A request outside any dialog that timed out, lost its transport or was
-/// answered 503: where it went, and what it was.
+/// An out-of-dialog request that timed out, lost its transport or got 503.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UnreachedRequest {
@@ -75,16 +62,15 @@ pub struct UnreachedRequest {
     pub destination: SocketAddr,
     /// The transport it went out on.
     pub transport: TransportId,
-    /// Whether it was a REGISTER, which a registration fails over by sending
-    /// a REGISTER of its own rather than this one again.
+    /// Whether it was a REGISTER. A registration fails over with a fresh
+    /// REGISTER of its own, not this one.
     pub register: bool,
     /// Whether it was an INVITE.
     pub invite: bool,
 }
 
 impl Endpoint {
-    /// Keep a request outside a dialog that just failed in one of §4.3's
-    /// three ways, for [`Endpoint::send_elsewhere`].
+    /// Keep an out-of-dialog request that failed per §4.3.
     pub(super) fn keep_unreached(
         &mut self,
         id: AnyTransactionId,
@@ -102,9 +88,8 @@ impl Endpoint {
         self.unreached.keep(id, request.clone(), flow);
     }
 
-    /// [`Endpoint::keep_unreached`] for a client transaction still in the
-    /// table, its request read out of it: a timeout or a transport failure,
-    /// read before the effects that retire it are applied.
+    /// [`Endpoint::keep_unreached`], read from the transaction table before the
+    /// effects that retire it are applied.
     pub(super) fn keep_unreached_in_flight(&mut self, id: AnyTransactionId, flow: Flow) {
         let sent = match id {
             AnyTransactionId::InviteClient(inner) => self
@@ -122,9 +107,7 @@ impl Endpoint {
         }
     }
 
-    /// The request `failed` carried, when it went outside a dialog and timed
-    /// out, lost its transport, or was answered 503 — and has not been sent
-    /// elsewhere or pushed out of the store since.
+    /// The request `failed` carried, if it is still kept.
     #[must_use]
     pub fn unreached(&self, failed: AnyTransactionId) -> Option<UnreachedRequest> {
         let (_, request, flow) = self.unreached.get(failed)?;
@@ -143,15 +126,11 @@ impl Endpoint {
         self.unreached.take(failed).is_some()
     }
 
-    /// Send the request `failed` carried again, to `destination`: RFC 3263
-    /// §4.3's new request, identical to the one that failed but for the
-    /// `Via` branch, which makes it a new transaction — whose id this
-    /// returns. On the transport it went out on when that one can reach
-    /// `destination`, and otherwise on any open transport of the same
-    /// protocol that can; credentials it carried for the server that failed
-    /// are left off, since the next one challenges with its own.
-    ///
-    /// The kept request is consumed either way.
+    /// Resend the request `failed` carried to `destination` with a new branch
+    /// (RFC 3263 §4.3), returning the new transaction. Uses the old transport if
+    /// it reaches `destination`, else any of the same protocol. Credentials are
+    /// dropped, since the next server challenges with its own. The kept request
+    /// is consumed either way.
     ///
     /// # Errors
     /// [`SendError::UnknownTransport`] when nothing was kept under `failed`
@@ -202,8 +181,8 @@ impl Endpoint {
             source: None,
             ..flow
         };
-        // the request was written compact to fit the datagram it first went
-        // in, and the rebuild above writes every field long again
+        // the first send may have been compacted to fit a datagram; the rebuild
+        // writes long forms again
         let message = self.written_for_the_datagram(moved, message)?;
         self.start_retry(method, message, moved, None, now)
             .map_err(|error| match error {

@@ -1,22 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Storage that hands out handles which cannot come back to the wrong thing.
+//! Storage whose handles cannot come back to the wrong thing.
 //!
-//! A transaction dies on a timer, its slot is reused by the next one, and the
-//! caller is still holding the old handle — a retransmission arrived late, a
-//! UI thread got round to it, an FFI caller kept an integer. Indexing by
-//! position alone would answer with whoever moved in.
-//!
-//! So every slot carries a generation that advances when it is vacated, and a
-//! handle carries the generation it was issued under. A stale handle finds
-//! nothing.
+//! A transaction dies on a timer and its slot is reused while someone still
+//! holds the old handle (a late retransmission, a UI thread, an FFI integer).
+//! Each slot carries a generation that advances when vacated, so a stale
+//! handle finds nothing.
 
 use super::handle::Raw;
 
-// Every slot an arena on this thread has looked at while iterating. A test
-// holds a sweep to the number of slots it had to see by counting them, which
-// no load on the machine running it can change.
+// Slots visited by arenas on this thread while iterating. Tests bound a sweep
+// by this count, which machine load cannot change.
 #[cfg(test)]
 thread_local! {
     static VISITED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
@@ -60,10 +55,7 @@ impl<T> Slab<T> {
         }
     }
 
-    /// Put a value in and get the handle to it.
-    ///
-    /// Reuses a vacated slot when there is one, so a long-lived endpoint does
-    /// not grow a slot per transaction it has ever had.
+    /// Put a value in and get its handle. Reuses vacated slots.
     pub(crate) fn insert(&mut self, value: T) -> Raw {
         self.live += 1;
         if let Some(slot) = self.free.pop()
@@ -106,10 +98,9 @@ impl<T> Slab<T> {
 
     /// Take the value out and retire the handle.
     ///
-    /// The generation advances, so every copy of the handle stops matching —
-    /// including the one that is about to arrive from somewhere slow. A slot
-    /// whose generation has run out is dropped rather than reused, since
-    /// wrapping would make an ancient handle valid again.
+    /// The generation advances, so every copy of the handle stops matching.
+    /// A slot whose generation is exhausted is dropped, not reused: wrapping
+    /// would revive ancient handles.
     pub(crate) fn remove(&mut self, raw: Raw) -> Option<T> {
         let entry = self.entries.get_mut(raw.slot as usize)?;
         if entry.generation != raw.generation {
@@ -132,10 +123,8 @@ impl<T> Slab<T> {
         self.live
     }
 
-    /// Every live value with its handle, in slot order.
-    ///
-    /// Visits every slot the arena has ever grown to, vacated ones included,
-    /// since the arena does not shrink.
+    /// Every live value with its handle, in slot order. Visits every slot
+    /// ever grown, vacated ones included: the arena does not shrink.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (Raw, &T)> {
         self.entries.iter().enumerate().filter_map(|(slot, entry)| {
             count_visit();
@@ -151,8 +140,8 @@ impl<T> Slab<T> {
         })
     }
 
-    /// Put a slot one generation short of running out, so the branch that
-    /// retires it for good can be reached without four billion inserts.
+    /// Put a slot one generation from running out, to reach the retirement
+    /// branch without four billion inserts.
     #[cfg(test)]
     fn exhaust(&mut self, raw: Raw) -> Raw {
         let Some(entry) = self.entries.get_mut(raw.slot as usize) else {
@@ -188,8 +177,7 @@ mod tests {
 
     #[test]
     fn a_retired_handle_does_not_find_the_slot_it_used_to_have() {
-        // the whole reason this type exists: a transaction dies, its slot is
-        // reused, and a late retransmission arrives holding the old handle
+        // a slot reused, and a late retransmission holding the old handle
         let mut slab = Slab::new();
         let first = slab.insert("first");
         assert_eq!(slab.remove(first), Some("first"));
@@ -215,8 +203,7 @@ mod tests {
 
     #[test]
     fn a_slot_that_has_run_out_of_generations_is_dropped_rather_than_reused() {
-        // wrapping would make an ancient handle valid again, which is the one
-        // thing the generation exists to prevent
+        // wrapping would revive an ancient handle
         let mut slab = Slab::new();
         let handle = slab.insert("x");
         let last = slab.exhaust(handle);

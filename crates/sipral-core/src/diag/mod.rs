@@ -3,49 +3,35 @@
 
 //! What the stack decided, and why: the diagnostic record.
 //!
-//! A call that failed is diagnosed today by asking somebody who does not read
-//! logs for a text log, often megabytes of it, and then correlating timestamps
-//! by eye until the shape of the failure appears. The expensive part of that
-//! is not the bug. It is the reconstruction.
+//! Every call carries an ordered [`Record`]. Each entry is a [`Decision`] with
+//! a [`Reason`] a program can match on, the message that caused it, its offset
+//! into the call, and the sizes and addresses it turned on. The record can be
+//! read while the call is up, outlives it, and serialises to JSON for a bug
+//! report.
 //!
-//! So the stack writes its decisions down as it makes them. Every call carries
-//! an ordered [`Record`]; every entry is a [`Decision`] with a [`Reason`] a
-//! program can match on, the message that caused it, how far into the call it
-//! happened, and the sizes and addresses it turned on. The record is readable
-//! while the call is still up, it outlives the call, and it serialises to JSON
-//! that goes into a bug report unchanged.
+//! A trace says what arrived; a record says what was decided about it. In the
+//! incident `docs/13-client-requirements.md` calls B1, the request was 1785
+//! bytes and the path allowed 1299: one entry here, and in no log at all.
 //!
-//! This is not a message trace. A trace says what arrived, which a capture
-//! also says; a record says what was *decided* about it, which nothing else
-//! does. The two numbers that mattered in the incident
-//! `docs/13-client-requirements.md` calls B1 — the request measured 1785
-//! bytes, the path allowed 1299 — are one entry here and are in no log at all.
+//! # Design
 //!
-//! # Three properties, and they are the whole design
+//! **Stable codes.** A [`Reason`]'s wire form never changes and is never
+//! reused for a different decision. The rules are beside the type.
 //!
-//! **The codes are stable.** A [`Reason`]'s wire form never changes and is
-//! never handed to a different decision. The rules, and how a variant is added
-//! without breaking them, are written beside the type.
+//! **Bounded memory.** A record holds a fixed number of decisions and an
+//! endpoint a fixed number of records ([`RecordLimits`]). Past either limit
+//! the oldest goes, and the number dropped is kept and serialised, so a
+//! truncated record does not pass for a complete one.
 //!
-//! **The memory is bounded, and the bound is honest.** A record holds a fixed
-//! number of decisions and an endpoint holds a fixed number of records
-//! ([`RecordLimits`]). Past either ceiling the oldest goes — and the count of
-//! what went is kept and serialised, because a record that quietly forgot its
-//! first twenty entries answers "what happened first?" with a lie.
+//! **No clock.** Time arrives at the endpoint's entry points. An entry carries
+//! a [`Duration`](core::time::Duration) from the record's first entry, and all
+//! decisions made in one call into the endpoint share one offset.
 //!
-//! **No clock is read.** Time arrives at the endpoint's entry points like
-//! everything else, and an entry carries a [`Duration`](core::time::Duration)
-//! from the record's own first entry rather than an instant. Inside one call
-//! into the endpoint no time passes, so every decision that call makes shares
-//! one offset — which is not an approximation, it is what a sans-I/O core
-//! means.
+//! # Not recorded
 //!
-//! # What is deliberately not in here
-//!
-//! No message bodies, no headers, no credentials, no audio. A record names a
-//! method, a status, a size, an address and a `Call-ID`, and that is the whole
-//! list. It is meant to be sent to somebody by a user who cannot be asked to
-//! read it first, so it must be safe to send without being read.
+//! No bodies, headers, credentials or audio: a method, a status, a size, an
+//! address and a `Call-ID`. A user must be able to send a record without
+//! reading it first.
 
 mod decision;
 mod json;

@@ -3,23 +3,13 @@
 
 //! The RFC 5118 IPv6 torture corpus, run against the message layer.
 //!
-//! `fixtures/rfc5118/manifest.toml` says whether each of the twelve messages
-//! is to be accepted or refused. The first test holds the layer to that; the
-//! rest check, one per message, the particular thing its section of the RFC
-//! is about, so that a message accepted for the wrong reason still fails.
+//! `fixtures/rfc5118/manifest.toml` says which of the twelve messages to
+//! accept. One test per message then checks what its section is about, so a
+//! message accepted for the wrong reason still fails. "Refused" means the
+//! parser or [`RawMessage::validate`] refuses, as for RFC 4475.
 //!
-//! "Refused" means what it means for the RFC 4475 corpus: the parser refuses
-//! the bytes, or they parse and [`RawMessage::validate`] refuses a field. Both
-//! are the stack answering 400.
-//!
-//! The files are the RFC's archive as it is, and the archive is not quite a
-//! set of messages as they travel: its lines end in a bare LF, two messages
-//! stop without the empty line that ends a header section, and two of the
-//! three bodies are not the length their `Content-Length` says. [`wire`]
-//! turns each file into the message it describes — CRLF line ends, the
-//! header section closed, `Content-Length` counted from the body — and
-//! changes nothing else, so every test below is about IPv6 and none about
-//! how the archive was made.
+//! The archive uses bare LF, two messages lack the closing empty line, and two
+//! bodies disagree with `Content-Length`. [`wire`] fixes only that.
 
 // a test says what it means; the no-panic discipline is for the library
 #![allow(
@@ -95,9 +85,8 @@ fn manifest() -> Vec<Entry> {
     entries
 }
 
-/// A message from the archive, as it would arrive: every line ended with
-/// CRLF as RFC 3261 §7 has it, the header section closed by an empty line,
-/// and `Content-Length` the length of the body.
+/// A message from the archive as it would arrive: CRLF (RFC 3261 §7), header
+/// section closed, `Content-Length` counted.
 fn wire(archived: &[u8]) -> Vec<u8> {
     let text = std::str::from_utf8(archived).expect("the archive is text");
     let lines: Vec<&str> = text.split('\n').collect();
@@ -132,8 +121,7 @@ fn bytes_of(name: &str) -> Vec<u8> {
     wire(&archived(name))
 }
 
-/// What the stack would do with this message: `Ok` for accepted, the reason
-/// otherwise.
+/// What the stack would do with this message.
 fn judge(bytes: &[u8]) -> Result<(), String> {
     let mut scratch = ParseScratch::new();
     let message =
@@ -194,8 +182,7 @@ fn the_corpus_behaves_as_the_manifest_says() {
 
 #[test]
 fn every_file_is_the_one_the_manifest_hashed() {
-    // the archive's bytes, LF line ends and all; a checkout that converts
-    // them fails here rather than quietly testing other messages
+    // the archive's LF bytes; a checkout that converts them fails here
     for entry in manifest() {
         let bytes = fs::read(fixtures().join(&entry.file)).expect("a fixture");
         assert_eq!(
@@ -220,8 +207,8 @@ fn the_groups_are_the_sizes_the_rfc_has() {
 
 #[test]
 fn the_archive_disagrees_with_itself_where_wire_says() {
-    // the printed Content-Length, and the body as archived, of the three
-    // messages with a body: §4.9 agrees, §4.6 and §4.8 do not
+    // of the three bodies, §4.9 agrees with its Content-Length, §4.6 and §4.8
+    // do not
     for (name, printed, body) in [
         ("ipv6-in-sdp", 268, 242),
         ("mult-ip-in-sdp", 181, 180),
@@ -234,8 +221,7 @@ fn the_archive_disagrees_with_itself_where_wire_says() {
             "{name}"
         );
         assert_eq!(archived_body.len(), body, "{name}");
-        // on the wire, with CRLF, the body is one octet a line longer, and
-        // Content-Length says so
+        // with CRLF the body is one octet a line longer
         let lines = archived_body.matches('\n').count();
         let sent = String::from_utf8(wire(&archived(name))).expect("text");
         assert!(
@@ -268,8 +254,7 @@ fn ipv6_good() {
 }
 
 /// §4.2: the same address in the Request-URI without the brackets
-/// RFC 3261 §19.1.1 requires. It has to be refused, and it has to be the
-/// Request-URI that is refused.
+/// RFC 3261 §19.1.1 requires, refused at the Request-URI.
 #[test]
 fn ipv6_bad() {
     let bytes = bytes_of("ipv6-bad");
@@ -288,9 +273,7 @@ fn ipv6_bad() {
     );
 }
 
-/// §4.3: `[2001:db8::10:5070]` looks like an address and a port to a reader
-/// who forgets the brackets. The brackets settle it: it is one address, and
-/// there is no port.
+/// §4.3: `[2001:db8::10:5070]` is one address with no port.
 #[test]
 fn port_ambiguous() {
     let owned = accepted("port-ambiguous");
@@ -328,8 +311,7 @@ fn via_received_param_no_delim() {
     let message = owned.as_raw();
     let via = message.top_via().expect("a Via");
     assert_eq!(via.received(), Some(IpAddr::V6(v6("2001:db8::9:255"))));
-    // the parameter after it is still read: the colons inside the bare
-    // address did not end the parameter list early
+    // the next parameter is still read
     assert_eq!(via.branch().as_deref(), Some(&b"z9hG4bKas3"[..]));
 }
 
@@ -420,9 +402,8 @@ fn ipv4_mapped_ipv6() {
 }
 
 /// §4.10: RFC 3261's `IPv6address` production admits `2001:db8:::192.0.2.1`,
-/// which RFC 4291 does not. "Following the Robustness Principle [RFC1122],
-/// an implementation must tolerate both of the above constructs", reading
-/// the address as if the extra colon were not there.
+/// which RFC 4291 does not; "an implementation must tolerate both", as if
+/// the extra colon were not there.
 #[test]
 fn ipv6_bug_abnf_3_colons() {
     let owned = accepted("ipv6-bug-abnf-3-colons");

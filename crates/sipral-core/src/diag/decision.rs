@@ -38,10 +38,8 @@ impl fmt::Display for Direction {
     }
 }
 
-/// A method, kept rather than borrowed.
-///
-/// [`Method`] borrows the start line it was read from, and a record outlives
-/// the buffer a message was parsed out of.
+/// A method, owned: [`Method`] borrows its start line, and a record outlives
+/// the parse buffer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MethodName {
     /// One of the methods this stack knows, kept as the literal.
@@ -69,11 +67,8 @@ const KNOWN: [Method<'static>; 14] = [
 ];
 
 impl MethodName {
-    /// Keep a method past the message it was read from.
-    ///
-    /// A known method costs nothing: its name is already a literal that
-    /// outlives everything. An extension is the peer's own token and has to be
-    /// copied.
+    /// Keep a method past the message it was read from. Known methods are
+    /// literals and cost nothing; an extension token is copied.
     #[must_use]
     pub fn of(method: Method<'_>) -> Self {
         match KNOWN.into_iter().find(|known| *known == method) {
@@ -109,10 +104,8 @@ pub enum Wire {
 
 /// The message that caused a decision.
 ///
-/// The size is the message as it goes on the wire — the length of the bytes
-/// the caller writes or the bytes that arrived — because that is the number
-/// B1 in `docs/13-client-requirements.md` says turns two days into an
-/// afternoon, and it is the one number a log line never carries.
+/// The size is the message as on the wire, the one number a log line never
+/// carries (B1 in `docs/13-client-requirements.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WireEvent {
@@ -146,11 +139,8 @@ impl WireEvent {
     }
 }
 
-/// A size and the limit it was measured against.
-///
-/// Both together or neither: a size on its own says nothing, which is exactly
-/// why a request that fragmented in the field read as "authentication is
-/// broken" for two days.
+/// A size and the limit it was measured against. Always both: a size alone
+/// says nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Measure {
@@ -160,19 +150,17 @@ pub struct Measure {
     pub limit: u32,
 }
 
-/// One decision, and everything about it that a bug report needs.
+/// One decision, with what a bug report needs.
 ///
-/// Built by the stack, never by a caller: the fields are readable so that a
-/// binding can walk them without going through JSON, and there is no
-/// constructor because a decision this crate did not make is not a decision.
+/// Built only by the stack. Fields are public so a binding can read them
+/// without JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Decision {
     /// Which decision it was.
     pub reason: Reason,
-    /// How far into the record it happened, measured from the first entry in
-    /// it. A duration rather than an instant, because nothing here reads a
-    /// clock and an instant would not survive being written down anyway.
+    /// Offset from the record's first entry. Not an instant: nothing here
+    /// reads a clock.
     pub at: Duration,
     /// The message that caused it, where there was one.
     pub wire: Option<WireEvent>,
@@ -229,8 +217,7 @@ mod tests {
 
     #[test]
     fn a_known_method_is_kept_as_a_literal_and_an_extension_is_copied() {
-        // the record outlives the datagram, so a borrowed method would not do;
-        // paying an allocation for INVITE would be paying it on every call
+        // a record outlives the datagram; known methods must not allocate
         assert_eq!(
             MethodName::of(Method::Invite),
             MethodName::Known("INVITE"),

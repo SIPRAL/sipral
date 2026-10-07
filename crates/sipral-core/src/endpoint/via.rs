@@ -1,37 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Writing the `Via` we put on, and reading the one that came back.
+//! Writing our `Via` and reading the one that comes back.
 //!
-//! Three rules live here, and each of them decides whether an answer ever
-//! arrives.
+//! `sent-by` is the address the caller advertised (§18.1.1), the branch has
+//! the `z9hG4bK` cookie (§8.1.1.7), and `;rport` goes on every request
+//! (RFC 3581 §3) so responses get back through NAT. A response whose top
+//! `Via` is not ours is dropped (§18.1.2).
 //!
-//! **What we write.** `sent-by` is the address the far end has to answer to,
-//! so it is the address the caller advertised for the transport rather than
-//! anything read off a socket (§18.1.1). The branch carries the `z9hG4bK`
-//! cookie of §8.1.1.7, without which the far end matches us the pre-3261 way.
-//! `;rport` goes on every request (RFC 3581 §3), because the alternative is
-//! not receiving responses from behind the NAT nearly every softphone sits
-//! behind, and a server that has never heard of RFC 3581 ignores it.
-//!
-//! **What we discard.** §18.1.2: a response whose top `Via` does not name us
-//! is not ours, and is dropped before the transaction layer sees it.
-//!
-//! **Where a response goes.** §18.2.2 and RFC 3581 §4 read as a list of
-//! cases, and for a user agent answering a request they collapse into one
-//! sentence: *the response goes back to the address the request came from.*
-//! The reasoning is worth writing down, because the collapse looks like a
-//! shortcut and is not. §18.2.1 makes a server add a `received` parameter
-//! whenever the `sent-by` host is a name, or an address that differs from the
-//! packet source; RFC 3581 §4 makes it add one unconditionally when `rport`
-//! is present. So in every case where `sent-by` disagrees with the source, the
-//! response is sent to the source; and in the one case where they agree, the
-//! source *is* `sent-by`. Only the port is still open: `rport` answers with
-//! the source port, and without it the port is the one in `sent-by`.
-//!
-//! This stack never rewrites an arriving message to add those parameters — it
-//! reads the source address and the `Via` together and gets the same answer,
-//! which is cheaper and keeps the received bytes exactly as they arrived.
+//! For a UA, §18.2.2 and RFC 3581 §4 collapse to "send the response to the
+//! request's source address". A server adds `received` whenever `sent-by`
+//! differs from the source (§18.2.1), and always with `rport`, so the address
+//! is always the source. Only the port depends on `rport`. We read the source
+//! and `Via` together instead of rewriting the message.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -45,8 +26,7 @@ pub(crate) fn local_via(
     branch: &[u8],
     request_rport: bool,
 ) -> Box<[u8]> {
-    // Display for SocketAddr is the sent-by grammar already: an IPv6 literal
-    // in brackets, the port after a colon
+    // SocketAddr's Display already matches the sent-by grammar
     via_with(
         protocol,
         local.to_string().as_bytes(),
@@ -55,9 +35,8 @@ pub(crate) fn local_via(
     )
 }
 
-/// The `Via` value for a request on a transport that advertises a name
-/// rather than an address: a WebSocket client's `.invalid` host (RFC 7118
-/// Appendix B.1), written without a port because there is none to give.
+/// The `Via` for a transport that advertises a name, such as a WebSocket
+/// `.invalid` host (RFC 7118 Appendix B.1), written without a port.
 pub(crate) fn named_via(
     protocol: TransportProtocol,
     name: &str,
@@ -86,11 +65,8 @@ fn via_with(
     out.into_boxed_slice()
 }
 
-/// Whether a response's top `Via` names this endpoint (§18.1.2).
-///
-/// "If the value does not match, the response MUST be discarded." The
-/// parameters the far end added — `received`, `rport` — are not part of the
-/// comparison: `sent-by` is what we wrote and what has to come back.
+/// Whether a response's top `Via` names this endpoint (§18.1.2). Parameters
+/// the far end added (`received`, `rport`) are ignored.
 pub(crate) fn is_ours(via: &ViaRef<'_>, local: SocketAddr, protocol: TransportProtocol) -> bool {
     if !via.transport.eq_ignore_ascii_case(protocol.as_str()) {
         return false;
@@ -98,16 +74,13 @@ pub(crate) fn is_ours(via: &ViaRef<'_>, local: SocketAddr, protocol: TransportPr
     let host_matches = match via.host {
         HostRef::Ipv4(addr) => IpAddr::V4(addr) == local.ip(),
         HostRef::Ipv6(addr) => IpAddr::V6(addr) == local.ip(),
-        // we never write a name into our own sent-by, so one coming back is
-        // somebody else's Via
+        // we never write a name into our own sent-by
         HostRef::Name(_) => false,
     };
     host_matches && via.port.unwrap_or_else(|| default_port(protocol)) == local.port()
 }
 
-/// Whether a response's top `Via` names this endpoint when its transport
-/// advertises `name` rather than an address: the same name, compared without
-/// case as §19.1.4 compares hosts, and no port, since none was written.
+/// [`is_ours`] for a named `sent-by`: case-insensitive host (§19.1.4), no port.
 pub(crate) fn is_ours_named(via: &ViaRef<'_>, name: &str, protocol: TransportProtocol) -> bool {
     if !via.transport.eq_ignore_ascii_case(protocol.as_str()) {
         return false;
@@ -118,54 +91,40 @@ pub(crate) fn is_ours_named(via: &ViaRef<'_>, name: &str, protocol: TransportPro
     }
 }
 
-/// Where the response to a request that arrived from `source` has to go.
-///
-/// `None` means the top `Via` asked for something this layer cannot do on its
-/// own — a `maddr` naming a host rather than an address — and the caller has
-/// to resolve it.
+/// Where the response to a request from `source` goes. `None` when a
+/// `maddr` names a host the caller must resolve.
 pub(crate) fn response_destination(
     via: &ViaRef<'_>,
     source: SocketAddr,
     protocol: TransportProtocol,
 ) -> Option<SocketAddr> {
-    // "If the sent-protocol is a reliable transport protocol ... the response
-    // MUST be sent using the existing connection to the source of the
-    // original request", which is the connection this arrived on
+    // §18.2.2: reliable transport, reuse the connection the request came on
     if protocol.is_reliable() {
         return Some(source);
     }
 
-    // "if the Via header field value contains a maddr parameter, the response
-    // MUST be forwarded to the address listed there, using the port indicated
-    // in sent-by, or port 5060 if none is present"
+    // §18.2.2: maddr wins, with the sent-by port or 5060
     if let Some(maddr) = via.maddr() {
         let literal = core::str::from_utf8(&maddr)
             .ok()
             .and_then(|text| text.trim_matches(['[', ']']).parse::<IpAddr>().ok());
-        // a maddr that is a name needs the resolver the caller owns; there is
-        // no answer to give here
         return literal.map(|addr| SocketAddr::new(addr, via.port.unwrap_or(5060)));
     }
 
-    // RFC 3581 4: "the response MUST be sent to the IP address listed in the
-    // received parameter, and the port in the rport parameter" — both of
-    // which are the source of the request, since we are the server that
-    // would have written them
+    // RFC 3581 §4: received and rport would both be the source
     if matches!(via.rport(), Ok(Rport::Requested | Rport::Given(_))) {
         return Some(source);
     }
 
-    // Everything left over: the address is the source either way, because a
-    // sent-by that disagreed with it earned a received parameter and one that
-    // agreed is the source. The port is sent-by's.
+    // otherwise: the source address with sent-by's port
     Some(SocketAddr::new(
         source.ip(),
         via.port.unwrap_or_else(|| default_port(protocol)),
     ))
 }
 
-/// The port to assume when `sent-by` gives none. 5060 for the transports
-/// that have no default of their own, since that is what §18.1.1 leaves.
+/// The port to assume when `sent-by` gives none (5060 if the transport has
+/// no default, per §18.1.1).
 fn default_port(protocol: TransportProtocol) -> u16 {
     protocol.default_port().unwrap_or(5060)
 }
@@ -223,7 +182,7 @@ mod tests {
 
     #[test]
     fn a_response_addressed_to_somebody_else_is_not_ours() {
-        // 18.1.2: "If the value does not match, the response MUST be discarded"
+        // §18.1.2
         let local = addr("192.0.2.1:5060");
         assert!(is_ours(
             &via("SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1"),
@@ -321,8 +280,7 @@ mod tests {
 
     #[test]
     fn rport_sends_the_response_to_the_port_the_request_came_from() {
-        // the case the whole extension exists for: the NAT rewrote the port,
-        // and 5060 in sent-by is where nothing is listening
+        // the NAT rewrote the port; nothing listens on sent-by's 5060
         let source = addr("198.51.100.7:41234");
         assert_eq!(
             response_destination(
@@ -336,8 +294,7 @@ mod tests {
 
     #[test]
     fn without_rport_the_address_is_still_the_source_and_the_port_is_sent_bys() {
-        // 18.2.1 makes a server add received whenever sent-by disagrees with
-        // the source, so the address is the source in every case
+        // §18.2.1: received is added whenever sent-by disagrees with the source
         let source = addr("198.51.100.7:41234");
         assert_eq!(
             response_destination(
@@ -380,8 +337,6 @@ mod tests {
 
     #[test]
     fn an_maddr_that_is_a_name_is_left_to_the_caller() {
-        // resolving it is I/O, and a response is not worth a round trip of it
-        // inside a layer that has no resolver
         let source = addr("198.51.100.7:41234");
         assert_eq!(
             response_destination(

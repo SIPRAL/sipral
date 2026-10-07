@@ -3,17 +3,9 @@
 
 //! What a dialog is called: a `Call-ID` and two tags (RFC 3261 §12).
 //!
-//! The two halves are not compared the same way, and the RFC says so in two
-//! different places. A `Call-ID` is "case-sensitive and ... simply compared
-//! byte-by-byte" (§20.8). A tag is a token, and "Tokens are always
-//! case-insensitive" (§7.3.1), so `tag=A1B2` and `tag=a1b2` name one dialog
-//! however the peer chose to spell it on the way back.
-//!
-//! Which tag is ours depends on who started the transaction the message
-//! belongs to, not on who started the dialog: our own requests and the
-//! responses to them carry our tag in `From`, everything the peer sends
-//! carries it in `To`. A lookup therefore needs no memory of which side of
-//! the dialog we were.
+//! A `Call-ID` compares byte by byte (§20.8); a tag is a token and compares
+//! without case (§7.3.1). Our tag sits in `From` on transactions we started
+//! and in `To` on the peer's, so a lookup needs no memory of who called.
 
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -77,10 +69,7 @@ impl Hash for Tag {
 }
 
 /// The name of a dialog: `Call-ID`, our tag, and the peer's if it sent one.
-///
-/// A peer that predates RFC 3261 may send no tag at all, "in which case the
-/// tag is considered to have a value of null" (§12.1.1 and §12.1.2). That is
-/// what the `None` is: not a missing field, a dialog with half a name.
+/// A pre-3261 peer may send no tag, a "null" tag (§12.1.1, §12.1.2).
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DialogKey {
     call_id: CallId,
@@ -99,11 +88,10 @@ impl DialogKey {
         }
     }
 
-    /// The dialog a message of a transaction *we* started names: our request,
-    /// or a response to it. Our tag is in `From`.
+    /// The dialog named by a transaction we started. Our tag is in `From`.
     ///
     /// # Errors
-    /// [`DialogError::MissingTag`] when `From` carries no tag, and
+    /// [`DialogError::MissingTag`] when `From` has no tag, and
     /// [`DialogError::Field`] when a field is missing or malformed.
     pub fn as_uac(message: &RawMessage<'_>) -> Result<Self, DialogError> {
         let call_id = CallId::new(message.call_id()?);
@@ -116,11 +104,10 @@ impl DialogKey {
         ))
     }
 
-    /// The dialog a message of a transaction the *peer* started names: their
-    /// request, or our response to it. Our tag is in `To`.
+    /// The dialog named by a transaction the peer started. Our tag is in `To`.
     ///
     /// # Errors
-    /// [`DialogError::MissingTag`] when `To` carries no tag, and
+    /// [`DialogError::MissingTag`] when `To` has no tag, and
     /// [`DialogError::Field`] when a field is missing or malformed.
     pub fn as_uas(message: &RawMessage<'_>) -> Result<Self, DialogError> {
         let call_id = CallId::new(message.call_id()?);
