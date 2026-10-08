@@ -1107,8 +1107,11 @@ over three runs. What
 reached its socket came from two RTP sources -- the PBX's own first packet,
 then the caller's stream forwarded under the caller's SSRC -- and the stack,
 having taken the first, dropped every packet of the second
-(`sipral-rtp`'s `Discard::SecondSource`, which nothing above the RTP session
-acts on yet), so the digit and the callee's half of the tones failed with it.
+(`sipral-rtp`'s `Discard::SecondSource`), so the digit and the callee's half
+of the tones failed with it. With a second source followed once it has sent
+three packets in a row from the latched address (`docs/05-media.md`), the run
+after it passed every scenario: the callee of the second call took 146 of
+150 datagrams from the two sources, and heard the tone in 143 frames of 150.
 
 ### Who is calling, where the call was sent, and the second server
 

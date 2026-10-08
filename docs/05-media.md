@@ -92,6 +92,16 @@ of it, as Asterisk's `direct_media` does — and when the latch closes there
 under another SSRC, the stream starts again under that one rather than
 refusing all of it as a second source.
 
+A second source with no re-negotiation at all is refused as one, packet by
+packet, until it has sent three in a row from the latched address, in
+sequence, with nothing from the source being listened to in between -- 60 ms
+of 20 ms packets. Then the stream starts again under it, through probation
+like any new source, with its sequence, jitter buffer and reception report
+begun afresh. A PBX that bridges two calls' RTP itself does exactly this:
+Asterisk's native bridge sends a packet of its own and then forwards the
+other end's stream under that end's SSRC. A stray packet, or two sources
+taking turns, never moves the stream.
+
 Validation before anything else: version, payload type in the negotiated set,
 plausible SSRC, length. The one widening of that set is G.711's other law: a
 call agreed on one companding law also takes the other's static payload type,

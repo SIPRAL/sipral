@@ -279,6 +279,17 @@ struct Outbound {
 /// What was merely in flight when it moved is a handful at most.
 const STILL_THERE: u16 = 25;
 
+/// How many packets in a row a second source has to send from the latched
+/// address, in sequence and with nothing from the source being listened to
+/// in between, before the stream starts again under it: 60 ms of 20 ms
+/// packets. A PBX that bridges two calls' RTP itself sends a packet or two
+/// of its own and then forwards the other end's stream under that end's
+/// SSRC, with no signalling at all (Asterisk's native bridge); refusing it
+/// for good leaves the call one-way. One more than RFC 3550 A.1's
+/// MIN_SEQUENTIAL of 2, so a stray or replayed packet, or a short burst of
+/// one, never moves the stream, and two sources interleaved never get there.
+const TAKEN_OVER: u8 = 3;
+
 // each bool here is an independent yes/no fact learned about the remote
 // side at a different point in the stream's life, not a state a caller
 // steps through, which is what the lint is guarding against
@@ -311,6 +322,10 @@ struct Inbound {
     /// RTP one even when the host does not.
     rtcp_latch: Option<SocketAddr>,
     source: Option<u32>,
+    /// A second source heard from the latched address: its SSRC, the
+    /// sequence number its next packet should carry, and how many it has
+    /// sent in a row. Cleared by any packet from `source`. See [`TAKEN_OVER`].
+    contender: Option<(u32, u16, u8)>,
     /// The SSRC an SR or RR has named itself with, latched the way
     /// `source` is but from RTCP instead of RTP.
     ///
@@ -392,6 +407,7 @@ impl RtpSession {
                 following: false,
                 rtcp_latch: None,
                 source: None,
+                contender: None,
                 rtcp_source: None,
                 sequence: SequenceState::new(),
                 buffer: JitterBuffer::new(config.clock_rate, &config.playout),
@@ -642,14 +658,19 @@ impl RtpSession {
         }
 
         // A second SSRC on a two-party stream is either the far end restarting
-        // or someone else's audio. Which of the two is a question the
-        // signalling can answer and this cannot, so it is reported and the
-        // application decides, with `follow` or `resync`.
+        // or someone else's audio. One packet of it, or two sources taking
+        // turns, is reported and dropped, and the application may still
+        // decide with `follow` or `resync`; a run of it from the latched
+        // address with the known source silent is the far end's stream now
+        // (`TAKEN_OVER`), and the stream starts again under it
         match self.inbound.source {
             Some(known) if known != header.ssrc => {
-                return Received::Dropped(Discard::SecondSource(header.ssrc));
+                if !self.taken_over(header.ssrc, header.sequence, from) {
+                    return Received::Dropped(Discard::SecondSource(header.ssrc));
+                }
+                self.follow(header.ssrc);
             }
-            Some(_) => {}
+            Some(_) => self.inbound.contender = None,
             None => {
                 self.inbound.source = Some(header.ssrc);
                 self.inbound.source_where_left = stale;
@@ -991,12 +1012,35 @@ impl RtpSession {
     /// report interval with every change.
     pub fn follow(&mut self, ssrc: u32) {
         self.inbound.source = Some(ssrc);
+        self.inbound.contender = None;
         self.inbound.rtcp_source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
         self.inbound.buffer.begin_source();
         self.inbound.rtcp = ReceptionTracker::new();
         self.forget_departed();
+    }
+
+    /// Count a packet from a second source towards [`TAKEN_OVER`], and say
+    /// whether this one completes the run. Only from the latched address,
+    /// and only in sequence: a packet out of step, or from another SSRC
+    /// again, starts the count over.
+    fn taken_over(&mut self, ssrc: u32, sequence: u16, from: SocketAddr) -> bool {
+        if self.inbound.latch != Some(from) {
+            return false;
+        }
+        let run = match self.inbound.contender {
+            Some((known, expected, run)) if known == ssrc && expected == sequence => {
+                run.saturating_add(1)
+            }
+            _ => 1,
+        };
+        if run >= TAKEN_OVER {
+            self.inbound.contender = None;
+            return true;
+        }
+        self.inbound.contender = Some((ssrc, sequence.wrapping_add(1), run));
+        false
     }
 
     /// The membership flags start again for the next source only if the one
@@ -1017,6 +1061,7 @@ impl RtpSession {
     /// only when the source they describe left by BYE.
     pub fn resync(&mut self) {
         self.inbound.source = None;
+        self.inbound.contender = None;
         self.inbound.rtcp_source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
@@ -1660,7 +1705,9 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use super::{Discard, Received, RtcpReceived, RtpSession, STILL_THERE, StreamConfig};
+    use super::{
+        Discard, Received, RtcpReceived, RtpSession, STILL_THERE, StreamConfig, TAKEN_OVER,
+    };
     use crate::dtmf::{EventReceiver, EventReport, Outcome, Outgoing, Reported};
     use crate::playout::{Activity, BufferConfig, Frame, Pull};
     use crate::rtcp::{
@@ -1963,12 +2010,13 @@ mod tests {
     }
 
     #[test]
-    fn a_second_synchronization_source_is_reported_rather_than_mixed_in() {
+    fn a_second_source_is_reported_until_it_persists_and_the_application_may_follow_it_sooner() {
         let mut session = session();
         let next = establish(&mut session, 7, addr(PEER));
         assert_eq!(session.remote_ssrc(), Some(7));
 
-        // same address, different SSRC: one machine, two streams
+        // same address, different SSRC, one packet of it: reported, not
+        // mixed in, and not yet taken for the far end's stream
         assert_eq!(
             session.receive(&mut datagram(9, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::SecondSource(9))
@@ -1984,6 +2032,100 @@ mod tests {
             Received::Dropped(Discard::SecondSource(7))
         );
         establish(&mut session, 9, addr(PEER));
+    }
+
+    /// A PBX bridging two calls' RTP itself: a packet of its own, then the
+    /// other end's stream forwarded under that end's SSRC from the same
+    /// address. Three in a row, in sequence, and the stream starts again
+    /// under it, through probation like any new source.
+    #[test]
+    fn a_second_source_that_keeps_sending_from_the_latched_address_is_followed() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+
+        for sequence in 500..500 + u16::from(TAKEN_OVER) - 1 {
+            assert_eq!(
+                session.receive(&mut datagram(9, sequence, 8), addr(PEER), Duration::ZERO),
+                Received::Dropped(Discard::SecondSource(9))
+            );
+            assert_eq!(session.remote_ssrc(), Some(7));
+        }
+        let taking = 500 + u16::from(TAKEN_OVER) - 1;
+        assert_eq!(
+            session.receive(&mut datagram(9, taking, 8), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::Probation),
+            "the run that takes the stream over starts it as a fresh source"
+        );
+        assert_eq!(session.remote_ssrc(), Some(9));
+        assert_eq!(
+            session.receive(&mut datagram(9, taking + 1, 8), addr(PEER), Duration::ZERO),
+            Received::Queued
+        );
+
+        // and the source it left is the second one now
+        assert_eq!(
+            session.receive(&mut datagram(7, 200, 8), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::SecondSource(7))
+        );
+        assert_eq!(session.remote_ssrc(), Some(9));
+    }
+
+    #[test]
+    fn a_single_stray_packet_from_another_source_is_still_discarded() {
+        let mut session = session();
+        let mut next = establish(&mut session, 7, addr(PEER));
+
+        assert_eq!(
+            session.receive(&mut datagram(9, 900, 8), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::SecondSource(9))
+        );
+        // the known source goes on, and the count the stray started is gone
+        assert_eq!(
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            Received::Queued
+        );
+        next += 1;
+        for sequence in 901..901 + u16::from(TAKEN_OVER) - 1 {
+            assert_eq!(
+                session.receive(&mut datagram(9, sequence, 8), addr(PEER), Duration::ZERO),
+                Received::Dropped(Discard::SecondSource(9))
+            );
+        }
+        assert_eq!(session.remote_ssrc(), Some(7));
+        assert_eq!(
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            Received::Queued
+        );
+    }
+
+    #[test]
+    fn a_second_source_out_of_sequence_never_takes_the_stream_over() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        for sequence in [500, 600, 700, 800, 900] {
+            assert_eq!(
+                session.receive(&mut datagram(9, sequence, 8), addr(PEER), Duration::ZERO),
+                Received::Dropped(Discard::SecondSource(9))
+            );
+        }
+        assert_eq!(session.remote_ssrc(), Some(7));
+    }
+
+    #[test]
+    fn two_sources_taking_turns_do_not_flap() {
+        let mut session = session();
+        let next = establish(&mut session, 7, addr(PEER));
+        for step in 0..20u16 {
+            assert_eq!(
+                session.receive(&mut datagram(9, 300 + step, 8), addr(PEER), Duration::ZERO),
+                Received::Dropped(Discard::SecondSource(9))
+            );
+            assert_eq!(
+                session.receive(&mut datagram(7, next + step, 8), addr(PEER), Duration::ZERO),
+                Received::Queued
+            );
+            assert_eq!(session.remote_ssrc(), Some(7));
+        }
     }
 
     #[test]
