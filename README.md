@@ -14,6 +14,8 @@ Copyright (c) 2026 Sytek
 traversal behind one C ABI — that replaces PJSIP without the GPL, and puts a
 phone line inside a voice agent without a media server in between.**
 
+[sipral.org](https://sipral.org) · [Voice agents](https://sipral.org/voice-agents/) · [Interoperability](https://sipral.org/#lab-title) · [Roadmap](https://sipral.org/roadmap/) · [Blog](https://sipral.org/blog/) · [Licensing](https://sipral.org/licensing/)
+
 ## What sets it apart
 
 - **Memory-safe, and built for hostile input.** Rust throughout; `unsafe` is denied everywhere but the C boundary and the device crates; `unwrap`, `panic` and unchecked indexing fail the gate; 34 `cargo-fuzz` targets, thirty of them run 24 CPU-hours each (about 61 billion executions, nothing found); the RFC 4475 torture corpus asserted message by message.
