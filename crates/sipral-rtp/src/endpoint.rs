@@ -193,12 +193,20 @@ fn duration_to_field_ms(duration: Duration) -> u16 {
 }
 
 /// RFC 3611 §4.7.3's own worked conversion: "one way symmetric voice path
-/// delay = (RTD + ESD(A) + ESD(B)) / 2", with only this end's ESD known.
-fn one_way_symmetric_delay_ms(round_trip_delay_ms: u16, end_system_delay_ms: u16) -> u32 {
-    u32::midpoint(
-        u32::from(round_trip_delay_ms),
-        u32::from(end_system_delay_ms),
-    )
+/// delay = (RTD + ESD(A) + ESD(B)) / 2", this end's ESD being `own` and the
+/// far end's `far`, `0` while it has not reported one.
+fn one_way_symmetric_delay_ms(round_trip_delay_ms: u16, own: u16, far: u16) -> u32 {
+    (u32::from(round_trip_delay_ms) + u32::from(own) + u32::from(far)) / 2
+}
+
+/// RFC 3611 §4.7.3's end system delay: "the nominal value of the jitter
+/// buffer delay plus the accumulation/encoding and decoding / playout delay
+/// associated with the codec being used". The accumulation is one packet:
+/// a frame cannot leave before all of it has been spoken. Decoding and
+/// playing out a frame of G.711, the one codec this stack rates, adds no
+/// look-ahead of its own.
+fn end_system_delay(nominal: Duration, packet_time: Duration) -> u16 {
+    duration_to_field_ms(nominal.saturating_add(packet_time))
 }
 
 /// One RTP stream in each direction, plus the RTCP that goes with it.
@@ -1161,11 +1169,20 @@ impl RtpSession {
         let ssrc = self.inbound.source?;
         let burst_gap = self.inbound.buffer.burst_gap_metrics();
         let round_trip_delay_ms = duration_to_field_ms(self.round_trip.unwrap_or_default());
-        // §4.7.3: "This value SHOULD be provided in all VoIP metrics
-        // reports. If an implementation is unable to provide the data,
-        // the value 0 MUST be used." The sender's own delay is unknown here.
-        let end_system_delay_ms = 0;
-        let one_way_delay_ms = one_way_symmetric_delay_ms(round_trip_delay_ms, end_system_delay_ms);
+        let quality = self.inbound.buffer.quality();
+        let end_system_delay_ms =
+            end_system_delay(quality.target_delay, self.inbound.buffer.packet_time());
+        // the far end's own figure is the ESD(B) of §4.7.3's conversion; a
+        // block that "is unable to provide the data" carries 0, which is
+        // also what an end that never sent one contributes
+        let far_end_system_delay_ms = self
+            .far_voip_metrics
+            .map_or(0, |block| block.end_system_delay_ms);
+        let one_way_delay_ms = one_way_symmetric_delay_ms(
+            round_trip_delay_ms,
+            end_system_delay_ms,
+            far_end_system_delay_ms,
+        );
         // §4.7.1: loss and discard "have equal effect on the quality of the
         // voice stream", so `Ppl` is the two together.
         let missing = u16::from(burst_gap.loss_rate) + u16::from(burst_gap.discard_rate);
@@ -1178,7 +1195,6 @@ impl RtpSession {
             burst_ratio: BurstRatio::RANDOM,
             codec,
         });
-        let quality = self.inbound.buffer.quality();
         Some(VoipMetricsBlock {
             ssrc,
             loss_rate: burst_gap.loss_rate,
@@ -2162,6 +2178,70 @@ mod tests {
             clean.r_factor
         );
         assert!(overflowed.mos_lq < clean.mos_lq);
+    }
+
+    #[test]
+    fn the_end_system_delay_is_the_buffers_nominal_delay_and_a_packet() {
+        // RFC 3611 §4.7.3: "the nominal value of the jitter buffer delay
+        // plus the accumulation/encoding and decoding / playout delay"
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        assert!(session.quality().delay > Duration::ZERO, "packets are held");
+
+        let block = session.voip_metrics(None).expect("a source");
+        assert!(block.jb_nominal_ms > 0);
+        assert_eq!(block.end_system_delay_ms, block.jb_nominal_ms + 20);
+    }
+
+    #[test]
+    fn the_end_system_delay_counts_in_the_delay_the_call_is_rated_on() {
+        // G.107's Id is rated on the mouth-to-ear delay, which a jitter
+        // buffer's wait is part of: half a 399 ms round trip alone sits
+        // under what the buffer and the packet add to it
+        let g711 = Some(crate::emodel::codec_quality_model(
+            crate::emodel::CodecFamily::G711Concealed,
+        ));
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        // A - LSR - DLSR = 0x6666 in 1/65536 s
+        let arrival_ntp = 0xb70a_c666_u64 << 16;
+        session.rtcp_receive(
+            &mut incoming[..n],
+            addr(PEER_RTCP),
+            Duration::ZERO,
+            arrival_ntp,
+        );
+
+        let block = session.voip_metrics(g711).expect("a source");
+        assert_eq!(block.round_trip_delay_ms, 399);
+        let network_only = crate::emodel::evaluate(crate::emodel::EModelInputs {
+            one_way_delay_ms: u32::from(block.round_trip_delay_ms) / 2,
+            packet_loss_percent: 0.0,
+            burst_ratio: crate::emodel::BurstRatio::RANDOM,
+            codec: g711,
+        });
+        assert!(
+            block.r_factor < network_only.r_factor,
+            "R {} with the end system's delay, {} without",
+            block.r_factor,
+            network_only.r_factor
+        );
+        assert_eq!(
+            block.mos_lq, network_only.mos_lq,
+            "listening quality excludes delay"
+        );
+    }
+
+    #[test]
+    fn the_one_way_delay_takes_both_ends_end_system_delays() {
+        assert_eq!(super::one_way_symmetric_delay_ms(400, 40, 60), 250);
+        assert_eq!(super::one_way_symmetric_delay_ms(399, 40, 0), 219);
+        assert_eq!(
+            super::one_way_symmetric_delay_ms(u16::MAX, u16::MAX, u16::MAX),
+            3 * u32::from(u16::MAX) / 2
+        );
     }
 
     #[test]

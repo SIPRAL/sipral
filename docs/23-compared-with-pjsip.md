@@ -557,7 +557,10 @@ without concealment, where the stack conceals every lost frame and the
 uniform rating assumes it does. It now rates G.711 with the Bpl of 25.1 for
 G.711 with concealment (`sipral-rtp`'s `emodel.rs`, as G.107's Table 3 asks:
 the Bpl must match the concealment in use); run again on 8 October, the same
-profiles read R 70 to 72, 82 to 84 and 81 to 83. It is printed beside the
+profiles read R 70 to 72, 82 to 84 and 81 to 83. Its delay term now takes
+the end system delay of RFC 3611 §4.7.3 too, the jitter buffer's nominal
+delay and one packet, and one later run that day read R 69, 80 and 80,
+beside the uniform 66.6, 76.5 and 71.7. It is printed beside the
 uniform one in the `cmp` lines (`own_r`, `own_mos`).
 
 **The senders, 4 October.** The bad-link phase was run with a capture in

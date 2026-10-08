@@ -390,9 +390,12 @@ again when `RtpSession::follow` or `RtpSession::resync` takes on another
 source, as the RFC 3550 reception statistics do: §4.7.1's rates are of the
 packets "from the source ... since the beginning of reception", and the
 block names the source it reports on. Round-trip delay is
-this session's own `round_trip_time`; end-system delay is always `0`
-(§4.7.3's own fallback: this crate has no visibility into the sending
-side's encode-and-accumulate delay); jitter buffer sizing comes from
+this session's own `round_trip_time`; end-system delay is §4.7.3's "nominal
+value of the jitter buffer delay plus the accumulation/encoding and
+decoding / playout delay associated with the codec": the buffer's
+`Quality::target_delay` (the block's own nominal jitter buffer delay) plus
+one packet time, the frame an encoder accumulates before it can send
+(G.711, the one codec rated, has no look-ahead to add); jitter buffer sizing comes from
 `playout::Quality`; every signal-related field (§4.7.4) is RFC 3611's own
 `127` "unavailable" sentinel, since nothing in this crate measures a
 signal or noise level over decoded audio.
@@ -401,7 +404,12 @@ signal or noise level over decoded audio.
 E-model: it takes G.107's own default value for every transmission
 parameter this crate cannot observe (§7.7's own "R = 93.2" baseline at
 every default) and computes only what a call actually measured — the
-delay impairment `Id` from one-way delay, and the codec/loss impairment
+delay impairment `Id` from one-way delay — G.107's mouth-to-ear `Ta`,
+taken as §4.7.3's "(RTD + ESD(A) + ESD(B)) / 2" with this end's
+end-system delay and the far end's from its own VoIP Metrics block, `0`
+until one arrives; G.107's `Idd` is zero up to 100 ms, so on a short
+path the buffer's wait shows in the rating only once the sum crosses
+it — and the codec/loss impairment
 `Ie,eff` from the codec's G.113 Appendix I `Ie`/`Bpl` pair and the
 share of packets that never reached the decoder: the loss rate and the
 discard rate together, since §4.7.1 keeps the two apart only to say where

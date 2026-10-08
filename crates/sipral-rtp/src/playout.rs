@@ -1248,6 +1248,13 @@ impl JitterBuffer {
         }
     }
 
+    /// How long one packet of the stream lasts: the negotiated packet time
+    /// until the stream itself has said otherwise.
+    #[must_use]
+    pub(crate) fn packet_time(&self) -> Duration {
+        self.packets_to_duration(1)
+    }
+
     fn packets_to_duration(&self, packets: u16) -> Duration {
         let ticks = u32::from(packets).saturating_mul(self.timing.span);
         ticks_to_duration(self.clock_rate, ticks)
