@@ -36,19 +36,19 @@
 name = "Registration and refresh"
 implemented = true
 unit_tested = true
-flows = ["register"]
+flows = ["register", "both extensions registered at a live VitalPBX"]
 
 [[feature]]
 name = "Call setup and teardown"
 implemented = true
 unit_tested = true
-flows = ["call", "a call to FusionPBX's own echo"]
+flows = ["call", "a call to FusionPBX's own echo", "a call between two extensions, answered, audio both ways", "a call ended by the caller", "a call ended by the callee"]
 
 [[feature]]
 name = "Hold and resume"
 implemented = true
 unit_tested = true
-flows = ["hold and resume"]
+flows = ["hold and resume", "held and resumed by the caller"]
 
 [[feature]]
 name = "Blind transfer"
@@ -72,7 +72,7 @@ flows = ["a REFER from outside any call, referraloff", "a REFER from outside any
 name = "DTMF, RFC 4733"
 implemented = true
 unit_tested = true
-flows = ["DTMF, RFC 4733"]
+flows = ["DTMF, RFC 4733", "an RFC 4733 digit carried end to end"]
 
 [[feature]]
 name = "DTMF, SIP INFO"
@@ -382,3 +382,9 @@ name = "A PBX line bridged to a voice agent that answers SIP"
 implemented = true
 unit_tested = true
 flows = ["the bridge to a voice agent, called by Asterisk"]
+
+[[feature]]
+name = "The far end's media moved by the PBX's re-INVITE (direct media)"
+implemented = true
+unit_tested = true
+flows = ["the media moved straight between the two stacks by the PBX's re-INVITE"]

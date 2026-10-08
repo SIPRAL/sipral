@@ -270,6 +270,26 @@
 #                               with the bridge's own CPU time printed.
 #                               SIPRAL_AGENT_BRIDGE and SIPRAL_HEADLESS_AGENT
 #                               name the two binaries when built elsewhere
+#   scripts/lab.sh vitalpbx-live
+#                               not the lab's own servers but a live
+#                               VitalPBX 4.5 (Asterisk 20) with other
+#                               people's calls on it, so only by hand and
+#                               never part of a run that names nothing: two
+#                               extensions of a test tenant registered
+#                               through the Python layer, a call each way
+#                               with a tone measured both ways, an RFC 4733
+#                               digit, hold and resume, the PBX's own
+#                               direct-media re-INVITE when it sends one,
+#                               a BYE from each side, then both unregistered
+#                               (interop/live/vitalpbx.py). Two calls of a
+#                               few seconds each, and no retry anywhere: a
+#                               refused REGISTER ends the run.
+#                               VITALPBX_LIVE_ENV names the file the host and
+#                               the two accounts are read from; without it the
+#                               step says it did not run and exits 2. Needs
+#                               no container of the lab's, only Docker for
+#                               the one it runs the layer in, and takes no
+#                               lab lock, having nothing of the lab's to race
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -340,7 +360,12 @@ ROOT="$PWD"
 # SIPRAL_LAB_LOCK_HELD=1 is for: set once the lock is taken, inherited by any
 # child this process starts, and checked here so a nested run skips locking
 # instead of deadlocking against its own parent.
-if [ -z "${SIPRAL_LAB_LOCK_HELD:-}" ]; then
+# `vitalpbx-live` alone takes no lock: it starts no Compose service and
+# reaches no container of the lab's, so it has nothing to race, and an hour
+# of somebody else's run holding the lock is no reason for it to wait.
+LAB_LOCK_WANTED=1
+case " $* " in *" vitalpbx-live "*) LAB_LOCK_WANTED=0 ;; esac
+if [ -z "${SIPRAL_LAB_LOCK_HELD:-}" ] && [ "$LAB_LOCK_WANTED" -eq 1 ]; then
     LOCK="/var/lock/sipral-lab.lock"
     [ -e "$LOCK" ] || LOCK="$ROOT/.sipral-lab.lock"
     exec 9>"$LOCK" || { printf 'could not open %s for locking\n' "$LOCK"; exit 2; }
@@ -556,6 +581,9 @@ if [ "$WANT" = pipewire ]; then
 elif [ "$WANT" = compare ]; then
     HARNESS=""
     printf '  note  not used by the comparison, which runs the headless agent\n'
+elif [ "$WANT" = vitalpbx-live ]; then
+    HARNESS=""
+    printf '  note  not used by the live VitalPBX step, which runs the Python layer\n'
 elif [ "$WANT" = bridge ]; then
     HARNESS=""
     printf '  note  not used by the bridge step, which runs its own example\n'
@@ -616,7 +644,8 @@ fi
 # Skipped rather than fatal, on the same reasoning as the C harness above: a
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
-if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ]; then
+if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ] \
+    || [ "$WANT" = vitalpbx-live ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
     printf '  note  not used by the %s step\n' "$WANT"
@@ -653,7 +682,7 @@ if [ -n "${SIPRAL_SWIFT_AGENT:-}" ]; then
 elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
-elif [ "$WANT" = security ] || [ "$WANT" = bridge ]; then
+elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ]; then
     SWIFT_AGENT=""
     printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -723,6 +752,75 @@ if [ "$WANT" = bridge ]; then
         HEADLESS_AGENT=""
         printf '  note  could not build the headless agent\n'
     fi
+fi
+
+# A live VitalPBX, not one of the lab's own servers: two extensions of a
+# test tenant on a server that carries other people's calls, reached over
+# the internet. interop/live/vitalpbx.py places the two calls and judges
+# each scenario itself; this only runs it and turns its "result" lines into
+# this script's own. The account file is mounted rather than passed in the
+# environment, so no secret is in an argument list or in `docker inspect`,
+# and the script masks the secrets and the host in everything it prints.
+# Host networking, so the two stacks are one NAT away from the PBX rather
+# than two, and a direct-media re-INVITE between them reaches the other's
+# own socket on this machine.
+vitalpbx_live() {
+    local beside log status line
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    log=$(lab_run "the live VitalPBX step" $((LAB_START_APT_S + 2 * LAB_CALL_S)) \
+        --network host \
+        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+        -e VITALPBX_LIVE_ENV=/live.env \
+        -v "$VITALPBX_LIVE_ENV:/live.env:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        -v "$ROOT/interop/live:/live:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            exec python3 -u /live/vitalpbx.py' 2>&1)
+    status=$?
+    printf '%s\n' "$log" | sed 's/^/    /'
+    while IFS= read -r line; do
+        case "$line" in
+            "result ok "*) pass "${line#result ok }" ;;
+            "result FAIL "*) fail "${line#result FAIL }" ;;
+        esac
+    done <<EOF
+$log
+EOF
+    return "$status"
+}
+
+if [ "$WANT" = vitalpbx-live ]; then
+    step "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet"
+    if [ -z "${VITALPBX_LIVE_ENV:-}" ]; then
+        printf '  note  VITALPBX_LIVE_ENV is not set, so there is no account to use\n'
+        printf '\nthe live VitalPBX step did not run\n'
+        exit 2
+    fi
+    if [ ! -r "$VITALPBX_LIVE_ENV" ]; then
+        printf '  note  VITALPBX_LIVE_ENV names no file this user can read\n'
+        printf '\nthe live VitalPBX step did not run\n'
+        exit 2
+    fi
+    if [ -z "$HARNESS_C" ]; then
+        printf '  note  no libsipral_ffi for the Python layer to load\n'
+        printf '\nthe live VitalPBX step did not run\n'
+        exit 2
+    fi
+    vitalpbx_live
+    status=$?
+    case "$status" in
+        0) ;;
+        3) printf '\nthe live VitalPBX step did not run\n'; exit 2 ;;
+        *) [ "$FAIL" -eq 1 ] \
+               || fail "the live VitalPBX step ended with status $status before judging anything" ;;
+    esac
+    printf '\n'
+    [ "$FAIL" -eq 0 ] && { printf 'the live VitalPBX agrees\n'; exit 0; }
+    printf 'the live VitalPBX does not agree\n'; exit 1
 fi
 
 step "the lab"

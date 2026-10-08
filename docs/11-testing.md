@@ -874,6 +874,7 @@ the generator itself — never the block, which the next run overwrites.
 | A 3xx redirect followed, when the call asks for it | yes | yes | yes |
 | SIP over WebSocket, the connection made by the stack (RFC 7118) | yes | yes | yes |
 | A PBX line bridged to a voice agent that answers SIP | yes | yes | yes |
+| The far end's media moved by the PBX's re-INVITE (direct media) | yes | yes | not yet |
 
 <!-- END GENERATED interop-matrix -->
 
@@ -1082,6 +1083,32 @@ whose firewall acts on the lab machine's own packet filter, which is shared
 with every other run on it; and an extension is then made through its web
 interface, or an API key created there. A machine of its own is what it
 would take.
+
+It is reached live instead, by hand only: `scripts/lab.sh vitalpbx-live` is
+never part of a run that names nothing, because the server it calls is a live
+VitalPBX 4.5 (Asterisk 20) carrying other people's calls. Two extensions of a
+test tenant (UDP, PCMA only, RFC 4733, `direct_media`, `rewrite_contact`,
+`rtp_symmetric`, `force_rport`, ICE allowed) are registered by two Python
+`Stack`s in one container on the lab machine's own network, behind its NAT
+(`interop/live/vitalpbx.py`). Two calls of a few seconds: 101 calls 102, each
+end sending a tone of its own and listening for the other's frame by frame,
+an RFC 4733 digit, a hold and a resume, the PBX's own direct-media re-INVITE
+reported when it sends one, the caller's BYE; then 102 calls 101 and the
+callee hangs up; both are unregistered at the end. A refused REGISTER ends
+the run with nothing retried. The host and the two accounts come only from
+the file `VITALPBX_LIVE_ENV` names, whose keys share one prefix
+(`<PREFIX>_HOST`, `<PREFIX>_101_USER`, `<PREFIX>_101_SECRET` and the same for
+102); without it the step says it did not run and exits 2, and everything the
+script prints passes through a filter that masks the secrets and the host.
+On 8 October 2026 registration, the caller's audio, the two BYEs and the
+unregistration passed, and the PBX sent no direct-media re-INVITE: it bridged
+the two calls' RTP itself. The callee heard nothing on four calls of six,
+over three runs. What
+reached its socket came from two RTP sources -- the PBX's own first packet,
+then the caller's stream forwarded under the caller's SSRC -- and the stack,
+having taken the first, dropped every packet of the second
+(`sipral-rtp`'s `Discard::SecondSource`, which nothing above the RTP session
+acts on yet), so the digit and the callee's half of the tones failed with it.
 
 ### Who is calling, where the call was sent, and the second server
 

@@ -192,6 +192,21 @@ LAYER_SECTIONS = {
             "a 302 followed by the stack",
         ),
     ),
+    # `scripts/lab.sh vitalpbx-live`, run by hand against a live server and
+    # never by a run that names nothing, so never in the committed fixture:
+    # a log of that word alone still turns into rows rather than orphans
+    "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet": (
+        "vitalpbx_live",
+        (
+            "both extensions registered at a live VitalPBX",
+            "a call between two extensions, answered, audio both ways",
+            "the media moved straight between the two stacks by the PBX's re-INVITE",
+            "an RFC 4733 digit carried end to end",
+            "held and resumed by the caller",
+            "a call ended by the caller",
+            "a call ended by the callee",
+        ),
+    ),
     "DTLS-SRTP against OpenSSL -- the harness as client and as server, no SIP": (
         "openssl_dtls",
         (
@@ -276,6 +291,7 @@ PEER_LABELS = {
     "kamailio_members": "Kamailio, routing to three sipral stacks registered at it",
     "fusionpbx": "FusionPBX → FreeSWITCH",
     "openssl_dtls": "OpenSSL (DTLS-SRTP alone, no SIP)",
+    "vitalpbx_live": "VitalPBX, live (a test tenant, over the internet)",
 }
 
 # Every peer worth an eventual row that this lab cannot reach yet, because
@@ -817,6 +833,11 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # whatever Debian trixie's openssl package is on the day: the run
         # prints it (interop/dtls/run.sh), and no file here pins it
         return "Debian 13's package"
+    if peer_key == "vitalpbx_live":
+        # somebody else's server, reached as it is on the day: no file here
+        # pins it, and the release it ran when the step was written is all
+        # this can say
+        return "4.5 (Asterisk 20)"
     if peer_key == "robust_listener":
         # interop/robust/listener.py, a few lines of Python in the lab: no
         # release of anybody's to pin.
