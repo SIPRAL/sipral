@@ -162,7 +162,7 @@ published = 4600000
 share = 0.1
 where = [
     "docs/23-compared-with-pjsip.md, Memory and CPU: idle, 4.6 MB resident",
-    "the website (sipral.org), its memory chart: 5.4 MB registered and idle",
+    "the website (sipral.org), its memory chart: 5.8 MB registered and idle (8 October 2026)",
 ]
 
 [[figure]]

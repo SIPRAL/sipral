@@ -48,7 +48,7 @@ end_user() { printf 'labuser-endure-%s' "$1"; }
 # once Asterisk holds no channel of that account any more. Each one placed
 # is a line in $OUT/$1.offered.
 end_driver() {
-    local kind="$1" until="$2" user waited
+    local kind="$1" until="$2" user waited channels
     user=$(end_user "$kind")
     # $$ is the run itself: a driver whose run is gone stops placing calls
     while [ "$(date +%s)" -lt "$until" ] && kill -0 $$ 2>/dev/null; do
@@ -58,7 +58,15 @@ end_driver() {
         waited=0
         # a call that is still there past its three minutes, a ring and
         # the end, by a margin, is ended here so that the next one can come
-        while cmp_ast "core show channels concise" | grep -q "^PJSIP/$user-"; do
+        # a reading that failed is read again rather than taken for "no
+        # channel" (the 8 October run placed one call over a live one, by a
+        # reading that did not show the live call)
+        while :; do
+            if ! channels=$(cmp_ast "core show channels concise"); then
+                sleep 1
+                continue
+            fi
+            printf '%s\n' "$channels" | grep -q "^PJSIP/$user-" || break
             waited=$((waited + END_POLL_S))
             if [ "$waited" -ge 240 ]; then
                 cmp_ast "core show channels concise" | grep "^PJSIP/$user-" | cut -d'!' -f1 \

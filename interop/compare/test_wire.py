@@ -250,6 +250,45 @@ class Views(unittest.TestCase):
             {"received": "1.4K", "loss_pct": "1.3", "jitter_ms": "11.500", "rtt_ms": "80.500"},
         )
 
+    def test_baresips_last_receive_statistics_and_its_round_trip_are_read(self):
+        # as baresip 4.11 prints them with `rtp_stats yes` and rtcpsummary:
+        # one block a call, the log of the whole client, the last one read
+        block = """EX=BareSip;CS=0;CD=30;PR={rx};PS=1476;PL={lost},49;PD=1,0;JI={jitter},9.5;DL={rtt};
+audio           Transmit:     Receive:
+packets:           1525         {rx}
+avg. bitrate:      64.0         61.6  (kbit/s)
+errors:               0           27
+pkt.report:        1502         1446
+lost:                49           {lost}
+jitter:            19.1         {jitter}  (ms)
+"""
+        path = self.text(block.format(rx=1375, lost=125, jitter="11.2", rtt="74.9")
+                         + block.format(rx=1468, lost=55, jitter="33.3", rtt="102.6"))
+        view = run(wire.baresip_stats, path)
+        self.assertEqual(
+            {name: view[name] for name in ("received", "loss_pct", "jitter_ms", "rtt_ms")},
+            {"received": "1468", "loss_pct": "3.61", "jitter_ms": "33.3", "rtt_ms": "102.6"},
+        )
+
+    def test_linphonecs_rtp_statistics_carry_no_jitter_so_no_rating(self):
+        stamp = "2026-10-08 14:31:42:734 ortp-message- "
+        path = self.text(
+            "2026-10-08 14:31:40:000 mediastreamer-message- rt_prop=0.124329 sec\n"
+            "2026-10-08 14:31:41:000 mediastreamer-message- rt_prop=0.101410 sec\n"
+            + "".join(stamp + line + "\n" for line in (
+                "                     RTP STATISTICS",
+                "sent                                       1527 packets",
+                "received                                   1476 packets",
+                "                                               0 duplicated packets",
+                "incoming cumulative lost                     46 packets",
+                "incoming received too late                    2 packets",
+            ))
+        )
+        self.assertEqual(run(wire.linphone_stats, path), {
+            "received": "1476", "loss_pct": "3.02", "jitter_ms": "-", "rtt_ms": "101.4",
+            "r": "-", "mos": "-",
+        })
+
     def test_the_agents_last_ended_line_keeps_its_own_rating_beside(self):
         path = self.text(
             "registered\n"

@@ -3,18 +3,23 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 Copyright (c) 2026 Sytek
 -->
 
-# Compared with PJSIP
+# Compared with PJSIP, baresip and Linphone
 
 The same scenarios, run one after the other for Sipral's headless agent and
-for `pjsua`, PJSIP's own command-line client, against the same Asterisk in the
-lab. Every time below is read off a packet capture taken in the client's own
-network namespace, never off what either client says about itself; memory
-and CPU are read from the same `/proc` files for both; a call's quality is
-reported as both ends measured it and rated by one formula for every row.
+for three other clients, each the binary a Linux distribution ships:
+`pjsua`, PJSIP's own command-line client; baresip; and `linphonec`,
+Linphone's console client — against the same Asterisk in the lab. Every
+time below is read off a packet capture taken in the client's own network
+namespace, never off what a client says about itself; memory and CPU are
+read from the same `/proc` files for every one; a call's quality is reported
+as both ends measured it and rated by one formula for every row. Beside them:
+what an application ships to make calls with each, and the four taking calls
+side by side for three hours.
 
-This is one run on one machine, 29 September 2026. It is here so anybody can
-run it again and get their own numbers, not so the numbers below can be
-quoted without the conditions beside them.
+The latest runs are two, on one machine, 8 October 2026; the earlier runs,
+Sipral and pjsua alone from 29 September to 7 October, follow them. They are
+here so anybody can run them again and get their own numbers, not so the
+numbers below can be quoted without the conditions beside them.
 
 ## Run it
 
@@ -22,25 +27,33 @@ On a Linux machine with Docker, from the repository root:
 
 ```bash
 cargo build --release -p sipral --example headless-agent
+cargo build --release -p sipral-ffi
 ./scripts/lab.sh compare
+SIPRAL_HEADLESS_AGENT=target/release/examples/headless-agent ./scripts/soak.sh compare 3
 ```
 
-`scripts/lab.sh compare` builds two images — a capture container (Debian
-trixie with `tcpdump`, `tc` and `python3`) and `pjsua` from Alpine's own
-package (`apk add pjsua`) — brings the lab's Asterisk up, and runs every
-scenario for each client in turn. It takes about thirteen minutes. The
-scenario script is `interop/compare/compare.sh`; what it reads out of each
-capture is `interop/compare/wire.py`, whose own tests run in
-`scripts/check.sh` against captures they write byte by byte. Every result is
-printed on a line that starts `cmp`; captures and each client's log are kept
-in `interop/pcap/compare/`.
+`scripts/lab.sh compare` builds a capture container (Debian trixie with
+`tcpdump`, `tc` and `python3`) and one image per client from its
+distribution's own packages and nothing else — `apk add pjsua` on Alpine,
+`dnf install baresip baresip-opus baresip-g722` on Fedora, `apt-get install
+linphone-cli` on Debian — brings the lab's Asterisk up, measures what each
+ships, and runs every scenario for each client in turn. It takes about half
+an hour. The scenario script is `interop/compare/compare.sh`; what it reads
+out of each capture and each client's log is `interop/compare/wire.py`,
+whose own tests run in `scripts/check.sh` against captures and logs they
+write byte by byte. Every result is printed on a line that starts `cmp`;
+captures and each client's log are kept in `interop/pcap/compare/`.
+`scripts/soak.sh compare` is the endurance run ("Three hours side by side"
+below); it takes no lab lock and runs under a Compose project of its own.
 
 A machine whose Rust build is not Linux names a Linux build of the agent
 instead, and the run can be narrowed:
 
 ```bash
 SIPRAL_HEADLESS_AGENT=/path/to/linux/headless-agent \
-SIPRAL_COMPARE_CLIENTS="sipral pjsua" \
+SIPRAL_FFI_LIB=/path/to/linux/libsipral_ffi.so \
+SIPRAL_COMPARE_CLIENTS="sipral pjsua baresip linphone" \
+SIPRAL_COMPARE_PHASES="size plain ice netem move" \
 SIPRAL_COMPARE_CALLS="1 4 10 100" \
 SIPRAL_COMPARE_PROFILES="lossy mobile satellite" \
 SIPRAL_COMPARE_HOLD_S=30 SIPRAL_COMPARE_WINDOW_S=20 \
@@ -53,16 +66,24 @@ The values shown are the defaults.
 
 | | |
 |---|---|
-| Host | Debian 13, Linux 6.12.95, 32 cores, x86-64, a virtual machine doing other work at the same time |
+| Host | Debian 13, Linux 6.12.95, 32 cores, 62 GB, x86-64, a virtual machine doing other work at the same time |
 | PBX | Asterisk 22.10.1 (`interop/compose.yaml`), one account `labuser-compare`, G.711 only, one contact at a time |
-| Sipral | the headless agent (`crates/sipral/examples/headless-agent.rs`) at `9cb492e` with this document's change, release build, Rust 1.95.0, in `debian:trixie-slim` |
-| PJSIP | `pjsua` 2.17 from Alpine 3.24's package `pjsua-2.17-r0`, run as shipped |
+| Sipral | the headless agent (`crates/sipral/examples/headless-agent.rs`) at `9d75da6`, the 1.1 tree, release build, Rust 1.99.0, in `debian:trixie-slim`; `libsipral_ffi.so` from the same tree |
+| PJSIP | `pjsua` 2.17 from Alpine 3.24's package `pjsua-2.17-r0` (PJ_VERSION 2.17), run as shipped |
+| baresip | 4.11.0 from Fedora 44's packages `baresip-4.11.0-1.fc44`, `baresip-opus` and `baresip-g722` of the same version |
+| Linphone | `linphonec` 5.3.105 from Debian 13's package `linphone-cli 5.3.105-5`, with `liblinphone12 5.3.105-5`, `libbellesip3 5.3.105+dfsg-4`, `libmediastreamer2-14 1:5.3.105+dfsg-5` |
 
-**Why Alpine.** Neither Debian 13 nor Ubuntu 24.04 packages PJSIP at all
-(`apt-cache search pjproject` and `apt-cache search pjsua` both come back
-empty), and the comparison uses PJSIP only as a binary a distribution ships:
-no PJSIP source is fetched, built or read. Alpine's package is the closest
-thing to "PJSIP as a user installs it" on a Linux server.
+The three are the newest each distribution had on 8 October 2026: Alpine
+edge carries the same `pjsua-2.17-r0`, Fedora 44 the same baresip, Debian 13
+the same `linphone-cli`.
+
+**Why these distributions.** Neither Debian 13 nor Ubuntu 24.04 packages
+PJSIP at all (`apt-cache search pjproject` and `apt-cache search pjsua` both
+come back empty); Alpine's package is the closest thing to "PJSIP as a user
+installs it" on a Linux server. Fedora packages baresip with its codec
+modules split out, and Debian packages Linphone's console client. Every
+client is used only as a binary its distribution ships: no source of any of
+them is fetched, built or read.
 
 **How each client was run.** The agent:
 
@@ -82,12 +103,40 @@ pjsua --null-audio --auto-answer=200 --auto-loop --max-calls=4 --no-tcp \
     --password=labpass [--use-ice] [--dis-codec=* --add-codec=PCMA --add-codec=PCMU]
 ```
 
-`--auto-loop` sends back what it receives, the same echo. Both run in a
-container that shares the capture container's network namespace, so the
-capture sees exactly what the client sent and received, and moving that
-container moves the client.
+`--auto-loop` sends back what it receives, the same echo. baresip, with a
+configuration `interop/compare/baresip.sh` writes and its console on a UDP
+port the script types at:
 
-Two settings are not defaults, and each is there so the two are asked the
+```text
+sip_listen 0.0.0.0:5060   call_max_calls 200   call_hold_other_calls no
+audio_player aubridge,nil   audio_source aubridge,nil   rtp_stats yes
+modules: opus g722 g711 auconv auresamp aubridge stun turn ice cons
+         account menu echo netroam rtcpsummary
+account: <sip:labuser-compare@asterisk>;auth_pass=labpass;outbound="sip:<asterisk>"
+         [;medianat=ice] [;audio_codecs=PCMU/8000/1,PCMA/8000/1]
+```
+
+Its `echo` module answers every call and sends back what it receives. The
+registrar is given by address, as to the agent: by name, baresip spends
+about ten seconds on SRV and NAPTR lookups through Docker's resolver first.
+`linphonec`, answering by itself, with the account and `max_calls=200` in a
+linphonerc and its console on a named pipe (`interop/compare/linphone.sh`):
+
+```text
+linphonec -a -c linphonerc -d 0        # -d 5 for the bad-link calls, whose
+                                       # statistics it prints only at that level
+soundcard use files
+play /usr/share/sounds/linphone/hello8000.wav
+[codec disable 7, 2, 1, 0]             # G.711 alone: Opus, Speex 16k and 8k, G.729
+[stun <coturn>:3478, firewall ice]     # ICE needs a STUN server named first
+```
+
+`linphonec` has no echo: it plays a file it ships to every call, so audio
+still flows both ways. Every client runs in a container that shares the
+capture container's network namespace, so the capture sees exactly what the
+client sent and received, and moving that container moves the client.
+
+Settings that are not defaults, each there so the clients are asked the
 same thing:
 
 - `pjsua --max-calls=4`. Alpine's build was compiled with
@@ -100,6 +149,18 @@ same thing:
   calls within a second is exactly the switchboard that guard's own
   documentation says to loosen it for; left at the default, 90 of the
   hundred were refused. The flag changes the burst and nothing else.
+- baresip `call_max_calls 200` (its default is 4) and
+  `call_hold_other_calls no`, so a second call does not hold the first.
+- `linphonec max_calls=200`. Answering by itself it still holds one call at
+  a time and answers the others `486 Busy here`; and it refuses a second
+  call from an address it already has a call with, so Asterisk places its
+  calls from call files, the same channel and extension, each with a caller
+  of its own, where every other client's come from `channel originate`.
+- The `ifb` device the bad-link phase needs for netem's ingress side is
+  made before the client starts, for that phase only: baresip's `netroam`
+  reads an interface appearing mid-call as a network change and resets its
+  SIP transport, and present during the other phases, pjsua offers ICE
+  candidates on it too.
 
 The agent holds 128 calls at once, the stack's default ceiling
 (`EndpointConfig::max_dialogs`): a second run on 2 October, with Asterisk
@@ -111,7 +172,226 @@ raises the ceiling and what grows with it, and lets the guard's burst
 follow it when `--invite-burst` is not given (the agent's own
 documentation); the refusal at the ceiling now carries `Retry-After: 2`.
 
-## Results
+## Results, 8 October 2026: four clients
+
+Two full runs, one after the other, 17:10 to 17:33 and 17:54 to 18:17 EEST,
+with this document's harness and the agent of `9d75da6`. Each cell gives the
+second run, then the first. The
+endurance run below was taking calls on the same machine throughout, under a
+Compose project and an Asterisk of its own; see "Memory and CPU" for the one
+column that changes.
+
+### Registering and calling
+
+From the first request to the `200` that accepted it, every client
+challenged once by Asterisk:
+
+| | Sipral | pjsua | baresip | linphonec |
+|---|---|---|---|---|
+| Registration, first REGISTER to its 200 | 3.1, 3.8 ms | 12.8, 12.2 ms | 4.4, 5.4 ms | 25.0, 25.2 ms |
+| Outgoing call to Asterisk's echo, first INVITE to its 200 | 5.3, 5.2 ms | 5.6, 4.9 ms | 4.2, 5.2 ms | 7.0, 7.9 ms |
+| Incoming call, INVITE to the client's 200 | 0.9, 1.0 ms | 3.3, 3.3 ms | 2.4, 3.5 ms | 14.9, 27.2 ms |
+| Outgoing call with ICE, every codec | 3.5, 3.6 ms | 4.9, 4.3 ms | 4.3, 4.7 ms | 31.0, 28.7 ms |
+
+Sipral answers first; the outgoing call is the server's time more than the
+client's (the 7 October capture under "Earlier runs" says so for Sipral and
+pjsua), and the four are within a millisecond or two of each other.
+linphonec asks the STUN server for its candidates before it sends an ICE
+INVITE, which is most of its 28 to 31 ms.
+
+### Memory and CPU
+
+Read from the client's own `/proc/1`, as before; a call is one Asterisk
+originated to a cadenced tone, G.711 both ways, echoed (linphonec: a file
+played back).
+
+**Resident and anonymous memory, MB** (anonymous: the `Anonymous:` line of
+`smaps_rollup`, what the client itself allocated):
+
+| Calls offered | Sipral | pjsua | baresip | linphonec |
+|---|---|---|---|---|
+| idle | 5.8 / 0.7 | 12.7 / 2.4 | 12.2 / 2.0 | 57.7 / 9.9 |
+| 1 | 5.9 / 0.7 | 13.7 / 3.4 | 12.2 / 2.0 | 58.8 / 10.9 |
+| 4 | 6.2 / 1.0 | 16.7 / 6.4 | 12.8 / 2.6 | 1 up: 58.9 / 10.9 |
+| 10 | 6.7 / 1.5 | 4 up: 16.8 / 6.5 | 14.0 / 3.8 | 1 up: 59.1 / 11.1 |
+| 100 | 14.1 / 8.9 | 4 up: 16.7 / 6.4 | 30.5 / 20.3 | 1 up: 60.6 / 12.7 |
+
+The first run is within about 0.1 MB of the second in every cell. Growth per call
+from ten to a hundred, anonymous: Sipral 84 kB, baresip 188 kB; pjsua 1.0 MB
+a call from idle to four.
+
+The private column of the earlier tables is not given: it counts a shared
+library's pages as a client's own whenever no other process maps them, and
+with the endurance run's four clients mapping the same libraries the
+private figures of pjsua, baresip and linphonec fell by 9 to 43 MB between
+two readings of the same process. Resident and anonymous memory do not move
+with what else runs.
+
+**CPU, % of one core over 20 s:**
+
+| Calls offered | Sipral | pjsua | baresip | linphonec |
+|---|---|---|---|---|
+| idle | 0.05, 0.00 | 0.60, 0.55 | 0.05, 0.05 | 0.35, 0.40 |
+| 1 | 1.10, 1.00 | 6.95, 6.20 | 2.20, 2.35 | 1.55, 1.60 |
+| 4 | 1.95, 1.95 | 19.20, 19.25 | 7.55, 7.90 | 1 up: 1.70, 1.60 |
+| 10 | 3.90, 3.90 | 4 up: 20.15, 20.75 | 16.85, 17.45 | 1 up: 1.80, 1.80 |
+| 100 | 30.20, 30.50 | 4 up: 21.50, 20.60 | 150.75, 150.80 | 1 up: 2.10, 2.00 |
+
+Per call above idle: Sipral 0.48 % of a core at four calls and 0.30 % at a
+hundred; baresip 1.9 % and 1.5 %, past a whole core at about 65 calls;
+pjsua 4.7 % at four. linphonec answering by itself carries one call and
+answers the rest `486 Busy here`, so its rows past one are one call.
+
+**What got worse for Sipral, and why.** Against the 2 October run of the
+same harness (the site's figures until now), the agent's idle memory went
+from 5.4 to 5.8 MB resident and from 0.6 to 0.7 MB anonymous, 13.7 to 14.1
+MB at a hundred calls, and a hundred calls from 27.45 to 30.2 % of a core.
+The agent of 2 October (`8687d1c` in today's history, built here with Rust
+1.95.0) was run again beside today's in the same harness, twice each:
+
+| | 2 October agent | Today's agent, Rust 1.95.0 | Today's agent, Rust 1.99.0 |
+|---|---|---|---|
+| Idle, resident / anonymous | 5.3 / 0.58, 5.5 / 0.58 MB | 5.8 / 0.70 MB | 5.8 / 0.70, 5.9 / 0.70 MB |
+| A hundred calls, resident / anonymous | 13.6 / 8.8, 13.7 / 8.8 MB | 14.0 / 8.9 MB | 14.2 / 8.9, 14.1 / 8.9 MB |
+| A hundred calls, CPU | 30.20, 28.35 % | 28.70 % | 29.35, 27.30 % |
+
+The processor time is the machine's, not the agent's: the 2 October agent
+reads 28 to 30 % on it today. One processor figure did move with the agent:
+a single call above idle, 0.55 % of a core on 2 October and 1.00 to 1.10 %
+now. The 2 October agent spent 0.65 % idle, polling its socket every 5 ms,
+and 1.10 to 1.25 % with one call; today's spends nothing idle and wakes on a
+10 ms grid only while a call has audio (`docs/19-numbers.md`, 4 October), so
+it reads 1.00 to 1.10 % with one call — the same total, all of it now the
+call's. From four calls up the two agents cost the same per call. The memory is the agent's, and not the
+compiler's: about 0.5 MB more resident and 0.12 MB more anonymous, idle and
+at a hundred calls alike, so a fixed cost rather than a cost per call. The
+agent reads its SIP socket on a thread of its own since 4 October (two
+threads where it had one; `docs/19-numbers.md`, 4 October), and the agent
+binary grew from 4 329 800 to 4 527 896 bytes with what 1.1 added; the 4 October runs below
+already read 5.8 MB.
+
+### The INVITE
+
+The client's first INVITE and the one it sent again after Asterisk's 401,
+as captured; "fragmented" is a datagram over the 1472 bytes a 1500-byte
+link carries in one IPv4 packet, which the sender's IP layer split:
+
+| | Sipral | pjsua | baresip | linphonec |
+|---|---|---|---|---|
+| No ICE | 923 / 1222 B | 1371 / 1670 B, fragmented | 943 to 945 / 1226 to 1228 B | 1134 / 1419 B |
+| ICE, every default codec | 1088 / 1236 B, 1 candidate | 1570 / 1869 B, both fragmented, 2 candidates | 1189 to 1196 / 1472 to 1479 B, fragmented in one run of two, 2 candidates | 1309 / 1594 B, fragmented, 2 candidates |
+| ICE, G.711 alone | 955 / 1254 B, 1 candidate | 1165 / 1463 B, 2 candidates | 1108 / 1391 B, 2 candidates | 1213 / 1498 B, fragmented, 2 candidates |
+| Requests over 1300 bytes sent over UDP | none | yes | yes | yes |
+
+The same sizes as 2 October within a few bytes (the session identifier's
+digits). Only Sipral keeps every request under the 1300 bytes RFC 3261
+§18.1.1 allows a datagram when the path's MTU is unknown.
+
+### A moved address
+
+As below, the time counted from the moment the new address existed; first
+SIP from there, then audio heard there again:
+
+| | Sipral | pjsua, alone | pjsua, told (`I`) | baresip, alone | baresip, told (`/netchange`) | linphonec, alone |
+|---|---|---|---|---|---|---|
+| First SIP from the new address | 999, 404 ms, a REGISTER | never | 122, 115 ms, a re-INVITE | 1971, 1971 ms, a REGISTER | 1112, 1149 ms, a REGISTER | 1838, 1848 ms, a re-INVITE |
+| Audio heard there again | 1013, 420 ms | never | 126, 131 ms | 1991, 1977 ms | 1126, 1170 ms | 1854, 1856 ms |
+| Call still up after 20 s | yes | yes, one way | yes | yes | yes | yes |
+
+Read from the cut instead (the last audio that reached the client before a
+silence of over 100 ms, off the same captures, Docker's 190 to 240 ms to
+give the container its new address inside every figure): Sipral 1240 and
+640 ms, pjsua told 360 and 340, baresip 2220 and 2200 alone and 1360 and
+1420 told, linphonec 2100 and 2100. linphonec has no command to be told.
+
+Sipral's 999 ms is the slowest move it has been measured at. Its route is
+read every half second, and in that run it sent no audio for 1.2 s after
+the cut where in every other run its audio left from the new address within
+20 ms of it existing, so the agent's loop did not turn for most of a second.
+The move alone was then run six more times, the 2 October agent and today's
+alternately on the same machine: 387, 432 and 435 ms for the first, 370, 393
+and 397 ms for today's, a REGISTER first each time and audio back 10 to
+15 ms after it. It is not a change in the agent; what held it that once is
+not known, and it is kept here as measured.
+
+### What each ships
+
+What an application has to ship to make calls on Linux x86-64, counted by
+`interop/compare/size.sh` in the images the clients ran from: the stack's
+library — PJSIP's `libpjsua.so.2`; baresip's `libbaresip.so.28` with the
+modules a call needs, the codecs, NAT traversal and media encryption
+Sipral's library carries (`g711 g722 opus stun turn ice srtp dtls_srtp`);
+Linphone's `liblinphone.so.12` — and every shared library those load, by
+`ldd`, each file once, as installed. Left out for every one alike: the C and
+C++ runtimes and the loader (glibc's or musl's libraries, `libgcc_s`,
+`libstdc++`), which any Linux machine has. "The project's own" are the
+libraries its own packages install: PJSIP's `pjproject`, baresip's and
+`libre`, and for Linphone the Belledonne Communications projects it is made
+of (`liblinphone`, `belle-sip`, `mediastreamer2`, `ortp`, `bctoolbox`,
+`belr`, `belcard`, `bzrtp`, `lime`, `bcg729`, `bcmatroska2`).
+
+| MB of 10^6 bytes | Sipral | PJSIP | baresip | Linphone |
+|---|---|---|---|---|
+| Everything, as installed | 6.36 MB, 1 file | 11.38 MB, 22 files | 13.22 MB, 22 files | 208.50 MB, 173 files |
+| The project's own libraries | 6.36 MB | 1.94 MB, 11 files | 1.38 MB, 10 files | 18.84 MB, 11 files |
+
+`libsipral_ffi.so` is the release build of this tree (stripped, as the
+release profile builds it, as distribution libraries are), with Opus, the
+cryptography and everything else it needs linked in, so its one file is
+both rows. The others' own libraries load OpenSSL (5.8 and 6.8 MB of the
+PJSIP and baresip totals), Opus, Speex, SRTP and audio-device libraries from the distribution;
+Debian's Linphone is built with video and loads FFmpeg, x264, x265, AV1
+codecs, ICU and more besides, most of its 208 MB. A build of any of them
+configured for audio alone would ship less, and is not what a distribution
+installs. Every file counted is listed in `size-<client>.txt` beside the
+captures.
+
+## Three hours side by side, 8 October 2026
+
+`scripts/soak.sh compare 3`, 17:23 to 20:27 EEST, on the same machine and
+with the same binaries as the runs above: the four clients registered at
+once, each with an account of its own on one Asterisk, each in a network
+namespace of its own, each taking one call after another for three hours.
+A call is the endurance run's (`scripts/soak.sh endurance`): three minutes
+of cadenced tone, a DTMF `#`, then Asterisk hangs up — here for every
+client, since the others do not hang up on a digit. The registration is held
+to one or two minutes, so each client registers again all through the run.
+Every minute, from each client's own process: resident and anonymous memory,
+processor time, open descriptors, threads (`interop/compare/endurance.sh`).
+The raw samples, a row a minute a client, are
+`interop/fixtures/compare-endurance-2026-10-08/`; `interop/compare/
+endurance.py` reads the table below out of them, and its tests hold it to
+these figures. Growth is read as the endurance run reads its own: from the
+end of the first hour, by least squares over every row after it.
+
+| | Sipral | pjsua | baresip | linphonec |
+|---|---|---|---|---|
+| Calls placed / answered / held to the end | 59 / 59 / 59 | 59 / 59 / 59 | 59 / 59 / 59 | 60 / 59 / 59 |
+| Registrations accepted (each challenged once) | 123 | 96 | 103 | 103 |
+| Resident memory at one hour, at three hours | 6.1, 6.2 MB | 13.8, 13.9 MB | 12.4, 12.5 MB | 57.8, 58.1 MB |
+| Anonymous memory at one, two and three hours | 832, 848, 848 kB | 3360, 3380, 3424 kB | 2316, 2340, 2380 kB | 11204, 11532, 11572 kB |
+| Anonymous growth after the first hour, per hour | 8.6 kB | 23.4 kB | 30.6 kB | 105.8 kB |
+| The same, per call | 0.45 kB | 1.18 kB | 1.54 kB | 5.33 kB |
+| Open descriptors, threads | 7, 2 throughout | 6, 5 throughout | 16, 7 throughout | 15 and 5, then 12 and 3 in the last minutes |
+| Processor, mean over the three hours | 0.95 % of a core | 5.65 % | 2.21 % | 1.53 % |
+| Processor per call | 1.77 s | 10.46 s | 4.08 s | 2.84 s |
+
+None of the four grows in a way three hours can tell from noise: Sipral's
+anonymous memory rose 16 kB in the second hour and not at all in the third,
+pjsua's and baresip's 20 to 44 kB in each, linphonec's 328 kB in the second
+hour and 40 kB in the third. At the rates measured, a day adds 0.2 MB to
+Sipral, 0.6 to pjsua, 0.7 to baresip and 2.5 to linphonec; three hours is
+not a day, and `scripts/soak.sh endurance` holds Sipral to a week on its own.
+No client lost a call, ended one early or stopped registering; descriptors
+and threads did not grow. The one call linphonec did not answer was the
+harness's: its reading of Asterisk's channels missed linphonec's call in
+progress, placed the next one over it, and linphonec answered that one
+`486 Busy here`, as it answers any second call. The harness now reads again
+when a reading fails rather than taking it for an empty list. For their
+first 65 minutes or so the four shared the machine with the runs, builds and
+probes above; after that, only with the lab's own week-long run.
+
+## Earlier runs: Sipral and pjsua, 29 September to 7 October
 
 ### Registering and calling
 
@@ -376,11 +656,14 @@ fragments in that run with ICE (1868 bytes) and without it (1670).
 ## What is not compared
 
 - More than four simultaneous calls in pjsua, which its packaged build does
-  not allow.
-- TLS, SRTP and TCP: `pjsua` from Alpine has them, the agent does not open a
-  stream transport, and a comparison of one side's handshake with the
+  not allow, or more than one in linphonec answering by itself.
+- TLS, SRTP and TCP: the other three clients have them, the agent does not
+  open a stream transport, and a comparison of one side's handshake with the
   other's absence would say nothing.
-- Audio quality as heard: both ends echo a tone and nobody listens. The
-  figures are the transport's.
+- Audio quality as heard: the clients echo a tone (linphonec plays a file)
+  and nobody listens. The figures are the transport's.
+- Sofia-SIP and reSIProcate: no distribution checked on 2 October 2026
+  (Debian 13, Ubuntu 24.04 and 25.04, Fedora 44, Alpine 3.24) ships a SIP user agent built on either, and
+  the comparison runs only what a distribution ships.
 - A NAT between the client and the PBX: the lab network is flat, and
   `scripts/lab.sh nat` covers Sipral alone behind one.

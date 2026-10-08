@@ -47,6 +47,14 @@ def slope(points):
 def summary(rows):
     if not rows:
         return "hours=0"
+    counts = rows[-1]
+    # the row endurance.sh writes once the last calls have run out comes
+    # later than the minute and with no call up: its counts are the run's,
+    # but its memory is an idle client's, not one comparable with the rows
+    # before it, so it is left out of the growth and the end values
+    gaps = sorted(int(b["elapsed_s"]) - int(a["elapsed_s"]) for a, b in zip(rows, rows[1:]))
+    if len(rows) >= 3 and int(rows[-1]["elapsed_s"]) - int(rows[-2]["elapsed_s"]) > 1.5 * gaps[len(gaps) // 2]:
+        rows = rows[:-1]
     elapsed = [int(row["elapsed_s"]) for row in rows]
     span = elapsed[-1] - elapsed[0]
     settle = 3600 if span >= 7200 else span // 3
@@ -70,7 +78,8 @@ def summary(rows):
     cpu_pct = cpu / span * 100 if span else 0.0
     calls = done - int(rows[0]["done"])
     cpu_call = f"{cpu * 1000 / calls:.0f}" if calls > 0 else "-"
-    return (f"hours={span / 3600:.2f} offered={last['offered']} answered={last['answered']} done={done} "
+    return (f"hours={span / 3600:.2f} offered={counts['offered']} answered={counts['answered']} "
+            f"done={counts['done']} "
             f"rss_kb={ends('rss_kb')} anon_kb={ends('anon_kb')} fds={ends('fds')} threads={ends('threads')} "
             f"rss_kb_h={growth('rss_kb'):.1f} anon_kb_h={anon_h:.1f} fds_h={growth('fds'):.2f} "
             f"anon_kb_call={per_call} cpu_pct={cpu_pct:.2f} cpu_ms_call={cpu_call}")

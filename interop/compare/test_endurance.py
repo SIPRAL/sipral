@@ -6,6 +6,8 @@ says of a real run's rows is known to be arithmetic on them.
     python3 -m unittest discover -s interop/compare
 """
 
+import csv
+import os
 import unittest
 
 import endurance
@@ -51,6 +53,27 @@ class Summary(unittest.TestCase):
         self.assertEqual(view["anon_kb"], "1100/1340")
         # 120 kB an hour at 20 calls an hour
         self.assertEqual(view["anon_kb_call"], "6.00")
+
+    def test_the_row_after_the_run_counts_calls_but_not_memory(self):
+        samples = rows(180, lambda m: 6000, lambda m: 700)
+        samples.append(dict(samples[-1], elapsed_s=str(180 * 60 + 190), anon_kb="400", done="61"))
+        view = parse(endurance.summary(samples))
+        self.assertEqual((view["anon_kb"], view["anon_kb_h"], view["done"]), ("700/700", "0.0", "61"))
+
+    def test_the_published_run_reads_as_published(self):
+        # interop/fixtures/compare-endurance-2026-10-08, docs/23's table
+        here = os.path.dirname(os.path.abspath(__file__))
+        folder = os.path.join(here, "..", "fixtures", "compare-endurance-2026-10-08")
+        published = {
+            "sipral": ("59", "832/848", "8.6"),
+            "pjsua": ("59", "3360/3424", "23.4"),
+            "baresip": ("59", "2316/2380", "30.6"),
+            "linphone": ("59", "11204/11572", "105.8"),
+        }
+        for client, expected in published.items():
+            with open(os.path.join(folder, f"{client}.csv"), encoding="utf-8") as handle:
+                view = parse(endurance.summary(list(csv.DictReader(handle))))
+            self.assertEqual((view["done"], view["anon_kb"], view["anon_kb_h"]), expected, client)
 
     def test_a_short_run_settles_after_its_first_third(self):
         view = parse(endurance.summary(rows(60, lambda m: 6000, lambda m: 100 * min(m, 20))))

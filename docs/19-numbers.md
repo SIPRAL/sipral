@@ -1403,6 +1403,18 @@ blocks once and nothing per call. The same pass bounded the queues that, like th
 fill on their own and empty only when the application asks: `Mappings` and `Relays` events,
 `Publication` events, the relays `MediaEngine` returns from refused calls, and a stream tap.
 
+## 8 October 2026 — unreleased: beside pjsua, baresip and linphonec
+
+The comparison of `docs/23-compared-with-pjsip.md` now runs the headless agent beside three
+clients as their distributions ship them, and its figures moved: idle, the agent read 5.8 MB
+resident and 0.7 MB anonymous where the 2 October run read 5.4 and 0.6, a fixed 0.5 MB that the
+2 October agent, run again beside it, does not have (its SIP reader thread and a larger binary;
+`docs/23`, "What got worse for Sipral, and why"). Three hours side by side under the same calls
+(`scripts/soak.sh compare`): the agent's anonymous memory grew 8.6 KB an hour after the first
+hour, pjsua's 23.4, baresip's 30.6 and linphonec's 105.8, at 0.95, 5.65, 2.21 and 1.53 % of a
+core. What each ships to make calls on Linux: `libsipral_ffi.so` 6.36 MB in one file, PJSIP
+11.38 MB in 22, baresip 13.22 MB in 22, Linphone 208.50 MB in 173.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty
