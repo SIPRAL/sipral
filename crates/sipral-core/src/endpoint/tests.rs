@@ -2451,6 +2451,46 @@ fn a_tapped_stream_hands_over_each_message_whole_however_the_reads_cut_it() {
 }
 
 #[test]
+fn a_tap_nobody_takes_from_keeps_only_the_newest_messages() {
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [3; 32]).unwrap();
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    endpoint.tap_streams(true);
+    let over = super::driver::STREAM_TAP_KEPT + 6;
+    for n in 0..over {
+        let message = incoming("OPTIONS", &format!("s{n}"), "");
+        endpoint
+            .receive(
+                Input::StreamData {
+                    transport: TCP,
+                    data: &message,
+                },
+                t0,
+            )
+            .expect("a read");
+        transmits(&mut endpoint);
+        while endpoint.poll_event().is_some() {}
+    }
+    let taken = endpoint.take_stream_messages();
+    assert_eq!(taken.len(), super::driver::STREAM_TAP_KEPT);
+    assert_eq!(&*taken[0].bytes, &incoming("OPTIONS", "s6", "")[..]);
+    assert_eq!(
+        &*taken[taken.len() - 1].bytes,
+        &incoming("OPTIONS", &format!("s{}", over - 1), "")[..]
+    );
+}
+
+#[test]
 fn a_ping_on_a_stream_is_answered_with_a_single_crlf() {
     // RFC 5626 4.4.1 makes the pong a MUST
     let t0 = Instant::now();

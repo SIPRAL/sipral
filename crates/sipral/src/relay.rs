@@ -55,6 +55,19 @@ use sipral_nat::turn::{Event, FrameError, Input, Transport, TurnClient, TurnConf
 /// [`Mappings`](crate::Mappings).
 const KEEPALIVE: Duration = Duration::from_secs(25);
 
+/// How many events wait for [`Relays::poll_event`] before the oldest is dropped. An application
+/// that asks [`Relays::holds`] and [`Relays::take`] instead of reading them would otherwise keep
+/// one for every allocation, a call's worth each, for the life of the process.
+const EVENTS_KEPT: usize = 256;
+
+/// Queue `event`, dropping the oldest past [`EVENTS_KEPT`].
+fn queue_event(events: &mut VecDeque<RelayEvent>, event: RelayEvent) {
+    if events.len() >= EVENTS_KEPT {
+        events.pop_front();
+    }
+    events.push_back(event);
+}
+
 /// What [`Relays`] learned about a socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelayEvent {
@@ -186,10 +199,13 @@ impl Relays {
             return;
         }
         if local.is_ipv4() != self.server.is_ipv4() {
-            self.events.push_back(RelayEvent::Failed {
-                local,
-                failure: TurnError::AddressFamilyNotSupported,
-            });
+            queue_event(
+                &mut self.events,
+                RelayEvent::Failed {
+                    local,
+                    failure: TurnError::AddressFamilyNotSupported,
+                },
+            );
             return;
         }
         let mut client = TurnClient::new(TurnConfig {
@@ -210,10 +226,13 @@ impl Relays {
                 self.drain(local, now);
             }
             // a fresh client only refuses a request too big for a message, e.g. a huge user name
-            Err(_) => self.events.push_back(RelayEvent::Failed {
-                local,
-                failure: TurnError::Oversized,
-            }),
+            Err(_) => queue_event(
+                &mut self.events,
+                RelayEvent::Failed {
+                    local,
+                    failure: TurnError::Oversized,
+                },
+            ),
         }
     }
 
@@ -333,7 +352,8 @@ impl Relays {
         self.outbox.pop_front()
     }
 
-    /// The next thing learned.
+    /// The next thing learned. At most 256 wait; past that the oldest is dropped, so an application
+    /// that asks [`Relays::holds`] instead holds a bounded queue.
     pub fn poll_event(&mut self) -> Option<RelayEvent> {
         self.events.pop_front()
     }
@@ -553,11 +573,14 @@ impl Relays {
                     relayed, mapped, ..
                 } => {
                     pending.keepalive_at = now.checked_add(KEEPALIVE);
-                    self.events.push_back(RelayEvent::Allocated {
-                        local,
-                        relayed,
-                        mapped: mapped.filter(|_| !self.transport.is_stream()),
-                    });
+                    queue_event(
+                        &mut self.events,
+                        RelayEvent::Allocated {
+                            local,
+                            relayed,
+                            mapped: mapped.filter(|_| !self.transport.is_stream()),
+                        },
+                    );
                 }
                 Event::Closed(failure) => closed = Some(failure),
                 Event::AlsoAllocated { .. }
@@ -572,7 +595,7 @@ impl Relays {
         }
         if let Some(failure) = closed {
             self.sockets.remove(&local);
-            self.events.push_back(RelayEvent::Failed { local, failure });
+            queue_event(&mut self.events, RelayEvent::Failed { local, failure });
         }
     }
 }
@@ -812,6 +835,34 @@ pub(crate) mod tests {
         // the call owns it now; nothing here sends for it
         assert!(relays.take(at(MEDIA)).is_none());
         assert_eq!(relays.poll_timeout(), None);
+    }
+
+    #[test]
+    fn an_application_that_takes_relays_without_reading_events_holds_a_bounded_queue() {
+        let now = Instant::now();
+        let mut relays = Relays::new(at(SERVER), "alice", "correct horse", [5; 32]);
+        let calls = u16::try_from(super::EVENTS_KEPT).expect("a port count") + 44;
+        for call in 0..calls {
+            let local = SocketAddr::new(at(MEDIA).ip(), 40_000 + 2 * call);
+            relays.allocate(local, now);
+            let requests = drain(&mut relays);
+            let reply = answer(&requests[0].payload).expect("an answer");
+            assert!(relays.receive(local, at(SERVER), &reply, now));
+            // what such an application asks, before the call takes the relay
+            assert!(relays.holds(local));
+            assert!(relays.take(local).is_some());
+        }
+        let kept = events(&mut relays);
+        assert_eq!(kept.len(), super::EVENTS_KEPT);
+        assert_eq!(
+            kept.first(),
+            Some(&RelayEvent::Allocated {
+                local: SocketAddr::new(at(MEDIA).ip(), 40_000 + 2 * 44),
+                relayed: at(RELAYED),
+                mapped: Some(at(MAPPED)),
+            }),
+            "the oldest were dropped first"
+        );
     }
 
     /// An Allocate over TCP, its answer handed in `chunk` octets at a time.

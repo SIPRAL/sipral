@@ -111,6 +111,13 @@ sipral-stir = { path = "../sipral-stir", version = "1.1.0", features = ["testing
 # two tones, a greeting -- written and companded with the same code the
 # facade already links, so nothing new enters the build either
 sipral-media = { path = "../sipral-media", version = "1.1.0", default-features = false }
+# the soak's voice agent pair for `tests/endurance_memory.rs`: the facade's
+# `HeadlessSession` and the socket protocol it bridges to, counted by the
+# same allocator. The facade's `headless` turned on from here reaches only
+# the test build, as `fake` above does; no release build of the library
+# carries `sipral-headless`.
+sipral = { path = "../sipral", version = "1.1.0", default-features = false, features = ["redaction", "headless"] }
+sipral-headless = { path = "../sipral-headless", version = "1.1.0" }
 
 [lints.rust]
 unsafe_code = "allow"

@@ -92,6 +92,14 @@ const EARLY_CHECKS: usize = 16;
 /// the process; a goodbye that old is worthless anyway, as the far end has long timed the stream out.
 const FAREWELL_CEILING: usize = 256;
 
+/// How many relays from refused descriptions wait for [`MediaEngine::poll_returned_relay`] before
+/// the oldest is dropped.
+///
+/// One comes back with every refused call that was offered a relay; an application that never
+/// collects them would otherwise keep them all, though each lapses at its server within minutes.
+#[cfg(feature = "ice")]
+const RETURNED_CEILING: usize = 256;
+
 /// How long a kept check is still worth answering. With the RFC 8489 §6.2.1 defaults (Rc 7, Rm 16,
 /// RTO 500 ms) the far end gives up after 39.5 s.
 #[cfg(feature = "ice")]
@@ -872,6 +880,11 @@ impl MediaEngine {
             Some(Kept::Agent(ice)) => self.returned.extend(ice.into_relays()),
             Some(Kept::Unused(relay)) => self.returned.push_back(*relay),
             None => {}
+        }
+        // the oldest uncollected relay goes first; it lapses at its server as one nobody collects
+        // does anyway
+        while self.returned.len() > RETURNED_CEILING {
+            self.returned.pop_front();
         }
     }
 
@@ -2557,7 +2570,7 @@ impl MediaEngine {
     /// Nothing that named it was accepted, so [`Relays::put_back`](crate::Relays::put_back) can
     /// keep it for the next call on [`crate::Relay::local`]. Ask after any `_with` call fails, and
     /// after [`MediaEngine::answer_with`] on a rung call. A relay nobody collects lapses at its
-    /// server.
+    /// server; at most 256 wait here, and past that the oldest is dropped.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn poll_returned_relay(&mut self) -> Option<crate::Relay> {

@@ -974,6 +974,7 @@ dependencies = [
  "sipral",
  "sipral-audio",
  "sipral-core",
+ "sipral-headless",
  "sipral-media",
  "sipral-nat",
  "sipral-stir",

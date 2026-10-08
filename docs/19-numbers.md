@@ -1393,6 +1393,16 @@ ring) and 203 KB once that ring is full — and the rest of the resident growth 
 allocator's. The test fails if the bytes held grow by more than 16 KB, or the blocks by more
 than 16, between the first stretch of calls and the last.
 
+A third run of the same test puts the soak's own voice agent pair in the answering stack's
+place: each call opens a `HeadlessSession`, the caller's audio crosses the `sipral-headless`
+wire to an agent that echoes it a frame later, the "#" reaches the agent as `DtmfReceived` and
+the BYE follows its `Hangup`, with one socket and both decoders for the whole run. With 1,000
+calls a stretch it held 209,374 bytes in 620 blocks after 1,000 calls and 209,375 in 620 after
+3,000 and 7,000 (14,086 registrations, 371,000 frames echoed): the bridge adds 5.9 KB and 7
+blocks once and nothing per call. The same pass bounded the queues that, like the goodbyes,
+fill on their own and empty only when the application asks: `Mappings` and `Relays` events,
+`Publication` events, the relays `MediaEngine` returns from refused calls, and a stream tap.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty

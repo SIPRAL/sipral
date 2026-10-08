@@ -241,6 +241,15 @@ capture queue's own policy one step further along, and never a control
 message. `headless-socket-agent.rs` is that shape, and prints how much audio
 it had to drop when a call ends.
 
+RTCP is the application's to send as well. The example binds each call's RTP
+on an even port with the next one held (RFC 3550 §11), keeps that port when
+the call's plan puts RTCP there and lets it go when the call muxes RTCP (RFC
+5761), writes every report `MediaEngine::poll_rtcp` hands it from the port
+the plan names, and the RTCP BYE `MediaEngine::poll_farewell` hands it once
+the call ends from the socket that was the call's own. Each call's closing
+line counts the reports (`rtcp_sent`) and gives the round trip they measured
+(`round_trip_ms`).
+
 A call the application cannot take is refused at once rather than left
 ringing, and the agent hears why on the error channel, under the call's id.
 No RTP port to carry it on is a shortage of the host's, not a fault in the

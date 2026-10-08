@@ -7854,6 +7854,43 @@ fn a_relay_handed_to_a_call_the_user_agent_refuses_comes_back_whole() {
 
 #[cfg(feature = "ice")]
 #[test]
+fn relays_from_refused_calls_nobody_collects_are_kept_only_to_the_ceiling() {
+    // the engine's own ceiling on relays nobody asked for
+    const RETURNED_KEPT: u16 = 256;
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let unknown = pair.callee.account("bob", caller_sip());
+    let refusals = RETURNED_KEPT + 6;
+    for n in 0..refusals {
+        let media = SocketAddr::new(caller_media().ip(), 40_000 + 2 * n);
+        let mut relays = relays_with_one_for(&mut pair.caller, media, pair.now);
+        let relay = relays.take(media).expect("the relay");
+        let refused = pair.caller.engine.place_with(
+            &mut pair.caller.agent,
+            unknown,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            media,
+            CallMedia::new(catalog.clone(), MediaConfig::default()).relay(relay),
+            pair.now,
+        );
+        assert!(refused.is_err(), "{refused:?}");
+    }
+    let mut back = Vec::new();
+    while let Some(relay) = pair.caller.engine.poll_returned_relay() {
+        back.push(relay.local());
+    }
+    assert_eq!(back.len(), usize::from(RETURNED_KEPT));
+    assert_eq!(
+        back.first().copied(),
+        Some(SocketAddr::new(caller_media().ip(), 40_000 + 2 * 6)),
+        "the oldest were dropped first"
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
 fn a_relay_handed_to_a_ring_refused_before_it_describes_anything_comes_back() {
     let catalog = CodecCatalog::with_order(&["PCMU"])
         .expect("an order")

@@ -12,9 +12,12 @@
 //! Simpler than what `sipral_headless::SessionRegistry` supports: one call at a time, one TCP
 //! connection accepted at startup before SIP comes up, which is what the interop lab needs.
 //!
-//! RTP is driven by hand on a raw `UdpSocket` instead of `common/media_socket.rs`'s
-//! `MediaSocket::turn`, whose two closures would both need `&mut` access to the same
-//! `HeadlessSession`. So this binary paces its own 20 ms tick.
+//! RTP is driven by hand instead of through `common/media_socket.rs`'s `MediaSocket::turn`, whose
+//! two closures would both need `&mut` access to the same `HeadlessSession`. So this binary paces
+//! its own 20 ms tick, and takes from `MediaSocket` only the sockets: RTP on an even port with the
+//! next one held for RTCP (RFC 3550 §11), given up when the call muxes RTCP (RFC 5761). RTCP
+//! reports go out from whichever port the call's plan names, and an ended call's BYE (RFC 3550
+//! §6.6) from the socket it was the call's.
 //!
 //! ```text
 //! cargo run --example headless-socket-agent --features headless -- \
@@ -53,7 +56,7 @@ mod wall_clock;
 use std::collections::VecDeque;
 use std::env;
 use std::io::Write as _;
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,6 +75,7 @@ use sipral_headless::{
     encode_audio, encode_control,
 };
 
+use media_socket::MediaSocket;
 use udp_endpoint::Endpoint;
 
 /// Socket audio format: independent of the call's codec (the point of `docs/07-headless.md`), fixed
@@ -354,13 +358,15 @@ fn bounded(mut text: String, most: usize) -> String {
     text
 }
 
-/// One call's socket-side state: its RTP socket, the `HeadlessSession` that resamples and queues
-/// audio, and the wire call id.
+/// One call's socket-side state: its RTP and RTCP sockets, the `HeadlessSession` that resamples and
+/// queues audio, and the wire call id.
 struct Bridge {
     call: CallHandle,
     call_id: String,
-    rtp: UdpSocket,
+    media: MediaSocket,
     session: sipral::HeadlessSession,
+    /// RTCP reports sent for this call while it was up (RFC 3550 §6.4), the BYE not among them.
+    rtcp_sent: u64,
     /// Set on `UaEvent::CallEnded`, which `MediaEngine` always reports before the
     /// `MediaEvent::Ended` with final statistics. `bridge` is cleared only after that, so it still
     /// has a `call_id` to report against.
@@ -435,6 +441,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut to_agent = ToAgent::spawn(socket);
 
     let mut bridge: Option<Bridge> = None;
+    // the sockets of calls that ended this turn, kept until their RTCP BYE has gone
+    let mut parting: Vec<(CallHandle, MediaSocket)> = Vec::new();
     let mut agent_up = false;
     let mut next_tick = now;
 
@@ -445,17 +453,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for event in endpoint.pump(turn) {
             handle_event(
                 &mut endpoint,
-                &mut bridge,
+                (&mut bridge, &mut parting),
                 &mut agent_up,
                 &mut out.control,
                 &event,
                 (turn, to_agent.audio_dropped, &answering),
             );
         }
-
-        // an ended call's RTCP BYE: this binary binds no RTCP socket and sends no reports, so the
-        // goodbyes are let go here rather than left queued in the engine call after call
-        while endpoint.engine.poll_farewell().is_some() {}
 
         if drain_agent(&reader, &mut endpoint, &mut bridge, &mut out.control, turn).is_break() {
             println!("the agent's socket closed");
@@ -467,6 +471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             drive_bridge(active, &mut media, agent_up, &mut next_tick, &mut out, turn);
         }
+        send_rtcp(&mut endpoint, bridge.as_mut(), &mut parting, turn);
 
         if to_agent.send(out).is_break() {
             println!("the agent stopped reading its socket");
@@ -540,7 +545,31 @@ fn drain_agent(
     }
 }
 
-/// One call's RTP for this tick: incoming datagrams go to `media`; when a media tick is due,
+/// The call's RTCP reports, due on the session's own schedule (RFC 3550 §6.2), and the BYE of a
+/// call that ended this turn from the socket that was its own (§6.6). A goodbye whose socket is
+/// already gone is let go rather than left queued in the engine.
+fn send_rtcp(
+    endpoint: &mut Endpoint,
+    bridge: Option<&mut Bridge>,
+    parting: &mut Vec<(CallHandle, MediaSocket)>,
+    turn: Instant,
+) {
+    let mut bridge = bridge.filter(|b| !b.ended);
+    while let Some((call, destination, payload)) = endpoint.engine.poll_rtcp(turn) {
+        if let Some(active) = bridge.as_deref_mut().filter(|b| b.call == call) {
+            active.media.send_rtcp(destination, &payload);
+            active.rtcp_sent += 1;
+        }
+    }
+    while let Some((call, destination, payload)) = endpoint.engine.poll_farewell() {
+        if let Some((_, media)) = parting.iter().find(|(gone, _)| *gone == call) {
+            media.send_rtcp(destination, &payload);
+        }
+    }
+    parting.clear();
+}
+
+/// One call's media for this tick: incoming RTP and RTCP go to `media`; when a media tick is due,
 /// decoded caller audio is heard, voice activity and ready frames are written to `out`, and queued
 /// agent audio is sent as the next RTP packet.
 fn drive_bridge(
@@ -554,14 +583,11 @@ fn drive_bridge(
     if active.ended {
         return;
     }
-    let mut inbox = [0_u8; 2_048];
-    while let Ok((length, from)) = active.rtp.recv_from(&mut inbox) {
-        let datagram = inbox.get_mut(..length).unwrap_or_default();
-        let _ = media.receive(datagram, from, turn);
-    }
-    // session datagrams (including ICE-lite check answers) go out on the same socket on every tick
+    // also adopts the RTCP port once the plan names one, or lets the held one go when muxed
+    active.media.receive(media, turn);
+    // session datagrams (including ICE-lite check answers) go out on the RTP socket on every tick
     while let Some(datagram) = media.poll_transmit(turn) {
-        let _ = active.rtp.send_to(datagram.payload, datagram.destination);
+        active.media.send(datagram.destination, datagram.payload);
     }
     if !agent_up || turn < *next_tick {
         return;
@@ -589,25 +615,23 @@ fn drive_bridge(
         let _ = encode_audio(session_audio(), &bytes, &mut out.audio);
     }
     let carries_agent = active.agent_spoke;
-    if let Ok(Some(datagram)) = active.session.speak(media, turn)
-        && active
-            .rtp
-            .send_to(datagram.payload, datagram.destination)
-            .is_ok()
-        && carries_agent
-        && active.first_rtp_timed == Some(false)
-    {
+    if let Ok(Some(datagram)) = active.session.speak(media, turn) {
+        active.media.send(datagram.destination, datagram.payload);
+    } else {
+        return;
+    }
+    if carries_agent && active.first_rtp_timed == Some(false) {
         active.first_rtp_timed = Some(true);
         println!("timing first-rtp {} {}", active.call_id, epoch_us());
     }
 }
 
-/// A fresh, non-blocking RTP socket on `ip`, and the address it is bound to.
-fn bind_rtp(ip: std::net::IpAddr) -> std::io::Result<(UdpSocket, SocketAddr)> {
-    let rtp = UdpSocket::bind((ip, 0))?;
-    rtp.set_nonblocking(true)?;
-    let local = rtp.local_addr()?;
-    Ok((rtp, local))
+/// A fresh RTP socket with its RTCP port held, and the address the SDP names: `ip`, the address
+/// SIP is reached at, and the socket's port.
+fn bind_media(ip: std::net::IpAddr, now: Instant) -> std::io::Result<(MediaSocket, SocketAddr)> {
+    let media = MediaSocket::bind(now)?;
+    let local = SocketAddr::new(ip, media.port()?);
+    Ok((media, local))
 }
 
 /// Refuse a call this binary cannot take instead of leaving it ringing: `status` to the caller, the
@@ -656,7 +680,7 @@ fn open_bridge(
     let call_id = format!("{call:?}");
     // no RTP port is this host's shortage, not the call's fault: 503 (§21.5.4) with Retry-After, so
     // a front server tries another agent (RFC 3263 §4.3) and a retrying caller waits
-    let (rtp, local) = match bind_rtp(endpoint.local.ip()) {
+    let (media, local) = match bind_media(endpoint.local.ip(), now) {
         Ok(bound) => bound,
         Err(error) => {
             let why = format!("no RTP socket for the call's audio: {error}");
@@ -691,8 +715,9 @@ fn open_bridge(
     *bridge = Some(Bridge {
         call,
         call_id: call_id.clone(),
-        rtp,
+        media,
         session,
+        rtcp_sent: 0,
         ended: false,
         agent_spoke: false,
         first_rtp_timed: answering.timings.then_some(false),
@@ -753,7 +778,7 @@ fn open_bridge(
 
 fn handle_event(
     endpoint: &mut Endpoint,
-    bridge: &mut Option<Bridge>,
+    (bridge, parting): (&mut Option<Bridge>, &mut Vec<(CallHandle, MediaSocket)>),
     agent_up: &mut bool,
     out: &mut Vec<u8>,
     event: &Event,
@@ -813,13 +838,19 @@ fn handle_event(
                 // agent audio unread: dropped from the capture queue, or pushed out of the socket
                 // queue by newer turns; the latter counted since the agent connected
                 println!(
-                    "ended {}: packets_received={} packets_sent={} capture_dropped={} audio_dropped={}",
+                    "ended {}: packets_received={} packets_sent={} rtcp_sent={} round_trip_ms={} \
+                     capture_dropped={} audio_dropped={}",
                     active.call_id,
                     stats.quality.received,
                     stats.packets_sent,
+                    active.rtcp_sent,
+                    stats
+                        .round_trip
+                        .map_or_else(|| "none".to_owned(), |rtt| rtt.as_millis().to_string()),
                     active.session.protocol().capture_dropped(),
                     audio_dropped
                 );
+                parting.push((active.call, active.media));
             }
         }
         _ => {}

@@ -19,6 +19,14 @@
 //! bytes still held after the last stretch of calls exceed what the first
 //! stretch settled at by more than a few hash-table resizes' worth.
 //!
+//! A third run puts the soak's own voice agent pair in the answering stack's
+//! place, as `crates/sipral/examples/headless-socket-agent.rs` and
+//! `crates/sipral-headless/examples/agent.rs` do over TCP: every call opens a
+//! `HeadlessSession`, the caller's audio goes over the `sipral-headless` wire
+//! to an agent that echoes it a frame later, the "#" reaches the agent as a
+//! `DtmfReceived`, and the BYE follows the agent's `Hangup`. The two byte
+//! streams and both decoders live as long as the run, as the socket does.
+//!
 //! `SIPRAL_ENDURANCE_CALLS` sets the calls per stretch (default 100), so the
 //! release run behind `docs/19-numbers.md` can go to thousands.
 
@@ -30,14 +38,21 @@
 )]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Account, AccountId, CallHandle, CodecCatalog, Credentials, Digit, EndpointConfig, Event, Input,
-    MediaConfig, MediaEngine, MediaEvent, OutgoingCall, TransportId, TransportProtocol, UaEvent,
-    Uri, UserAgent, WallClock,
+    Account, AccountId, CallHandle, CodecCatalog, Credentials, Digit, EndpointConfig, Event,
+    HeadlessSession, Input, MediaConfig, MediaEngine, MediaEvent, MediaSession, OutgoingCall,
+    TransportId, TransportProtocol, UaEvent, Uri, UserAgent, WallClock, call_state_of,
+    dtmf_received_of,
+};
+use sipral_headless::{
+    AudioConfig, CallState, CallStateKind, ControlMessage, Decoded, Decoder, FrameDecoder,
+    FrameKind, Hangup, IncomingCall, MAX_CONTROL_PAYLOAD, SampleRate, SessionOpen, VoiceActivity,
+    encode_audio, encode_control, payload_bound, write_frame,
 };
 
 // the allocator
@@ -253,6 +268,240 @@ fn registrar_answer(request: &[u8], nonces: &mut u64) -> Vec<u8> {
     }
 }
 
+// the voice agent pair: the socket application's half and the agent's
+
+/// The socket's audio as the soak's application fixes it: 16 kHz, so the
+/// bridge resamples G.711's 8 kHz both ways.
+fn socket_audio() -> AudioConfig {
+    AudioConfig::new(SampleRate::Hz16000)
+}
+
+const CODEC_RATE: u32 = 8_000;
+/// Frames each of a bridged call's queues holds, as the application opens it.
+const QUEUED_FRAMES: usize = 50;
+/// Frames the agent holds before echoing one, as its example does.
+const ECHO_DELAY: usize = 1;
+
+/// The bridged call on the application's side.
+struct Bridged {
+    call: CallHandle,
+    call_id: String,
+    session: HeadlessSession,
+}
+
+/// One socket for the whole run, both ends of it: what each side has written
+/// and the other not read yet, the application's decoder, and the agent's
+/// frame decoder and echo.
+struct Wire {
+    to_agent: Vec<u8>,
+    to_app: Vec<u8>,
+    app_reads: Decoder,
+    agent_reads: FrameDecoder,
+    echo: VecDeque<Vec<u8>>,
+    agent_call: String,
+    bridged: Option<Bridged>,
+    /// Audio frames the agent sent back, and `Hangup`s it sent.
+    echoed: usize,
+    hangups: usize,
+}
+
+impl Wire {
+    fn new() -> Self {
+        Self {
+            to_agent: Vec::new(),
+            to_app: Vec::new(),
+            app_reads: Decoder::new(socket_audio()).expect("the socket's audio"),
+            agent_reads: FrameDecoder::new(
+                u16::try_from(MAX_CONTROL_PAYLOAD).expect("a control bound"),
+            ),
+            echo: VecDeque::new(),
+            agent_call: String::new(),
+            bridged: None,
+            echoed: 0,
+            hangups: 0,
+        }
+    }
+
+    /// The application takes `call`: a session, and its opening and caller
+    /// written to the agent.
+    fn open(&mut self, call: CallHandle, caller: String) {
+        let call_id = format!("{call:?}");
+        let session = HeadlessSession::open(
+            call_id.clone(),
+            socket_audio(),
+            CODEC_RATE,
+            QUEUED_FRAMES,
+            QUEUED_FRAMES,
+        )
+        .expect("a bridge");
+        encode_control(
+            &ControlMessage::SessionOpen(SessionOpen::new(SampleRate::Hz16000)),
+            &mut self.to_agent,
+        )
+        .expect("the opening goes");
+        encode_control(
+            &ControlMessage::IncomingCall(IncomingCall {
+                call_id: call_id.clone(),
+                caller,
+                display_name: None,
+            }),
+            &mut self.to_agent,
+        )
+        .expect("the caller goes");
+        self.bridged = Some(Bridged {
+            call,
+            call_id,
+            session,
+        });
+    }
+
+    /// The bridged call's state change, if `event` is one.
+    fn signalling(&mut self, event: &UaEvent) {
+        let Some((call, state)) = call_state_of(event) else {
+            return;
+        };
+        let Some(bridged) = self.bridged.as_mut().filter(|b| b.call == call) else {
+            return;
+        };
+        let protocol = bridged.session.protocol_mut();
+        let _ = match state {
+            CallStateKind::Ringing => Ok(()),
+            CallStateKind::Answered => protocol.answer(),
+            CallStateKind::Ended { .. } => protocol.hangup(),
+        };
+        encode_control(
+            &ControlMessage::CallState(CallState {
+                call_id: bridged.call_id.clone(),
+                state,
+            }),
+            &mut self.to_agent,
+        )
+        .expect("the state goes");
+    }
+
+    fn digit(&mut self, call: CallHandle, digit: Option<char>, held: Option<Duration>) {
+        if let Some(bridged) = self.bridged.as_ref().filter(|b| b.call == call)
+            && let Some(received) = dtmf_received_of(bridged.call_id.clone(), digit, held)
+        {
+            encode_control(&ControlMessage::DtmfReceived(received), &mut self.to_agent)
+                .expect("the digit goes");
+        }
+    }
+
+    fn close(&mut self, call: CallHandle) {
+        if self.bridged.as_ref().is_some_and(|b| b.call == call) {
+            self.bridged = None;
+        }
+    }
+
+    /// The caller's decoded frame: heard, and whatever whole frames it made
+    /// written to the agent.
+    fn hear(&mut self, decoded: &[i16]) {
+        let Some(bridged) = self.bridged.as_mut() else {
+            return;
+        };
+        if let Some(speaking) = bridged.session.hear(decoded) {
+            encode_control(
+                &ControlMessage::VoiceActivity(VoiceActivity {
+                    call_id: bridged.call_id.clone(),
+                    speaking,
+                }),
+                &mut self.to_agent,
+            )
+            .expect("the activity goes");
+        }
+        while let Some(bytes) = bridged.session.protocol_mut().pop_capture() {
+            encode_audio(socket_audio(), &bytes, &mut self.to_agent).expect("a whole frame");
+        }
+    }
+
+    /// The agent's audio as the call's next packet, or silence before the
+    /// bridge opens.
+    fn speak(&mut self, media: &mut MediaSession, now: Instant) -> Option<Vec<u8>> {
+        let sent = match self.bridged.as_mut() {
+            Some(bridged) => bridged.session.speak(media, now),
+            None => media.capture(&[0_i16; 160], now),
+        };
+        sent.ok().flatten().map(|d| d.payload.to_vec())
+    }
+
+    /// The agent reads everything written to it, echoing audio a frame
+    /// later and hanging up on "#". Whether it wrote anything back.
+    fn agent_turn(&mut self) -> bool {
+        if self.to_agent.is_empty() {
+            return false;
+        }
+        self.agent_reads.push(&self.to_agent);
+        self.to_agent.clear();
+        let wrote = self.to_app.len();
+        while let Some(frame) = self.agent_reads.next_frame().expect("a well-formed stream") {
+            if frame.kind() == FrameKind::Audio.to_u8() {
+                self.echo.push_back(frame.payload().to_vec());
+                if self.echo.len() > ECHO_DELAY
+                    && let Some(due) = self.echo.pop_front()
+                {
+                    write_frame(FrameKind::Audio.to_u8(), &due, &mut self.to_app)
+                        .expect("an echo");
+                    self.echoed += 1;
+                }
+                continue;
+            }
+            match ControlMessage::decode(frame.kind(), frame.payload()).expect("a message") {
+                ControlMessage::SessionOpen(open) => {
+                    let bound = open.audio().and_then(payload_bound).expect("a bound");
+                    self.agent_reads.set_max_payload(bound);
+                }
+                ControlMessage::IncomingCall(incoming) => {
+                    self.agent_call = incoming.call_id;
+                    self.echo.clear();
+                }
+                ControlMessage::DtmfReceived(received) if received.digit.get() == '#' => {
+                    encode_control(
+                        &ControlMessage::Hangup(Hangup {
+                            call_id: self.agent_call.clone(),
+                            reason: Some("agent finished".to_owned()),
+                        }),
+                        &mut self.to_app,
+                    )
+                    .expect("the hangup goes");
+                    self.hangups += 1;
+                }
+                _ => {}
+            }
+        }
+        self.to_app.len() > wrote
+    }
+
+    /// The application reads the agent: audio to the bridged call's
+    /// playback queue, and the call to hang up if the agent asked.
+    fn app_turn(&mut self) -> Option<CallHandle> {
+        if self.to_app.is_empty() {
+            return None;
+        }
+        self.app_reads.push(&self.to_app);
+        self.to_app.clear();
+        let mut hangup = None;
+        while let Some(message) = self.app_reads.next_message().expect("a well-formed stream") {
+            match message {
+                Decoded::Audio(payload) => {
+                    if let Some(bridged) = self.bridged.as_mut() {
+                        let _ = bridged.session.protocol_mut().push_playback(payload.to_vec());
+                    }
+                }
+                Decoded::Control(ControlMessage::Hangup(asked)) => {
+                    hangup = self
+                        .bridged
+                        .as_ref()
+                        .filter(|b| b.call_id == asked.call_id)
+                        .map(|b| b.call);
+                }
+                Decoded::Control(_) => {}
+            }
+        }
+        hangup
+    }
+}
+
 // the run
 
 struct Run {
@@ -265,10 +514,13 @@ struct Run {
     /// The answering stack's current call, and whether it has ended.
     answered: Option<CallHandle>,
     ended: bool,
+    /// The voice agent pair, when the answering stack is the soak's
+    /// application rather than one that hangs up on "#" itself.
+    wire: Option<Wire>,
 }
 
 impl Run {
-    fn new(polls_farewells: bool) -> Self {
+    fn new(polls_farewells: bool, bridged: bool) -> Self {
         let now = Instant::now();
         let mut pbx = Side::new(0x11, "192.0.2.1", true, now);
         let mut app = Side::new(0x22, "192.0.2.2", polls_farewells, now);
@@ -299,6 +551,7 @@ impl Run {
             registrations: 0,
             answered: None,
             ended: false,
+            wire: bridged.then(Wire::new),
         };
         run.settle();
         assert_eq!(run.registrations, 1, "the first registration did not take");
@@ -324,6 +577,13 @@ impl Run {
                 moved = true;
                 self.app.deliver(&transmit.payload, self.pbx.sip, self.now);
             }
+            if let Some(wire) = self.wire.as_mut() {
+                moved |= wire.agent_turn();
+                if let Some(call) = wire.app_turn() {
+                    moved = true;
+                    self.app.agent.hangup(call, self.now).expect("the BYE goes");
+                }
+            }
             if !moved {
                 break;
             }
@@ -338,8 +598,18 @@ impl Run {
             .is_some()
         {}
         while let Some(event) = self.app.engine.poll_event(&mut self.app.agent, self.now) {
-            match event {
+            match &event {
                 Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
+                    let call = *call;
+                    if let Some(wire) = self.wire.as_mut() {
+                        let caller = self
+                            .app
+                            .agent
+                            .call_identity(call)
+                            .map(|who| String::from_utf8_lossy(&who.from_uri).into_owned())
+                            .unwrap_or_default();
+                        wire.open(call, caller);
+                    }
                     self.app
                         .engine
                         .answer(&mut self.app.agent, call, self.app.media, self.now)
@@ -352,20 +622,32 @@ impl Run {
                     panic!("the registration failed: {reason}")
                 }
                 Event::Signalling(UaEvent::CallEnded { call, .. })
-                    if self.answered == Some(call) =>
+                    if self.answered == Some(*call) =>
                 {
                     self.ended = true;
                 }
                 Event::Media {
                     call,
-                    event:
-                        MediaEvent::DigitReceived {
-                            digit: Some('#'), ..
-                        },
+                    event: MediaEvent::DigitReceived { digit, held, .. },
+                } => match self.wire.as_mut() {
+                    Some(wire) => wire.digit(*call, *digit, *held),
+                    None if *digit == Some('#') => {
+                        self.app.agent.hangup(*call, self.now).expect("the BYE goes");
+                    }
+                    None => {}
+                },
+                Event::Media {
+                    call,
+                    event: MediaEvent::Ended(_),
                 } => {
-                    self.app.agent.hangup(call, self.now).expect("the BYE goes");
+                    if let Some(wire) = self.wire.as_mut() {
+                        wire.close(*call);
+                    }
                 }
                 _ => {}
+            }
+            if let (Some(wire), Event::Signalling(signalling)) = (self.wire.as_mut(), &event) {
+                wire.signalling(signalling);
             }
         }
     }
@@ -377,7 +659,6 @@ impl Run {
             *sample = if *phase % 18 < 9 { 8_000 } else { -8_000 };
             *phase = phase.wrapping_add(1);
         }
-        let silence = [0_i16; 160];
         let now = self.now;
         let sent = self.pbx.engine.session(pbx_call).and_then(|mut session| {
             session
@@ -390,14 +671,26 @@ impl Run {
             session.receive(&mut datagram, self.pbx.media, now);
             let mut played = [0_i16; 160];
             session.playback(&mut played);
+            if let Some(wire) = self.wire.as_mut() {
+                wire.hear(&played);
+            }
         }
-        let back = self.app.engine.session(app_call).and_then(|mut session| {
-            session
-                .capture(&silence, now)
-                .ok()
-                .flatten()
-                .map(|d| d.payload.to_vec())
-        });
+        // silence back from a stack of its own, the agent's echo through the
+        // bridge otherwise
+        let back = match self.wire.as_mut() {
+            Some(wire) => self
+                .app
+                .engine
+                .session(app_call)
+                .and_then(|mut session| wire.speak(&mut session, now)),
+            None => self.app.engine.session(app_call).and_then(|mut session| {
+                session
+                    .capture(&[0_i16; 160], now)
+                    .ok()
+                    .flatten()
+                    .map(|d| d.payload.to_vec())
+            }),
+        };
         if let (Some(mut datagram), Some(mut session)) = (back, self.pbx.engine.session(pbx_call)) {
             session.receive(&mut datagram, self.app.media, now);
             let mut played = [0_i16; 160];
@@ -483,9 +776,10 @@ fn stretch() -> usize {
 }
 
 /// Bytes and blocks held after `stretch`, 3 × `stretch` and 7 × `stretch`
-/// calls, checked for growth over the last two stretches.
-fn endure(stretch: usize, polls_farewells: bool) {
-    let mut run = Run::new(polls_farewells);
+/// calls, checked for growth over the last two stretches; `bridged` puts the
+/// voice agent pair in the answering stack's place.
+fn endure(stretch: usize, polls_farewells: bool, bridged: bool) {
+    let mut run = Run::new(polls_farewells, bridged);
     let mut readings = Vec::with_capacity(4);
     readings.push((0, run.registrations, live()));
     let mut done = 0;
@@ -497,11 +791,23 @@ fn endure(stretch: usize, polls_farewells: bool) {
         }
         readings.push((done, run.registrations, live()));
     }
-    let asking = if polls_farewells {
-        "asks for"
-    } else {
-        "never asks for"
+    let asking = match (polls_farewells, bridged) {
+        (_, true) => "voice agent pair, asks for",
+        (true, false) => "asks for",
+        (false, false) => "never asks for",
     };
+    if let Some(wire) = &run.wire {
+        println!(
+            "endurance ({asking} goodbyes): the agent echoed {} frames and hung up {} calls",
+            wire.echoed, wire.hangups
+        );
+        assert_eq!(wire.hangups, done, "a call was not ended by the agent");
+        assert!(
+            wire.echoed >= done * FRAMES_BEFORE_DIGIT / 2,
+            "the agent's echo did not flow: {} frames over {done} calls",
+            wire.echoed
+        );
+    }
     for (calls, registrations, (bytes, blocks)) in &readings {
         println!(
             "endurance ({asking} goodbyes): after {calls} calls and {registrations} \
@@ -543,8 +849,10 @@ fn endure(stretch: usize, polls_farewells: bool) {
 #[test]
 fn calls_and_registrations_one_after_another_hold_nothing_once_each_is_over() {
     let stretch = stretch();
-    endure(stretch, true);
+    endure(stretch, true, false);
     // an application that never asks for ended calls' goodbyes, as the soak's
     // own did: past the queue's ceiling the oldest go
-    endure(stretch.max(FAREWELLS_KEPT), false);
+    endure(stretch.max(FAREWELLS_KEPT), false, false);
+    // the soak's own pair: the socket application and its echo agent
+    endure(stretch, true, true);
 }

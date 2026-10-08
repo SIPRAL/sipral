@@ -128,9 +128,15 @@ pub struct Endpoint {
     /// Per-transport ping intervals ([`Endpoint::keep_stream_alive`]), keyed by name to survive a
     /// rebind.
     pub(super) stream_keepalives: HashMap<TransportId, core::time::Duration>,
-    /// Framed stream messages while [`Endpoint::tap_streams`] is on.
-    pub(super) stream_tap: Option<Vec<StreamMessage>>,
+    /// Framed stream messages while [`Endpoint::tap_streams`] is on, the newest
+    /// [`STREAM_TAP_KEPT`].
+    pub(super) stream_tap: Option<VecDeque<StreamMessage>>,
 }
+
+/// How many tapped stream messages wait for [`Endpoint::take_stream_messages`] before the oldest is
+/// dropped. A tap left on by an application that stopped taking would otherwise copy every message
+/// for the life of the connection.
+pub(super) const STREAM_TAP_KEPT: usize = 1_024;
 
 impl Endpoint {
     /// A new endpoint. `seed` is thirty-two bytes of entropy that every branch, tag, `Call-ID` and
@@ -184,18 +190,40 @@ impl Endpoint {
     /// ends (§18.3).
     pub fn tap_streams(&mut self, on: bool) {
         match (on, self.stream_tap.is_some()) {
-            (true, false) => self.stream_tap = Some(Vec::new()),
+            (true, false) => self.stream_tap = Some(VecDeque::new()),
             (false, true) => self.stream_tap = None,
             _ => {}
         }
     }
 
-    /// The messages [`Endpoint::tap_streams`] kept, in order, each once.
+    /// The messages [`Endpoint::tap_streams`] kept, in order, each once: the newest 1,024 since
+    /// the last take, the older ones dropped.
     pub fn take_stream_messages(&mut self) -> Vec<StreamMessage> {
         self.stream_tap
             .as_mut()
-            .map(core::mem::take)
+            .map(|tap| Vec::from(core::mem::take(tap)))
             .unwrap_or_default()
+    }
+
+    /// Keep a copy of one framed stream message while the tap is on, dropping the oldest past
+    /// [`STREAM_TAP_KEPT`].
+    pub(super) fn tap_stream(
+        &mut self,
+        transport: TransportId,
+        remote: Option<SocketAddr>,
+        bytes: &[u8],
+    ) {
+        let Some(tap) = self.stream_tap.as_mut() else {
+            return;
+        };
+        if tap.len() >= STREAM_TAP_KEPT {
+            tap.pop_front();
+        }
+        tap.push_back(StreamMessage {
+            transport,
+            remote,
+            bytes: bytes.into(),
+        });
     }
 
     /// The stream a `TransportWanted` asked for cannot be had. `true` when a request held back may

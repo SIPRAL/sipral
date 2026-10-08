@@ -138,18 +138,9 @@ impl Endpoint {
         while outcome.is_ok() {
             match framer.next_message(mode) {
                 Ok(Some(Framed::Message(message))) => {
-                    if let Some(tap) = self.stream_tap.as_mut() {
-                        tap.push(super::StreamMessage {
-                            transport,
-                            remote: named_far_end,
-                            // the framer's buffer runs on past the message
-                            bytes: message
-                                .as_bytes()
-                                .get(..message.len())
-                                .unwrap_or_default()
-                                .into(),
-                        });
-                    }
+                    // the framer's buffer runs on past the message
+                    let bytes = message.as_bytes().get(..message.len());
+                    self.tap_stream(transport, named_far_end, bytes.unwrap_or_default());
                     let flow = Self::flow_for(&message, transport, remote, None, protocol);
                     self.dispatch(&message, flow, advertised, now);
                 }

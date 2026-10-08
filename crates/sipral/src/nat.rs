@@ -80,6 +80,19 @@ const FIRST_BACK_OFF: Duration = Duration::from_secs(30);
 /// minutes, and a recovered one is used again within ten minutes.
 const LONGEST_BACK_OFF: Duration = Duration::from_secs(600);
 
+/// How many events wait for [`Mappings::poll_event`] before the oldest is dropped. An application
+/// that asks [`Mappings::public`] instead of reading them would otherwise keep one for every socket
+/// it ever mapped, a call's worth each, for the life of the process.
+const EVENTS_KEPT: usize = 256;
+
+/// Queue `event`, dropping the oldest past [`EVENTS_KEPT`].
+fn queue_event(events: &mut VecDeque<MappingEvent>, event: MappingEvent) {
+    if events.len() >= EVENTS_KEPT {
+        events.pop_front();
+    }
+    events.push_back(event);
+}
+
 /// How long a socket's mapping is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keep {
@@ -352,10 +365,13 @@ impl Mappings {
                 socket.refresh_at = None;
                 if !socket.settled && socket.public.is_none() {
                     socket.settled = true;
-                    self.events.push_back(MappingEvent::Unanswered {
-                        local: *local,
-                        failure: Failure::TimedOut,
-                    });
+                    queue_event(
+                        &mut self.events,
+                        MappingEvent::Unanswered {
+                            local: *local,
+                            failure: Failure::TimedOut,
+                        },
+                    );
                 }
             }
         }
@@ -411,10 +427,13 @@ impl Mappings {
                 socket.asking = false;
                 socket.refresh_at = None;
             }
-            self.events.push_back(MappingEvent::Unanswered {
-                local,
-                failure: Failure::TimedOut,
-            });
+            queue_event(
+                &mut self.events,
+                MappingEvent::Unanswered {
+                    local,
+                    failure: Failure::TimedOut,
+                },
+            );
             return;
         }
         self.ask(local, now, keep == Keep::Refreshed);
@@ -494,7 +513,8 @@ impl Mappings {
         self.outbox.pop_front()
     }
 
-    /// The next thing learned.
+    /// The next thing learned. At most 256 wait; past that the oldest is dropped, so an application
+    /// that reads [`Mappings::public`] instead holds a bounded queue.
     pub fn poll_event(&mut self) -> Option<MappingEvent> {
         self.events.pop_front()
     }
@@ -603,8 +623,10 @@ impl Mappings {
     fn use_server(&mut self, slot: bool, server: SocketAddr) {
         match *self.in_use.of(slot) {
             Some(previous) if previous != server => {
-                self.events
-                    .push_back(MappingEvent::ServerChanged { previous, server });
+                queue_event(
+                    &mut self.events,
+                    MappingEvent::ServerChanged { previous, server },
+                );
             }
             _ => {}
         }
@@ -635,8 +657,10 @@ impl Mappings {
         let Some(next) = next else {
             if !*self.exhausted.of(slot) {
                 *self.exhausted.of_mut(slot) = true;
-                self.events
-                    .push_back(MappingEvent::ServersFailed { last: asked });
+                queue_event(
+                    &mut self.events,
+                    MappingEvent::ServersFailed { last: asked },
+                );
             }
             return false;
         };
@@ -729,7 +753,7 @@ impl Mappings {
             Keep::Once => socket.public.and_then(|_| now.checked_add(refresh)),
         };
         if let Some(event) = ended {
-            self.events.push_back(event);
+            queue_event(&mut self.events, event);
         }
     }
 }
@@ -772,7 +796,7 @@ pub(crate) mod tests {
         AttributeType, Class, Failure, Message, MessageBuilder, Method, TransactionId,
     };
 
-    use super::{Keep, MappingEvent, MappingState, Mappings, StunDatagram};
+    use super::{EVENTS_KEPT, Keep, MappingEvent, MappingState, Mappings, StunDatagram};
 
     const SERVER: &str = "198.51.100.1:3478";
     const SIP: &str = "192.168.1.10:5060";
@@ -842,6 +866,33 @@ pub(crate) mod tests {
             }]
         );
         assert_eq!(mappings.public(at(SIP)), Some(at("203.0.113.7:41000")));
+    }
+
+    #[test]
+    fn an_application_that_reads_the_address_and_not_the_events_holds_a_bounded_queue() {
+        let now = Instant::now();
+        let mut mappings = Mappings::new(at(SERVER), [7; 32]);
+        let calls = u16::try_from(EVENTS_KEPT).expect("a port count") + 44;
+        for call in 0..calls {
+            let local = SocketAddr::new(at(MEDIA).ip(), 40_000 + 2 * call);
+            let public = SocketAddr::new(at("203.0.113.7:0").ip(), 50_000 + 2 * call);
+            mappings.map(local, Keep::Once, now);
+            let sent = drain(&mut mappings);
+            assert!(mappings.receive(local, at(SERVER), &answer(&sent[0].payload, public), now));
+            // what such an application reads, before the call takes the socket and ends
+            assert_eq!(mappings.public(local), Some(public));
+            mappings.forget(local);
+        }
+        let kept = events(&mut mappings);
+        assert_eq!(kept.len(), EVENTS_KEPT);
+        assert_eq!(
+            kept.first(),
+            Some(&MappingEvent::Learned {
+                local: SocketAddr::new(at(MEDIA).ip(), 40_000 + 2 * 44),
+                public: SocketAddr::new(at("203.0.113.7:0").ip(), 50_000 + 2 * 44),
+            }),
+            "the oldest were dropped first"
+        );
     }
 
     #[test]

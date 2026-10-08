@@ -64,6 +64,11 @@ const SIP_IF_MATCH: HeaderName<'static> = HeaderName::Extension("SIP-If-Match");
 /// make every later request carry.
 const MAX_ETAG: usize = 128;
 
+/// How many events wait for [`Publication::poll_event`] before the oldest is dropped. Every
+/// refresh reports `Published`; an application that reads [`Publication::etag`] instead would
+/// otherwise keep one per refresh for the life of the process.
+const EVENTS_KEPT: usize = 64;
+
 /// Which of RFC 3903 §4's requests a PUBLISH is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PublishKind {
@@ -365,7 +370,7 @@ impl Publication {
         self.outbox.pop_front()
     }
 
-    /// The next thing that happened.
+    /// The next thing that happened. At most 64 wait; past that the oldest is dropped.
     pub fn poll_event(&mut self) -> Option<PublishEvent> {
         self.events.pop_front()
     }
@@ -384,7 +389,7 @@ impl Publication {
     pub fn handle_timeout(&mut self, now: Instant) {
         if self.lapses_at.is_some_and(|at| at <= now) {
             self.forget();
-            self.events.push_back(PublishEvent::Expired);
+            self.report(PublishEvent::Expired);
             return;
         }
         if self.in_flight.is_none()
@@ -419,7 +424,7 @@ impl Publication {
         if self.in_flight.take().is_none() {
             return;
         }
-        self.events.push_back(PublishEvent::Failed {
+        self.report(PublishEvent::Failed {
             reason: PublishFailure::Unreachable,
             status: None,
         });
@@ -468,7 +473,7 @@ impl Publication {
         match status.get() {
             200..=299 => self.accepted(&sent, etag, expires, now),
             401 | 407 => {
-                self.events.push_back(PublishEvent::Challenged {
+                self.report(PublishEvent::Challenged {
                     request: sent.clone(),
                     status,
                 });
@@ -487,7 +492,7 @@ impl Publication {
                 self.lapses_at = None;
                 if sent.kind == PublishKind::Remove {
                     self.document = None;
-                    self.events.push_back(PublishEvent::Removed);
+                    self.report(PublishEvent::Removed);
                 } else if !matches!(self.queued, Some(Intent::Remove))
                     && let Some(document) = self.document.clone()
                 {
@@ -503,7 +508,7 @@ impl Publication {
                     return;
                 } else if self.queued.is_none() {
                     // nothing to publish afresh: the state is simply gone
-                    self.events.push_back(PublishEvent::Expired);
+                    self.report(PublishEvent::Expired);
                 }
             }
             // RFC 3261 §10.2.8's rule, which RFC 3903 §4 applies to PUBLISH:
@@ -538,7 +543,7 @@ impl Publication {
         if sent.kind == PublishKind::Remove {
             self.forget();
             self.document = None;
-            self.events.push_back(PublishEvent::Removed);
+            self.report(PublishEvent::Removed);
             return;
         }
         // the compositor's number wins over the one asked for, and one it
@@ -546,7 +551,7 @@ impl Publication {
         let granted = expires.unwrap_or(sent.expires);
         if granted.is_zero() {
             self.forget();
-            self.events.push_back(PublishEvent::Expired);
+            self.report(PublishEvent::Expired);
             return;
         }
         let Some(etag) = etag else {
@@ -558,7 +563,7 @@ impl Publication {
         self.etag = Some(etag.clone());
         self.refresh_at = Some(now + refresh_in);
         self.lapses_at = Some(now + granted);
-        self.events.push_back(PublishEvent::Published {
+        self.report(PublishEvent::Published {
             etag,
             expires: granted,
             refresh_in,
@@ -573,7 +578,7 @@ impl Publication {
                     // nothing was ever created, or it is already gone: the
                     // removal has nothing to do, and the state is not there
                     self.document = None;
-                    self.events.push_back(PublishEvent::Removed);
+                    self.report(PublishEvent::Removed);
                 }
                 intent => self.dispatch(intent),
             }
@@ -624,8 +629,15 @@ impl Publication {
     }
 
     fn fail(&mut self, reason: PublishFailure, status: Option<StatusCode>) {
-        self.events
-            .push_back(PublishEvent::Failed { reason, status });
+        self.report(PublishEvent::Failed { reason, status });
+    }
+
+    /// Queue `event`, dropping the oldest past [`EVENTS_KEPT`].
+    fn report(&mut self, event: PublishEvent) {
+        if self.events.len() >= EVENTS_KEPT {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
     }
 
     /// The compositor holds nothing under a name this end knows.
@@ -788,6 +800,34 @@ Call-ID: pub@example.com\r\nCSeq: 1 PUBLISH\r\n{extra}Content-Length: 0\r\n\r\n"
             events(&mut publication)[..],
             [PublishEvent::Published { expires, .. }] if expires == HOUR
         ));
+    }
+
+    #[test]
+    fn refreshes_nobody_reads_the_events_of_are_kept_only_to_the_bound() {
+        let t0 = Instant::now();
+        let mut publication = published("e0", t0);
+        let refreshes = super::EVENTS_KEPT + 36;
+        let mut now = t0;
+        for n in 1..=refreshes {
+            now += refresh_after(HOUR);
+            publication.handle_timeout(now);
+            only(&mut publication);
+            answer(
+                &mut publication,
+                200,
+                &format!("SIP-ETag: e{n}\r\nExpires: 3600\r\n"),
+                now,
+            );
+            // what such an application reads instead of the events
+            assert_eq!(publication.etag(), Some(format!("e{n}").as_str()));
+        }
+        let kept = events(&mut publication);
+        assert_eq!(kept.len(), super::EVENTS_KEPT);
+        assert!(
+            matches!(&kept[0], PublishEvent::Published { etag, .. } if &**etag == "e37"),
+            "the oldest were dropped first: {:?}",
+            kept[0]
+        );
     }
 
     #[test]
