@@ -3,17 +3,24 @@
 # Copyright (c) 2026 Sytek
 #
 # `scripts/lab.sh compare`: the same scenarios run for Sipral's headless
-# agent (crates/sipral/examples/headless-agent.rs) and for pjsua, PJSIP's own
-# command-line client, against the lab's Asterisk. Sourced by scripts/lab.sh,
-# whose `step`, `pass`, `fail`, `LAB_NETWORK` and `ROOT` it uses; it defines
-# functions only, and `compare_run` runs them.
+# agent (crates/sipral/examples/headless-agent.rs) and for three other
+# clients, each the binary a distribution ships, against the lab's Asterisk.
+# Sourced by scripts/lab.sh, whose `step`, `pass`, `fail`, `LAB_NETWORK` and
+# `ROOT` it uses; it defines functions only, and `compare_run` runs them
+# (scripts/soak.sh sources it too, for `soak.sh compare`).
 #
-# pjsua is the distribution's binary and nothing else: Debian and Ubuntu ship
-# no pjsua package, Alpine does (`apk add pjsua`), so it runs in an Alpine
-# image built here from that one package. No PJSIP source is fetched, built or
-# read. docs/23-compared-with-pjsip.md is the write-up of one run of this.
+#   pjsua      PJSIP's own console client. Debian and Ubuntu ship no pjsua
+#              package, Alpine does (`apk add pjsua`); pjsua.sh runs it
+#   baresip    from Fedora's packages (`dnf install baresip baresip-opus
+#              baresip-g722`); baresip.sh writes its configuration
+#   linphone   linphonec, Linphone's console client, from Debian's package
+#              (`apt-get install linphone-cli`); linphone.sh runs it
 #
-# Both clients run the same way: in a container that shares the network
+# No source of any of them is fetched, built or read: each runs in an image
+# built here from its distribution's package and nothing else.
+# docs/23-compared-with-pjsip.md is the write-up of runs of this.
+#
+# Every client runs the same way: in a container that shares the network
 # namespace of a capture container ("the pod"), which is on the lab network,
 # holds tcpdump, tc and python3, and is what moves when the network changes.
 # Every time is read off the pod's capture (interop/compare/wire.py), never
@@ -41,28 +48,40 @@
 #            there, sent audio from there, and heard audio there again. pjsua
 #            does nothing about a new address by itself -- its console's `I`
 #            command is what an application calls when the platform reports
-#            one -- so it is moved twice, once left alone and once told
+#            one -- so it is moved twice, once left alone and once told;
+#            baresip too, told with its console's `/netchange`. linphonec
+#            has no such command, so it is moved once
 #
 # pjsua is run with the null audio device, auto-answer 200 and --auto-loop
-# (what it receives is what it sends back), Sipral's agent echoes; both are
-# given the most calls they can hold. pjsua's --max-calls stops at the limit
+# (what it receives is what it sends back), baresip with its `echo` module
+# (the same), Sipral's agent echoes; linphonec, which has no echo, plays a
+# wav file it ships to every call, so audio still flows both ways. Each is
+# given the most calls it can hold. pjsua's --max-calls stops at the limit
 # its build was compiled with, and Alpine's is 4 (`pjsua --max-calls=5` says
 # "maximum call setting exceeds compile time limit (PJSUA_MAX_CALLS=4)"), so
-# its rows past 4 calls say how many came up. The agent is told to let 200
-# INVITEs arrive at once from Asterisk (--invite-burst): the stack's own
-# default lets ten through and then one every two seconds, a guard against a
-# scanner that a PBX's only extension does not need.
+# its rows past 4 calls say how many came up. baresip is given
+# `call_max_calls 200`, linphonec `max_calls=200`; linphonec answering by
+# itself (-a) still holds one call at a time and answers the rest 486. The
+# agent is told to let 200 INVITEs arrive at once from Asterisk
+# (--invite-burst): the stack's own default lets ten through and then one
+# every two seconds, a guard against a scanner that a PBX's only extension
+# does not need.
 
 CMP_PREFIX="${COMPOSE_PROJECT_NAME:-sipral-interop}-compare"
 CMP_POD="$CMP_PREFIX-pod"
 CMP_CLIENT="$CMP_PREFIX-client"
 CMP_POD_IMAGE="$CMP_PREFIX-pod:local"
 CMP_PJSUA_IMAGE="$CMP_PREFIX-pjsua:local"
+CMP_BARESIP_IMAGE="$CMP_PREFIX-baresip:local"
+CMP_LINPHONE_IMAGE="$CMP_PREFIX-linphone:local"
 CMP_ALPINE="${SIPRAL_COMPARE_ALPINE:-alpine:3.24}"
+CMP_FEDORA="${SIPRAL_COMPARE_FEDORA:-fedora:44}"
+CMP_DEBIAN="${SIPRAL_COMPARE_DEBIAN:-debian:trixie-slim}"
 CMP_OUT="$ROOT/interop/pcap/compare"
 CMP_USER=labuser-compare
 CMP_PASS=labpass
-CMP_CLIENTS="${SIPRAL_COMPARE_CLIENTS:-sipral pjsua}"
+CMP_CLIENTS="${SIPRAL_COMPARE_CLIENTS:-sipral pjsua baresip linphone}"
+CMP_PHASES="${SIPRAL_COMPARE_PHASES:-size plain ice netem move}"
 CMP_CALLS="${SIPRAL_COMPARE_CALLS:-1 4 10 100}"
 CMP_PROFILES="${SIPRAL_COMPARE_PROFILES:-lossy mobile satellite}"
 CMP_HOLD_S="${SIPRAL_COMPARE_HOLD_S:-30}"
@@ -74,14 +93,18 @@ CMP_ASTERISK_IP=""
 cmp_note() { printf '  note  %s\n' "$1"; }
 # one result line: client, scenario, then name=value pairs -- the lines the
 # write-up's tables are made from
-cmp_result() { printf '  cmp   %-6s %-22s %s\n' "$1" "$2" "$3"; }
+cmp_result() { printf '  cmp   %-8s %-22s %s\n' "$1" "$2" "$3"; }
+
+cmp_want() { case " $CMP_PHASES " in *" $1 "*) return 0 ;; esac; return 1; }
 
 cmp_ast() {
     ( cd "$ROOT/interop" && docker compose exec -T asterisk asterisk -rx "$1" ) 2>/dev/null
 }
 
+# the client's own channels only, so that calls to another account on the
+# same Asterisk (soak.sh compare runs four clients at once) are not counted
 cmp_calls_up() {
-    cmp_ast "core show channels concise" | grep -c '!Up!'
+    cmp_ast "core show channels concise" | grep "^PJSIP/$CMP_USER-" | grep -c '!Up!'
 }
 
 cmp_channels() {
@@ -91,8 +114,23 @@ cmp_channels() {
 # Asterisk originates $1 calls to the registered client, in one shell inside
 # its own container rather than one `docker compose exec` each, so a hundred
 # of them leave within a second or two the way a hundred callers would.
+#
+# $2 the client: linphonec refuses ("486 Busy here") a second call from an
+# address it already has a call with, and every CLI originate comes from
+# "anonymous", so its calls are written as call files instead, the same
+# channel and extension with a caller of their own each.
 cmp_originate() {
-    local count="$1"
+    local count="$1" kind="${2:-}"
+    if [ "$kind" = linphone ]; then
+        ( cd "$ROOT/interop" && docker compose exec -T asterisk sh -c "
+            i=0
+            while [ \$i -lt $count ]; do
+                i=\$((i + 1))
+                printf 'Channel: PJSIP/$CMP_USER\nCallerID: \"c%s\" <1%04d>\nContext: lab\nExtension: 9020\nPriority: 1\n' \$i \$i >/tmp/cmp\$i.call
+                mv /tmp/cmp\$i.call /var/spool/asterisk/outgoing/
+            done" ) >/dev/null 2>&1
+        return 0
+    fi
     ( cd "$ROOT/interop" && docker compose exec -T asterisk sh -c "
         i=0
         while [ \$i -lt $count ]; do
@@ -142,7 +180,13 @@ cmp_images() {
     printf 'FROM %s\nRUN apk add --no-cache pjsua\n' "$CMP_ALPINE" \
         | docker build -q -t "$CMP_PJSUA_IMAGE" - >/dev/null 2>&1 \
         || { fail "the pjsua image ($CMP_ALPINE, apk add pjsua)"; return 1; }
-    pass "images: the capture pod, and pjsua from $CMP_ALPINE's own package"
+    printf 'FROM %s\nRUN dnf -y -q install baresip baresip-opus baresip-g722 && dnf clean all\n' "$CMP_FEDORA" \
+        | docker build -q -t "$CMP_BARESIP_IMAGE" - >/dev/null 2>&1 \
+        || { fail "the baresip image ($CMP_FEDORA, dnf install baresip)"; return 1; }
+    printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends linphone-cli && rm -rf /var/lib/apt/lists/*\n' "$CMP_DEBIAN" \
+        | docker build -q -t "$CMP_LINPHONE_IMAGE" - >/dev/null 2>&1 \
+        || { fail "the linphonec image ($CMP_DEBIAN, apt-get install linphone-cli)"; return 1; }
+    pass "images: the capture pod, pjsua ($CMP_ALPINE), baresip ($CMP_FEDORA), linphonec ($CMP_DEBIAN)"
 }
 
 cmp_pod_up() {
@@ -187,6 +231,18 @@ cmp_client_up() {
             "--username=$CMP_USER" "--password=$CMP_PASS" \
             ${ice:+--use-ice} ${g711:+"--dis-codec=*" --add-codec=PCMA --add-codec=PCMU} \
             >/dev/null || return 1
+    elif [ "$kind" = baresip ]; then
+        docker run -d --name "$CMP_CLIENT" --network "container:$CMP_POD" \
+            -v "$ROOT/interop/compare:/compare:ro" \
+            -e CMP_USER="$CMP_USER" -e CMP_PASS="$CMP_PASS" -e CMP_REGISTRAR="$CMP_ASTERISK_IP" \
+            -e CMP_ICE="$ice" -e CMP_G711="$g711" \
+            "$CMP_BARESIP_IMAGE" sh /compare/baresip.sh >/dev/null || return 1
+    elif [ "$kind" = linphone ]; then
+        docker run -d --name "$CMP_CLIENT" --network "container:$CMP_POD" \
+            -v "$ROOT/interop/compare:/compare:ro" \
+            -e CMP_USER="$CMP_USER" -e CMP_PASS="$CMP_PASS" -e CMP_REGISTRAR="$CMP_ASTERISK_IP" \
+            -e CMP_LOGLEVEL="${CMP_LP_LOGLEVEL:-0}" \
+            "$CMP_LINPHONE_IMAGE" sh /compare/linphone.sh >/dev/null || return 1
     else
         docker run -d --name "$CMP_CLIENT" --network "container:$CMP_POD" \
             -v "$(dirname "$CMP_AGENT"):/sipral:ro" debian:trixie-slim \
@@ -199,7 +255,8 @@ cmp_client_up() {
     ip=$(cmp_pod_ip)
     # read from the registrar's own store rather than `pjsip show contacts`,
     # whose column cuts an address the length of the move's short
-    until cmp_ast "database show registrar/contact" | grep -q "\"uri\":\"sip:$CMP_USER@$ip:"; do
+    # (linphonec registers a contact with no port, hence the end it may have)
+    until cmp_ast "database show registrar/contact" | grep -qE "\"uri\":\"sip:$CMP_USER@$ip[:;\"]"; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$CMP_CLIENT" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 60 ]; then
@@ -209,6 +266,30 @@ cmp_client_up() {
         fi
         sleep 1
     done
+    if [ "$kind" = linphone ]; then
+        # no sound card in the container: linphonec's own file mode, a wav
+        # it ships played (looped) as the microphone of every call
+        cmp_type 'soundcard use files\n' "$kind"
+        cmp_type 'play /usr/share/sounds/linphone/hello8000.wav\n' "$kind"
+        # G.711 alone: opus, speex 16k, speex 8k and G.729 are the codecs it
+        # enables by default besides PCMU and PCMA (`codec list`), highest
+        # numbered first so the numbers do not move
+        [ -n "$g711" ] && cmp_type 'codec disable 7\ncodec disable 2\ncodec disable 1\ncodec disable 0\n' "$kind"
+        if [ -n "$ice" ]; then
+            # linphonec turns ICE on only once a STUN server is named ("No
+            # stun server address is defined, use 'stun <address>' first"),
+            # so the lab's coturn (STUN only, the `nat` profile's) is started
+            # for it; on this flat network its answer is the host address
+            local stun
+            ( cd "$ROOT/interop" && docker compose --profile nat up -d coturn ) >/dev/null 2>&1
+            stun=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+                "$(cd "$ROOT/interop" && docker compose --profile nat ps -q coturn)")
+            cmp_type "stun $stun:3478\\n" "$kind"
+            cmp_type 'firewall ice\n' "$kind"
+        fi
+        sleep 1
+    fi
+    return 0
 }
 
 # Keeps the client's log beside the captures, then stops it.
@@ -217,25 +298,40 @@ cmp_client_down() {
     docker rm -f "$CMP_CLIENT" >/dev/null 2>&1
 }
 
+# $1 what to type, $2 the client: pjsua and linphonec read a named pipe,
+# baresip its console on UDP 5555, one command a datagram
 cmp_type() {
-    docker exec "$CMP_CLIENT" sh -c "printf '$1' >/tmp/in"
+    if [ "${2:-}" = baresip ]; then
+        docker exec "$CMP_CLIENT" bash -c "printf '$1' >/dev/udp/127.0.0.1/5555"
+    else
+        docker exec "$CMP_CLIENT" sh -c "printf '$1' >/tmp/in"
+    fi
 }
 
 cmp_dial() {
-    [ "$1" = pjsua ] && cmp_type 'm\nsip:9008@asterisk\n'
+    case "$1" in
+    pjsua) cmp_type 'm\nsip:9008@asterisk\n' "$1" ;;
+    baresip) cmp_type '/dial sip:9008@asterisk\n' "$1" ;;
+    linphone) cmp_type 'call sip:9008@asterisk\n' "$1" ;;
+    esac
     return 0
 }
 
 # Resident memory and the private part of it, in kB, from the client's own
 # /proc/1: RSS counts every shared library page the process has touched,
 # which a dynamically linked binary has more of, so the private figure is
-# printed beside it.
+# printed beside it. Private in turn counts the code pages of a client's own
+# shared libraries whenever no other process on the machine maps them, so
+# the anonymous memory (heap, stacks, buffers: what the client allocated)
+# is printed too, comparable between a static build and a dynamic one.
 cmp_memory() {
-    local rss private
+    local rss private anon
     rss=$(docker exec "$CMP_CLIENT" cat /proc/1/status 2>/dev/null | awk '/^VmRSS:/{print $2}')
     private=$(docker exec "$CMP_CLIENT" cat /proc/1/smaps_rollup 2>/dev/null \
         | awk '/^Private_(Clean|Dirty):/{sum += $2} END {print sum + 0}')
-    printf 'rss_kb=%s private_kb=%s' "${rss:--}" "${private:--}"
+    anon=$(docker exec "$CMP_CLIENT" cat /proc/1/smaps_rollup 2>/dev/null \
+        | awk '/^Anonymous:/{print $2}')
+    printf 'rss_kb=%s private_kb=%s anon_kb=%s' "${rss:--}" "${private:--}" "${anon:--}"
 }
 
 cmp_ticks() {
@@ -263,13 +359,14 @@ cmp_phase_plain() {
     cmp_dial "$kind"
     up=$(cmp_wait_up 1)
     [ "$up" -ge 1 ] || printf '  %s placed no call to the echo\n' "$kind"
+    cmp_result "$kind" "echo-call" "up=$up"
     sleep 3
     cmp_hangup_all
     sleep 5
     idle_cpu=$(cmp_cpu)
     cmp_result "$kind" "idle" "$(cmp_memory) cpu_pct=$idle_cpu"
     for n in $CMP_CALLS; do
-        cmp_originate "$n"
+        cmp_originate "$n" "$kind"
         up=$(cmp_wait_up "$n")
         sleep 5
         cpu=$(cmp_cpu)
@@ -326,8 +423,6 @@ cmp_netem_on() {
     applied=$(docker exec "$CMP_POD" sh -c "
         link=\$(ip route | awk '/^default/{print \$5}')
         tc qdisc add dev \"\$link\" root netem $NETEM
-        ip link add ifb0 type ifb
-        ip link set ifb0 up
         tc qdisc add dev \"\$link\" handle ffff: ingress
         tc filter add dev \"\$link\" parent ffff: protocol ip u32 \
             match u32 0 0 action mirred egress redirect dev ifb0
@@ -344,24 +439,34 @@ cmp_netem_off() {
         link=\$(ip route | awk '/^default/{print \$5}')
         tc qdisc del dev \"\$link\" root
         tc qdisc del dev \"\$link\" ingress
-        ip link del ifb0" >/dev/null 2>&1
+        tc qdisc del dev ifb0 root" >/dev/null 2>&1
 }
 
 cmp_phase_netem() {
     local kind="$1" name="$1-netem" profile stats
-    cmp_client_up "$kind" || return 1
+    # the ifb device netem's ingress side needs is made before the client
+    # starts and kept for every profile, not made with each one: baresip's
+    # netroam reads an interface appearing mid-call as a network change and
+    # resets its SIP transport, which is not what these rows measure. Only
+    # for this phase: present during the others, pjsua offers ICE
+    # candidates on it too
+    docker exec "$CMP_POD" sh -c 'ip link add ifb0 type ifb && ip link set ifb0 up'
+    # linphonec prints its call statistics only at message level
+    CMP_LP_LOGLEVEL=5
+    cmp_client_up "$kind" || { CMP_LP_LOGLEVEL=0; return 1; }
+    CMP_LP_LOGLEVEL=0
     for profile in $CMP_PROFILES; do
         if ! cmp_netem_on "$profile"; then
             printf '  the %s profile was not applied on this kernel\n' "$profile"
             cmp_netem_off
             return 1
         fi
-        cmp_originate 1
+        cmp_originate 1 "$kind"
         cmp_wait_up 1 >/dev/null
         sleep "$CMP_HOLD_S"
         stats="$CMP_OUT/$name-$profile.channelstats"
         cmp_ast "pjsip show channelstats" >"$stats"
-        [ "$kind" = pjsua ] && { cmp_type 'dq\n'; sleep 1; }
+        [ "$kind" = pjsua ] && { cmp_type 'dq\n' "$kind"; sleep 1; }
         cmp_hangup_all
         sleep 2
         docker logs "$CMP_CLIENT" >"$CMP_OUT/$name-$profile.log" 2>&1
@@ -369,11 +474,16 @@ cmp_phase_netem() {
         cmp_result "$kind" "$profile/asterisk" "$(cmp_wire channelstats "/out/$(basename "$stats")" "$CMP_USER")"
         if [ "$kind" = pjsua ]; then
             cmp_result "$kind" "$profile/client" "$(cmp_wire pjsua-dq "/out/$name-$profile.log")"
+        elif [ "$kind" = baresip ]; then
+            cmp_result "$kind" "$profile/client" "$(cmp_wire baresip-stats "/out/$name-$profile.log")"
+        elif [ "$kind" = linphone ]; then
+            cmp_result "$kind" "$profile/client" "$(cmp_wire linphone-stats "/out/$name-$profile.log")"
         else
             cmp_result "$kind" "$profile/client" "$(cmp_wire sipral-ended "/out/$name-$profile.log")"
         fi
     done
     cmp_client_down "$name"
+    docker exec "$CMP_POD" ip link del ifb0 >/dev/null 2>&1
 }
 
 # An address near the top of the lab network's own subnet, which Docker hands
@@ -399,14 +509,19 @@ cmp_move() {
     cmp_client_up "$kind" || return 1
     to=$(cmp_address "$below") || { printf '  cannot read the lab network'"'"'s subnet\n'; return 1; }
     cmp_capture_start "$name"
-    cmp_originate 1
+    cmp_originate 1 "$kind"
     cmp_wait_up 1 >/dev/null
     sleep 5
     docker network disconnect "$LAB_NETWORK" "$CMP_POD" >/dev/null 2>&1
     docker network connect --ip "$to" "$LAB_NETWORK" "$CMP_POD" >/dev/null 2>&1 \
         || { printf '  could not put the pod back at %s\n' "$to"; cmp_capture_stop; return 1; }
     moved_at=$(date +%s.%N)
-    [ -n "$told" ] && cmp_type 'I\n'
+    if [ -n "$told" ]; then
+        case "$kind" in
+        pjsua) cmp_type 'I\n' "$kind" ;;
+        baresip) cmp_type '/netchange\n' "$kind" ;;
+        esac
+    fi
     sleep 20
     up=$(cmp_calls_up)
     cmp_capture_stop
@@ -425,9 +540,61 @@ cmp_versions() {
     pj=$(docker run --rm "$CMP_PJSUA_IMAGE" sh -c \
         'apk info -v 2>/dev/null | grep "^pjsua-"; pjsua --version 2>&1 | sed -n "s/.*PJ_VERSION *: *//p" | head -1')
     cmp_note "pjsua: package $(printf '%s' "$pj" | head -1), PJ_VERSION $(printf '%s' "$pj" | sed -n 2p), on $CMP_ALPINE"
+    cmp_note "baresip: $(docker run --rm "$CMP_BARESIP_IMAGE" sh -c 'rpm -q baresip baresip-opus baresip-g722 | tr "\n" " "; cat /etc/fedora-release')"
+    cmp_note "linphonec: $(docker run --rm "$CMP_LINPHONE_IMAGE" sh -c 'dpkg-query -W -f "\${Package} \${Version}; " linphone-cli liblinphone12 libbellesip3 libmediastreamer2-14; linphonec -v 2>&1 | head -1')"
     cmp_note "sipral: $(git -C "$ROOT" describe --always --dirty 2>/dev/null || printf unknown), $(basename "$CMP_AGENT")"
     cmp_note "asterisk: $(cmp_ast 'core show version' | head -1 | cut -d' ' -f1-2)"
     cmp_note "host: $(uname -sr), $(nproc 2>/dev/null || printf '?') cores"
+}
+
+# What an application ships to make calls with each stack (size.sh says what
+# is counted), read in the same images the clients run from: PJSIP's C API
+# library, baresip's library with the modules a call needs -- the codecs,
+# NAT traversal and media encryption Sipral's own library carries -- and
+# Linphone's, against libsipral_ffi.so as built (SIPRAL_FFI_LIB, or the one
+# beside the agent's build). Each file counted is kept in size-<client>.txt.
+# The project's own libraries are added up apart too (SIZE_OWN): PJSIP's
+# package, baresip's and libre's, and for Linphone the libraries of the
+# projects it is made of, all Belledonne Communications' own.
+cmp_sizes() {
+    local ffi out kind status=0
+    ffi="${SIPRAL_FFI_LIB:-$(dirname "$(dirname "$CMP_AGENT")")/libsipral_ffi.so}"
+    [ -f "$ffi" ] || { printf '  no libsipral_ffi.so at %s; set SIPRAL_FFI_LIB\n' "$ffi"; return 1; }
+    for kind in sipral pjsua baresip linphone; do
+        case "$kind" in
+        sipral)
+            out=$(docker run --rm -v "$ROOT/interop/compare:/compare:ro" \
+                -e SIZE_OWN='libsipral*' \
+                -v "$(dirname "$ffi"):/sipral:ro" debian:trixie-slim \
+                sh /compare/size.sh "/sipral/$(basename "$ffi")" 2>&1) ;;
+        pjsua)
+            out=$(docker run --rm -v "$ROOT/interop/compare:/compare:ro" \
+                -e SIZE_OWN='libpj* libilbccodec* libg7221codec*' "$CMP_PJSUA_IMAGE" \
+                sh /compare/size.sh /usr/lib/libpjsua.so.2 2>&1) ;;
+        baresip)
+            out=$(docker run --rm -v "$ROOT/interop/compare:/compare:ro" \
+                -e SIZE_OWN='libbaresip* libre.so* g711.so g722.so opus.so stun.so turn.so ice.so srtp.so dtls_srtp.so' \
+                "$CMP_BARESIP_IMAGE" \
+                sh -c 'set -- /usr/lib64/libbaresip.so.*
+                    for module in g711 g722 opus stun turn ice srtp dtls_srtp; do
+                        set -- "$@" "/usr/lib64/baresip/modules/$module.so"
+                    done
+                    exec sh /compare/size.sh "$@"' 2>&1) ;;
+        linphone)
+            out=$(docker run --rm -v "$ROOT/interop/compare:/compare:ro" \
+                -e SIZE_OWN='liblinphone* libbelle-sip* libbelr* libbelcard* libbctoolbox* libbzrtp* liblime* libmediastreamer* libortp* libbcg729* libbcmatroska*' \
+                "$CMP_LINPHONE_IMAGE" \
+                sh -c 'exec sh /compare/size.sh /usr/lib/*/liblinphone.so.12' 2>&1) ;;
+        esac
+        printf '%s\n' "$out" >"$CMP_OUT/size-$kind.txt"
+        if printf '%s\n' "$out" | grep -q '^files='; then
+            cmp_result "$kind" "shipped" "$(printf '%s\n' "$out" | grep '^files=')"
+        else
+            printf '  %s: %s\n' "$kind" "$(printf '%s\n' "$out" | tail -1)"
+            status=1
+        fi
+    done
+    return "$status"
 }
 
 compare_run() {
@@ -439,17 +606,21 @@ compare_run() {
     [ -n "$CMP_ASTERISK_IP" ] || { fail "the lab's Asterisk has no address"; return 1; }
     cmp_images || return 1
     cmp_versions
+    cmp_want size && { cmp_sizes && pass "the size of what each ships" \
+        || { fail "the size of what each ships"; status=1; }; }
     for kind in $CMP_CLIENTS; do
-        step "compared with PJSIP -- $kind"
+        step "compared -- $kind"
         cmp_pod_up || { fail "the capture pod for $kind"; status=1; continue; }
-        cmp_phase_plain "$kind" && pass "$kind: registered, called, carried calls" \
-            || { fail "$kind: the plain scenarios"; status=1; }
-        cmp_phase_ice "$kind" && cmp_phase_ice "$kind" g711 \
+        cmp_want plain && { cmp_phase_plain "$kind" && pass "$kind: registered, called, carried calls" \
+            || { fail "$kind: the plain scenarios"; status=1; }; }
+        cmp_want ice && { cmp_phase_ice "$kind" && cmp_phase_ice "$kind" g711 \
             && pass "$kind: placed a call with ICE, every codec and G.711 alone" \
-            || { fail "$kind: the ICE call"; status=1; }
-        cmp_phase_netem "$kind" && pass "$kind: a call over each profile" \
-            || { fail "$kind: the calls over a bad link"; status=1; }
-        if [ "$kind" = pjsua ]; then
+            || { fail "$kind: the ICE call"; status=1; }; }
+        cmp_want netem && { cmp_phase_netem "$kind" && pass "$kind: a call over each profile" \
+            || { fail "$kind: the calls over a bad link"; status=1; }; }
+        if ! cmp_want move; then
+            :
+        elif [ "$kind" = pjsua ] || [ "$kind" = baresip ]; then
             cmp_move "$kind" "" 10 && cmp_move "$kind" told 11 \
                 && pass "$kind: moved, left alone and told" \
                 || { fail "$kind: the move"; status=1; }
@@ -459,6 +630,7 @@ compare_run() {
         fi
         cmp_pod_down
     done
-    docker rmi "$CMP_POD_IMAGE" "$CMP_PJSUA_IMAGE" >/dev/null 2>&1
+    docker rmi "$CMP_POD_IMAGE" "$CMP_PJSUA_IMAGE" "$CMP_BARESIP_IMAGE" "$CMP_LINPHONE_IMAGE" >/dev/null 2>&1
+    ( cd "$ROOT/interop" && docker compose --profile nat rm -sf coturn ) >/dev/null 2>&1
     return "$status"
 }

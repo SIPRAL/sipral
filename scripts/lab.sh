@@ -240,23 +240,26 @@
 #                               way the other steps already read it, and
 #                               printed beside it
 #   scripts/lab.sh compare      the same scenarios for Sipral's headless
-#                               agent and for pjsua, PJSIP's own client from
-#                               Alpine's package, against Asterisk:
-#                               registering, a call each way, memory and CPU
-#                               idle and at 1, 4, 10 and 100 calls, a call over
-#                               each netem profile rated from both ends, a
-#                               move to another address mid-call, and the
-#                               INVITE with ICE -- interop/compare/compare.sh
-#                               says how, docs/23-compared-with-pjsip.md
-#                               reports a run. Not part of a run that names
-#                               nothing: about thirteen minutes, and a
-#                               comparison rather than a check.
-#                               SIPRAL_HEADLESS_AGENT names the agent binary
-#                               built elsewhere (a Linux build of
+#                               agent and for pjsua (Alpine's package),
+#                               baresip (Fedora's) and linphonec (Debian's),
+#                               against Asterisk: the size of what each
+#                               ships, registering, a call each way, memory
+#                               and CPU idle and at 1, 4, 10 and 100 calls,
+#                               a call over each netem profile rated from
+#                               both ends, a move to another address
+#                               mid-call, and the INVITE with ICE --
+#                               interop/compare/compare.sh says how,
+#                               docs/23-compared-with-pjsip.md reports runs.
+#                               Not part of a run that names nothing: about
+#                               half an hour, and a comparison rather than a
+#                               check. SIPRAL_HEADLESS_AGENT names the agent
+#                               binary built elsewhere (a Linux build of
 #                               `cargo build --release -p sipral --example
-#                               headless-agent`); SIPRAL_COMPARE_CLIENTS,
-#                               _CALLS, _PROFILES, _HOLD_S and _WINDOW_S
-#                               narrow it
+#                               headless-agent`), SIPRAL_FFI_LIB the library
+#                               when it is not beside it; SIPRAL_COMPARE_
+#                               CLIENTS, _PHASES, _CALLS, _PROFILES, _HOLD_S
+#                               and _WINDOW_S narrow it. Its endurance
+#                               counterpart is `scripts/soak.sh compare`
 #   scripts/lab.sh bridge       only the bridge to a voice agent
 #                               (crates/sipral/examples/agent-bridge.rs),
 #                               registered at Asterisk as labuser-bridge: one
@@ -4585,13 +4588,14 @@ if [ "$WANT" = pipewire ]; then
         || fail "interop/pipewire/run.sh call"
 fi
 
-# Sipral's headless agent and pjsua, one after the other, through the same
-# scenarios against the same Asterisk: interop/compare/compare.sh says what
-# and how, and docs/23-compared-with-pjsip.md reports a run of it.
+# Sipral's headless agent, pjsua, baresip and linphonec, one after the
+# other, through the same scenarios against the same Asterisk:
+# interop/compare/compare.sh says what and how, and
+# docs/23-compared-with-pjsip.md reports runs of it.
 if [ "$WANT" = compare ]; then
     # shellcheck source=interop/compare/compare.sh
     . "$ROOT/interop/compare/compare.sh"
-    compare_run "$HEADLESS_AGENT" || fail "the comparison with PJSIP"
+    compare_run "$HEADLESS_AGENT" || fail "the comparison"
 fi
 
 step "the capture"

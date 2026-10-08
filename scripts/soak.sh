@@ -12,19 +12,32 @@
 #                                       (default 24), sampled to a CSV
 #   scripts/soak.sh latency [CALLS]     CALLS short calls (default 200),
 #                                       timed at both ends of the socket
+#   scripts/soak.sh compare [HOURS]     the endurance comparison: Sipral's
+#                                       headless agent, pjsua, baresip and
+#                                       linphonec taking calls side by side
+#                                       for HOURS (default 3), sampled to a
+#                                       CSV each (interop/compare/
+#                                       endurance.sh says how)
 #
-# Both need the two binaries built for Linux, named the way scripts/lab.sh
-# names them:
+# The first two need the two binaries built for Linux, named the way
+# scripts/lab.sh names them:
 #
 #   SIPRAL_HEADLESS_APP     the headless-socket-agent example
 #   SIPRAL_HEADLESS_CLIENT  the sipral-headless agent example
 #
-# and write everything under SOAK_DIR (default target/soak/<word>-<UTC time>).
+# and `compare` the headless-agent example, as `scripts/lab.sh compare`
+# takes it:
 #
-# Neither takes the lab lock: each runs under a Compose project of its own
-# (sipral-soak-<word>), Asterisk alone, on a network of its own, so a day
-# long run never holds the lock every lab run waits on and never touches
-# another run's containers. It removes only what it started, by name.
+#   SIPRAL_HEADLESS_AGENT   the headless-agent example
+#
+# Each writes everything under SOAK_DIR (default target/soak/<word>-<UTC
+# time>).
+#
+# None takes the lab lock: each runs under a Compose project of its own
+# (sipral-soak-<word>, or SOAK_PROJECT), Asterisk alone, on a network of its
+# own, so a long run never holds the lock every lab run waits on and never
+# touches another run's containers. It removes only what it started, by
+# name.
 #
 # endurance: each call is the dialplan's [soak-call], three minutes of tone,
 # then the "#" the agent hangs up on, so the BYE is the stack's own; the next
@@ -68,18 +81,25 @@ WORD="${1:-}"
 case "$WORD" in
 endurance) HOURS="${2:-24}" ;;
 latency) CALLS="${2:-200}" ;;
+compare) HOURS="${2:-3}" ;;
 *)
-    printf 'usage: scripts/soak.sh endurance [HOURS] | latency [CALLS]\n'
+    printf 'usage: scripts/soak.sh endurance [HOURS] | latency [CALLS] | compare [HOURS]\n'
     exit 2
     ;;
 esac
 
 APP="${SIPRAL_HEADLESS_APP:-}"
 CLIENT="${SIPRAL_HEADLESS_CLIENT:-}"
-[ -x "$APP" ] && [ -x "$CLIENT" ] || {
-    printf 'set SIPRAL_HEADLESS_APP and SIPRAL_HEADLESS_CLIENT to the two Linux binaries\n'
-    exit 2
-}
+AGENT="${SIPRAL_HEADLESS_AGENT:-}"
+if [ "$WORD" = compare ]; then
+    [ -x "$AGENT" ] || { printf 'set SIPRAL_HEADLESS_AGENT to the Linux headless-agent binary\n'; exit 2; }
+    AGENT=$(cd "$(dirname "$AGENT")" && pwd)/$(basename "$AGENT")
+else
+    [ -x "$APP" ] && [ -x "$CLIENT" ] || {
+        printf 'set SIPRAL_HEADLESS_APP and SIPRAL_HEADLESS_CLIENT to the two Linux binaries\n'
+        exit 2
+    }
+fi
 command -v docker >/dev/null 2>&1 || { printf 'docker is not on the path\n'; exit 2; }
 
 OUT="${SOAK_DIR:-$ROOT/target/soak/$WORD-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -87,7 +107,7 @@ mkdir -p "$OUT" || exit 2
 OUT=$(cd "$OUT" && pwd)
 INTERVAL="${SOAK_INTERVAL_S:-60}"
 
-export COMPOSE_PROJECT_NAME="sipral-soak-$WORD"
+export COMPOSE_PROJECT_NAME="${SOAK_PROJECT:-sipral-soak-$WORD}"
 NETWORK="${COMPOSE_PROJECT_NAME}_lab"
 APP_NAME="$COMPOSE_PROJECT_NAME-app"
 CLIENT_NAME="$COMPOSE_PROJECT_NAME-agent"
@@ -103,6 +123,39 @@ minimum_expiration=60
 default_expiration=120
 maximum_expiration=120
 CONF
+# `compare`: an account per client compared, declared whole here (the file
+# is included last, so new sections are as good as pjsip.conf's own), the
+# registration held the same way
+if [ "$WORD" = compare ]; then
+    for kind in sipral pjsua baresip linphone; do
+        cat >>"$OUT/pjsip_local.conf" <<CONF
+[labuser-endure-$kind]
+type=auth
+auth_type=userpass
+username=labuser-endure-$kind
+password=labpass
+
+[labuser-endure-$kind]
+type=aor
+max_contacts=1
+remove_existing=yes
+minimum_expiration=60
+default_expiration=120
+maximum_expiration=120
+
+[labuser-endure-$kind]
+type=endpoint
+transport=transport-udp
+context=lab
+auth=labuser-endure-$kind
+aors=labuser-endure-$kind
+disallow=all
+allow=ulaw
+allow=alaw
+
+CONF
+    done
+fi
 cat >"$OUT/compose.override.yaml" <<YAML
 services:
   asterisk:
@@ -133,6 +186,33 @@ until asterisk_cli 'pjsip show transports' | grep '0\.0\.0\.0:5060' >/dev/null; 
     [ "$tries" -ge 60 ] && { printf 'Asterisk never opened its SIP socket\n'; exit 1; }
     sleep 1
 done
+
+# compare: the clients compared, from interop/compare/, with the step, pass
+# and fail lines scripts/lab.sh prints, on this run's own network
+if [ "$WORD" = compare ]; then
+    step() { printf '%s\n' "$1"; }
+    pass() { printf '  ok    %s\n' "$1"; }
+    fail() { printf '  FAIL  %s\n' "$1"; }
+    LAB_NETWORK="$NETWORK"
+    # shellcheck source=interop/compare/compare.sh
+    . "$ROOT/interop/compare/compare.sh"
+    # shellcheck source=interop/compare/endurance.sh
+    . "$ROOT/interop/compare/endurance.sh"
+    END_DRIVERS=""
+    compare_teardown() {
+        for pid in $END_DRIVERS; do
+            kill "$pid" 2>/dev/null
+        done
+        for kind in $END_KINDS; do
+            docker rm -f "$CMP_PREFIX-$kind" "$CMP_PREFIX-$kind-pod" >/dev/null 2>&1
+        done
+        compose down >/dev/null 2>&1
+    }
+    trap compare_teardown EXIT
+    step "the endurance comparison, $HOURS hours"
+    endurance_run "$HOURS" "$AGENT" "$OUT"
+    exit $?
+fi
 
 TIMINGS=""
 [ "$WORD" = latency ] && TIMINGS="--timings"
@@ -249,7 +329,7 @@ sample() {
     calls=$(count '^ended ' "$OUT/app.log")
     registered=$(count '^registered$' "$OUT/app.log")
     errors=$(count 'failed|refused|stopped reading|socket closed|cannot' "$OUT/app.log")
-    backstop=$(asterisk_cli 'core show globals' | awk -F= '/SOAK_BACKSTOP/ {print $2}' | tr -dc 0-9)
+    backstop=$(asterisk_cli 'dialplan show globals' | awk -F= '/SOAK_BACKSTOP/ {print $2}' | tr -dc 0-9)
     errors=$((errors + ${backstop:-0} + MISSED))
     cpu=$(awk -v d="$((ticks - LAST_TICKS))" -v s="$((now - LAST_AT))" -v hz="$TICKS" \
         'BEGIN { if (s > 0) printf "%.2f", 100 * d / hz / s; else print "0.00" }')

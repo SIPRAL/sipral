@@ -112,6 +112,22 @@ class Captures(unittest.TestCase):
         self.assertEqual(run(wire.register, path, CLIENT),
                          {"register_ms": "6.5", "registers_sent": "2"})
 
+    def test_a_long_runs_registrations_and_calls_are_all_counted(self):
+        path = self.pcap([
+            (100.0, udp(CLIENT, 5060, PBX, 5060, request("REGISTER", "REGISTER", "r"))),
+            (100.1, udp(PBX, 5060, CLIENT, 5060, response(401, "REGISTER", "r"))),
+            (100.2, udp(CLIENT, 5060, PBX, 5060, request("REGISTER", "REGISTER", "r"))),
+            (100.3, udp(PBX, 5060, CLIENT, 5060, response(200, "REGISTER", "r"))),
+            (150.0, udp(PBX, 5060, CLIENT, 5060, request("INVITE", "INVITE", "c"))),
+            (150.1, udp(CLIENT, 5060, PBX, 5060, response(200, "INVITE", "c"))),
+            (160.0, udp(CLIENT, 5060, PBX, 5060, request("REGISTER", "REGISTER", "r"))),
+            (160.1, udp(PBX, 5060, CLIENT, 5060, response(200, "REGISTER", "r"))),
+            (170.0, udp(PBX, 5060, CLIENT, 5060, response(200, "OPTIONS", "o"))),
+        ])
+        self.assertEqual(run(wire.registrations, path, CLIENT), {
+            "registers_sent": "3", "registers_accepted": "2", "invites_in": "1",
+        })
+
     def test_an_invite_is_measured_as_sent_and_to_its_own_200(self):
         body = (b"v=0\r\nm=audio 4000 RTP/AVP 0\r\n"
                 b"a=candidate:1 1 UDP 2130706431 172.18.0.3 4000 typ host\r\n"

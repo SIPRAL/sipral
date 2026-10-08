@@ -11,6 +11,7 @@ itself. Standard library only; it runs in the comparison's own capture
 container.
 
     wire.py register CAPTURE CLIENT_IP
+    wire.py registrations CAPTURE CLIENT_IP
     wire.py invite-out CAPTURE CLIENT_IP
     wire.py invite-in CAPTURE CLIENT_IP
     wire.py move CAPTURE NEW_IP PEER_IP MOVED_AT
@@ -18,10 +19,13 @@ container.
     wire.py channelstats FILE ENDPOINT
     wire.py pjsua-dq LOG
     wire.py sipral-ended LOG
+    wire.py baresip-stats LOG
+    wire.py linphone-stats LOG
 
-The last three read what each end said about the call's audio -- Asterisk's
+The last five read what each end said about the call's audio -- Asterisk's
 `pjsip show channelstats`, pjsua's own `dq` dump, the Sipral agent's `ended`
-line -- into the same four figures, and rate them with `rate`.
+line, baresip's receive statistics, linphonec's RTP statistics -- into the
+same four figures, and rate them with `rate`.
 
 Each prints `name=value` pairs on one line, `-` for what the capture does
 not hold, and exits non-zero only when the capture itself cannot be read.
@@ -163,6 +167,21 @@ def register(path, client):
             break
     took = None if first is None or accepted is None else accepted - first
     print(f"register_ms={fmt(took)} registers_sent={sent}")
+
+
+def registrations(path, client):
+    """Over a whole capture: the REGISTERs the client sent, the 200s that
+    accepted one, and the INVITEs that reached it -- what a long run asked of
+    it besides the audio."""
+    sent = accepted = invites = 0
+    for _, src, dst, _, (start, headers, _) in messages(path):
+        if src == client and start.startswith("REGISTER "):
+            sent += 1
+        elif dst == client and start.startswith("SIP/2.0 200") and cseq_method(headers) == "REGISTER":
+            accepted += 1
+        elif dst == client and start.startswith("INVITE "):
+            invites += 1
+    print(f"registers_sent={sent} registers_accepted={accepted} invites_in={invites}")
 
 
 def candidates(body):
@@ -329,9 +348,66 @@ def sipral_ended(path):
           + f" own_r={fields.get('r', '-')} own_mos={fields.get('mos', '-')}")
 
 
+def baresip_stats(path):
+    """baresip's own view, from the last receive statistics it printed when a
+    call ended (`rtp_stats yes`): the Receive column's packets, lost and
+    jitter, and the round trip from the `rtcpsummary` line before them (DL,
+    in milliseconds)."""
+    with open(path, encoding="latin-1") as handle:
+        lines = handle.read().splitlines()
+    start = max((i for i, line in enumerate(lines) if line.startswith("audio") and "Receive:" in line),
+                default=-1)
+    if start < 0:
+        print(figures("-", "-", "-", "-"))
+        return
+    values = {}
+    for line in lines[start + 1:start + 8]:
+        name, _, rest = line.partition(":")
+        numbers = rest.split()
+        if len(numbers) >= 2:
+            values[name.strip()] = numbers[1]
+    received, lost, jitter = values.get("packets", "-"), values.get("lost", "-"), values.get("jitter", "-")
+    rtt = "-"
+    for line in lines[:start]:
+        found = re.search(r"DL=([\d.]+)", line)
+        if found:
+            rtt = found.group(1)
+    loss = "-"
+    if received != "-" and lost != "-":
+        count = int(received) + int(lost)
+        loss = f"{0.0 if count == 0 else int(lost) * 100.0 / count:.2f}"
+    print(figures(received, loss, jitter, rtt))
+
+
+def linphone_stats(path):
+    """linphonec's own view, from its message-level log: the last RTP
+    STATISTICS block oRTP prints when a call's audio stops (packets received,
+    cumulative lost) and the last round trip mediastreamer's quality analyser
+    logged (rt_prop, in seconds). linphonec logs no receive-side jitter of
+    its own, so its jitter, and with it its rating, is '-'."""
+    with open(path, encoding="latin-1") as handle:
+        text = handle.read()
+    start = text.rfind("RTP STATISTICS")
+    if start < 0:
+        print(figures("-", "-", "-", "-"))
+        return
+    block = text[start:start + 3000]
+    received = re.search(r"\breceived\s+(\d+) packets", block)
+    lost = re.search(r"incoming cumulative lost\s+(-?\d+) packets", block)
+    rtts = re.findall(r"rt_prop=([\d.]+) sec", text[:start])
+    loss = "-"
+    if received and lost:
+        dropped = max(0, int(lost.group(1)))
+        count = int(received.group(1)) + dropped
+        loss = f"{0.0 if count == 0 else dropped * 100.0 / count:.2f}"
+    rtt = f"{float(rtts[-1]) * 1e3:.1f}" if rtts else "-"
+    print(figures(received.group(1) if received else "-", loss, "-", rtt))
+
+
 def main(argv):
     commands = {
         "register": (register, 2),
+        "registrations": (registrations, 2),
         "invite-out": (invite_out, 2),
         "invite-in": (invite_in, 2),
         "move": (move, 4),
@@ -339,6 +415,8 @@ def main(argv):
         "channelstats": (channelstats, 2),
         "pjsua-dq": (pjsua_dq, 1),
         "sipral-ended": (sipral_ended, 1),
+        "baresip-stats": (baresip_stats, 1),
+        "linphone-stats": (linphone_stats, 1),
     }
     if len(argv) < 2 or argv[1] not in commands or len(argv) - 2 != commands[argv[1]][1]:
         print(__doc__.strip(), file=sys.stderr)
