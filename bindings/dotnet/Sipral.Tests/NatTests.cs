@@ -120,7 +120,7 @@ public sealed class NatTests
                 if (msgType == BindingRequest)
                 {
                     var response = BuildResponse(transactionId, PublicHost, PublicPort);
-                    _socket.SendTo(response, from);
+                    Answer(response, from);
                     continue;
                 }
                 if (method == AllocateRequest && _credential is not null)
@@ -128,7 +128,7 @@ public sealed class NatTests
                     var answer = AnswerAllocate(data, transactionId, attributes, (IPEndPoint)from);
                     if (answer is not null)
                     {
-                        _socket.SendTo(answer, from);
+                        Answer(answer, from);
                     }
                     continue;
                 }
@@ -136,6 +136,21 @@ public sealed class NatTests
                 {
                     OtherRequests.Add(data);
                 }
+            }
+        }
+
+        // On this server's own thread: an exception here would end the test
+        // process, not the test. A peer whose address went away -- the
+        // interface lost it, EADDRNOTAVAIL -- gets no answer, and the test
+        // waiting for one fails on its own.
+        private void Answer(byte[] reply, EndPoint to)
+        {
+            try
+            {
+                _socket.SendTo(reply, to);
+            }
+            catch (SocketException)
+            {
             }
         }
 
