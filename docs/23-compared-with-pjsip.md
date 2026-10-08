@@ -307,12 +307,17 @@ give the container its new address inside every figure): Sipral 1240 and
 Sipral's 999 ms is the slowest move it has been measured at. Its route is
 read every half second, and in that run it sent no audio for 1.2 s after
 the cut where in every other run its audio left from the new address within
-20 ms of it existing, so the agent's loop did not turn for most of a second.
-The move alone was then run six more times, the 2 October agent and today's
-alternately on the same machine: 387, 432 and 435 ms for the first, 370, 393
-and 397 ms for today's, a REGISTER first each time and audio back 10 to
-15 ms after it. It is not a change in the agent; what held it that once is
-not known, and it is kept here as measured.
+20 ms of it existing. The move alone was then run six more times, the
+2 October agent and today's alternately on the same machine: 387, 432 and
+435 ms for the first, 370, 393 and 397 ms for today's, a REGISTER first each
+time and audio back 10 to 15 ms after it. A hundred more moves, run on
+8 October, found it once, at 983 ms against 165 to 408 ms for the rest, and
+the agent was not what held it: its own log had followed the move at 400 ms
+and its loop kept turning, but its REGISTER and every audio packet it had
+sent since the address existed reached the wire together at 983 ms. Linux
+holds a datagram until it has the next hop's link-layer address and asks
+for it again a second after an ARP request goes unanswered, so the second
+was the container's network, not the agent.
 
 ### What each ships
 
