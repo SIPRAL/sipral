@@ -63,7 +63,7 @@ public sealed class DatagramLimitTests
     /// on the same port when asked for.</summary>
     private sealed class Pbx : IDisposable
     {
-        private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
+        private readonly UdpClient _udp;
         private readonly TcpListener? _listener;
         private readonly object _lock = new();
         private readonly List<string> _overTcp = new();
@@ -75,16 +75,24 @@ public sealed class DatagramLimitTests
 
         public Pbx(bool tcp, bool apart = false)
         {
+            if (tcp && apart)
+            {
+                // apart: TCP on its own port, like UDP 5060 and TCP 5160
+                _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                _listener = new TcpListener(IPAddress.Loopback, 0);
+                _listener.Start();
+            }
+            else
+            {
+                (_udp, _listener) = SamePort.Take(tcp);
+            }
             // disposing a UDP socket can wait for a blocked receiver here,
             // so the receiver wakes on its own
             _udp.Client.ReceiveTimeout = 50;
             var port = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
             Address = $"127.0.0.1:{port}";
-            if (tcp)
+            if (_listener is not null)
             {
-                // apart: TCP on its own port, like UDP 5060 and TCP 5160
-                _listener = new TcpListener(IPAddress.Loopback, apart ? 0 : port);
-                _listener.Start();
                 TcpAddress = $"127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
                 new Thread(Accept) { IsBackground = true }.Start();
             }

@@ -132,14 +132,68 @@ public sealed class MoveTests
         }
     }
 
-    private static int FreePort(string host)
+    /// <summary>A stack on 127.0.0.1 at a port the application chose, one
+    /// found free at <paramref name="elsewhere"/> too. The port is let go
+    /// between the check and the stack taking it, and other processes bind
+    /// ports all the while: one taken in between is another port to try,
+    /// not a failure of the move.</summary>
+    private static (SipralStack Stack, int Port) StackOnAPortFreeAtBoth(string elsewhere)
     {
-        using var probe = new System.Net.Sockets.Socket(
-            System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram,
-            System.Net.Sockets.ProtocolType.Udp);
-        probe.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse(host), 0));
-        return ((System.Net.IPEndPoint)probe.LocalEndPoint!).Port;
+        for (var attempt = 1; ; attempt++)
+        {
+            int port;
+            using (var there = UdpSocket())
+            {
+                there.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse(elsewhere), 0));
+                port = ((System.Net.IPEndPoint)there.LocalEndPoint!).Port;
+                using var here = UdpSocket();
+                try
+                {
+                    here.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
+                }
+                catch (System.Net.Sockets.SocketException e)
+                    when (e.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse && attempt < 20)
+                {
+                    continue;
+                }
+            }
+            try
+            {
+                return (new SipralStack("127.0.0.1", port, audio: SipralAudio.Application), port);
+            }
+            catch (System.Net.Sockets.SocketException e)
+                when (e.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse && attempt < 20)
+            {
+            }
+        }
     }
+
+    /// <summary>A stack on 127.0.0.1 at the port a squatter holds at
+    /// <paramref name="elsewhere"/>. That the port is free at one address
+    /// says nothing of the other; one another process holds on loopback is
+    /// another squatter's port to try.</summary>
+    private static (SipralStack Stack, System.Net.Sockets.Socket Squatter) StackOnAPortTakenElsewhere(string elsewhere)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var squatter = UdpSocket();
+            squatter.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse(elsewhere), 0));
+            var port = ((System.Net.IPEndPoint)squatter.LocalEndPoint!).Port;
+            try
+            {
+                return (new SipralStack("127.0.0.1", port, audio: SipralAudio.Application), squatter);
+            }
+            catch (System.Net.Sockets.SocketException e)
+                when (e.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse && attempt < 20)
+            {
+                squatter.Dispose();
+            }
+        }
+    }
+
+    private static System.Net.Sockets.Socket UdpSocket() => new(
+        System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram,
+        System.Net.Sockets.ProtocolType.Udp);
 
     private static string OtherAddress()
     {
@@ -155,8 +209,8 @@ public sealed class MoveTests
     public void TheSignallingPortSurvivesAMoveToAnotherAddress()
     {
         var elsewhere = OtherAddress();
-        var chosen = FreePort(elsewhere);
-        using (var stack = new SipralStack("127.0.0.1", chosen, audio: SipralAudio.Application))
+        var (first, chosen) = StackOnAPortFreeAtBoth(elsewhere);
+        using (var stack = first)
         {
             stack.MoveTo(elsewhere);
             Assert.Equal($"{elsewhere}:{chosen}", stack.BindAddress);
@@ -179,12 +233,10 @@ public sealed class MoveTests
     public void APortTakenAtTheNewAddressFallsBackAndSaysSo()
     {
         var elsewhere = OtherAddress();
-        using var squatter = new System.Net.Sockets.Socket(
-            System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram,
-            System.Net.Sockets.ProtocolType.Udp);
-        squatter.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse(elsewhere), 0));
+        var (held, squatting) = StackOnAPortTakenElsewhere(elsewhere);
+        using var squatter = squatting;
+        using var stack = held;
         var taken = ((System.Net.IPEndPoint)squatter.LocalEndPoint!).Port;
-        using var stack = new SipralStack("127.0.0.1", taken, audio: SipralAudio.Application);
         stack.MoveTo(elsewhere);
         var colon = stack.BindAddress.LastIndexOf(':');
         Assert.Equal(elsewhere, stack.BindAddress[..colon]);

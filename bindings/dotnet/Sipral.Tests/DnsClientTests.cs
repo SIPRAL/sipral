@@ -29,9 +29,9 @@ public sealed class DnsClientTests
     /// properly.</summary>
     private sealed class ScriptedDns : IDisposable
     {
-        private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
+        private readonly UdpClient _udp;
         private readonly UdpClient _stranger = new(new IPEndPoint(IPAddress.Loopback, 0));
-        private readonly TcpListener _tcp;
+        private readonly TcpListener? _tcp;
         private readonly Script _script;
         private readonly Thread _udpThread;
         private readonly Thread _tcpThread;
@@ -43,13 +43,9 @@ public sealed class DnsClientTests
         public ScriptedDns(Script script, bool tcp = true)
         {
             _script = script;
+            (_udp, _tcp) = SamePort.Take(tcp);
             _udp.Client.ReceiveTimeout = 50;
             EndPoint = (IPEndPoint)_udp.Client.LocalEndPoint!;
-            _tcp = new TcpListener(IPAddress.Loopback, EndPoint.Port);
-            if (tcp)
-            {
-                _tcp.Start();
-            }
             _udpThread = new Thread(ServeUdp) { IsBackground = true };
             _tcpThread = new Thread(ServeTcp) { IsBackground = true };
             _udpThread.Start();
@@ -97,7 +93,7 @@ public sealed class DnsClientTests
                 TcpClient client;
                 try
                 {
-                    client = _tcp.AcceptTcpClient();
+                    client = _tcp!.AcceptTcpClient();
                 }
                 catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
                 {
@@ -121,7 +117,7 @@ public sealed class DnsClientTests
         public void Dispose()
         {
             _stopped = true;
-            _tcp.Stop();
+            _tcp?.Stop();
             _udpThread.Join();
             if (_tcpThread.IsAlive)
             {
