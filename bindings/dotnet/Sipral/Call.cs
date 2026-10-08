@@ -38,6 +38,10 @@ public sealed class Call : IDisposable
     private readonly Socket? _textSocket;
 
     private int _disposed;
+    // Orders the poll thread starting Media against Close and Readdress on
+    // the application's: each decides from one view of Media whether the
+    // media socket is the media's or still the call's to close.
+    private readonly object _mediaLock = new();
 
     /// <summary>The raw <c>sipral_handle_t</c>, for entry points this class
     /// does not wrap. Valid while the call is.</summary>
@@ -101,7 +105,16 @@ public sealed class Call : IDisposable
         {
             // release from STUN first so the two readers never race
             _stack.ReleaseStunSocket(_mediaAddress);
-            Media = new CallMedia(_stack, Handle, _mediaSocket, pumped: _stack.AudioMode == SipralAudio.Device, textSocket: _textSocket);
+            lock (_mediaLock)
+            {
+                // Close, on another thread, may have closed the socket after
+                // the stack looked this call up for the event: then there is
+                // no media to start, only a socket already gone.
+                if (Volatile.Read(ref _disposed) == 0 && Media is null)
+                {
+                    Media = new CallMedia(_stack, Handle, _mediaSocket, pumped: _stack.AudioMode == SipralAudio.Device, textSocket: _textSocket);
+                }
+            }
         }
         if (args.Kind == SipralEventKind.MediaSecured && args.Media is { } secured)
         {
@@ -324,10 +337,16 @@ public sealed class Call : IDisposable
             _stack.GiveBackPort(port);
             throw;
         }
-        var old = _mediaSocket;
-        _mediaSocket = socket;
-        _mediaAddress = address;
-        if (Media is { } media)
+        Socket old;
+        CallMedia? started;
+        lock (_mediaLock)
+        {
+            old = _mediaSocket;
+            _mediaSocket = socket;
+            _mediaAddress = address;
+            started = Media;
+        }
+        if (started is { } media)
         {
             media.Rebind(socket);
         }
@@ -604,9 +623,15 @@ public sealed class Call : IDisposable
             {
             }
         }
-        if (Media is not null)
+        // _disposed is set: past this lock the poll thread starts no media
+        CallMedia? started;
+        lock (_mediaLock)
         {
-            Media.Dispose();
+            started = Media;
+        }
+        if (started is not null)
+        {
+            started.Dispose();
         }
         else
         {

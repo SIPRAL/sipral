@@ -170,6 +170,40 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
+    /// <summary>The poll thread can look a call up for its MediaStarted
+    /// just before the application's Close (or the stack's Dispose)
+    /// forgets it and closes its socket. That late event starts nothing:
+    /// it used to build the media over the closed socket and throw on the
+    /// poll thread, inside the native callback, ending the process.</summary>
+    [Fact]
+    public async Task AMediaStartedThatLosesTheRaceWithCloseStartsNothing()
+    {
+        var aliceAccount = _alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: _bob.BindAddress);
+        _bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: _alice.BindAddress);
+        var aliceCall = _alice.PlaceCall(aliceAccount, $"sip:bob@{_bob.BindAddress}");
+        await FirstMatchingAsync(_bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
+        var handle = aliceCall.Handle;
+        aliceCall.Close();
+
+        var evt = global::Sipral.SipralEvent.Sized();
+        evt.Kind = SipralEventKind.MediaStarted;
+        evt.Call = handle;
+        var raw = Marshal.AllocHGlobal(Marshal.SizeOf<global::Sipral.SipralEvent>());
+        SipralEventArgs late;
+        try
+        {
+            Marshal.StructureToPtr(evt, raw, false);
+            late = SipralEventArgs.Decode(raw);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(raw);
+        }
+
+        aliceCall.Deliver(late);
+        Assert.Null(aliceCall.Media);
+    }
+
     /// <summary>The final statistics record is kept and served after the
     /// library answers <c>WRONG_STATE</c>.</summary>
     [Fact]
