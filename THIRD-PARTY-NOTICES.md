@@ -601,6 +601,37 @@ them is copied here or shipped. As the README names them: whisper.cpp's
 Ollama 0.40.0 (MIT) with `qwen2.5:1.5b` (Apache-2.0); each licence is the
 one its project's repository or model card states.
 
+The local agent's voice, `sipral_agents.PocketVoice`, imports Kyutai's
+Pocket TTS, `pocket-tts` 3.3.0 (MIT), when the user installs the
+package's optional `local` extra; nothing of it is shipped here. Its
+weights (`kyutai/pocket-tts-without-voice-cloning`) and its default
+English voice (`alba`, Alba MacKenna, in `kyutai/tts-voices`) are under
+CC BY 4.0, fetched from Hugging Face by the user's own machine at first
+use; whoever puts an agent built on it in front of callers credits them,
+as the README says. Other voices of that catalogue carry their own
+licences, the Expresso and EARS ones non-commercial. What `pocket-tts`
+requires, from each installed package's own metadata on macOS: `torch`
+2.14.1 under Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND
+MIT (with the LLVM exception on part of the Apache code); `numpy` under
+BSD-3-Clause with 0BSD, MIT, Zlib and CC0-1.0 parts; `scipy`, `jinja2`,
+`markupsafe`, `click`, `fsspec`, `httpcore`, `httpx`, `idna`, `mpmath`,
+`networkx`, `starlette`, `sympy` and `uvicorn` under BSD-3-Clause, and
+`pygments` under BSD-2-Clause; `sentencepiece`, `tokenizers`,
+`safetensors`, `huggingface-hub`, `hf-xet`, `requests`,
+`python-multipart` and `opentelemetry-api` under Apache-2.0, and
+`packaging` under Apache-2.0 OR BSD-2-Clause; `einops`, `fastapi`,
+`pydantic`, `pydantic-core`, `typer`, `rich`, `anyio`, `h11`, `filelock`,
+`pyyaml`, `markdown-it-py`, `mdurl`, `urllib3`, `charset-normalizer`,
+`annotated-types`, `annotated-doc` and `typing-inspection` under MIT;
+`shellingham` under ISC; `typing-extensions` under PSF-2.0; and two
+outside the project's own allow-list, both weak, file-level copyleft and
+used unmodified: `certifi` under MPL-2.0 and `tqdm` under MPL-2.0 AND
+MIT. No GPL or LGPL package is among them, and no phonemiser: text
+becomes tokens through SentencePiece. On Linux, PyPI's default `torch`
+also brings NVIDIA's CUDA runtime wheels (`nvidia-*`, under NVIDIA's own
+licence) and `triton` (MIT); installing from PyTorch's CPU index, as the
+README says, brings neither.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

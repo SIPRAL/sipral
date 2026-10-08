@@ -144,11 +144,26 @@ same core as every other connector (`LocalAgent` is its `Provider`):
   its HTTP chat API with streaming on (`Ollama`). The reply is spoken a
   sentence at a time, so the first sentence plays while the rest is still
   being written.
-- **Speaking**: macOS's own voice, `say` (`SystemVoice`), or any program
-  that reads text on its input and writes a 16 kHz WAV file
-  (`CommandVoice(["prog", "--out", "{out}"])`). Piper is not used: its
-  maintained releases (`piper-tts` 1.3.0 and later) are GPL-3.0-or-later,
-  and the older MIT ones phonemise through espeak-ng, which is GPL-3.0.
+- **Speaking**: Kyutai's Pocket TTS (`PocketVoice`; `pocket-tts` 3.3.0,
+  code MIT, weights and voices CC BY 4.0), in the agent's own process. The
+  model is loaded once, before the agent takes calls, and kept; each
+  sentence then streams into the call in 80 ms pieces as they are made,
+  resampled from the model's 24 kHz to the agent's 16 kHz (`Resampler`,
+  a windowed-sinc filter in pure Python). The caller hears a sentence
+  begin while the rest of it is still being made, and talking over the
+  agent stops the model as well as the call's queue. `--language` picks
+  Pocket's French, German, Spanish, Portuguese, Italian or Dutch model
+  (each has its own default voice) and `--voice` a voice of its catalogue
+  or a WAV file to clone; there is no Romanian model. On a Mac without
+  Pocket TTS the agent speaks with `say` (`SystemVoice`) and says so in one
+  line; elsewhere it stops and says what to install. Any program that reads
+  text on its input and writes a 16 kHz WAV file works too
+  (`CommandVoice(["prog", "--out", "{out}"])`), started once per sentence.
+  Piper is not used: its maintained releases (`piper-tts` 1.3.0 and later)
+  are GPL-3.0-or-later, and the older MIT ones phonemise through
+  espeak-ng, which is GPL-3.0; Kokoro's published packages bring espeak-ng
+  too. Pocket TTS turns text into tokens with SentencePiece, with no
+  phonemiser.
 - **The end of a turn**: 700 ms of quiet after speech, measured on the
   energy of each 20 ms frame (`EnergyVad`; threshold and timings are
   arguments). Speech that starts while the agent talks cancels its turn and
@@ -164,15 +179,32 @@ ollama serve &
 ollama pull qwen2.5:1.5b
 
 cargo build --release -p sipral-ffi
-python3 -m pip install websockets cffi
+python3 -m pip install websockets cffi './integrations/agents[local]'
 export SIPRAL_LIBRARY=target/release PYTHONPATH=integrations/agents:bindings/python
 python3 integrations/agents/examples/local_agent.py --port 5070
 ```
 
-It loads the model, then prints the address to call; a softphone dials it,
-hears "Hello, how can I help?" and talks. The same `SIPRAL_*` variables as
-the demo put it on a PBX extension. `--model`, `--voice` and `--greeting`
-change the rest.
+On Linux, add `--extra-index-url https://download.pytorch.org/whl/cpu` to
+the `pip install`: without it pip fetches PyTorch's CUDA build and
+NVIDIA's runtime libraries, gigabytes the agent does not use and under
+NVIDIA's own licence. The `local` extra is `pocket-tts` and what it
+requires (about 600 MB installed, most of it PyTorch); the first run
+fetches the model's weights and voice from Hugging Face (about 225 MB)
+into its cache, and the agent then holds about 1 GB of memory.
+
+It loads the two models, then prints the address to call; a softphone
+dials it, hears "Hello, how can I help?" and talks. The same `SIPRAL_*`
+variables as the demo put it on a PBX extension. `--model`, `--tts`
+(`pocket`, `say`, or `auto`, the default), `--language`, `--voice` and
+`--greeting` change the rest.
+
+The voice is Kyutai's Pocket TTS, under CC BY 4.0: an agent built on
+this example that speaks to the public should credit it, for instance
+"Voice: Kyutai Pocket TTS (CC BY 4.0)". The default English voice,
+`alba`, is Alba MacKenna's, also CC BY 4.0; another language's default
+voice, or one picked with `--voice`, has the licence its entry in
+`kyutai/tts-voices` or the model card states, and the Expresso and EARS
+voices there are for non-commercial use only.
 
 The example plays the caller too. With the agent running, in another
 terminal:
@@ -189,35 +221,50 @@ the question the first sound of the answer came. `--barge-in` says the
 question again a second into the answer and prints how soon the answer
 stopped.
 
-Measured on 7 October 2026 on an Apple M2 with 24 GB, macOS 27, both stacks
-on loopback, the machine loaded by other builds (load average 8 to 17), 6
-calls with three different questions, the model already loaded:
+Measured on 8 October 2026 on an Apple M2 with 24 GB, macOS 27, both
+stacks on loopback, the machine loaded by other work (load average 9 to
+10), whisper.cpp 1.9.5 with `base.en`, Ollama with `qwen2.5:1.5b`,
+`pocket-tts` 3.3.0 with torch 2.14.1 on Python 3.12, everything already
+loaded; 6 calls for each voice, the same three questions twice, made with
+`say -o qN.wav --data-format=LEI16@16000 "..."` ("What are your opening
+hours on Saturday?", "Can I book a table for two tonight?", "How do I
+reset my password?") and asked with `--ask`. The agent prints the first
+three rows for each answer, the asking side the fourth:
 
-| | Measured |
-|---|---|
-| Question transcribed, from the end of the turn | 147 to 568 ms |
-| First words of the reply from the model | 249 to 904 ms |
-| First audio of the reply ready (one sentence through `say`) | 3.6 to 5.6 s |
-| `say` alone, one sentence, same machine | 1.9 to 2.5 s |
-| First sound heard by the caller, from the end of the question | 4.3 to 7.1 s |
-| The answer stopping once the caller talked over it (1 call) | 0.8 s |
+| | `say` | Pocket TTS |
+|---|---|---|
+| Question transcribed, from the end of the turn | 137 to 181 ms | 122 to 155 ms |
+| First words of the reply from the model | 254 to 289 ms | 213 to 286 ms |
+| First audio of the reply ready | 2.9 to 4.3 s | 0.62 to 1.37 s (5 of 6 under 0.8 s) |
+| First sound heard by the caller, from the end of the question | 3.4 to 5.1 s | 1.29 to 3.0 s (5 of 6 under 1.41 s) |
+| The answer stopping once the caller talked over it (1 call) | 0.8 s (7 October) | 0.21 s |
 
 The caller's figure adds the 700 ms of quiet that end a turn and the
-jitter buffer to the agent's. Most of the wait is `say`, which takes about
-two seconds for any sentence, however short; a faster synthesiser plugged
-in through `CommandVoice` shortens it by as much. Whisper heard every
-question word for word, and the answers were relevant and short
-(transcribed back from `heard.wav`: "I'm sorry, but as an AI, I don't have
-specific opening hours. Please check the website or contact customer
-service for accurate information."). The first question after `ollama
-serve` starts waits for the model to load (26 s here), which is why the
-example loads it before it takes calls.
+jitter buffer to the agent's. With `say` most of the wait is `say`
+itself, a new process for every sentence that takes about two seconds
+however short the sentence is. With Pocket TTS the wait is the model
+writing its first sentence, whisper, and Pocket's first 80 ms piece; the
+one slow answer began "Of course!", a sentence too quiet at its start for
+the asking side's loudness threshold. Whisper heard every question word
+for word, and two of Pocket's answers, transcribed back from what the
+caller recorded, came out word for word ("We're open from 9 a.m. to 5
+p.m. on Saturdays."). The first question after `ollama serve` starts
+waits for the model to load (26 s on 7 October), and Pocket TTS takes
+seconds to load (22 s here the first time, weights fetched included),
+which is why the example loads both before it takes calls.
 
 `tests/test_local.py` checks the end-of-turn detector, and on a call
 between two stacks with stand-ins for the three programs that a question
 is transcribed, answered a sentence at a time and heard, that talking over
 the answer interrupts it and becomes the next question, and that the
-greeting is heard. It needs no model and no program.
+greeting is heard; and with a stand-in for Pocket's model, that it is
+loaded once however many sentences and calls there are, that a
+sentence's pieces arrive resampled exactly as the whole would be, at the
+rate asked for, that closing a sentence early stops the model, that a
+streamed answer is heard on a call, and which voice `local_voice` picks
+with and without Pocket TTS, on macOS and elsewhere. The resampler is
+checked against an ideal tone, for its length, and for filtering out what
+an 8 kHz call cannot carry. None of it needs a model or a program.
 
 ## Example
 
@@ -365,4 +412,7 @@ commercial licence. Its one dependency besides `sipral` is `websockets`,
 BSD-3-Clause, which needs nothing else. The local agent reaches whisper.cpp
 and Ollama as separate programs over HTTP, with the standard library; they
 and their models are the user's to install and are not dependencies of the
-package (`THIRD-PARTY-NOTICES.md`).
+package. Its voice, Pocket TTS, is the optional `local` extra: MIT code,
+weights and voices under CC BY 4.0 fetched by the user at first run, and
+nothing of it shipped here; what it requires, and their licences, are in
+`THIRD-PARTY-NOTICES.md`.

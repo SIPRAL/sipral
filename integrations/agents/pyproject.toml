@@ -27,6 +27,10 @@ classifiers = [
 ]
 dependencies = ["sipral>=1.1.0", "websockets>=17.2"]
 
+[project.optional-dependencies]
+# the local agent's voice, Kyutai's Pocket TTS (MIT; weights CC BY 4.0, fetched at first use)
+local = ["pocket-tts>=3.3.0"]
+
 [project.scripts]
 sipral-agents = "sipral_agents.__main__:main"
 

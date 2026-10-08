@@ -26,7 +26,18 @@ from .core import (
 from .deepgram import DeepgramAgent
 from .elevenlabs import ElevenLabsAgent
 from .gemini_live import GeminiLive
-from .local import CommandVoice, EnergyVad, LocalAgent, LocalAgentServer, Ollama, SystemVoice, WhisperServer
+from .local import (
+    CommandVoice,
+    EnergyVad,
+    LocalAgent,
+    LocalAgentServer,
+    Ollama,
+    PocketVoice,
+    Resampler,
+    SystemVoice,
+    WhisperServer,
+    local_voice,
+)
 from .openai_realtime import OpenAIRealtime
 from .outbound import MachinePolicy, dial
 from .serve import ProviderFactory, serve, wait_for_media
@@ -50,10 +61,12 @@ __all__ = [
     "MachinePolicy",
     "Ollama",
     "OpenAIRealtime",
+    "PocketVoice",
     "Provider",
     "ProviderError",
     "ProviderFactory",
     "Reply",
+    "Resampler",
     "SessionRefused",
     "Signal",
     "SpeechStarted",
@@ -63,6 +76,7 @@ __all__ = [
     "VapiAgent",
     "WhisperServer",
     "dial",
+    "local_voice",
     "serve",
     "wait_for_media",
 ]

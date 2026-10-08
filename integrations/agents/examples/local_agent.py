@@ -3,14 +3,21 @@
 # Copyright (c) 2026 Sytek
 
 """A phone agent that runs entirely on this machine, with no key and no
-paid service: whisper.cpp listens, Ollama thinks, the system voice speaks.
+paid service: whisper.cpp listens, Ollama thinks, Pocket TTS speaks.
 
     brew install whisper-cpp ollama
     curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
     whisper-server -m ggml-base.en.bin --port 8178 &
     ollama serve &
     ollama pull qwen2.5:1.5b
+    pip install './integrations/agents[local]'
     python3 local_agent.py --port 5070
+
+Pocket TTS (Kyutai; code MIT, weights and voices CC BY 4.0) is loaded
+once, before the agent takes calls, and streams each sentence into the
+call as it is made. Without it the agent speaks with macOS's ``say``, and
+says so; ``--tts say`` asks for ``say``, ``--language`` and ``--voice``
+pick Pocket's model and voice.
 
 A softphone then calls ``sip:agent@<the address printed>``. With
 ``SIPRAL_REGISTRAR_ADDRESS`` set the agent answers what that PBX sends it,
@@ -44,8 +51,10 @@ from sipral_agents import (
     LocalAgent,
     LocalAgentServer,
     Ollama,
+    PocketVoice,
     SystemVoice,
     WhisperServer,
+    local_voice,
     serve,
     wait_for_media,
 )
@@ -88,10 +97,22 @@ async def answer(args: argparse.Namespace) -> None:
     print(f"loading {args.model}", flush=True)
     async for _ in thinker.reply([{"role": "user", "content": "Say OK."}]):
         pass
+    if args.tts == "say":
+        voice = SystemVoice(args.voice)
+    elif args.tts == "pocket":
+        voice = PocketVoice(args.voice, args.language)
+    else:
+        try:
+            voice = local_voice(args.voice, args.language)
+        except RuntimeError as failed:
+            raise SystemExit(str(failed)) from None
+    if isinstance(voice, PocketVoice):
+        print(f"loading Pocket TTS ({args.language or 'english'})", flush=True)
+        await voice.load()
     pipeline = LocalAgentServer(
         WhisperServer(args.whisper),
         thinker,
-        SystemVoice(args.voice),
+        voice,
         greeting=args.greeting or None,
         on_timing=print_timing,
     )
@@ -122,6 +143,8 @@ async def answer(args: argparse.Namespace) -> None:
     finally:
         stack.close()
         await pipeline.stop()
+        if isinstance(voice, PocketVoice):
+            voice.close()
 
 
 def loud(pcm: bytes) -> bool:
@@ -205,7 +228,21 @@ def main() -> None:
     parser.add_argument("--whisper", default="http://127.0.0.1:8178", help="whisper-server's address")
     parser.add_argument("--ollama", default="http://127.0.0.1:11434", help="Ollama's address")
     parser.add_argument("--model", default="qwen2.5:1.5b", help="the Ollama model (default qwen2.5:1.5b)")
-    parser.add_argument("--voice", help="a voice of `say -v '?'` (default: the system's)")
+    parser.add_argument(
+        "--tts",
+        choices=["auto", "pocket", "say"],
+        default="auto",
+        help="the voice: Pocket TTS, macOS's say, or Pocket when installed and say otherwise (default auto)",
+    )
+    parser.add_argument(
+        "--language",
+        help="Pocket's model: english (default), french, german, spanish, portuguese, italian, dutch",
+    )
+    parser.add_argument(
+        "--voice",
+        help="Pocket: a voice of its catalogue or a WAV file to clone (default: the language's own); "
+        "say: a voice of `say -v '?'` (default: the system's)",
+    )
     parser.add_argument("--greeting", default="Hello, how can I help?", help="said when a call is answered; empty for none")
     parser.add_argument("--ask", help="call the agent and say this WAV file instead of answering calls")
     parser.add_argument("--to", default="sip:agent@127.0.0.1:5070", help="with --ask: the agent's SIP URI")

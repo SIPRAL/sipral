@@ -14,9 +14,12 @@ running locally:
   ``127.0.0.1:11434`` (:class:`Ollama`); the reply is streamed and spoken a
   sentence at a time, so the caller hears the first sentence while the rest
   is still being written.
-- **Speaking**: the operating system's own voice (:class:`SystemVoice`,
-  ``say`` on macOS) or any program that reads text and writes a WAV file
-  (:class:`CommandVoice`).
+- **Speaking**: Kyutai's Pocket TTS (:class:`PocketVoice`, the
+  package's ``local`` extra), loaded once and kept in this process,
+  its audio streamed to the call as it is synthesised; or the operating
+  system's own voice (:class:`SystemVoice`, ``say`` on macOS); or any
+  program that reads text and writes a WAV file (:class:`CommandVoice`).
+  :func:`local_voice` picks the first of the two that is there.
 
 The caller's turn ends after ``end_silence_ms`` of quiet, measured on the
 energy of each frame (:class:`EnergyVad`). Speech that starts while the
@@ -25,25 +28,32 @@ of it is still queued in the call is dropped.
 
 :class:`LocalAgent` is the :class:`~sipral_agents.core.Provider` that joins
 a call to the server, so the pacing, barge-in and events are those of every
-other connector. Nothing here needs a Python package beyond the ones
-``sipral-agents`` already depends on.
+other connector. Only :class:`PocketVoice` needs a Python package beyond
+the ones ``sipral-agents`` already depends on, and imports it when it loads.
 """
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
+import concurrent.futures
 import contextlib
+import importlib.util
 import json
 import math
+import operator
 import os
 import re
+import shutil
+import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
 import wave
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -61,10 +71,13 @@ __all__ = [
     "LocalAgent",
     "LocalAgentServer",
     "Ollama",
+    "PocketVoice",
+    "Resampler",
     "Speaker",
     "SystemVoice",
     "Thinker",
     "WhisperServer",
+    "local_voice",
 ]
 
 RATE = 16000
@@ -83,6 +96,11 @@ class Thinker(Protocol):
 
 
 class Speaker(Protocol):
+    """A voice. One that can also hand its audio over as it is made has a
+    ``stream(text)`` method too, an async iterator of PCM pieces in the
+    same format; :class:`LocalAgentServer` then sends each piece to the
+    call as it comes instead of waiting for the sentence."""
+
     async def speak(self, text: str) -> bytes:
         """``text`` spoken, as 16-bit mono PCM at 16 kHz."""
 
@@ -254,6 +272,232 @@ class SystemVoice:
         if self.voice:
             argv[1:1] = ["-v", self.voice]
         return await CommandVoice(argv).speak(text)
+
+
+class Resampler:
+    """16-bit mono PCM from ``source`` Hz to ``target`` Hz, a piece at a
+    time: a Blackman-windowed sinc low-pass at 90 % of the lower of the two
+    Nyquist frequencies, ``zeros`` of its zero crossings on each side,
+    applied one output sample at a time from the input it needs. Its delay
+    is taken out, so the pieces :meth:`feed` returns, followed by what
+    :meth:`flush` returns, are the whole input resampled at once:
+    ``ceil(n * target / source)`` samples for ``n`` in."""
+
+    def __init__(self, source: int, target: int, zeros: int = 8) -> None:
+        common = math.gcd(source, target)
+        self.up, self.down = target // common, source // common
+        # in cycles per sample at source * up, the rate the filter runs at
+        cutoff = 0.45 / max(self.up, self.down)
+        self._half = math.ceil(zeros / (2 * cutoff))
+        length = 2 * self._half + 1
+        taps = []
+        for n in range(length):
+            x = 2 * cutoff * (n - self._half)
+            sinc = 1.0 if x == 0 else math.sin(math.pi * x) / (math.pi * x)
+            phase = 2 * math.pi * n / (length - 1)
+            window = 0.42 - 0.5 * math.cos(phase) + 0.08 * math.cos(2 * phase)
+            taps.append(self.up * 2 * cutoff * sinc * window)
+        self._k = math.ceil(length / self.up)
+        # phase p is every up-th tap from p, newest input last
+        self._phases = [
+            tuple(reversed(taps[p :: self.up] + [0.0] * (self._k - len(taps[p :: self.up])))) for p in range(self.up)
+        ]
+        self._x: list[int] = [0] * self._k
+        self._base = -self._k  # the input index of self._x[0]
+        self._made = 0
+        self._seen = 0
+
+    def feed(self, pcm: bytes) -> bytes:
+        """What of the output ``pcm`` completes."""
+        samples = array.array("h")
+        samples.frombytes(pcm[: len(pcm) // 2 * 2])
+        if sys.byteorder == "big":
+            samples.byteswap()
+        if self.up == self.down:
+            return samples.tobytes() if sys.byteorder == "little" else pcm[: len(pcm) // 2 * 2]
+        self._x.extend(samples)
+        self._seen += len(samples)
+        return self._produce(None)
+
+    def flush(self) -> bytes:
+        """The rest of the output, once the input has all been fed."""
+        if self.up == self.down:
+            return b""
+        total = -(-self._seen * self.up // self.down)
+        if total > self._made:
+            needed = ((total - 1) * self.down + self._half) // self.up + 1
+            self._x.extend([0] * max(0, needed - (self._base + len(self._x))))
+        return self._produce(total)
+
+    def _produce(self, limit: int | None) -> bytes:
+        out = array.array("h")
+        x, k, up, down, half, phases = self._x, self._k, self.up, self.down, self._half, self._phases
+        end = self._base + len(x)
+        made = self._made
+        while limit is None or made < limit:
+            t = made * down + half
+            newest = t // up
+            if newest >= end:
+                break
+            start = newest - k + 1 - self._base
+            value = round(sum(map(operator.mul, phases[t % up], x[start : start + k])))
+            out.append(32767 if value > 32767 else -32768 if value < -32768 else value)
+            made += 1
+        self._made = made
+        drop = (made * down + half) // up - k + 1 - self._base
+        if drop > 0:
+            del x[:drop]
+            self._base += drop
+        if sys.byteorder == "big":
+            out.byteswap()
+        return out.tobytes()
+
+
+class _PocketEngine:
+    """Pocket TTS in this process: the model and the voice's state, loaded
+    once; each sentence streamed in 16-bit pieces at the model's rate."""
+
+    def __init__(self, voice: str | None, language: str | None) -> None:
+        from pocket_tts import TTSModel
+
+        if voice is None:
+            from pocket_tts.default_parameters import get_default_voice_for_language
+
+            voice = get_default_voice_for_language(language)
+        self.voice = voice
+        self._model = TTSModel.load_model(language=language)
+        self.sample_rate: int = self._model.sample_rate
+        self._state = self._model.get_state_for_audio_prompt(voice)
+
+    def stream(self, text: str, stop: threading.Event) -> Iterator[bytes]:
+        # the voice's state is copied for each sentence, so every one starts from it
+        for chunk in self._model.generate_audio_stream(self._state, text, stop=stop):
+            yield chunk.clamp(-1.0, 1.0).mul(32767.0).round().short().numpy().tobytes()
+
+
+class PocketVoice:
+    """Kyutai's Pocket TTS (code MIT, weights and voices CC BY 4.0), run in
+    this process: the package's ``local`` extra. The weights and
+    the voice are fetched from Hugging Face the first time and cached.
+
+    ``language`` is one of its models -- ``"english"`` when ``None``,
+    ``"french"``, ``"german"``, ``"spanish"``, ``"portuguese"``,
+    ``"italian"``, ``"dutch"``, and a slower, better ``_24l`` variant of
+    each but English -- and ``voice`` one of its catalogue's names or the
+    path of a WAV file to clone, the model's own default for the language
+    when ``None``.
+
+    The model is loaded once, by :meth:`load` or the first sentence, and
+    kept for the life of this object. A sentence is then streamed: each
+    80 ms piece the model makes is resampled from 24 kHz to ``rate`` and
+    handed over at once, so the call hears the start of a sentence while
+    the rest is being made. The model is not safe to run twice at once, so
+    sentences are made one at a time, on one thread, whichever call they
+    are for. ``engine``, when given, is called instead of loading the model
+    (for tests): it returns an object with ``sample_rate`` and
+    ``stream(text, stop)``, an iterator of 16-bit pieces at that rate that
+    ends early once the :class:`threading.Event` ``stop`` is set."""
+
+    def __init__(
+        self,
+        voice: str | None = None,
+        language: str | None = None,
+        *,
+        rate: int = RATE,
+        engine: Callable[[], object] | None = None,
+    ) -> None:
+        self.voice = voice
+        self.language = language
+        self.rate = rate
+        self._make = engine or (lambda: _PocketEngine(voice, language))
+        self._engine = None
+        self._loading = asyncio.Lock()
+        self._worker = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="pocket-tts")
+
+    async def load(self) -> None:
+        """Load the model now rather than on the first sentence."""
+        await self._loaded()
+
+    async def _loaded(self):
+        async with self._loading:
+            if self._engine is None:
+                self._engine = await asyncio.get_running_loop().run_in_executor(self._worker, self._make)
+        return self._engine
+
+    async def stream(self, text: str) -> AsyncIterator[bytes]:
+        """``text`` spoken, 16-bit mono PCM at ``rate``, in pieces as they
+        are made. Closing the iterator early stops the model."""
+        engine = await self._loaded()
+        loop = asyncio.get_running_loop()
+        pieces: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+        stop = threading.Event()
+        resampler = Resampler(engine.sample_rate, self.rate)
+
+        def put(item: bytes | BaseException | None) -> None:
+            with contextlib.suppress(RuntimeError):  # the loop has closed
+                loop.call_soon_threadsafe(pieces.put_nowait, item)
+
+        def make() -> None:
+            try:
+                for pcm in engine.stream(text, stop):
+                    if stop.is_set():
+                        return
+                    out = resampler.feed(pcm)
+                    if out:
+                        put(out)
+                if not stop.is_set():
+                    put(resampler.flush())
+                put(None)
+            except BaseException as failed:  # noqa: BLE001 -- handed to the event loop
+                put(failed)
+
+        loop.run_in_executor(self._worker, make)
+        try:
+            while True:
+                piece = await pieces.get()
+                if piece is None:
+                    return
+                if isinstance(piece, BaseException):
+                    raise piece
+                if piece:
+                    yield piece
+        finally:
+            stop.set()
+
+    async def speak(self, text: str) -> bytes:
+        return b"".join([piece async for piece in self.stream(text)])
+
+    def close(self) -> None:
+        """Let the model's thread go; the object is not used again."""
+        self._worker.shutdown(wait=False, cancel_futures=True)
+
+
+POCKET_INSTALL = (
+    "pip install './integrations/agents[local]' from Sipral's checkout, or pip install 'pocket-tts>=3.3' "
+    "(on Linux add --extra-index-url https://download.pytorch.org/whl/cpu, or pip pulls PyTorch's CUDA build)"
+)
+
+
+def local_voice(
+    voice: str | None = None,
+    language: str | None = None,
+    *,
+    rate: int = RATE,
+    warn: Callable[[str], None] | None = None,
+) -> Speaker:
+    """The best voice this machine has: :class:`PocketVoice` when Pocket
+    TTS is installed; on macOS without it, ``say`` (:class:`SystemVoice`,
+    in the system's default voice, since ``voice`` and ``language`` name
+    Pocket's), after one line to ``warn`` (standard error when ``None``)
+    saying so; anywhere else, :class:`RuntimeError` naming what to
+    install."""
+    if importlib.util.find_spec("pocket_tts") is not None:
+        return PocketVoice(voice, language, rate=rate)
+    if sys.platform == "darwin" and shutil.which("say"):
+        line = f"Pocket TTS is not installed, so the agent speaks with macOS's say; for a better voice: {POCKET_INSTALL}"
+        (warn or (lambda text: print(text, file=sys.stderr, flush=True)))(line)
+        return SystemVoice()
+    raise RuntimeError(f"no local voice: Pocket TTS is not installed. {POCKET_INSTALL}")
 
 
 # -- the end of a turn -------------------------------------------------------
@@ -455,10 +699,31 @@ class LocalAgentServer:
         sentence = sentence.strip()
         if not sentence:
             return
-        pcm = await self.speaker.speak(sentence)
-        timing.setdefault("first_audio", time.monotonic() - ended)
-        await self._send_audio(session, pcm)
-        said.append(sentence)
+        stream = getattr(self.speaker, "stream", None)
+        if stream is None:
+            pcm = await self.speaker.speak(sentence)
+            timing.setdefault("first_audio", time.monotonic() - ended)
+            await self._send_audio(session, pcm)
+            said.append(sentence)
+            return
+        # each piece goes out as it comes, in whole frames; only the
+        # sentence's last one is padded
+        pending = b""
+        heard = False
+        async with contextlib.aclosing(stream(sentence)) as pieces:
+            async for piece in pieces:
+                if not heard:
+                    timing.setdefault("first_audio", time.monotonic() - ended)
+                    # the caller is hearing it from now on
+                    said.append(sentence)
+                    heard = True
+                pending += piece
+                whole = len(pending) - len(pending) % _FRAME_BYTES
+                if whole:
+                    await self._send_audio(session, pending[:whole])
+                    pending = pending[whole:]
+        if pending:
+            await self._send_audio(session, pending)
 
 
 class LocalAgent(Provider):
