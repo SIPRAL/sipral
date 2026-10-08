@@ -677,6 +677,14 @@ NEGATIVE_CONTROL_QUALIFIER = "blocked without TURN"
 BLOCK_DOES_NOT_HOLD_RE = re.compile(
     r"^  the call(?: through the C ABI)? connected with the path between the NATs blocked: .+$"
 )
+# turn_blocked's note when a negative control failed for a reason other
+# than the block: the callee never reported a missing path.
+BLOCK_UNPROVED_RE = re.compile(
+    r"^  the call(?: through the C ABI)? failed, but the callee never said it was for want of a path: .+$"
+)
+# The harness's own verdict when no ICE path was chosen (interop/harness/src/
+# ice_lite.rs, interop/harness-c/main.c): the one failure the block causes.
+NO_PATH = "no path was ever chosen"
 
 
 def invert_negative_control(
@@ -687,13 +695,19 @@ def invert_negative_control(
     run looks like, and the harness succeeding is the block not holding, a
     real regression. Read literally, like every other flow, the two read
     backwards -- passing exactly when something is wrong. Inverted here,
-    once, rather than at every reader of a Row's `result`.
+    once, rather than at every reader of a Row's `result`. Only the failure
+    the block causes is inverted: a call that failed for any other reason
+    (never answered, no media, a callee that never came up) proved nothing,
+    and stays a failure, as lab.sh's own turn_blocked keeps it.
     """
     reason = next((line.strip() for line in lines if BLOCK_DOES_NOT_HOLD_RE.match(line)), None)
+    unproved = next((line.strip() for line in lines if BLOCK_UNPROVED_RE.match(line)), None)
     out: list[tuple[str, str, str | None]] = []
     for name, result, detail in flows:
-        if result == "fail":
+        if result == "fail" and unproved is None and NO_PATH in (detail or ""):
             out.append((name, "pass", None))
+        elif result == "fail":
+            out.append((name, "fail", unproved or detail or "the call failed for another reason"))
         else:
             out.append((name, "fail", reason or detail or "the block does not hold"))
     return out
@@ -1186,6 +1200,41 @@ def self_test() -> int:
             )
             self.assertEqual([r.result for r in rows], ["pass"])
             self.assertEqual(orphans, ["'a step added to lab.sh yesterday': FAIL  it broke"])
+
+        def test_a_negative_control_passes_only_for_want_of_a_path(self) -> None:
+            def blocked(caller: str, callee: str, after: list[str]) -> list[tuple[str, str]]:
+                rows, orphans = parse_log(
+                    log(
+                        (
+                            TURN_RELAY_SECTION,
+                            [
+                                "  without TURN: the call has to find no path",
+                                "lab: 172.18.0.6:5060 at 172.18.0.6:5060, extension callee, as labuser",
+                                f"  FAIL  full ICE through two NATs, calling — {caller}",
+                                "1 flow(s) failed",
+                                f"    callee    FAIL  full ICE through two NATs, answering — {callee}",
+                                *after,
+                            ],
+                        )
+                    ),
+                    versions,
+                    "2026-01-01",
+                )
+                self.assertEqual(orphans, [])
+                return [(r.result, r.detail) for r in rows]
+
+            no_path = "no path was ever chosen (0 sent, 0 back): the far end answered no check"
+            self.assertEqual(
+                blocked(no_path, no_path, ["  ok    no path, as the block requires: the FAIL lines above are the expected verdict"]),
+                [("pass", None)],
+            )
+            unproved = (
+                "  the call failed, but the callee never said it was for want of a path: the block proved nothing"
+            )
+            self.assertEqual(
+                blocked("the call was never answered", "the call was never answered", [unproved]),
+                [("fail", unproved.strip())],
+            )
 
         def test_every_result_in_the_recorded_run_has_a_row(self) -> None:
             text = (ROOT / "interop/fixtures/lab-run.log").read_text(encoding="utf-8")

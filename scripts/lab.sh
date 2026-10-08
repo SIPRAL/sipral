@@ -2465,7 +2465,9 @@ nat_pair_call() {
     # the callee's own patience for the call is two of them (ice_nat.rs's
     # CALLEE_PATIENCE); past that it is stuck, and only it is removed
     callee_status=$(timeout $((LAB_CALL_S * 2)) docker wait "$ICE_CALLEE_NAME" 2>/dev/null || echo 1)
-    docker logs "$ICE_CALLEE_NAME" 2>&1 | sed 's/^/    callee  /'
+    # kept for turn_blocked, which reads the callee's own verdict
+    NAT_PAIR_CALLEE_SAID=$(docker logs "$ICE_CALLEE_NAME" 2>&1)
+    [ -z "$NAT_PAIR_CALLEE_SAID" ] || printf '%s\n' "$NAT_PAIR_CALLEE_SAID" | sed 's/^/    callee  /'
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
     [ "$status" -ne "$LAB_RUN_TIMED_OUT" ] || return "$LAB_RUN_TIMED_OUT"
     [ "$status" -eq 0 ] || return 1
@@ -2687,10 +2689,17 @@ turn_forked() {
 # The call across the blocked pair with no TURN anywhere, from the caller
 # NAT_PAIR_CALLER=$1 names (empty for the Rust harness), which has to find
 # no path: a call that connects is a block that does not hold, and a caller
-# stopped for running past its time proved nothing either way. $2 is how
-# that caller is named in what is printed.
+# stopped for running past its time proved nothing either way. Nor does a
+# call that failed for any other reason -- a caller that never started, a
+# binding that was not built, a call never answered, media that never
+# started: the step passes only on the Rust callee's own verdict that it
+# answered, its media started and no path was ever chosen, the one failure
+# the block is meant to cause. Every "FAIL ... no path was ever chosen" line
+# a passing step prints is that verdict, expected. $2 is how that caller is
+# named in what is printed.
 turn_blocked() {
     local placed
+    NAT_PAIR_CALLEE_SAID=""
     NAT_PAIR_CALLER="${1:-rust}" nat_pair_call
     placed=$?
     if [ "$placed" -eq 0 ]; then
@@ -2698,7 +2707,14 @@ turn_blocked() {
             "${2:+ $2}"
         return 1
     fi
-    [ "$placed" -ne "$LAB_RUN_TIMED_OUT" ]
+    [ "$placed" -ne "$LAB_RUN_TIMED_OUT" ] || return 1
+    if ! printf '%s\n' "$NAT_PAIR_CALLEE_SAID" | found 'answering .* no path was ever chosen'; then
+        printf '  the call%s failed, but the callee never said it was for want of a path: the block proved nothing\n' \
+            "${2:+ $2}"
+        return 1
+    fi
+    printf '  ok    no path%s, as the block requires: the FAIL lines above are the expected verdict\n' \
+        "${2:+ $2}"
 }
 
 # The call across the blocked pair with both ends given TURN over UDP, from
