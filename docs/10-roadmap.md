@@ -29,7 +29,7 @@ their API promises nothing (`11-testing.md`, "Releasing").
 It does not wait for what only a third party can supply — a paid carrier
 account (phase 1), real phones and the two stores (phase 4), a public
 registry the packages are pulled from (phase 5) — nor for what each phase
-below still names as left: the adversarial review of DTLS-SRTP (phase 2), a
+below still names as left: an external review of DTLS-SRTP (phase 2), a
 device chosen per call (phase 3), and video (phase 6), which comes after 1.0
 by decision.
 
@@ -308,10 +308,11 @@ and each is cheaper before the ABI carries it than after:
   a risk rather than a virtue. **Built**, and joined to a call behind the
   `dtls` feature, which is on by default: `SrtpPolicy::DtlsOffered` and
   `DtlsRequired`, `MediaEvent::Secured`, and a stream that agreed to be
-  encrypted and sends nothing until the handshake has keyed it. Still to do:
-  the adversarial cryptography review, before it ships under the commercial
-  licence. The lab runs it against FreeSWITCH and Asterisk
-  (`docs/11-testing.md`).
+  encrypted and sends nothing until the handshake has keyed it. The project's
+  own adversarial review is done, with OpenSSL interop both ways and a fuzz
+  target that drives two connections against each other; an external review
+  is still owed (`docs/20-security-model.md`). The lab runs it against
+  FreeSWITCH and Asterisk (`docs/11-testing.md`).
 
 **Exit:**
 
