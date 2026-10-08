@@ -440,8 +440,7 @@ impl Wire {
                 if self.echo.len() > ECHO_DELAY
                     && let Some(due) = self.echo.pop_front()
                 {
-                    write_frame(FrameKind::Audio.to_u8(), &due, &mut self.to_app)
-                        .expect("an echo");
+                    write_frame(FrameKind::Audio.to_u8(), &due, &mut self.to_app).expect("an echo");
                     self.echoed += 1;
                 }
                 continue;
@@ -485,7 +484,10 @@ impl Wire {
             match message {
                 Decoded::Audio(payload) => {
                     if let Some(bridged) = self.bridged.as_mut() {
-                        let _ = bridged.session.protocol_mut().push_playback(payload.to_vec());
+                        let _ = bridged
+                            .session
+                            .protocol_mut()
+                            .push_playback(payload.to_vec());
                     }
                 }
                 Decoded::Control(ControlMessage::Hangup(asked)) => {
@@ -632,7 +634,10 @@ impl Run {
                 } => match self.wire.as_mut() {
                     Some(wire) => wire.digit(*call, *digit, *held),
                     None if *digit == Some('#') => {
-                        self.app.agent.hangup(*call, self.now).expect("the BYE goes");
+                        self.app
+                            .agent
+                            .hangup(*call, self.now)
+                            .expect("the BYE goes");
                     }
                     None => {}
                 },

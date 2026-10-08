@@ -54,7 +54,7 @@ impl core::error::Error for AdvertiseError {}
 ///
 /// A connected socket can still report the wildcard as its local address: on macOS under load,
 /// roughly one connect in 1,500 does. That answer names no interface, so the route is asked
-/// again on a fresh socket, up to [`ROUTE_ASKS`] times.
+/// again on a fresh socket, up to eight times.
 ///
 /// # Errors
 /// Whatever the operating system says when it has no route to `peer`, or
@@ -130,7 +130,9 @@ fn advertised_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{AdvertiseError, ROUTE_ASKS, advertised_address, advertised_with, route_to, settled};
+    use super::{
+        AdvertiseError, ROUTE_ASKS, advertised_address, advertised_with, route_to, settled,
+    };
     use std::io;
     use std::net::{IpAddr, SocketAddr};
 
