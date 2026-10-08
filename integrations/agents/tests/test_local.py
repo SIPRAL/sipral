@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import json
 import math
 import threading
 import unittest
@@ -23,7 +24,7 @@ from sipral_agents import (
     SystemVoice,
     local_voice,
 )
-from sipral_agents.local import RATE
+from sipral_agents.local import RATE, _pieces, _Session
 
 from .harness import AgentCallTest, rms, tone, LOUD
 
@@ -245,6 +246,181 @@ class EnergyVadTest(unittest.TestCase):
     def test_a_click_is_not_speech(self) -> None:
         vad = EnergyVad(start_ms=60)
         self.assertEqual([vad.feed(f) for f in (tone(RATE, 0.02), bytes(640)) * 5], [None] * 10)
+
+    def test_a_pause_is_reported_once_and_speech_after_it_resumes_the_turn(self) -> None:
+        vad = EnergyVad(start_ms=60, pause_ms=100, end_silence_ms=300)
+        loud, quiet = tone(RATE, 0.02), bytes(640)
+        self.assertEqual([vad.feed(loud) for _ in range(3)], [None, None, "start"])
+        self.assertEqual([vad.feed(quiet) for _ in range(7)], [None] * 4 + ["pause", None, None])
+        self.assertEqual(vad.quiet_ms, 140)
+        self.assertEqual([vad.feed(loud) for _ in range(2)], ["resume", None])
+        self.assertTrue(vad.speaking)
+        self.assertEqual([vad.feed(quiet) for _ in range(15)], [None] * 4 + ["pause"] + [None] * 9 + ["end"])
+
+    def test_without_pauses_only_the_end_is_reported(self) -> None:
+        vad = EnergyVad(start_ms=20, pause_ms=None, end_silence_ms=100)
+        self.assertEqual(vad.feed(tone(RATE, 0.02)), "start")
+        self.assertEqual([vad.feed(bytes(640)) for _ in range(5)], [None] * 4 + ["end"])
+
+
+class FirstClauseTest(unittest.TestCase):
+    def test_the_first_piece_ends_at_a_clause_of_enough_words(self) -> None:
+        self.assertEqual(
+            _pieces("My opening hours vary, but I am usually", 3),
+            (["My opening hours vary,"], "but I am usually"),
+        )
+        self.assertEqual(_pieces("To reset your password: open", 3), (["To reset your password:"], "open"))
+
+    def test_a_short_clause_waits_for_more(self) -> None:
+        self.assertEqual(_pieces("Yes, we are open", 3), ([], "Yes, we are open"))
+        self.assertEqual(
+            _pieces("Yes, we are open on Saturday, from nine", 3),
+            (["Yes, we are open on Saturday,"], "from nine"),
+        )
+
+    def test_a_comma_not_yet_followed_by_a_word_is_not_an_end(self) -> None:
+        # the next piece of the reply may still be "000 people"
+        self.assertEqual(_pieces("We seat up to 9,", 3), ([], "We seat up to 9,"))
+        self.assertEqual(_pieces("We seat up to 9,000 people", 3), ([], "We seat up to 9,000 people"))
+
+    def test_a_sentence_ends_a_piece_however_short(self) -> None:
+        self.assertEqual(_pieces("Sure. We open at nine, and close", 3), (["Sure."], "We open at nine, and close"))
+
+    def test_later_pieces_are_whole_sentences(self) -> None:
+        self.assertEqual(
+            _pieces("We open at nine, and close at five. Book", None),
+            (["We open at nine, and close at five."], "Book"),
+        )
+
+
+class Ws:
+    """Stands in for the call's WebSocket: what the server sends to it."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, message: str) -> None:
+        self.sent.append(json.loads(message))
+
+    def kinds(self) -> list[str]:
+        return [m["type"] for m in self.sent]
+
+
+class SlowThinker:
+    """Writes its reply once ``go`` is set, and notes whether its reply was
+    closed before the end."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.go = asyncio.Event()
+        self.closed_early = 0
+        self.histories: list[list[dict[str, str]]] = []
+
+    async def reply(self, history):
+        self.histories.append(list(history))
+        self.started.set()
+        finished = False
+        try:
+            await self.go.wait()
+            for piece in ["Yes", ", I am", " here."]:
+                yield piece
+            finished = True
+        finally:
+            self.closed_early += not finished
+
+
+class EarlyAnswerTest(unittest.IsolatedAsyncioTestCase):
+    """The answer started at a pause, driven frame by frame: what reaches
+    the call, and when."""
+
+    def server(self, thinker, **vad) -> tuple[LocalAgentServer, _Session, Speaker]:
+        speaker = Speaker()
+        service = LocalAgentServer(Listener(), thinker, speaker, vad=lambda: EnergyVad(**vad))
+        return service, _Session(Ws(), service.vad()), speaker
+
+    async def feed(self, service, session, seconds: float, loud: bool) -> None:
+        frame = tone(RATE, 0.02) if loud else bytes(640)
+        for _ in range(round(seconds / 0.02)):
+            await service._hear(session, frame)
+            await asyncio.sleep(0)
+
+    async def settle(self) -> None:
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    async def test_nothing_reaches_the_call_before_the_turn_ends(self) -> None:
+        thinker = SlowThinker()
+        thinker.go.set()
+        service, session, speaker = self.server(thinker, pause_ms=200, end_silence_ms=600)
+        await self.feed(service, session, 0.5, loud=True)
+        await self.feed(service, session, 0.3, loud=False)
+        await self.settle()
+        # the answer is written and spoken already ...
+        self.assertEqual(speaker.sentences, ["Yes, I am here."])
+        # ... and none of it, not even the question's words, has gone out
+        self.assertEqual(session.ws.kinds(), ["speech_started"])
+        self.assertEqual(session.history, [])
+        await self.feed(service, session, 0.3, loud=False)
+        await asyncio.wait_for(session.turn, 5)
+        self.assertEqual(
+            session.ws.kinds(), ["speech_started", "transcript", "audio", "transcript", "turn_complete"]
+        )
+        self.assertEqual(session.ws.sent[1], {"type": "transcript", "role": "user", "text": "is anyone there"})
+        self.assertEqual([m["role"] for m in session.history], ["user", "assistant"])
+
+    async def test_speech_after_the_pause_cancels_the_early_answer(self) -> None:
+        thinker = SlowThinker()
+        service, session, speaker = self.server(thinker, pause_ms=200, end_silence_ms=600)
+        await self.feed(service, session, 0.5, loud=True)
+        await self.feed(service, session, 0.25, loud=False)
+        await asyncio.wait_for(thinker.started.wait(), 5)
+        early = session.turn
+        await self.feed(service, session, 0.04, loud=True)
+        self.assertTrue(early.cancelled())
+        self.assertEqual(thinker.closed_early, 1)
+        self.assertEqual(speaker.sentences, [])
+        self.assertEqual(session.ws.kinds(), ["speech_started"])
+        # the caller goes on, then stops: one answer, to the whole of it
+        thinker.go.set()
+        await self.feed(service, session, 0.5, loud=True)
+        await self.feed(service, session, 0.7, loud=False)
+        await asyncio.wait_for(session.turn, 5)
+        self.assertEqual(session.ws.kinds().count("transcript"), 2)
+        self.assertEqual(session.ws.kinds().count("turn_complete"), 1)
+        heard = service.listener.heard
+        self.assertGreater(len(heard[-1]), len(heard[0]))
+        self.assertEqual(thinker.histories[-1], [{"role": "user", "content": "is anyone there"}])
+        self.assertEqual(session.history[0], {"role": "user", "content": "is anyone there"})
+        self.assertEqual(len(session.history), 2)
+
+    async def test_a_pause_mid_sentence_gets_no_reply_with_the_defaults(self) -> None:
+        thinker = SlowThinker()
+        thinker.go.set()
+        service, session, _ = self.server(thinker)
+        for pause in (0.3, 0.4):
+            await self.feed(service, session, 0.5, loud=True)
+            await self.feed(service, session, pause, loud=False)
+            await self.settle()
+            self.assertNotIn("audio", session.ws.kinds(), f"a reply after a pause of {pause} s")
+            self.assertNotIn("transcript", session.ws.kinds())
+        await self.feed(service, session, 0.5, loud=True)
+        await self.feed(service, session, 1.0, loud=False)
+        await asyncio.wait_for(session.turn, 5)
+        self.assertEqual(session.ws.kinds().count("turn_complete"), 1)
+        self.assertEqual([m["role"] for m in session.history], ["user", "assistant"])
+
+    async def test_without_pauses_the_answer_starts_at_the_end_of_the_turn(self) -> None:
+        thinker = SlowThinker()
+        thinker.go.set()
+        service, session, _ = self.server(thinker, pause_ms=None, end_silence_ms=300)
+        await self.feed(service, session, 0.5, loud=True)
+        await self.feed(service, session, 0.28, loud=False)
+        await self.settle()
+        self.assertEqual(service.listener.heard, [])
+        await self.feed(service, session, 0.02, loud=False)
+        await asyncio.wait_for(session.turn, 5)
+        self.assertEqual(session.ws.kinds()[-1], "turn_complete")
+        self.assertIn("audio", session.ws.kinds())
 
 
 class LocalAgentOnACall(AgentCallTest):

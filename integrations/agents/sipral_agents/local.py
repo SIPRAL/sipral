@@ -12,8 +12,8 @@ running locally:
   over its HTTP ``/inference`` endpoint (:class:`WhisperServer`).
 - **Thinking**: Ollama (MIT) and a small model, over its HTTP chat API on
   ``127.0.0.1:11434`` (:class:`Ollama`); the reply is streamed and spoken a
-  sentence at a time, so the caller hears the first sentence while the rest
-  is still being written.
+  sentence at a time, its first clause on its own, so the caller hears it
+  begin while the rest is still being written.
 - **Speaking**: Kyutai's Pocket TTS (:class:`PocketVoice`, the
   package's ``local`` extra), loaded once and kept in this process,
   its audio streamed to the call as it is synthesised; or the operating
@@ -22,9 +22,13 @@ running locally:
   :func:`local_voice` picks the first of the two that is there.
 
 The caller's turn ends after ``end_silence_ms`` of quiet, measured on the
-energy of each frame (:class:`EnergyVad`). Speech that starts while the
-agent is talking cuts the agent short: its turn is cancelled and whatever
-of it is still queued in the call is dropped.
+energy of each frame (:class:`EnergyVad`). The answer starts earlier, at
+the first ``pause_ms`` of quiet: transcribed, written and spoken while the
+caller may still go on, and held back from the call until the turn ends;
+speech that resumes cancels it unheard. The reply's first clause is spoken
+as soon as it is written. Speech that starts while the agent is talking
+cuts the agent short: its turn is cancelled and whatever of it is still
+queued in the call is dropped.
 
 :class:`LocalAgent` is the :class:`~sipral_agents.core.Provider` that joins
 a call to the server, so the pacing, barge-in and events are those of every
@@ -507,14 +511,21 @@ def local_voice(
 class EnergyVad:
     """Speech is ``start_ms`` of frames louder than ``threshold`` (RMS of
     16-bit samples); the turn ends after ``end_silence_ms`` of frames that
-    are not."""
+    are not.
+
+    ``pause_ms`` of quiet, shorter than that, is a pause: the turn may be
+    ending, and :class:`LocalAgentServer` starts on its answer then, holding
+    its audio back until the turn does end. A loud frame after a pause
+    resumes the turn. ``None`` reports no pauses."""
 
     threshold: float = 500.0
     start_ms: int = 60
     end_silence_ms: int = 700
+    pause_ms: int | None = 200
     speaking: bool = False
     _loud_ms: float = 0.0
     _quiet_ms: float = 0.0
+    _paused: bool = False
 
     @staticmethod
     def rms(pcm: bytes) -> float:
@@ -524,9 +535,15 @@ class EnergyVad:
         samples = memoryview(pcm[: count * 2]).cast("h")
         return math.sqrt(sum(s * s for s in samples) / count)
 
+    @property
+    def quiet_ms(self) -> float:
+        """How long the caller has been quiet in the current turn."""
+        return self._quiet_ms
+
     def feed(self, pcm: bytes) -> str | None:
-        """``"start"`` when speech starts, ``"end"`` when the turn ends,
-        ``None`` otherwise."""
+        """``"start"`` when speech starts, ``"pause"`` after ``pause_ms`` of
+        quiet in it, ``"resume"`` when speech comes back after a pause,
+        ``"end"`` when the turn ends, ``None`` otherwise."""
         ms = len(pcm) / 2 / RATE * 1000
         loud = self.rms(pcm) > self.threshold
         if not self.speaking:
@@ -534,19 +551,62 @@ class EnergyVad:
             if self._loud_ms >= self.start_ms:
                 self.speaking = True
                 self._quiet_ms = 0.0
+                self._paused = False
                 return "start"
             return None
-        self._quiet_ms = 0.0 if loud else self._quiet_ms + ms
+        if loud:
+            self._quiet_ms = 0.0
+            if self._paused:
+                self._paused = False
+                return "resume"
+            return None
+        self._quiet_ms += ms
         if self._quiet_ms >= self.end_silence_ms:
             self.speaking = False
             self._loud_ms = 0.0
+            self._paused = False
             return "end"
+        if self.pause_ms is not None and not self._paused and self._quiet_ms >= self.pause_ms:
+            self._paused = True
+            return "pause"
         return None
 
 
 # -- the server --------------------------------------------------------------
 
 _SENTENCE_END = re.compile(r"(?<=[.!?;:])\s+")
+_CLAUSE_END = re.compile(r"(?<=[,;:–—])\s+")
+
+
+def _pieces(text: str, first_clause_words: int | None = None) -> tuple[list[str], str]:
+    """What of ``text``, a reply as far as it is written, can be spoken
+    now, and the rest. A piece ends where a sentence does; with
+    ``first_clause_words``, for the first piece of a reply, it may also end
+    at a comma, semicolon, colon or dash after at least that many words."""
+    first: list[str] = []
+    if first_clause_words:
+        sentence = _SENTENCE_END.search(text)
+        for clause in _CLAUSE_END.finditer(text):
+            if sentence is not None and sentence.start() < clause.start():
+                break
+            if len(text[: clause.start()].split()) >= first_clause_words:
+                first.append(text[: clause.start()])
+                text = text[clause.end() :]
+                break
+    *sentences, rest = _SENTENCE_END.split(text)
+    return first + sentences, rest
+
+
+@dataclass
+class _Turn:
+    """One answer: ``ended`` is when the caller's speech ended; its audio
+    is held back until ``commit`` is set, when the caller's turn has."""
+
+    commit: asyncio.Event
+    ended: float
+    timing: dict[str, float] = field(default_factory=dict)
+    said: list[str] = field(default_factory=list)
+    announced: bool = False
 
 
 @dataclass
@@ -558,14 +618,28 @@ class _Session:
     preroll: list[bytes] = field(default_factory=list)
     turn: asyncio.Task | None = None
     turns: int = 0
+    # the answer started at a pause, until the turn ends or speech resumes
+    early: _Turn | None = None
 
 
 class LocalAgentServer:
     """The local pipeline behind a WebSocket on ``127.0.0.1``: one session
     per connection, so per call. ``greeting``, when set, is spoken as soon
-    as a call is joined. ``on_timing``, when set, is called with the
-    seconds from the end of the caller's turn to the transcript, to the
-    first piece of the reply and to the first audio of it."""
+    as a call is joined.
+
+    The answer starts when the caller pauses (``EnergyVad.pause_ms``): the
+    question is transcribed, the reply written and spoken, but none of it
+    reaches the call, and nothing of the turn is reported, until the
+    caller's turn ends (``EnergyVad.end_silence_ms``); speech that resumes
+    first cancels it. ``first_clause_words``, when set, lets the first
+    piece of a reply end at a clause with at least that many words rather
+    than at the end of its first sentence; ``None`` speaks sentences only.
+
+    ``on_timing``, when set, is called with the seconds from the end of
+    the caller's speech to the transcript (``transcript``), to the first
+    piece of the reply (``first_words``), to the first audio of it
+    (``first_audio``), to the end of the turn (``turn_end``) and to the
+    first audio sent to the call (``released``)."""
 
     def __init__(
         self,
@@ -575,6 +649,7 @@ class LocalAgentServer:
         *,
         greeting: str | None = None,
         vad: Callable[[], EnergyVad] = EnergyVad,
+        first_clause_words: int | None = 2,
         on_timing: Callable[[dict[str, float]], None] | None = None,
     ) -> None:
         self.listener = listener
@@ -582,6 +657,7 @@ class LocalAgentServer:
         self.speaker = speaker
         self.greeting = greeting
         self.vad = vad
+        self.first_clause_words = first_clause_words
         self.on_timing = on_timing
         self.server = None
         self._greeting_pcm: bytes | None = None
@@ -624,15 +700,32 @@ class LocalAgentServer:
         if change == "start":
             session.utterance = bytearray(b"".join(session.preroll)) + session.utterance
             session.preroll = []
-            if session.turn is not None and not session.turn.done():
-                session.turn.cancel()
-                await asyncio.gather(session.turn, return_exceptions=True)
+            await self._cancel(session)
             # the reply may be written already and still be playing in the call
             await session.ws.send(json.dumps({"type": "speech_started"}))
+        elif change == "pause":
+            # the turn may be ending: answer now, heard only once it has
+            session.early = _Turn(asyncio.Event(), time.monotonic() - session.vad.quiet_ms / 1000)
+            self._begin(session, self._answer(session, bytes(session.utterance), session.early))
+        elif change == "resume":
+            # it was not: nothing of that answer has reached the call
+            await self._cancel(session)
         elif change == "end":
             utterance = bytes(session.utterance)
             session.utterance = bytearray()
-            self._begin(session, self._answer(session, utterance, time.monotonic()))
+            turn, session.early = session.early, None
+            if turn is None:
+                turn = _Turn(asyncio.Event(), time.monotonic() - session.vad.quiet_ms / 1000)
+                self._begin(session, self._answer(session, utterance, turn))
+            # the words are those heard at the pause: the quiet since adds none
+            turn.timing["turn_end"] = time.monotonic() - turn.ended
+            turn.commit.set()
+
+    async def _cancel(self, session: _Session) -> None:
+        session.early = None
+        if session.turn is not None and not session.turn.done():
+            session.turn.cancel()
+            await asyncio.gather(session.turn, return_exceptions=True)
 
     def _begin(self, session: _Session, work: Awaitable[None]) -> None:
         session.turns += 1
@@ -659,71 +752,107 @@ class LocalAgentServer:
         await session.ws.send(json.dumps({"type": "transcript", "role": "agent", "text": self.greeting}))
         await session.ws.send(json.dumps({"type": "turn_complete"}))
 
-    async def _answer(self, session: _Session, utterance: bytes, ended: float) -> None:
+    async def _answer(self, session: _Session, utterance: bytes, turn: _Turn) -> None:
         ws = session.ws
-        timing: dict[str, float] = {}
-        said: list[str] = []
+        user: dict[str, str] | None = None
         try:
             text = await self.listener.transcribe(utterance)
-            timing["transcript"] = time.monotonic() - ended
+            turn.timing["transcript"] = time.monotonic() - turn.ended
             if not text:
                 return
-            await ws.send(json.dumps({"type": "transcript", "role": "user", "text": text}))
-            session.history.append({"role": "user", "content": text})
-            pending = ""
-            async for piece in self.thinker.reply(session.history):
-                timing.setdefault("first_words", time.monotonic() - ended)
-                pending += piece
-                *sentences, pending = _SENTENCE_END.split(pending)
-                for sentence in sentences:
-                    await self._say(session, sentence, said, timing, ended)
-            await self._say(session, pending, said, timing, ended)
+            user = {"role": "user", "content": text}
+            # what is spoken waits here for the end of the caller's turn
+            out: asyncio.Queue[tuple[int, str, bytes] | None] = asyncio.Queue()
+            release = asyncio.ensure_future(self._release(session, turn, user, out))
+            try:
+                await self._write(session.history + [user], turn, out)
+                out.put_nowait(None)
+                await release
+            finally:
+                if not release.done():
+                    release.cancel()
+                    await asyncio.gather(release, return_exceptions=True)
         except asyncio.CancelledError:
-            if said:
-                session.history.append({"role": "assistant", "content": " ".join(said)})
+            if turn.said:
+                session.history.append({"role": "assistant", "content": " ".join(turn.said)})
             raise
         except Exception as failed:  # noqa: BLE001 -- reported to the call, which goes on
+            # a caller who goes on speaking after a pause hears of none of it
+            await turn.commit.wait()
+            if user is not None:
+                await self._announce(session, turn, user)
             await ws.send(json.dumps({"type": "error", "message": f"{type(failed).__name__}: {failed}"}))
             return
-        if said:
-            reply = " ".join(said)
+        if turn.said:
+            reply = " ".join(turn.said)
             session.history.append({"role": "assistant", "content": reply})
             await ws.send(json.dumps({"type": "transcript", "role": "agent", "text": reply}))
         await ws.send(json.dumps({"type": "turn_complete"}))
         if self.on_timing is not None:
-            self.on_timing(timing)
+            self.on_timing(turn.timing)
 
-    async def _say(
-        self, session: _Session, sentence: str, said: list[str], timing: dict[str, float], ended: float
-    ) -> None:
-        sentence = sentence.strip()
-        if not sentence:
+    async def _announce(self, session: _Session, turn: _Turn, user: dict[str, str]) -> None:
+        if turn.announced:
             return
+        turn.announced = True
+        session.history.append(user)
+        await session.ws.send(json.dumps({"type": "transcript", "role": "user", "text": user["content"]}))
+
+    async def _release(
+        self, session: _Session, turn: _Turn, user: dict[str, str], out: asyncio.Queue[tuple[int, str, bytes] | None]
+    ) -> None:
+        await turn.commit.wait()
+        await self._announce(session, turn, user)
+        heard = -1
+        while (item := await out.get()) is not None:
+            index, text, pcm = item
+            if index != heard:
+                heard = index
+                turn.timing.setdefault("released", time.monotonic() - turn.ended)
+                # the caller is hearing it from now on
+                turn.said.append(text)
+            await self._send_audio(session, pcm)
+
+    async def _write(
+        self, history: list[dict[str, str]], turn: _Turn, out: asyncio.Queue[tuple[int, str, bytes] | None]
+    ) -> None:
+        pending = ""
+        count = 0
+        async for piece in self.thinker.reply(history):
+            turn.timing.setdefault("first_words", time.monotonic() - turn.ended)
+            pending += piece
+            pieces, pending = _pieces(pending, None if count else self.first_clause_words)
+            for text in pieces:
+                if await self._speak(text, count, turn, out):
+                    count += 1
+        await self._speak(pending, count, turn, out)
+
+    async def _speak(
+        self, text: str, index: int, turn: _Turn, out: asyncio.Queue[tuple[int, str, bytes] | None]
+    ) -> bool:
+        text = text.strip()
+        if not text:
+            return False
         stream = getattr(self.speaker, "stream", None)
         if stream is None:
-            pcm = await self.speaker.speak(sentence)
-            timing.setdefault("first_audio", time.monotonic() - ended)
-            await self._send_audio(session, pcm)
-            said.append(sentence)
-            return
+            pcm = await self.speaker.speak(text)
+            turn.timing.setdefault("first_audio", time.monotonic() - turn.ended)
+            out.put_nowait((index, text, pcm))
+            return True
         # each piece goes out as it comes, in whole frames; only the
-        # sentence's last one is padded
+        # last one of the text is padded
         pending = b""
-        heard = False
-        async with contextlib.aclosing(stream(sentence)) as pieces:
+        async with contextlib.aclosing(stream(text)) as pieces:
             async for piece in pieces:
-                if not heard:
-                    timing.setdefault("first_audio", time.monotonic() - ended)
-                    # the caller is hearing it from now on
-                    said.append(sentence)
-                    heard = True
+                turn.timing.setdefault("first_audio", time.monotonic() - turn.ended)
                 pending += piece
                 whole = len(pending) - len(pending) % _FRAME_BYTES
                 if whole:
-                    await self._send_audio(session, pending[:whole])
+                    out.put_nowait((index, text, pending[:whole]))
                     pending = pending[whole:]
         if pending:
-            await self._send_audio(session, pending)
+            out.put_nowait((index, text, pending))
+        return True
 
 
 class LocalAgent(Provider):

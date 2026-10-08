@@ -114,17 +114,18 @@ listens with whisper.cpp, thinks with a small model in Ollama and speaks
 with Kyutai's Pocket TTS (MIT code, CC BY 4.0 weights, the package's
 optional `local` extra), every step on the same machine, behind the same
 core (`LocalAgentServer`, `LocalAgent`): turn ends found on energy, the
-reply spoken a sentence at a time, the agent cut short when the caller
-talks over it. The voice model is loaded once and kept in the agent's
-process, and each sentence streams into the call in 80 ms pieces as they
+answer started at the caller's first pause and held back until the turn
+is over, the reply spoken a clause and then a sentence at a time, the
+agent cut short when the caller talks over it. The voice model is loaded
+once and kept in the agent's process, and each sentence streams into the call in 80 ms pieces as they
 are made, resampled from 24 kHz to the agent's 16 kHz; English, French,
 German, Spanish, Portuguese, Italian and Dutch, no Romanian. On a Mac
 without it the agent falls back to `say`. On an Apple M2 the caller heard
-the first sound of an answer 1.3 to 3.0 s after the end of the question,
-five calls in six under 1.4 s, against 3.4 to 5.1 s with `say` on the
-same machine the same day, and the answer stopped 0.21 s after the caller
-talked over it; the steps and figures are in the package's README, "A
-voice agent with no key, on your own machine".
+the first sound of an answer 0.62 to 0.80 s after the end of the
+question, against 1.08 to 1.61 s when the answer waited for the end of
+the turn and 3.4 to 5.1 s with `say`, and the answer stopped 0.10 s after
+the caller talked over it; the steps and figures are in the package's
+README, "A voice agent with no key, on your own machine".
 
 **A bridge from a configuration file.** `python -m sipral_agents
 bridge.toml` (or the `sipral-agents` command the package installs) runs

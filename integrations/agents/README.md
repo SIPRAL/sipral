@@ -143,7 +143,10 @@ same core as every other connector (`LocalAgent` is its `Provider`):
 - **Thinking**: Ollama (MIT) and `qwen2.5:1.5b` (Apache-2.0, 986 MB), over
   its HTTP chat API with streaming on (`Ollama`). The reply is spoken a
   sentence at a time, so the first sentence plays while the rest is still
-  being written.
+  being written; the first piece ends sooner, at the first comma, colon,
+  semicolon or dash after two words or more ("I'm sorry," or "Of course,"),
+  so the caller hears the reply begin before its first sentence is
+  written. Later pieces stay whole sentences, which the voice says better.
 - **Speaking**: Kyutai's Pocket TTS (`PocketVoice`; `pocket-tts` 3.3.0,
   code MIT, weights and voices CC BY 4.0), in the agent's own process. The
   model is loaded once, before the agent takes calls, and kept; each
@@ -166,7 +169,14 @@ same core as every other connector (`LocalAgent` is its `Provider`):
   phonemiser.
 - **The end of a turn**: 700 ms of quiet after speech, measured on the
   energy of each 20 ms frame (`EnergyVad`; threshold and timings are
-  arguments). Speech that starts while the agent talks cancels its turn and
+  arguments). The answer does not wait for it: at the first 200 ms of quiet
+  (`pause_ms`) the question is transcribed and the reply written and
+  spoken, but nothing of it reaches the call, not even the question's
+  transcript, until the 700 ms have passed; a caller who speaks again
+  before then cancels it unheard, and the answer starts over at the next
+  pause, from everything said. A pause in the middle of a sentence, which
+  in speech is often 300 to 400 ms, so costs some work and is never
+  answered. Speech that starts while the agent talks cancels its turn and
   drops what is still queued in the call.
 
 On a Mac:
@@ -196,7 +206,9 @@ It loads the two models, then prints the address to call; a softphone
 dials it, hears "Hello, how can I help?" and talks. The same `SIPRAL_*`
 variables as the demo put it on a PBX extension. `--model`, `--tts`
 (`pocket`, `say`, or `auto`, the default), `--language`, `--voice` and
-`--greeting` change the rest.
+`--greeting` change the rest; `--end-silence-ms`, `--pause-ms` (0 waits
+for the end of the turn) and `--first-clause-words` (0 speaks whole
+sentences) the timing of the answer.
 
 The voice is Kyutai's Pocket TTS, under CC BY 4.0: an agent built on
 this example that speaks to the public should credit it, for instance
@@ -222,38 +234,76 @@ question again a second into the answer and prints how soon the answer
 stopped.
 
 Measured on 8 October 2026 on an Apple M2 with 24 GB, macOS 27, both
-stacks on loopback, the machine loaded by other work (load average 9 to
-10), whisper.cpp 1.9.5 with `base.en`, Ollama with `qwen2.5:1.5b`,
-`pocket-tts` 3.3.0 with torch 2.14.1 on Python 3.12, everything already
-loaded; 6 calls for each voice, the same three questions twice, made with
+stacks on loopback, the machine shared with other work, whisper.cpp 1.9.5
+with `base.en`, Ollama 0.40.0 with `qwen2.5:1.5b`, `pocket-tts` 3.3.0
+with torch 2.14.1 on Python 3.12, everything already loaded; 6 calls for
+each column, the same three questions twice, made with
 `say -o qN.wav --data-format=LEI16@16000 "..."` ("What are your opening
 hours on Saturday?", "Can I book a table for two tonight?", "How do I
-reset my password?") and asked with `--ask`. The agent prints the first
-three rows for each answer, the asking side the fourth:
+reset my password?") and asked with `--ask`. "Before" is the agent
+answering only once the 700 ms of quiet had passed and speaking whole
+sentences (`--pause-ms 0 --first-clause-words 0`, load average 7 to 16);
+"now" is the defaults (load average 6 to 7). The agent prints the first
+five rows for each answer, from the end of the caller's speech; the
+asking side prints the sixth, from the end of the question's recording,
+which closes on 200 to 280 ms of quiet:
 
-| | `say` | Pocket TTS |
+| | Before | Now |
 |---|---|---|
-| Question transcribed, from the end of the turn | 137 to 181 ms | 122 to 155 ms |
-| First words of the reply from the model | 254 to 289 ms | 213 to 286 ms |
-| First audio of the reply ready | 2.9 to 4.3 s | 0.62 to 1.37 s (5 of 6 under 0.8 s) |
-| First sound heard by the caller, from the end of the question | 3.4 to 5.1 s | 1.29 to 3.0 s (5 of 6 under 1.41 s) |
-| The answer stopping once the caller talked over it (1 call) | 0.8 s (7 October) | 0.21 s |
+| Question transcribed | 825 to 865 ms | 320 to 342 ms |
+| First words of the reply from the model | 883 to 960 ms | 405 to 448 ms |
+| First audio of the reply ready | 1.21 to 1.58 s | 552 to 801 ms |
+| The caller's turn over (700 ms of quiet) | 700 ms | 701 to 706 ms |
+| First audio sent to the call | 1.21 to 1.58 s | 702 to 801 ms |
+| **First sound heard by the caller, from the end of the question** | **1.08 to 1.61 s** | **622 to 803 ms** |
+| The answer stopping once the caller talked over it (1 call) | 0.21 s (that morning) | 0.10 s |
 
-The caller's figure adds the 700 ms of quiet that end a turn and the
-jitter buffer to the agent's. With `say` most of the wait is `say`
-itself, a new process for every sentence that takes about two seconds
-however short the sentence is. With Pocket TTS the wait is the model
-writing its first sentence, whisper, and Pocket's first 80 ms piece; the
-one slow answer began "Of course!", a sentence too quiet at its start for
-the asking side's loudness threshold. Whisper heard every question word
-for word, and two of Pocket's answers, transcribed back from what the
-caller recorded, came out word for word ("We're open from 9 a.m. to 5
-p.m. on Saturdays."). The first question after `ollama serve` starts
-waits for the model to load (26 s on 7 October), and Pocket TTS takes
-seconds to load (22 s here the first time, weights fetched included),
-which is why the example loads both before it takes calls.
+Before, nothing started until the turn was over: the 700 ms of quiet,
+then whisper, then the model writing its whole first sentence, then
+Pocket's first 80 ms piece. Now whisper and the model work during the
+quiet, from its first 200 ms, and the first piece is the reply's first
+clause ("I'm sorry," "Of course,"), so in four answers of six the reply
+was ready before the turn was over and waited for it; in the other two
+the first clause was long ("You can usually find instructions to reset
+your password on the website..."). The same defaults gave 574 to 919 ms
+and 520 to 724 ms in two more runs of six calls the same afternoon (load
+average 6 to 10 and 5 to 15), and the
+agent as it was before this change 0.88 to 1.58 s (load average 7 to
+10). Load from other work shows: in six calls while it rose to 23 to 43
+the caller heard five answers in 0.61 to 1.92 s and one after 8.5 s,
+Pocket having taken 5.7 s for its first piece. With macOS's `say` the
+caller heard the answer 3.4 to 5.1 s after the question (the same
+morning, before this change), most of it `say` itself, a new process for
+every sentence that takes about two seconds however short the sentence
+is.
 
-`tests/test_local.py` checks the end-of-turn detector, and on a call
+The quiet that ends a turn stays 700 ms, so a pause in the middle of a
+sentence is not taken for its end: the answer that starts at the pause is
+not heard unless the quiet lasts. Four calls asking "Can I book a table
+... for two tonight?" with 350 ms and 600 ms of silence after "table"
+were each answered once, to the whole question, the answer started at
+the pause cancelled when the caller went on; whisper had written that
+first half as "Can I book a table?", question mark included, which is
+why the end of a turn is not decided on the transcript's punctuation.
+Shortening the quiet to 600 ms (`--end-silence-ms 600`) gave 576 to
+892 ms, about as fast, since most answers are not ready before 700 ms
+anyway; a smart-turn model (Pipecat's Smart Turn v3, BSD-2-Clause,
+8 MB) could tell an ending from a pause sooner, but would bring ONNX
+Runtime and a model download for no gain while the reply itself takes
+that long. Transcribing while the caller still speaks would gain nothing
+either: whisper's 120 to 140 ms now run inside the quiet. Asking the
+model for a short first sentence in its instructions did not make it
+write one. The first question after `ollama serve` starts waits for the
+model to load (26 s on 7 October), and Pocket TTS takes seconds to load
+(22 s here the first time, weights fetched included), which is why the
+example loads both before it takes calls.
+
+`tests/test_local.py` checks the end-of-turn detector and its pauses,
+where the reply's first piece ends, and, frame by frame, that an answer
+started at a pause sends nothing to the call, not even the question's
+transcript, before the turn is over, that speech after the pause cancels
+it and is answered once as a whole, and that pauses of 300 and 400 ms
+mid-sentence get no reply with the defaults; on a call
 between two stacks with stand-ins for the three programs that a question
 is transcribed, answered a sentence at a time and heard, that talking over
 the answer interrupts it and becomes the next question, and that the

@@ -48,6 +48,7 @@ from sipral.enums import AudioMode
 from sipral_agents import (
     AgentCall,
     AgentEventKind,
+    EnergyVad,
     LocalAgent,
     LocalAgentServer,
     Ollama,
@@ -114,6 +115,8 @@ async def answer(args: argparse.Namespace) -> None:
         thinker,
         voice,
         greeting=args.greeting or None,
+        vad=lambda: EnergyVad(end_silence_ms=args.end_silence_ms, pause_ms=args.pause_ms or None),
+        first_clause_words=args.first_clause_words or None,
         on_timing=print_timing,
     )
     url = await pipeline.start()
@@ -242,6 +245,25 @@ def main() -> None:
         "--voice",
         help="Pocket: a voice of its catalogue or a WAV file to clone (default: the language's own); "
         "say: a voice of `say -v '?'` (default: the system's)",
+    )
+    parser.add_argument(
+        "--end-silence-ms",
+        type=int,
+        default=EnergyVad.end_silence_ms,
+        help=f"quiet that ends the caller's turn (default {EnergyVad.end_silence_ms})",
+    )
+    parser.add_argument(
+        "--pause-ms",
+        type=int,
+        default=EnergyVad.pause_ms,
+        help=f"quiet after which the answer is started, heard only once the turn ends; 0 waits for the end "
+        f"(default {EnergyVad.pause_ms})",
+    )
+    parser.add_argument(
+        "--first-clause-words",
+        type=int,
+        default=2,
+        help="the reply's first clause is spoken once it has this many words; 0 speaks whole sentences (default 2)",
     )
     parser.add_argument("--greeting", default="Hello, how can I help?", help="said when a call is answered; empty for none")
     parser.add_argument("--ask", help="call the agent and say this WAV file instead of answering calls")
