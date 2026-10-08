@@ -70,6 +70,11 @@ pub enum CodecFamily {
     /// G.711, mu-law or A-law: one quantiser design, and G.113 Table I.4
     /// tabulates both under the one entry "G.711".
     G711,
+    /// G.711 whose lost frames are concealed by waveform extension, the
+    /// receiver repeating the last pitch period: G.107 Table 3, Note 5, "the
+    /// Bpl must match the codec, packet size and packet loss concealment
+    /// (PLC) assumed".
+    G711Concealed,
 }
 
 /// G.113 Table I.4's entry for one codec family, without packet loss: `Ie`
@@ -83,6 +88,10 @@ pub const fn codec_quality_model(family: CodecFamily) -> CodecQualityModel {
         // default, since an unconcealed G.711 stream is the model's own
         // reference case.
         CodecFamily::G711 => CodecQualityModel { ie: 0.0, bpl: 4.3 },
+        // G.113 Appendix I, G.711 with the packet loss concealment of G.711
+        // Appendix I: no impairment of its own, and Bpl = 25.1 under random
+        // loss
+        CodecFamily::G711Concealed => CodecQualityModel { ie: 0.0, bpl: 25.1 },
     }
 }
 
@@ -179,7 +188,10 @@ fn delay_impairment(one_way_delay_ms: f64) -> f64 {
 }
 
 /// `Ie,eff`, equation 7-29: the codec's own impairment folded together
-/// with what packet loss does to it.
+/// with what packet loss does to it,
+/// `Ie + (95 - Ie) * Ppl / (Ppl / BurstR + Bpl)`. Only the `Ppl` in the
+/// denominator is divided by `BurstR`, so loss in bursts weighs more than
+/// the same loss at random (`BurstR > 1`).
 fn effective_equipment_impairment(
     codec: CodecQualityModel,
     ppl_percent: f64,
@@ -188,8 +200,7 @@ fn effective_equipment_impairment(
     if ppl_percent <= 0.0 {
         return codec.ie;
     }
-    let x = ppl_percent / burst_ratio;
-    codec.ie + (95.0 - codec.ie) * (x / (x + codec.bpl))
+    codec.ie + (95.0 - codec.ie) * (ppl_percent / (ppl_percent / burst_ratio + codec.bpl))
 }
 
 /// Equation B-4: mean opinion score from a transmission rating factor.
@@ -386,9 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn burstier_loss_at_the_same_rate_is_rated_no_worse_than_random_loss() {
-        // Equation 7-29 divides Ppl by BurstR before weighing it against Bpl, so a higher burst
-        // ratio at the same loss rate can only shrink or hold x.
+    fn burstier_loss_at_the_same_rate_is_rated_worse_than_random_loss() {
+        // §7.5: BurstR > 1 is loss in bursts, and equation 7-29 divides only
+        // the denominator's Ppl by it, so the same rate in bursts costs more.
+        // 5 % at BurstR 2 on Bpl 4.3: Ie,eff = 95 * 5 / (2.5 + 4.3) = 69.85,
+        // R = 93.2 - 69.85 = 23.35
+        let model = codec_quality_model(CodecFamily::G711);
+        let ie_eff = effective_equipment_impairment(model, 5.0, 2.0);
+        assert!((ie_eff - 95.0 * 5.0 / 6.8).abs() < 1e-9, "{ie_eff}");
         let random = evaluate(EModelInputs {
             one_way_delay_ms: 0,
             packet_loss_percent: 5.0,
@@ -401,7 +417,14 @@ mod tests {
             burst_ratio: BurstRatio::new(4.0),
             codec: Some(codec_quality_model(CodecFamily::G711)),
         });
-        assert!(bursty.r_factor >= random.r_factor);
+        assert!(bursty.r_factor < random.r_factor);
+        let two = evaluate(EModelInputs {
+            one_way_delay_ms: 0,
+            packet_loss_percent: 5.0,
+            burst_ratio: BurstRatio::new(2.0),
+            codec: Some(model),
+        });
+        assert_eq!(two.r_factor, 23);
     }
 
     #[test]
@@ -409,5 +432,8 @@ mod tests {
         let model = codec_quality_model(CodecFamily::G711);
         assert!((model.ie - 0.0).abs() < f64::EPSILON);
         assert!((model.bpl - 4.3).abs() < f64::EPSILON);
+        let concealed = codec_quality_model(CodecFamily::G711Concealed);
+        assert!((concealed.ie - 0.0).abs() < f64::EPSILON);
+        assert!((concealed.bpl - 25.1).abs() < f64::EPSILON);
     }
 }

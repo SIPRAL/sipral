@@ -199,11 +199,15 @@ impl Codec {
     /// postdates the list. RFC 3611 §4.7.5 wants the sentinel rather than a guess; see
     /// `sipral_rtp::RtpSession::voip_metrics`. G.729 gets `None` too: Table I.4 rates it only with
     /// Annex B, which depends on the call, and Table I.1 gives no `Bpl` for Annex A alone.
+    ///
+    /// G.711 is rated with concealment, since this stack conceals every lost G.711 frame
+    /// (`sipral_media::plc`); G.107 Table 3, Note 5: "the Bpl must match the codec, packet size and
+    /// packet loss concealment (PLC) assumed".
     #[must_use]
     pub const fn quality_model(self) -> Option<sipral_rtp::CodecQualityModel> {
         match self {
             Self::Pcmu | Self::Pcma => Some(sipral_rtp::codec_quality_model(
-                sipral_rtp::CodecFamily::G711,
+                sipral_rtp::CodecFamily::G711Concealed,
             )),
             Self::G722 | Self::G729 | Self::L16Narrowband | Self::L16Wideband => None,
             #[cfg(feature = "opus")]
@@ -843,6 +847,26 @@ pub(crate) mod tests {
     /// See the other declaration.
     #[cfg(not(feature = "opus"))]
     pub(crate) const UNMATCHED: (&str, Codec) = ("G722", Codec::G722);
+
+    /// A lost G.711 frame is concealed (`sipral_media::plc`), so a call's own E-model takes G.113's
+    /// concealed entry. The unconcealed one rated 3.66 % random loss R 50 where 81 is the figure.
+    #[test]
+    fn g711_is_rated_as_the_concealed_g711_this_stack_plays() {
+        for codec in [Codec::Pcmu, Codec::Pcma] {
+            let model = codec.quality_model().expect("G.113 rates G.711");
+            assert!(
+                (model.bpl - 25.1).abs() < f64::EPSILON,
+                "{codec:?}: {model:?}"
+            );
+            let report = sipral_rtp::evaluate_e_model(sipral_rtp::EModelInputs {
+                one_way_delay_ms: 54,
+                packet_loss_percent: 3.66,
+                burst_ratio: sipral_rtp::BurstRatio::RANDOM,
+                codec: Some(model),
+            });
+            assert_eq!(report.r_factor, 81, "{codec:?}");
+        }
+    }
 
     /// A trap the interop harness fell into once.
     #[test]

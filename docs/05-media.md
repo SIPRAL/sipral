@@ -421,10 +421,13 @@ no under-run: `Quality::silenced` counts those, beside it, and the lost
 packet is in `Quality::lost` as well. `Quality::loss_rate` takes under-runs
 as it takes a concealed one, and `StreamStatistics::score` and
 `StreamStatistics::is_suffering`, and the C ABI's `loss_rate`, `score` and
-`suffering`, are read from it. `emodel::codec_quality_model` tabulates G.113 Table
-I.4 for the one codec family it covers (G.711); the facade
+`suffering`, are read from it. `emodel::codec_quality_model` tabulates G.113
+Appendix I for the one codec family it covers, G.711, without concealment
+(`Bpl` 4.3) and with it (`Bpl` 25.1); the facade
 (`Codec::quality_model` in `sipral`) maps this crate's own codec catalogue
-onto it, `None` for G.722 and Opus, which G.113 does not tabulate — RFC
+onto it, PCMU and PCMA to the concealed entry, since the stack conceals
+every lost G.711 frame and G.107 Table 3, Note 5, asks for the `Bpl` of the
+concealment in use, `None` for G.722 and Opus, which G.113 does not tabulate — RFC
 3611 §4.7.5's own answer for a metric this stack cannot honestly compute
 is the sentinel, not a guess, and `emodel::evaluate` returns exactly that
 when handed `None`.

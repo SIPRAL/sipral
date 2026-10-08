@@ -550,11 +550,15 @@ on the audio it received come from that higher jitter in the rating's delay
 term (twice the jitter) and from its round trip, the last RTCP exchange's
 rather than pjsua's average over the call; what its jitter buffer and loss
 concealment made of the audio is not what this table measures. The agent's
-own rating, from its RTCP XR VoIP metrics block (RFC 3611), is lower again —
-R 32 to 34, 48 to 53 and 83 to 84 over the three profiles — because the stack
-rates G.711 with the Bpl of 4.3 that G.113 gives it without concealment
-(`sipral-rtp`'s `emodel.rs`) where the uniform rating assumes concealment; it
-is printed beside the uniform one in the `cmp` lines (`own_r`, `own_mos`).
+own rating, from its RTCP XR VoIP metrics block (RFC 3611), read lower again
+in these runs — R 32 to 34, 48 to 53 and 83 to 84 over the three profiles —
+because the stack rated G.711 with the Bpl of 4.3 that G.113 gives it
+without concealment, where the stack conceals every lost frame and the
+uniform rating assumes it does. It now rates G.711 with the Bpl of 25.1 for
+G.711 with concealment (`sipral-rtp`'s `emodel.rs`, as G.107's Table 3 asks:
+the Bpl must match the concealment in use); run again on 8 October, the same
+profiles read R 70 to 72, 82 to 84 and 81 to 83. It is printed beside the
+uniform one in the `cmp` lines (`own_r`, `own_mos`).
 
 **The senders, 4 October.** The bad-link phase was run with a capture in
 each client's network namespace, the profiles' rules unchanged, beside a

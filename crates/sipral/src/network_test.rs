@@ -41,11 +41,13 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use sipral_rtp::{BurstRatio, CodecQualityModel, EModelInputs, evaluate_e_model};
+use sipral_rtp::{
+    BurstRatio, CodecFamily, CodecQualityModel, EModelInputs, codec_quality_model, evaluate_e_model,
+};
 
 /// ITU-T G.113 Appendix I, G.711 with the packet loss concealment of G.711
 /// Appendix I: no impairment of its own, and `Bpl` 25.1 under random loss.
-const G711_CONCEALED: CodecQualityModel = CodecQualityModel { ie: 0.0, bpl: 25.1 };
+const G711_CONCEALED: CodecQualityModel = codec_quality_model(CodecFamily::G711Concealed);
 
 /// The value `sipral_rtp`'s E-model writes for a figure it cannot rate.
 const UNRATED: u8 = 127;
