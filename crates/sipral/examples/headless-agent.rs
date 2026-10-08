@@ -434,6 +434,12 @@ impl Route {
         self.current = here;
         Some((from, here))
     }
+
+    /// The move to the address last reported could not be made: keep `from` as where the agent
+    /// still is, so the next check reports the move again.
+    fn stay_at(&mut self, from: IpAddr) {
+        self.current = from;
+    }
 }
 
 /// What one call's receiving side counted by its end, and the E-model rating if it got that far:
@@ -646,7 +652,7 @@ impl Agent {
 
     /// The route to the registrar moved from `from` to `to`: rebind SIP, report, repoint the
     /// account. Returns the stack's decision, or `Nothing` if binding failed and nothing was
-    /// reported.
+    /// reported; the route then stays at `from`, so the next check tries the move again.
     fn move_to(&mut self, from: IpAddr, to: IpAddr, now: Instant) -> Recovery {
         let Some(registration) = self.registration.as_ref() else {
             return Recovery::Nothing;
@@ -655,6 +661,9 @@ impl Agent {
             Ok(local) => local,
             Err(error) => {
                 eprintln!("cannot bind at {to}: {error}");
+                if let Some(route) = self.route.as_mut() {
+                    route.stay_at(from);
+                }
                 return Recovery::Nothing;
             }
         };
@@ -1633,6 +1642,20 @@ mod tests {
         assert_eq!(route.moved(later, |_| new), Some((old, new)));
         let later = later + ROUTE_CHECK;
         assert_eq!(route.moved(later, |_| new), None, "moved once, not again");
+    }
+
+    #[test]
+    fn a_move_that_could_not_be_made_is_reported_again() {
+        let now = Instant::now();
+        let old = IpAddr::from([192, 0, 2, 20]);
+        let new = IpAddr::from([198, 51, 100, 20]);
+        let mut route = Route::new("192.0.2.10:5060".parse().unwrap(), old, now);
+
+        let later = now + ROUTE_CHECK;
+        assert_eq!(route.moved(later, |_| new), Some((old, new)));
+        route.stay_at(old);
+        let later = later + ROUTE_CHECK;
+        assert_eq!(route.moved(later, |_| new), Some((old, new)), "tried again");
     }
 
     #[test]
