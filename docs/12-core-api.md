@@ -1570,7 +1570,9 @@ the pinned certificate's dates or a `PinMismatch`, in constant time
 socket bound on every interface is reached at by `peer`: the source address
 of the operating system's route toward it, with the socket's port, and
 `AdvertiseError::Loopback` rather than a loopback address advertised to a
-peer elsewhere (`sipral_advertised_address`).
+peer elsewhere (`sipral_advertised_address`). A route that answers with the
+wildcard itself, as macOS does now and then under load, is asked again, and
+never advertised.
 
 **`sipral_audio::Engine`** (device mode):
 

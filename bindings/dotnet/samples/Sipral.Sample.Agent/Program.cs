@@ -26,20 +26,14 @@
 // application audio mode, since handling frames is a voice agent's job; the
 // WPF sample lets the library drive the devices instead.
 
-using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using Sipral;
 
-// This host's address toward `address`, for the Contact and the SDP.
-// Connecting a datagram socket sends nothing; it only picks the route.
-static string RouteTo(string address)
-{
-    var (host, port) = SipralStack.ParseAddress(address);
-    using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-    probe.Connect(IPAddress.Parse(host), port);
-    return ((IPEndPoint)probe.LocalEndPoint!).Address.ToString();
-}
+// This host's address toward `address`, for the Contact and the SDP. The
+// library's route lookup sends nothing; it only picks the route, and asks
+// again when the system answers with the wildcard.
+static string RouteTo(string address) =>
+    SipralStack.ParseAddress(SipralStack.AdvertisedAddress("0.0.0.0:0", address)).Host;
 
 // The one function a real agent replaces. Default: an echo.
 static short[] Respond(short[] pcm) => pcm;

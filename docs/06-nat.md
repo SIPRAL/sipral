@@ -198,7 +198,8 @@ hears why — `UaError::UnreachableAddress` in Rust,
 its own. **A socket bound on every interface advertises the route's
 address** toward the peer, the one the operating system would send from:
 `sipral::advertised_address(bound, peer)`, `sipral_advertised_address` in C,
-which asks the system for the route and sends nothing. The idiomatic layers build on it: a
+which asks the system for the route and sends nothing (and asks again when the
+answer is the wildcard itself, which macOS gives now and then under load). The idiomatic layers build on it: a
 stack given no bind address listens on every interface and advertises the
 route toward its first account's server, each later account the route
 toward its own, and each call's media socket the route toward its far end,

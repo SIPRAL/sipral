@@ -479,12 +479,5 @@ pub(crate) fn place(
 /// The local address a datagram to `remote` would leave from, for `Contact`. A wildcard bind would
 /// advertise `0.0.0.0`, and a registrar sending calls there sends them nowhere.
 pub(crate) fn route_to(remote: SocketAddr) -> std::net::IpAddr {
-    UdpSocket::bind("0.0.0.0:0")
-        .and_then(|socket| {
-            socket.connect(remote)?;
-            socket.local_addr()
-        })
-        .map_or(std::net::IpAddr::from([127, 0, 0, 1]), |address| {
-            address.ip()
-        })
+    sipral::route_to(remote).unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]))
 }

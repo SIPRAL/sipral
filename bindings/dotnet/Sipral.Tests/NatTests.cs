@@ -658,18 +658,32 @@ public sealed class NatTests
 
     /// <summary>This host's address on its default route, or
     /// <see langword="null"/>. ICE excludes loopback candidates (RFC 8445
-    /// §5.1.1.1), so even two local stacks need a real address.</summary>
+    /// §5.1.1.1), so even two local stacks need a real address.
+    ///
+    /// A connected socket's local address is the route's, but on macOS
+    /// under load about one connect in a thousand reports 0.0.0.0 instead
+    /// (the library's own route lookup asks again for the same reason): a
+    /// stack bound there offers ICE nothing usable and the call is refused.
+    /// That answer is no answer, and the route is asked again.</summary>
     internal static string? RoutableAddress()
     {
-        try
+        for (var attempt = 0; attempt < 20; attempt++)
         {
-            using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            probe.Connect("203.0.113.1", 80); // RFC 5737 TEST-NET-3: never dialled
-            return ((IPEndPoint)probe.LocalEndPoint!).Address.ToString();
+            try
+            {
+                using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                probe.Connect("203.0.113.1", 80); // RFC 5737 TEST-NET-3: never dialled
+                var local = ((IPEndPoint)probe.LocalEndPoint!).Address;
+                if (!local.Equals(IPAddress.Any))
+                {
+                    return local.ToString();
+                }
+            }
+            catch (SocketException)
+            {
+                return null;
+            }
         }
-        catch (SocketException)
-        {
-            return null;
-        }
+        return null;
     }
 }

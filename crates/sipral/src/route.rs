@@ -52,17 +52,41 @@ impl core::error::Error for AdvertiseError {}
 /// The local address the operating system sends from toward `peer`, found
 /// without sending anything.
 ///
+/// A connected socket can still report the wildcard as its local address: on macOS under load,
+/// roughly one connect in 1,500 does. That answer names no interface, so the route is asked
+/// again on a fresh socket, up to [`ROUTE_ASKS`] times.
+///
 /// # Errors
 /// Whatever the operating system says when it has no route to `peer`, or
-/// cannot open a datagram socket of `peer`'s family.
+/// cannot open a datagram socket of `peer`'s family; [`io::ErrorKind::AddrNotAvailable`] when
+/// every answer was the wildcard.
 pub fn route_to(peer: SocketAddr) -> io::Result<IpAddr> {
     let wildcard: IpAddr = match peer {
         SocketAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
         SocketAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     };
-    let socket = UdpSocket::bind(SocketAddr::new(wildcard, 0))?;
-    socket.connect(peer)?;
-    Ok(socket.local_addr()?.ip())
+    settled(|| {
+        let socket = UdpSocket::bind(SocketAddr::new(wildcard, 0))?;
+        socket.connect(peer)?;
+        Ok(socket.local_addr()?.ip())
+    })
+}
+
+/// How many times [`route_to`] asks before giving up on a wildcard answer.
+const ROUTE_ASKS: usize = 8;
+
+/// The first answer from `ask` that names an address; an error from `ask` ends the asking.
+fn settled(mut ask: impl FnMut() -> io::Result<IpAddr>) -> io::Result<IpAddr> {
+    for _ in 0..ROUTE_ASKS {
+        let local = ask()?;
+        if !local.to_canonical().is_unspecified() {
+            return Ok(local);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "the route's source address stayed unspecified",
+    ))
 }
 
 /// The address to advertise in `Contact` or `c=` for a socket bound at `bound` talking to `peer`.
@@ -106,7 +130,7 @@ fn advertised_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{AdvertiseError, advertised_address, advertised_with, route_to};
+    use super::{AdvertiseError, ROUTE_ASKS, advertised_address, advertised_with, route_to, settled};
     use std::io;
     use std::net::{IpAddr, SocketAddr};
 
@@ -140,6 +164,42 @@ mod tests {
             advertised_address(at("0.0.0.0:5060"), listener.local_addr().unwrap()),
             Ok(at("127.0.0.1:5060"))
         );
+    }
+
+    /// Seen on macOS under load: a connected socket reporting `0.0.0.0` as its local address. It
+    /// was advertised as is, in `Contact` and `c=`, and an ICE agent refused it as a host.
+    #[test]
+    fn a_wildcard_answer_from_the_route_is_asked_again() {
+        let mut answers = vec![ip("0.0.0.0"), ip("::"), ip("198.51.100.23")].into_iter();
+        let mut asked = 0;
+        let settled_on = settled(|| {
+            asked += 1;
+            Ok(answers.next().unwrap())
+        });
+        assert_eq!(settled_on.unwrap(), ip("198.51.100.23"));
+        assert_eq!(asked, 3);
+
+        let mut asked = 0;
+        let never = settled(|| {
+            asked += 1;
+            Ok(ip("::ffff:0.0.0.0"))
+        });
+        assert_eq!(
+            never.map_err(|error| error.kind()),
+            Err(io::ErrorKind::AddrNotAvailable)
+        );
+        assert_eq!(asked, ROUTE_ASKS);
+
+        let mut asked = 0;
+        let refused = settled(|| {
+            asked += 1;
+            Err(io::ErrorKind::NetworkUnreachable.into())
+        });
+        assert_eq!(
+            refused.map_err(|error| error.kind()),
+            Err(io::ErrorKind::NetworkUnreachable)
+        );
+        assert_eq!(asked, 1, "no route is an answer, not a wildcard");
     }
 
     #[test]

@@ -309,16 +309,10 @@ public partial class MainWindow : Window
         }
     }
 
-    // Connecting a datagram socket sends nothing; it only picks the route.
-    private static string RouteTo(string address)
-    {
-        var (host, port) = SipralStack.ParseAddress(address);
-        using var probe = new System.Net.Sockets.Socket(
-            System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram,
-            System.Net.Sockets.ProtocolType.Udp);
-        probe.Connect(System.Net.IPAddress.Parse(host), port);
-        return ((System.Net.IPEndPoint)probe.LocalEndPoint!).Address.ToString();
-    }
+    // The library's route lookup sends nothing; it only picks the route, and
+    // asks again when the system answers with the wildcard.
+    private static string RouteTo(string address) =>
+        SipralStack.ParseAddress(SipralStack.AdvertisedAddress("0.0.0.0:0", address)).Host;
 
     protected override void OnClosed(EventArgs e)
     {
