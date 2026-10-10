@@ -293,6 +293,18 @@
 #                               no container of the lab's, only Docker for
 #                               the one it runs the layer in, and takes no
 #                               lab lock, having nothing of the lab's to race
+#   scripts/lab.sh vicidial-live
+#                               a ViciBox 12 (VICIdial, Asterisk 18) on the
+#                               LAN, by hand only like vitalpbx-live: the
+#                               same two-extension calls, then an agent's
+#                               session -- the login rings 101 into its
+#                               conference, 102 dials that conference, tones
+#                               both ways and a digit through it, 102 leaves,
+#                               the agent is logged out and the dialer ends
+#                               101's call (interop/live/vicidial.py).
+#                               VICIDIAL_LIVE_ENV names the account file;
+#                               without it the step says it did not run and
+#                               exits 2. No lab lock, as above
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -363,11 +375,11 @@ ROOT="$PWD"
 # SIPRAL_LAB_LOCK_HELD=1 is for: set once the lock is taken, inherited by any
 # child this process starts, and checked here so a nested run skips locking
 # instead of deadlocking against its own parent.
-# `vitalpbx-live` alone takes no lock: it starts no Compose service and
+# `vitalpbx-live` and `vicidial-live` take no lock: they start no Compose service and
 # reaches no container of the lab's, so it has nothing to race, and an hour
 # of somebody else's run holding the lock is no reason for it to wait.
 LAB_LOCK_WANTED=1
-case " $* " in *" vitalpbx-live "*) LAB_LOCK_WANTED=0 ;; esac
+case " $* " in *" vitalpbx-live "* | *" vicidial-live "*) LAB_LOCK_WANTED=0 ;; esac
 if [ -z "${SIPRAL_LAB_LOCK_HELD:-}" ] && [ "$LAB_LOCK_WANTED" -eq 1 ]; then
     LOCK="/var/lock/sipral-lab.lock"
     [ -e "$LOCK" ] || LOCK="$ROOT/.sipral-lab.lock"
@@ -584,9 +596,9 @@ if [ "$WANT" = pipewire ]; then
 elif [ "$WANT" = compare ]; then
     HARNESS=""
     printf '  note  not used by the comparison, which runs the headless agent\n'
-elif [ "$WANT" = vitalpbx-live ]; then
+elif [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ]; then
     HARNESS=""
-    printf '  note  not used by the live VitalPBX step, which runs the Python layer\n'
+    printf '  note  not used by the %s step, which runs the Python layer\n' "$WANT"
 elif [ "$WANT" = bridge ]; then
     HARNESS=""
     printf '  note  not used by the bridge step, which runs its own example\n'
@@ -648,7 +660,7 @@ fi
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
 if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ] \
-    || [ "$WANT" = vitalpbx-live ]; then
+    || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
     printf '  note  not used by the %s step\n' "$WANT"
@@ -685,7 +697,8 @@ if [ -n "${SIPRAL_SWIFT_AGENT:-}" ]; then
 elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
-elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ]; then
+elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ] \
+    || [ "$WANT" = vicidial-live ]; then
     SWIFT_AGENT=""
     printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -757,24 +770,29 @@ if [ "$WANT" = bridge ]; then
     fi
 fi
 
-# A live VitalPBX, not one of the lab's own servers: two extensions of a
-# test tenant on a server that carries other people's calls, reached over
-# the internet. interop/live/vitalpbx.py places the two calls and judges
-# each scenario itself; this only runs it and turns its "result" lines into
-# this script's own. The account file is mounted rather than passed in the
-# environment, so no secret is in an argument list or in `docker inspect`,
-# and the script masks the secrets and the host in everything it prints.
-# Host networking, so the two stacks are one NAT away from the PBX rather
-# than two, and a direct-media re-INVITE between them reaches the other's
-# own socket on this machine.
-vitalpbx_live() {
-    local beside log status line
+# A live PBX, not one of the lab's own servers: a VitalPBX test tenant on a
+# server that carries other people's calls, reached over the internet, or a
+# ViciBox on the LAN. The scripts in interop/live place the calls and judge
+# each scenario themselves; this only runs them, one after the other in one
+# container, and turns their "result" lines into this script's own. The
+# account file is mounted rather than passed in the environment, so no
+# secret is in an argument list or in `docker inspect`, and the scripts mask
+# the secrets and the host in everything they print. Host networking, so the
+# two stacks are one NAT away from the PBX rather than two, and a
+# direct-media re-INVITE between them reaches the other's own socket on this
+# machine. A script's status 3 means it could not run at all, and wins over
+# a failure, since nothing was judged.
+live_pbx() {
+    local name=$1 file=$2 seconds=$3 beside log status line
+    shift 3
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    log=$(lab_run "the live VitalPBX step" $((LAB_START_APT_S + 2 * LAB_CALL_S)) \
+    # one account file, under the name each script reads it by: the
+    # ViciBox step runs vitalpbx.py's two-extension calls on it too
+    log=$(lab_run "$name" "$seconds" \
         --network host \
         -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
-        -e VITALPBX_LIVE_ENV=/live.env \
-        -v "$VITALPBX_LIVE_ENV:/live.env:ro" \
+        -e VITALPBX_LIVE_ENV=/live.env -e VICIDIAL_LIVE_ENV=/live.env \
+        -v "$file:/live.env:ro" \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/bindings/python:/python:ro" \
         -v "$ROOT/interop/live:/live:ro" \
@@ -782,7 +800,15 @@ vitalpbx_live() {
             export DEBIAN_FRONTEND=noninteractive
             apt-get -qq update >/dev/null 2>&1
             apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
-            exec python3 -u /live/vitalpbx.py' 2>&1)
+            worst=0
+            for script in "$@"; do
+                python3 -u "/live/$script"
+                status=$?
+                if [ "$status" -eq 3 ] || [ "$worst" -eq 3 ]; then worst=3
+                elif [ "$status" -ne 0 ]; then worst=1
+                fi
+            done
+            exit "$worst"' live "$@" 2>&1)
     status=$?
     printf '%s\n' "$log" | sed 's/^/    /'
     while IFS= read -r line; do
@@ -796,34 +822,49 @@ EOF
     return "$status"
 }
 
-if [ "$WANT" = vitalpbx-live ]; then
-    step "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet"
-    if [ -z "${VITALPBX_LIVE_ENV:-}" ]; then
-        printf '  note  VITALPBX_LIVE_ENV is not set, so there is no account to use\n'
-        printf '\nthe live VitalPBX step did not run\n'
+# The step around live_pbx: the account file checked, the scripts run, the
+# verdict said, and the whole script ended, as every single-step run is.
+live_pbx_step() {
+    local name=$1 variable=$2 seconds=$3 file status
+    shift 3
+    file=$(printenv "$variable" || true)
+    if [ -z "$file" ]; then
+        printf '  note  %s is not set, so there is no account to use\n' "$variable"
+        printf '\n%s step did not run\n' "$name"
         exit 2
     fi
-    if [ ! -r "$VITALPBX_LIVE_ENV" ]; then
-        printf '  note  VITALPBX_LIVE_ENV names no file this user can read\n'
-        printf '\nthe live VitalPBX step did not run\n'
+    if [ ! -r "$file" ]; then
+        printf '  note  %s names no file this user can read\n' "$variable"
+        printf '\n%s step did not run\n' "$name"
         exit 2
     fi
     if [ -z "$HARNESS_C" ]; then
         printf '  note  no libsipral_ffi for the Python layer to load\n'
-        printf '\nthe live VitalPBX step did not run\n'
+        printf '\n%s step did not run\n' "$name"
         exit 2
     fi
-    vitalpbx_live
+    live_pbx "$name step" "$file" "$seconds" "$@"
     status=$?
     case "$status" in
         0) ;;
-        3) printf '\nthe live VitalPBX step did not run\n'; exit 2 ;;
+        3) printf '\n%s step did not run\n' "$name"; exit 2 ;;
         *) [ "$FAIL" -eq 1 ] \
-               || fail "the live VitalPBX step ended with status $status before judging anything" ;;
+               || fail "$name step ended with status $status before judging anything" ;;
     esac
     printf '\n'
-    [ "$FAIL" -eq 0 ] && { printf 'the live VitalPBX agrees\n'; exit 0; }
-    printf 'the live VitalPBX does not agree\n'; exit 1
+    [ "$FAIL" -eq 0 ] && { printf '%s agrees\n' "$name"; exit 0; }
+    printf '%s does not agree\n' "$name"; exit 1
+}
+
+if [ "$WANT" = vitalpbx-live ]; then
+    step "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet"
+    live_pbx_step "the live VitalPBX" VITALPBX_LIVE_ENV $((LAB_START_APT_S + 2 * LAB_CALL_S)) vitalpbx.py
+fi
+
+if [ "$WANT" = vicidial-live ]; then
+    step "a ViciBox 12 -- two extensions, then an agent's session"
+    live_pbx_step "the ViciBox" VICIDIAL_LIVE_ENV $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
+        vitalpbx.py vicidial.py
 fi
 
 step "the lab"

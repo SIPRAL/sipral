@@ -198,13 +198,32 @@ LAYER_SECTIONS = {
     "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet": (
         "vitalpbx_live",
         (
-            "both extensions registered at a live VitalPBX",
+            "both extensions registered at the live PBX",
             "a call between two extensions, answered, audio both ways",
             "the media moved straight between the two stacks by the PBX's re-INVITE",
             "an RFC 4733 digit carried end to end",
             "held and resumed by the caller",
             "a call ended by the caller",
             "a call ended by the callee",
+        ),
+    ),
+    # `scripts/lab.sh vicidial-live`, by hand only for the same reason: the
+    # same two-extension calls, then the agent's session
+    "a ViciBox 12 -- two extensions, then an agent's session": (
+        "vicibox_live",
+        (
+            "both extensions registered at the live PBX",
+            "a call between two extensions, answered, audio both ways",
+            "the media moved straight between the two stacks by the PBX's re-INVITE",
+            "an RFC 4733 digit carried end to end",
+            "held and resumed by the caller",
+            "a call ended by the caller",
+            "a call ended by the callee",
+            "the agent's login rang the phone into its session, answered",
+            "a caller joined to the agent's session, audio both ways",
+            "a caller's digit passed through the session to the agent",
+            "the caller left and the agent's session stayed up",
+            "the agent's logout ended the session call from the dialer's side",
         ),
     ),
     "DTLS-SRTP against OpenSSL -- the harness as client and as server, no SIP": (
@@ -292,6 +311,7 @@ PEER_LABELS = {
     "fusionpbx": "FusionPBX → FreeSWITCH",
     "openssl_dtls": "OpenSSL (DTLS-SRTP alone, no SIP)",
     "vitalpbx_live": "VitalPBX, live (a test tenant, over the internet)",
+    "vicibox_live": "ViciBox (VICIdial), on the LAN",
 }
 
 # Every peer worth an eventual row that this lab cannot reach yet, because
@@ -838,6 +858,10 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # pins it, and the release it ran when the step was written is all
         # this can say
         return "4.5 (Asterisk 20)"
+    if peer_key == "vicibox_live":
+        # a machine of its own, installed once by ViciBox's express
+        # installer: the release it was installed from
+        return "12 (Asterisk 18.26)"
     if peer_key == "robust_listener":
         # interop/robust/listener.py, a few lines of Python in the lab: no
         # release of anybody's to pin.

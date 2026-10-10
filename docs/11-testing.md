@@ -1098,7 +1098,8 @@ callee hangs up; both are unregistered at the end. A refused REGISTER ends
 the run with nothing retried. The host and the two accounts come only from
 the file `VITALPBX_LIVE_ENV` names, whose keys share one prefix
 (`<PREFIX>_HOST`, `<PREFIX>_101_USER`, `<PREFIX>_101_SECRET` and the same for
-102); without it the step says it did not run and exits 2, and everything the
+102, and an optional `<PREFIX>_CODEC`, `PCMA` when left out or `PCMU`);
+without it the step says it did not run and exits 2, and everything the
 script prints passes through a filter that masks the secrets and the host.
 On 8 October 2026 registration, the caller's audio, the two BYEs and the
 unregistration passed, and the PBX sent no direct-media re-INVITE: it bridged
@@ -1112,6 +1113,50 @@ of the tones failed with it. With a second source followed once it has sent
 three packets in a row from the latched address (`docs/05-media.md`), the run
 after it passed every scenario: the callee of the second call took 146 of
 150 datagrams from the two sources, and heard the tone in 143 frames of 150.
+
+### VICIdial: an agent's phone
+
+A call centre's dialer uses a phone differently from a PBX. The agent logs in
+on a web page with a phone and a campaign, and the dialer then calls that
+phone and keeps it in a conference of its own for the whole shift: every call
+the agent takes is joined to that conference, and the phone answers the
+dialer's call without anyone choosing to. `scripts/lab.sh vicidial-live`,
+by hand only like the VitalPBX step, runs this against a ViciBox 12 (VICIdial
+SVN 3898, Asterisk 18.26 with `chan_sip`, MeetMe conferences, `ulaw` only),
+installed by its own express installer on a machine of its own on the lab's
+LAN. It runs `interop/live/vitalpbx.py`'s two-extension calls first, on
+`PCMU`, then `interop/live/vicidial.py`, with 101 as the agent's phone:
+
+- the agent logs in through the agent page's form, and the dialer's call to
+  101 has to arrive and be answered;
+- 102 dials the conference the dialer gave the agent, read from VICIdial's
+  own `agent_status` API, and each end listens for the other's tone through
+  it, both ways, from the moment both are heard -- the conference answers at
+  once but plays its announcements first, about three seconds in which the
+  agent hears prompts and the caller silence;
+- 102 sends an RFC 4733 digit, which the conference passes on to 101;
+- 102 hangs up, and 101's session has to stay up;
+- the agent is logged out from the administration page (its emergency
+  logout), and the dialer has to end 101's call itself.
+
+The account file, named by `VICIDIAL_LIVE_ENV`, carries the keys above and
+five more: `<PREFIX>_AGENT_USER` and `<PREFIX>_AGENT_PASS`, the agent;
+`<PREFIX>_CAMPAIGN`, a manual-dial campaign that lets an agent log in with no
+leads (`no_hopper_leads_logins`); `<PREFIX>_ADMIN_USER` and
+`<PREFIX>_ADMIN_PASS`, a user of level 7 or more allowed to view reports and
+modify users. Phone 101's login password on the agent page is its SIP
+secret. Every request is a form post, so no secret is in a URL, and the agent
+is logged out whatever failed before.
+
+On 11 October 2026, from the lab machine on the same LAN, every scenario
+passed: the agent's session in four runs of four once the listening window
+waited for both ends to be joined (opened a second after the answer, it
+caught the announcements and failed on the tones), the two-extension calls
+in two of two. The two-extension calls heard the tones in 138 to 144 frames
+of 150, the dialer's call to 101 was answered on PCMU, the
+caller was joined 3.3 s after the conference answered and each end then
+heard the other in 150 frames of 150, the digit reached 101 as an RFC 4733
+event, and the logout ended 101's call with a BYE from the dialer.
 
 ### Who is calling, where the call was sent, and the second server
 

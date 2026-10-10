@@ -3,7 +3,8 @@
 
 """Two extensions of a test tenant on a live VitalPBX 4.5 (Asterisk 20):
 `scripts/lab.sh vitalpbx-live` runs this, by hand only, never as part of a
-run that names nothing.
+run that names nothing. Nothing in it is particular to VitalPBX, and the
+same file reaches the two phones of a ViciBox (`interop/live/vicidial.py`).
 
 Two Python ``Stack`` objects in one process, one per extension, each on a
 socket of its own, so the PBX sees two phones. Two calls, each short:
@@ -26,8 +27,11 @@ The account details come from one file only, whose path is
 whatever it is: ``<PREFIX>_HOST``, ``<PREFIX>_101_USER``,
 ``<PREFIX>_101_SECRET``, ``<PREFIX>_102_USER`` and ``<PREFIX>_102_SECRET``.
 The host is the SIP domain and the registrar, on UDP 5060; each user is
-also its own authentication user name. Nothing dialled is anything but the
-two extension numbers, 101 and 102.
+also its own authentication user name. An optional ``<PREFIX>_CODEC``,
+``PCMA`` or ``PCMU``, is the one codec both ends offer and accept; it is
+``PCMA`` when left out, and a server that takes only the other (a ViciBox
+install allows ``ulaw`` alone) is reached by naming it. Nothing dialled is
+anything but the two extension numbers, 101 and 102.
 
 Everything this process writes passes through a filter that replaces the
 two secrets, the host name and its addresses with placeholders, whatever
@@ -168,8 +172,11 @@ def read_env(path: str) -> dict[str, str]:
     return values
 
 
-def account_details(values: dict[str, str]) -> tuple[str, dict[str, tuple[str, str]]] | str:
-    """The host and each extension's (user, secret), or why not."""
+CODECS = ("PCMA", "PCMU")
+
+
+def account_details(values: dict[str, str]) -> tuple[str, dict[str, tuple[str, str]], str] | str:
+    """The host, each extension's (user, secret) and the codec, or why not."""
     hosts = [key for key in values if key.endswith("_HOST")]
     if len(hosts) != 1:
         return f"the file names {len(hosts)} keys ending in _HOST, not one"
@@ -184,7 +191,10 @@ def account_details(values: dict[str, str]) -> tuple[str, dict[str, tuple[str, s
         if not user or not secret:
             return f"extension {extension}'s user or secret is missing"
         extensions[extension] = (user, secret)
-    return host, extensions
+    codec = values.get(f"{prefix}_CODEC", "") or CODECS[0]
+    if codec not in CODECS:
+        return f"the codec is {codec}, not one of {', '.join(CODECS)}"
+    return host, extensions, codec
 
 
 def route_to(address: tuple[str, int]) -> str:
@@ -321,8 +331,9 @@ async def carry(leg: Leg) -> None:
 class Run:
     """The two stacks, their events in one queue, and the results."""
 
-    def __init__(self, host: str, address: tuple[str, int], extensions) -> None:
+    def __init__(self, host: str, address: tuple[str, int], extensions, codec: str) -> None:
         self.host = host
+        self.codec = codec
         self.address = address
         self.extensions = extensions
         self.stacks: dict[str, object] = {}
@@ -357,7 +368,7 @@ class Run:
                 loop=loop,
                 bind_host=bind_host,
                 audio=AudioMode.APPLICATION,
-                codecs="PCMA",
+                codecs=self.codec,
             )
             self.stacks[extension] = stack
             self.accounts[extension] = stack.add_account(
@@ -415,7 +426,7 @@ class Run:
         if kind == EventKind.INCOMING_CALL:
             stack = self.stacks[extension]
             other = "102" if extension == "101" else "101"
-            call = stack.answer_call(event, codecs="PCMA")
+            call = stack.answer_call(event, codecs=self.codec)
             leg = Leg(extension, call, other)
             leg.far = media_endpoint(fields.get("remote_sdp"))
             self.legs[(extension, call.handle)] = leg
@@ -483,16 +494,16 @@ class Run:
         )
         both = all(self.registration.get(e) == "registered" for e in ("101", "102"))
         if both:
-            self.result(True, "both extensions registered at a live VitalPBX", "digest answered, 200 for each")
+            self.result(True, "both extensions registered at the live PBX", "digest answered, 200 for each")
         else:
             said = ", ".join(f"{e} {self.registration.get(e, 'no answer')}" for e in ("101", "102"))
-            self.result(False, "both extensions registered at a live VitalPBX", said)
+            self.result(False, "both extensions registered at the live PBX", said)
         return both
 
     def place(self, caller: str, callee: str) -> Leg:
         stack = self.stacks[caller]
         # only ever the other extension of the two
-        call = stack.place_call(self.accounts[caller], f"sip:{callee}@{self.host}", codecs="PCMA")
+        call = stack.place_call(self.accounts[caller], f"sip:{callee}@{self.host}", codecs=self.codec)
         leg = Leg(caller, call, callee)
         leg.placed = True
         self.legs[(caller, call.handle)] = leg
@@ -672,7 +683,7 @@ async def main() -> int:
     if isinstance(details, str):
         say(f"not run: {details}")
         return NOT_RUN
-    host, extensions = details
+    host, extensions, codec = details
 
     replacements = [(host, "<pbx>")]
     replacements += [(secret, "<secret>") for _, secret in extensions.values()]
@@ -688,7 +699,7 @@ async def main() -> int:
     sys.stdout = Redacting(sys.__stdout__, replacements)
     sys.stderr = Redacting(sys.__stderr__, replacements)
 
-    run = Run(host, (addresses[0], 5060), extensions)
+    run = Run(host, (addresses[0], 5060), extensions, codec)
     try:
         run.start()
         if await run.register():

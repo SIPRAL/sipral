@@ -36,13 +36,13 @@
 name = "Registration and refresh"
 implemented = true
 unit_tested = true
-flows = ["register", "both extensions registered at a live VitalPBX"]
+flows = ["register", "both extensions registered at the live PBX"]
 
 [[feature]]
 name = "Call setup and teardown"
 implemented = true
 unit_tested = true
-flows = ["call", "a call to FusionPBX's own echo", "a call between two extensions, answered, audio both ways", "a call ended by the caller", "a call ended by the callee"]
+flows = ["call", "a call to FusionPBX's own echo", "a call between two extensions, answered, audio both ways", "a call ended by the caller", "a call ended by the callee", "a caller joined to the agent's session, audio both ways"]
 
 [[feature]]
 name = "Hold and resume"
@@ -72,7 +72,7 @@ flows = ["a REFER from outside any call, referraloff", "a REFER from outside any
 name = "DTMF, RFC 4733"
 implemented = true
 unit_tested = true
-flows = ["DTMF, RFC 4733", "an RFC 4733 digit carried end to end"]
+flows = ["DTMF, RFC 4733", "an RFC 4733 digit carried end to end", "a caller's digit passed through the session to the agent"]
 
 [[feature]]
 name = "DTMF, SIP INFO"
