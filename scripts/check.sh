@@ -93,8 +93,10 @@ areas:
 --changed reads `git diff` against BASE (default: the merge base with
 origin/main) and the untracked files, picks the areas those paths reach and
 prints why; hygiene always runs. Areas run in parallel, at most
-SIPRAL_CHECK_JOBS at once (default: the number of CPUs), and each one's
-output is kept in target/check/AREA.log.
+SIPRAL_CHECK_JOBS at once (default: the number of CPUs), except swift,
+kotlin, python and agents, whose tests wait on real time: those run one at
+a time once the rest are done. Each area's output is kept in
+target/check/AREA.log.
 EOF
 }
 
@@ -3190,6 +3192,18 @@ waits_for() {
     esac
 }
 
+# The areas whose tests wait on real time -- a call's media, a timer, a
+# deadline against the wall clock -- and miss it when every CPU is busy:
+# in the complete gate of 9 October 2026 on the 8-core Mac all four failed
+# beside the others and passed alone. They run alone, once every other area has finished, and
+# nothing starts beside them.
+alone() {
+    case "$1" in
+        swift|kotlin|python|agents) return 0 ;;
+    esac
+    return 1
+}
+
 # How many lines of one kind (ok, skip, FAIL) an area printed.
 counted() {
     if [ -f "$CHECK_DIR/$2.log" ]; then grep -c "^  $1 " "$CHECK_DIR/$2.log" || true; else echo 0; fi
@@ -3253,6 +3267,15 @@ else
             for d in $(waits_for "$a"); do
                 case " $pending $busy " in *" $d "*) blocked=1 ;; esac
             done
+            for e in $running; do
+                alone "${e%%:*}" && blocked=1
+            done
+            if alone "$a"; then
+                [ -n "$running" ] && blocked=1
+                for o in $pending; do
+                    alone "$o" || blocked=1
+                done
+            fi
             if [ "$blocked" -eq 0 ] && [ "$(printf '%s\n' $running | grep -c .)" -lt "$JOBS" ]; then
                 date +%s >"$CHECK_DIR/$a.started"
                 ( run_area "$a" ) >"$CHECK_DIR/$a.log" 2>&1 &

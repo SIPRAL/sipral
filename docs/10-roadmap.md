@@ -63,9 +63,9 @@ October 2026, released.
 - Outgoing audio sent on a steady 20 ms clock *(done)*
 - Opus rebuilds a lost frame from the copy the next packet carries, sized by the loss the far end reports *(done)*
 
-### 1.2 — Voice agents and the enterprise
+### 1.2 — Voice agents, the enterprise and more platforms
 
-November 2026, planned.
+October 2026, planned.
 
 - A SIP bridge from a PBX line to any voice agent that answers SIP, the outcome handed back to the PBX *(done)*
 - Call audio at the rate a speech service asks for, in every language *(done)*
@@ -78,11 +78,6 @@ November 2026, planned.
 - A phone voice agent that runs in five minutes, speech to speech, from one command *(done)*
 - Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published *(done)*
 - Calls held for a day and for a week with no growth in memory or processor time, measured and published *(in progress)*
-
-### 1.3 — More platforms
-
-Q1 2027, planned.
-
 - Node.js and TypeScript package *(done)*
 - .NET MAUI package for iOS and Android *(done)*
 - A network test before the call *(done)*

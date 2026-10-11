@@ -1568,7 +1568,11 @@ The complete gate, with no argument, runs every area, as many at once as
 the machine has CPUs; `SIPRAL_CHECK_JOBS` caps that, and `1` runs them one
 after another. `hygiene`, `abi` and `site` start at once and the rest wait
 for `abi`, because every layer loads the library `abi` builds and checks
-and the rust area's builds write beside it. What several areas need -- the
+and the rust area's builds write beside it. `swift`, `kotlin`, `python`
+and `agents` run alone, one after another, once every other area is done:
+their tests wait on real time -- a call's media, a timer, a deadline -- and
+with every CPU busy beside them all four failed in the complete gate of 9
+October 2026 and passed alone. What several areas need -- the
 library, the Kotlin layer's classes, the JNI shims, `sipral.aar` -- is made
 once, by whichever area asks first, while the others wait for it, and the
 three packaging scripts that build into the one Apple target directory take
@@ -1584,10 +1588,10 @@ other work on the machine, the complete gate took 616 seconds one area
 after another (load average 5 to 10 at the start) and 247 seconds in
 parallel (5 at the start, 30 by the end); the rust area, at about four
 minutes, is the whole of the difference that is left. A machine that busy
-makes a test that waits on a timer more likely to miss it, and a step that
-fails in the parallel gate and passes alone under `--only` is that, until
-it is not: `SIPRAL_CHECK_JOBS=1` runs the areas one at a time to tell the
-two apart.
+makes a test that waits on a timer more likely to miss it, which is why the
+four areas above run alone; a step elsewhere that fails in the parallel gate
+and passes alone under `--only` is that, until it is not:
+`SIPRAL_CHECK_JOBS=1` runs the areas one at a time to tell the two apart.
 
 ### The published figures
 
