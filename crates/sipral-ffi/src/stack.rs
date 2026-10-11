@@ -1884,7 +1884,7 @@ fn signalling(
         return;
     }
     // RFC 5626 §4.4.1: a flow stopped answering and its transport was retired
-    if let UaEvent::Unclaimed(sipral_core::endpoint::Event::FlowFailed { transport }) = said {
+    if let UaEvent::FlowFailed { transport } = said {
         // a WebSocket the stack runs says why it gave up, in its own words
         let (error, detail) = match state.agent.websocket_failure(transport) {
             Some((kind, why)) => (crate::transport::error_of(kind), String::from(why)),

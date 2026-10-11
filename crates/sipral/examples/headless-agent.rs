@@ -95,7 +95,6 @@ use sipral::{
     StatusCode, StreamStatistics, UaEvent, Uri, UserAgent,
 };
 
-use sipral_core::endpoint::Event as CoreEvent;
 use udp_endpoint::Endpoint;
 
 /// One call's worth of what it said last turn, played back this turn.
@@ -805,12 +804,12 @@ fn handle(agent: &mut Agent, event: &Event, now: Instant) {
                 }
             }
         }
-        Event::Signalling(UaEvent::Unclaimed(CoreEvent::TransportWanted {
+        Event::Signalling(UaEvent::TransportWanted {
             protocol,
             destination,
             request_bytes,
             limit_bytes,
-        })) => println!(
+        }) => println!(
             "transport wanted: {protocol:?} to {destination} for a request of \
                  {request_bytes} bytes, over the {limit_bytes} a datagram may carry"
         ),

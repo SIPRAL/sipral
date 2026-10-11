@@ -9,8 +9,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sipral_core::endpoint::Event;
+use sipral_core::endpoint::{Event, Host, TransportId, TransportProtocol};
 use sipral_core::msg::{OwnedMessage, StatusCode};
+use sipral_core::transaction::DialogId;
 
 use crate::account::AccountId;
 use crate::announce::Announcement;
@@ -798,8 +799,67 @@ pub enum UaEvent {
         /// Bindings left unproved.
         unverified: usize,
     },
+    /// A request needs a connection that is not open: a message too large
+    /// for any open datagram transport with no stream transport to move it
+    /// to (RFC 3261 §18.1.1 makes the switch a MUST), or an account whose
+    /// server is reached over a stream asking for its own connection.
+    ///
+    /// The application opens the connection and binds it; the request goes
+    /// out once it is bound. `request_bytes` and `limit_bytes` make a
+    /// silently dropped fragment explainable, and are both zero when the
+    /// connection is asked for by an account rather than by a size.
+    TransportWanted {
+        /// What to open.
+        protocol: TransportProtocol,
+        /// Where to.
+        destination: std::net::SocketAddr,
+        /// The request's size on the wire, in bytes.
+        request_bytes: usize,
+        /// The largest request that fits a datagram: the MTU less the
+        /// §18.1.1 headroom, 1300 when the MTU is unknown, zero when it
+        /// leaves no room.
+        limit_bytes: u32,
+    },
+    /// The next hop a dialog names is not the address its requests are going
+    /// to (RFC 3261 §12.2.1.1, RFC 3263).
+    ///
+    /// A dialog keeps its first flow (§8.1.2), which survives a NAT. An
+    /// application with a resolver may answer with
+    /// [`UserAgent::resolved`](crate::UserAgent::resolved) to retarget the
+    /// dialog; ignoring it is the common choice.
+    ResolveNeeded {
+        /// The dialog whose next hop this is, and the handle the answer takes.
+        dialog: DialogId,
+        /// The host to resolve.
+        host: Host,
+        /// The port, when the URI gave one (else RFC 3263 §4.2).
+        port: Option<u16>,
+        /// The transport, when the URI or the scheme named one.
+        protocol: Option<TransportProtocol>,
+    },
+    /// A keep-alive went unanswered for ten seconds on a flow that had
+    /// answered one before, so RFC 5626 §4.4.1 calls the flow dead and the
+    /// stack has taken it down.
+    ///
+    /// Everything on it has failed and the transport is forgotten. The
+    /// application closes the socket and, for a registration, binds a new
+    /// flow under the same [`TransportId`] (§4.5).
+    FlowFailed {
+        /// The transport that is gone.
+        transport: TransportId,
+    },
+    /// A request was refused because the stack already holds as many server
+    /// transactions or dialogs as it is configured to
+    /// ([`EndpointConfig`](crate::EndpointConfig)'s `max_server_transactions`
+    /// and `max_dialogs`). A stateless 503 went back (§21.5.4); the count is
+    /// cumulative.
+    Overloaded {
+        /// Requests refused this way since the stack was created.
+        refused: u64,
+    },
     /// A protocol event this layer has no policy for, passed through
-    /// uninterpreted.
+    /// uninterpreted: the SIP core's own, outside what this crate promises
+    /// to keep the same between releases.
     ///
     /// Exception: a request no handler claims is answered here (405 with
     /// `Allow`, 501, or 481 per RFC 3261 §8.2.1 and RFC 5057 §5.3; RFC 6086
@@ -808,5 +868,40 @@ pub enum UaEvent {
     /// in a call after
     /// [`UserAgent::hand_over_info`](crate::UserAgent::hand_over_info)
     /// (`docs/04-ua.md`).
+    #[doc(hidden)]
     Unclaimed(Event),
+}
+
+impl UaEvent {
+    /// The application's own event for one of the SIP core's, when it has
+    /// one; the core's event passed through otherwise.
+    pub(crate) fn from_core(event: Event) -> Self {
+        match event {
+            Event::TransportWanted {
+                protocol,
+                destination,
+                request_bytes,
+                limit_bytes,
+            } => Self::TransportWanted {
+                protocol,
+                destination,
+                request_bytes,
+                limit_bytes,
+            },
+            Event::ResolveNeeded {
+                dialog,
+                host,
+                port,
+                protocol,
+            } => Self::ResolveNeeded {
+                dialog,
+                host,
+                port,
+                protocol,
+            },
+            Event::FlowFailed { transport } => Self::FlowFailed { transport },
+            Event::Overloaded { refused } => Self::Overloaded { refused },
+            other => Self::Unclaimed(other),
+        }
+    }
 }

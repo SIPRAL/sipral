@@ -279,9 +279,8 @@ pub(crate) fn run(lab: &Lab<'_>) -> Result<String, String> {
                     stage = Stage::Closing;
                     since = now;
                 }
-                Event::Signalling(UaEvent::Unclaimed(
-                    sipral_core::endpoint::Event::FlowFailed { transport },
-                )) if transport == WS && stage == Stage::Closing => {
+                Event::Signalling(UaEvent::FlowFailed { transport },
+                ) if transport == WS && stage == Stage::Closing => {
                     let closed = endpoint
                         .agent
                         .websocket_failure(WS)

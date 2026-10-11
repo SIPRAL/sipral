@@ -15304,12 +15304,12 @@ fn a_secure_call_whose_answer_to_a_challenge_outgrew_the_datagram_goes_over_tcp(
     let now = Instant::now();
     let (mut caller, call, heard) = a_secure_call_challenged_past_the_line(now);
     let wanted = heard.iter().find_map(|event| match *event {
-        Event::Signalling(UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted {
+        Event::Signalling(UaEvent::TransportWanted {
             protocol,
             destination,
             request_bytes,
             limit_bytes,
-        })) => Some((protocol, destination, request_bytes, limit_bytes)),
+        }) => Some((protocol, destination, request_bytes, limit_bytes)),
         _ => None,
     });
     let (protocol, destination, request_bytes, limit_bytes) =
@@ -15489,9 +15489,8 @@ fn a_secure_call_trimmed_into_a_datagram_is_keyed_under_the_suite_it_kept() {
     let whole = heard
         .iter()
         .find_map(|event| match *event {
-            Event::Signalling(UaEvent::Unclaimed(
-                sipral_core::endpoint::Event::TransportWanted { request_bytes, .. },
-            )) => Some(request_bytes),
+            Event::Signalling(UaEvent::TransportWanted { request_bytes, .. },
+            ) => Some(request_bytes),
             _ => None,
         })
         .expect("a stream was asked for");

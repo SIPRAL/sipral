@@ -20,7 +20,7 @@ use sipral_core::auth::Credentials;
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
     AuthRetryError, Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest,
-    ReceiveError, SendError, Transmit, TransportId, TransportProtocol,
+    ReceiveError, Retransmissions, SendError, Transmit, TransportId, TransportProtocol,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode, Uri};
 use sipral_core::replay::{Driven, RecordError, Recorder, Recording};
@@ -470,19 +470,67 @@ impl UserAgent {
         None
     }
 
-    /// The endpoint underneath, for what this layer has no policy for yet.
+    /// The settings the stack was created with.
+    #[must_use]
+    pub const fn config(&self) -> &EndpointConfig {
+        self.endpoint.config()
+    }
+
+    /// The addresses a dialog's next hop resolved to, answering
+    /// [`UaEvent::ResolveNeeded`]: the dialog's requests go to the first one
+    /// a transport of `protocol` reaches, or of the dialog's own when `None`.
+    pub fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+    ) {
+        self.endpoint.resolved(dialog, addresses, protocol);
+    }
+
+    /// What a transport is bound to: its protocol and local address, or
+    /// `None` when it is not bound.
+    #[must_use]
+    pub fn bound_transport(&self, transport: TransportId) -> Option<(TransportProtocol, SocketAddr)> {
+        self.endpoint.bound_transport(transport)
+    }
+
+    /// How many requests and responses went again, and how many
+    /// transactions timed out, since the stack was created.
+    #[must_use]
+    pub const fn retransmissions(&self) -> Retransmissions {
+        self.endpoint.retransmissions()
+    }
+
+    /// How many requests were refused at a limit of [`EndpointConfig`]
+    /// since the stack was created ([`UaEvent::Overloaded`]).
+    #[must_use]
+    pub const fn refused(&self) -> u64 {
+        self.endpoint.refused()
+    }
+
+    /// Every record the stack keeps for a bug report, as one JSON document.
+    #[must_use]
+    pub fn diagnostics_json(&self) -> String {
+        self.endpoint.diagnostics_json()
+    }
+
+    /// The SIP core underneath, for what this layer has no policy for yet:
+    /// outside what this crate promises to keep the same between releases.
     ///
     /// Used to answer a non-DTMF INFO after [`UserAgent::hand_over_info`];
     /// every other unclaimed request is answered by this layer (§8.2.1, RFC
     /// 5057 §5.3). Do not send REGISTER or SUBSCRIBE through it: this layer
     /// would not know it owns them and would neither refresh nor retry them.
+    #[doc(hidden)]
     #[must_use]
     pub const fn endpoint(&mut self) -> &mut Endpoint {
         &mut self.endpoint
     }
 
-    /// The endpoint underneath, shared, to read counters such as
-    /// [`Endpoint::retransmissions`] and [`Endpoint::refused`].
+    /// The SIP core underneath, shared: outside what this crate promises to
+    /// keep the same between releases.
+    #[doc(hidden)]
     #[must_use]
     pub const fn endpoint_ref(&self) -> &Endpoint {
         &self.endpoint
@@ -904,7 +952,7 @@ impl UserAgent {
                 self.oversize = Some((request_bytes, limit_bytes));
             }
             if let Some(event) = self.on_core_event(event, now) {
-                self.events.push_back(UaEvent::Unclaimed(event));
+                self.events.push_back(UaEvent::from_core(event));
             }
         }
         self.settle_challenges();

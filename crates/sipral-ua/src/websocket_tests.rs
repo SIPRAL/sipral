@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use sipral_core::endpoint::{Event, Input, TransportId, TransportProtocol};
+use sipral_core::endpoint::{Input, TransportId, TransportProtocol};
 use sipral_core::msg::HeaderName;
 
 use crate::EndpointConfig;
@@ -136,7 +136,7 @@ fn accepted(handshake: &[u8]) -> Vec<u8> {
 fn flow_failed(events: &[UaEvent]) -> bool {
     events
         .iter()
-        .any(|event| matches!(event, UaEvent::Unclaimed(Event::FlowFailed { transport }) if *transport == WS))
+        .any(|event| matches!(event, UaEvent::FlowFailed { transport } if *transport == WS))
 }
 
 /// Bound, the REGISTER sent, the handshake answered: the REGISTER, as the
@@ -322,11 +322,11 @@ fn an_account_on_a_websocket_of_its_own_asks_for_the_connection_again() {
         events.iter().any(|event| {
             matches!(
                 event,
-                UaEvent::Unclaimed(Event::TransportWanted {
+                UaEvent::TransportWanted {
                     protocol: TransportProtocol::Ws,
                     destination,
                     ..
-                }) if *destination == server()
+                } if *destination == server()
             )
         })
     };

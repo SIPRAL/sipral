@@ -23,7 +23,6 @@
 //! machines and raises no event, and reading them would need a second path into the lower layers.
 //! `docs/17-observability.md` says so too.
 
-use sipral_core::endpoint::Event as CoreEvent;
 use sipral_ua::{CallEndReason, RegistrationFailure, UaEvent};
 
 use crate::event::MediaEvent;
@@ -244,7 +243,7 @@ impl Counters {
             UaEvent::CallEnded { reason, .. } => self.calls_ended.tick(*reason),
             // B1: a message did not fit a datagram and there was no stream, so the endpoint asked
             // for one; sipral-ua passes it through unhandled
-            UaEvent::Unclaimed(CoreEvent::TransportWanted { .. }) => {
+            UaEvent::TransportWanted { .. } => {
                 self.stream_transport_wanted.tick();
             }
             _ => {}
@@ -292,7 +291,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
-    use sipral_core::endpoint::{Event as CoreEvent, TransportProtocol};
+    use sipral_core::endpoint::TransportProtocol;
     use sipral_core::msg::{ParseMode, ParseScratch, parse};
     use sipral_core::sdp::Direction;
     use sipral_ua::{
@@ -516,12 +515,12 @@ Content-Length: 0\r\n\r\n",
     #[test]
     fn a_message_too_large_for_a_datagram_with_nowhere_to_go_is_counted() {
         let mut counters = Counters::default();
-        let event = UaEvent::Unclaimed(CoreEvent::TransportWanted {
+        let event = UaEvent::TransportWanted {
             protocol: TransportProtocol::Tcp,
             destination: registrar(),
             request_bytes: 1785,
             limit_bytes: 1299,
-        });
+        };
         counters.observe_signalling(&event);
         counters.observe_signalling(&event);
         assert_eq!(counters.stream_transport_wanted.get(), 2);
@@ -530,7 +529,7 @@ Content-Length: 0\r\n\r\n",
     #[test]
     fn an_unclaimed_event_that_is_not_about_transport_size_counts_nowhere() {
         let mut counters = Counters::default();
-        counters.observe_signalling(&UaEvent::Unclaimed(CoreEvent::Overloaded { refused: 9 }));
+        counters.observe_signalling(&UaEvent::Overloaded { refused: 9 });
         assert_eq!(counters.stream_transport_wanted.get(), 0);
     }
 

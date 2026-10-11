@@ -411,7 +411,10 @@ impl UserAgent {
     /// Package, 415 for an unreadable body, 200 with no body (see
     /// `crate::admission`). Turn it on only if every INFO will be answered:
     /// an unanswered INFO is retransmitted for 32 s and then the far end
-    /// ends the call (RFC 3261 §12.2.1.2). The C ABI cannot answer them.
+    /// ends the call (RFC 3261 §12.2.1.2). The C ABI cannot answer them, and
+    /// like the two it goes through, it is outside what this crate promises
+    /// to keep the same between releases.
+    #[doc(hidden)]
     pub const fn hand_over_info(&mut self, handed_over: bool) {
         self.info_handed_over = handed_over;
     }

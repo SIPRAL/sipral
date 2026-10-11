@@ -28,7 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{
-    AddressFamily, Answer, EndpointConfig, Event, Host, Input, Query, Record, RecordType,
+    AddressFamily, Answer, EndpointConfig, Host, Input, Query, Record, RecordType,
     TransportId, TransportProtocol,
 };
 use sipral_core::msg::HostRef;
@@ -255,15 +255,15 @@ impl Runtime {
     fn report(&mut self, handler: &mut impl Handler, now: Instant) {
         while let Some(event) = self.agent.poll_event() {
             match event {
-                UaEvent::Unclaimed(Event::ResolveNeeded {
+                UaEvent::ResolveNeeded {
                     dialog,
                     host,
                     port,
                     protocol,
-                }) => {
+                } => {
                     if let Ok(addresses) = (self.resolver)(&host, port, protocol) {
                         if !addresses.is_empty() {
-                            self.agent.endpoint().resolved(dialog, &addresses, protocol);
+                            self.agent.resolved(dialog, &addresses, protocol);
                         }
                     } else {
                         // the application hears the name; registrations are
@@ -273,12 +273,12 @@ impl Runtime {
                         }
                         handler.on_event(
                             &mut self.agent,
-                            UaEvent::Unclaimed(Event::ResolveNeeded {
+                            UaEvent::ResolveNeeded {
                                 dialog,
                                 host,
                                 port,
                                 protocol,
-                            }),
+                            },
                             now,
                         );
                     }
@@ -290,30 +290,30 @@ impl Runtime {
                     let _ = self.agent.looked_up(account, &query, answer, now);
                 }
                 // reported anyway: only here does the application see the sizes
-                UaEvent::Unclaimed(Event::TransportWanted {
+                UaEvent::TransportWanted {
                     protocol,
                     destination,
                     request_bytes,
                     limit_bytes,
-                }) => {
+                } => {
                     self.open(protocol, destination);
                     handler.on_event(
                         &mut self.agent,
-                        UaEvent::Unclaimed(Event::TransportWanted {
+                        UaEvent::TransportWanted {
                             protocol,
                             destination,
                             request_bytes,
                             limit_bytes,
-                        }),
+                        },
                         now,
                     );
                 }
                 // RFC 5626 §4.4.1: dead flow; dropping the link closes it
-                UaEvent::Unclaimed(Event::FlowFailed { transport }) => {
+                UaEvent::FlowFailed { transport } => {
                     self.links.remove(&transport);
                     handler.on_event(
                         &mut self.agent,
-                        UaEvent::Unclaimed(Event::FlowFailed { transport }),
+                        UaEvent::FlowFailed { transport },
                         now,
                     );
                 }
@@ -534,7 +534,7 @@ mod tests {
     use super::{Control, Handler, IDLE, Link, Runtime, sleep_for};
     use crate::event::UaEvent;
     use crate::{Account, UserAgent};
-    use sipral_core::endpoint::{EndpointConfig, Event, OutgoingRequest, TransportProtocol};
+    use sipral_core::endpoint::{EndpointConfig, OutgoingRequest, TransportProtocol};
     use sipral_core::msg::{HeaderName, Method, Uri};
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
@@ -589,11 +589,11 @@ mod tests {
         let mut recorder = Recorder::default();
         runtime.turn(&mut recorder, now).expect("a turn");
         let sizes = recorder.seen.iter().find_map(|event| match *event {
-            UaEvent::Unclaimed(Event::TransportWanted {
+            UaEvent::TransportWanted {
                 request_bytes,
                 limit_bytes,
                 ..
-            }) => Some((request_bytes, limit_bytes)),
+            } => Some((request_bytes, limit_bytes)),
             _ => None,
         });
         assert_eq!(sizes.map(|(_, limit)| limit), Some(1_300), "{recorder:?}");
@@ -865,7 +865,7 @@ mod tests {
             if recorder
                 .seen
                 .iter()
-                .any(|event| matches!(*event, UaEvent::Unclaimed(Event::ResolveNeeded { .. })))
+                .any(|event| matches!(*event, UaEvent::ResolveNeeded { .. }))
             {
                 break;
             }
@@ -875,7 +875,7 @@ mod tests {
             runtime.turn(&mut recorder, at).expect("a turn");
         }
         let asked = recorder.seen.iter().find_map(|event| match *event {
-            UaEvent::Unclaimed(Event::ResolveNeeded { ref host, .. }) => Some(host.to_string()),
+            UaEvent::ResolveNeeded { ref host, .. } => Some(host.to_string()),
             _ => None,
         });
         assert_eq!(

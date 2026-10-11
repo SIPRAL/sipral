@@ -22,7 +22,6 @@ use std::time::Duration;
 
 use sipral::SrtpSuite;
 use sipral::{AmdReason, AmdVerdict, CallProgress, DigitSource, MediaEvent, ProgressTone};
-use sipral_core::endpoint::Event;
 use sipral_core::msg::HeaderName;
 use sipral_ua::{
     CallEndReason, CallHandle, CallIdentity, CallState, LifecycleState, RecoveryFailure,
@@ -2272,12 +2271,12 @@ fn about_a_transport(
     destination: Option<&str>,
 ) -> Option<SipralEvent> {
     match *event {
-        UaEvent::Unclaimed(Event::TransportWanted {
+        UaEvent::TransportWanted {
             protocol,
             request_bytes,
             limit_bytes,
             ..
-        }) => {
+        } => {
             let mut payload = SipralTransportWantedEvent {
                 protocol: crate::stack::SipralTransport::named(protocol),
                 destination: std::ptr::null(),
@@ -2307,12 +2306,12 @@ fn about_a_resolve(
     host: Option<&str>,
 ) -> Option<SipralEvent> {
     match *event {
-        UaEvent::Unclaimed(Event::ResolveNeeded {
+        UaEvent::ResolveNeeded {
             dialog,
             port,
             protocol,
             ..
-        }) => {
+        } => {
             // looked up, not inserted: every target refresh asks again and
             // must get the same handle
             let named = known
@@ -2344,10 +2343,10 @@ fn about_a_resolve(
 /// can point at it. `None` for kinds that need none.
 pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
     match *event {
-        UaEvent::Unclaimed(Event::TransportWanted { destination, .. }) => {
+        UaEvent::TransportWanted { destination, .. } => {
             Some(destination.to_string())
         }
-        UaEvent::Unclaimed(Event::ResolveNeeded { ref host, .. }) => Some(host.to_string()),
+        UaEvent::ResolveNeeded { ref host, .. } => Some(host.to_string()),
         UaEvent::Located { ref targets, .. } => Some(
             targets
                 .iter()

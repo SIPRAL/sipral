@@ -10839,7 +10839,7 @@ fn a_ping_that_is_never_answered_takes_the_registration_with_it() {
     assert!(
         events.iter().any(|event| matches!(
             *event,
-            UaEvent::Unclaimed(sipral_core::endpoint::Event::FlowFailed { .. })
+            UaEvent::FlowFailed { .. }
         )),
         "the application owns the socket and has to be told to close it"
     );
@@ -13614,7 +13614,7 @@ fn connections_asked_for(seen: &[UaEvent]) -> usize {
         .filter(|event| {
             matches!(
                 **event,
-                UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted { .. })
+                UaEvent::TransportWanted { .. }
             )
         })
         .count()
@@ -16397,7 +16397,7 @@ fn secure_call() -> OutgoingCall {
 /// The size the retry asked a stream for.
 fn wanted_bytes(said: &[UaEvent]) -> Option<usize> {
     said.iter().find_map(|event| match *event {
-        UaEvent::Unclaimed(Event::TransportWanted { request_bytes, .. }) => Some(request_bytes),
+        UaEvent::TransportWanted { request_bytes, .. } => Some(request_bytes),
         _ => None,
     })
 }

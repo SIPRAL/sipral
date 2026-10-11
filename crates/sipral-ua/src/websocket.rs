@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 
 use sha1::{Digest, Sha1};
 use sipral_core::endpoint::{
-    Event, Input, ReceiveError, Transmit, TransportErrorKind, TransportId, TransportProtocol,
+    Input, ReceiveError, Transmit, TransportErrorKind, TransportId, TransportProtocol,
 };
 
 use crate::agent::UserAgent;
@@ -1041,7 +1041,7 @@ impl UserAgent {
         };
         let _ = self.take(input, now);
         self.events
-            .push_back(UaEvent::Unclaimed(Event::FlowFailed { transport }));
+            .push_back(UaEvent::FlowFailed { transport });
     }
 
     /// Frames a transmit on one of our connections; `None` while it waits

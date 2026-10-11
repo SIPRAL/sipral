@@ -35,7 +35,7 @@
 
 use std::time::Instant;
 
-use sipral_core::endpoint::{Event, TransportId};
+use sipral_core::endpoint::TransportId;
 
 use crate::account::{AccountId, NO_FLOW_YET};
 use crate::agent::UserAgent;
@@ -89,12 +89,12 @@ impl UserAgent {
             None => {
                 self.flows_wanted.insert(account, now);
                 self.events
-                    .push_back(UaEvent::Unclaimed(Event::TransportWanted {
+                    .push_back(UaEvent::TransportWanted {
                         protocol,
                         destination: server,
                         request_bytes: 0,
                         limit_bytes: 0,
-                    }));
+                    });
                 Flow::Asked {
                     until: now + STREAM_WAIT,
                 }
@@ -266,7 +266,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
-    use sipral_core::endpoint::{Event, Input, TransportErrorKind, TransportId, TransportProtocol};
+    use sipral_core::endpoint::{Input, TransportErrorKind, TransportId, TransportProtocol};
     use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, parse};
 
     use crate::account::{Account, AccountId};
@@ -429,11 +429,11 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                UaEvent::Unclaimed(Event::TransportWanted {
+                UaEvent::TransportWanted {
                     protocol,
                     destination,
                     ..
-                }) => Some((*protocol, *destination)),
+                } => Some((*protocol, *destination)),
                 _ => None,
             })
             .collect()

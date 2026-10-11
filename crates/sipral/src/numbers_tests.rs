@@ -117,10 +117,10 @@ fn lab_call(catalog: CodecCatalog) -> (Vec<u8>, Vec<u8>) {
     agent.deliver(&challenge_to(&first), asterisk(), now);
     agent.drain(now, false);
     let stream_asked = agent.heard.iter().find_map(|event| match *event {
-        Event::Signalling(UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted {
+        Event::Signalling(UaEvent::TransportWanted {
             request_bytes,
             ..
-        })) => Some(request_bytes),
+        }) => Some(request_bytes),
         _ => None,
     });
     assert_eq!(
