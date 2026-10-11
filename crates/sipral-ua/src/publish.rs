@@ -144,6 +144,7 @@ impl PublishRequest {
     /// which the caller built with [`sipral_core::msg::Method::Publish`] and
     /// its own addressing.
     #[must_use]
+    #[doc(hidden)]
     pub fn apply(&self, request: OutgoingRequest) -> OutgoingRequest {
         let seconds = self.expires.as_secs().to_string();
         let mut request = request
@@ -405,6 +406,7 @@ impl Publication {
     ///
     /// A response when nothing is in flight is not this machine's and is
     /// ignored.
+    #[doc(hidden)]
     pub fn handle_response(&mut self, response: &RawMessage<'_>, now: Instant) {
         let Some(status) = response.status() else {
             return;

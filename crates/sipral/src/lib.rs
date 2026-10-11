@@ -318,5 +318,28 @@ pub use sipral_ua::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 #[cfg(feature = "stir")]
 pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, NumberPlan, StirConfig, StirSigning};
 
+/// What the media types are made of, so that every type a call's media hands
+/// back has a name an application can write: a VoIP metrics block's parts
+/// (RFC 3611 §4.7), a progress tone's cadence, why a packet was refused, and
+/// the errors [`MediaError`] carries.
+pub use sipral_media::inband::progress::{Burst, Cadence, ToneSpec};
+#[cfg(feature = "opus")]
+pub use sipral_media::opus::CodecError;
+pub use sipral_media::resample::RateError as ResampleError;
+#[cfg(feature = "ice")]
+pub use sipral_nat::ice::IceError;
+pub use sipral_rtp::srtp::SrtpError;
+pub use sipral_rtp::{CodecQualityModel, JitterBufferAdaptive, PacketError, PacketLossConcealment, RxConfig};
+
+/// The whole signalling layer by its own names: every type the user agent
+/// takes or hands back, the presence, conference, dialog, message-summary
+/// and recording documents it reads and writes, and their errors. The most
+/// used are also named at this crate's root.
+pub use sipral_ua as ua;
+
+/// The session descriptions a call offers and answers (RFC 4566, RFC 3264),
+/// every part of them by its own name.
+pub use sipral_core::sdp;
+
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

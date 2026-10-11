@@ -92,7 +92,9 @@ pub struct BearerChallenge {
 }
 
 impl BearerChallenge {
-    /// Read a challenge, or decide it is not a `Bearer` one.
+    /// Read a challenge, or decide it is not a `Bearer` one: from the
+    /// parser's own view, outside what `sipral` promises to keep the same.
+    #[doc(hidden)]
     #[must_use]
     pub fn read(challenge: &ChallengeRef<'_>, proxy: bool) -> Option<Self> {
         if !challenge.scheme().eq_ignore_ascii_case(b"Bearer") {

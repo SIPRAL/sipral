@@ -1298,6 +1298,9 @@ impl CallIdentity {
     ///
     /// Read as untrusted: [`CallIdentity::caller`] carries no asserted
     /// identity. [`UaEvent::IncomingCall`]'s `identity` is the trusted read.
+    /// It takes the SIP core's own message, so it is outside what this crate
+    /// promises to keep the same between releases.
+    #[doc(hidden)]
     #[must_use]
     pub fn of_request(request: &OwnedMessage) -> Option<Self> {
         Self::of_invite(request, false)

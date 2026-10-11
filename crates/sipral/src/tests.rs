@@ -14455,13 +14455,12 @@ fn a_recording_session_offers_one_labelled_stream_per_party_and_names_both() {
             _ => None,
         })
         .expect("the server heard the INVITE");
-    let raw = request.as_raw();
-    assert!(sipral_ua::siprec::requires_siprec(&raw));
+    assert!(sipral_ua::siprec::requires_siprec(&request));
     assert!(sipral_ua::siprec::contact_has_feature_tag(
-        &raw,
+        &request,
         sipral_ua::siprec::SRC_FEATURE_TAG
     ));
-    let offer = sipral_ua::siprec::read_recording_offer(&raw).expect("a recording offer");
+    let offer = sipral_ua::siprec::read_recording_offer(&request).expect("a recording offer");
     let sdp = parse(offer.sdp).expect("the offer");
     assert_eq!(sdp.media.len(), 2);
     for (stream, (socket, label)) in sdp
@@ -14584,8 +14583,7 @@ fn recording_offer(server: &Server) -> SessionDescription {
             _ => None,
         })
         .expect("the server heard the INVITE");
-    let raw = request.as_raw();
-    let offer = sipral_ua::siprec::read_recording_offer(&raw).expect("a recording offer");
+    let offer = sipral_ua::siprec::read_recording_offer(&request).expect("a recording offer");
     parse(offer.sdp).expect("the offer")
 }
 
@@ -14937,7 +14935,7 @@ fn a_hold_tells_the_server_who_sends_and_the_end_of_the_call_ends_the_recording(
         let mut scratch = ParseScratch::new();
         let message =
             sipral_core::msg::parse(reinvite, &mut scratch, ParseMode::Lenient).expect("a message");
-        sipral_ua::siprec::read_recording_offer(&message)
+        sipral_ua::siprec::read_recording_offer(&message.to_owned())
             .expect("the SDP and the metadata")
             .metadata
     };
@@ -15013,7 +15011,7 @@ fn a_call_that_replaces_the_recorded_one_takes_the_recording_over() {
         let mut scratch = ParseScratch::new();
         let message =
             sipral_core::msg::parse(reinvite, &mut scratch, ParseMode::Lenient).expect("a message");
-        sipral_ua::siprec::read_recording_offer(&message)
+        sipral_ua::siprec::read_recording_offer(&message.to_owned())
             .expect("the SDP and the metadata")
             .metadata
     };
@@ -15040,6 +15038,7 @@ fn a_recorded_call_that_moves_codec_offers_the_server_the_new_one() {
         let mut scratch = ParseScratch::new();
         let message =
             sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient).expect("a message");
+        let message = message.to_owned();
         let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
         parse(read.sdp).expect("the offer")
     };
@@ -15080,7 +15079,8 @@ fn a_call_that_replaces_the_recorded_one_on_another_codec_is_recorded_on_that_co
             let mut scratch = ParseScratch::new();
             let message = sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient)
                 .expect("a message");
-            let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
+            let message = message.to_owned();
+        let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
             let sdp = parse(read.sdp).expect("the offer");
             sdp.media.len() == 2 && sdp.media.iter().all(|stream| stream.formats == ["8"])
         });

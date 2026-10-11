@@ -666,7 +666,46 @@ impl OwnedMessage {
         }
     }
 
-    /// A borrowed view, with the whole accessor surface on it.
+    /// The first value of a header field, by its name in either case or its
+    /// compact form (RFC 3261 §7.3.3): `"X-Customer-Id"`, `"call-id"`,
+    /// `"i"`. `None` when the field is not there.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&[u8]> {
+        self.header_values(name).next()
+    }
+
+    /// Every value of a header field, in the order they arrived, named as
+    /// [`OwnedMessage::header`] takes it.
+    pub fn header_values(&self, name: &str) -> impl Iterator<Item = &[u8]> {
+        let raw = self.as_raw();
+        let values: Vec<&[u8]> = match HeaderName::from_bytes(name.as_bytes()) {
+            Some(wanted) => raw.header_values(wanted).collect(),
+            None => Vec::new(),
+        };
+        values.into_iter()
+    }
+
+    /// The body, empty when there is none.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        self.as_raw().body()
+    }
+
+    /// A request's method as it was written, `None` for a response.
+    #[must_use]
+    pub fn method(&self) -> Option<&str> {
+        self.as_raw().method().map(|method| method.as_str())
+    }
+
+    /// A response's status code, `None` for a request.
+    #[must_use]
+    pub fn status(&self) -> Option<StatusCode> {
+        self.as_raw().status()
+    }
+
+    /// A borrowed view, with the whole accessor surface on it: the parser's
+    /// own, outside what `sipral` promises to keep the same between releases.
+    #[doc(hidden)]
     #[must_use]
     pub fn as_raw(&self) -> RawMessage<'_> {
         RawMessage {

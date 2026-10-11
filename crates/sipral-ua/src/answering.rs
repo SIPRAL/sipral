@@ -108,7 +108,7 @@ pub struct Answering {
 impl Answering {
     /// Read what an INVITE says about how to answer it and ring for it.
     #[must_use]
-    pub fn of_request(request: &RawMessage<'_>) -> Self {
+    pub(crate) fn of_request(request: &RawMessage<'_>) -> Self {
         let answer_mode = AnswerModeField::of(request, ANSWER_MODE);
         let priv_answer_mode = AnswerModeField::of(request, PRIV_ANSWER_MODE);
         let automatic = [&answer_mode, &priv_answer_mode]

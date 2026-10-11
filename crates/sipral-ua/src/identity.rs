@@ -112,7 +112,7 @@ impl Privacy {
     /// Every `Privacy` field of a message, read together. `,` is accepted
     /// like `;` since some senders write it; unknown values are ignored.
     #[must_use]
-    pub fn of_message(message: &RawMessage<'_>) -> Self {
+    pub(crate) fn of_message(message: &RawMessage<'_>) -> Self {
         let mut out = Self::default();
         for line in message.header_values(PRIVACY) {
             for value in line.split(|byte| *byte == b';' || *byte == b',') {
@@ -298,7 +298,7 @@ impl CallerIdentity {
     /// Read everything an INVITE says about who is calling. `trusted` is
     /// whether it came from a peer the account it arrived for trusts.
     #[must_use]
-    pub fn of_request(request: &RawMessage<'_>, trusted: bool) -> Self {
+    pub(crate) fn of_request(request: &RawMessage<'_>, trusted: bool) -> Self {
         let asserted: Box<[Party]> = if trusted {
             request
                 .field_values(ASSERTED)

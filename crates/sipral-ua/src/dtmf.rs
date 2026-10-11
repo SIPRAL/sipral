@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
-use sipral_core::msg::{HeaderName, MediaTypeRef, Method, RawMessage, StatusCode, digits, trim};
+use sipral_core::msg::{HeaderName, MediaTypeRef, Method, OwnedMessage, StatusCode, digits, trim};
 use sipral_core::transaction::AnyTransactionId;
 
 use crate::agent::UserAgent;
@@ -221,8 +221,8 @@ pub fn parse_info(content_type: Option<&[u8]>, body: &[u8]) -> Result<DtmfInfo, 
 ///
 /// # Errors
 /// As [`parse_info`].
-pub fn parse_incoming(request: &RawMessage<'_>) -> Result<DtmfInfo, InfoRefusal> {
-    parse_info(request.header(HeaderName::ContentType), request.body())
+pub fn parse_incoming(request: &OwnedMessage) -> Result<DtmfInfo, InfoRefusal> {
+    parse_info(request.header("Content-Type"), request.body())
 }
 
 fn parse_plain(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
@@ -441,7 +441,7 @@ impl UserAgent {
         let Some(call) = self.by_dialog.get(&dialog).copied() else {
             return Some(event);
         };
-        match parse_incoming(&raw) {
+        match parse_incoming(request) {
             Ok(info) => {
                 self.endpoint
                     .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)

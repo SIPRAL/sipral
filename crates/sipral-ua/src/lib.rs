@@ -183,3 +183,18 @@ pub use sipral_core::msg::{StatusCode, Uri};
 pub use sipral_core::pin::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 /// Session record and replay, as for the endpoint (`docs/18-replay.md`).
 pub use sipral_core::replay::{Driven, Played, Recorder, Recording, Replay};
+/// What this crate's own types are made of, from the SIP core, so that every
+/// type an application is handed has a name it can write: a URI's parts, the
+/// settings' parts, the errors a request can end with, the message a request
+/// event carries, and the handles events name.
+pub use sipral_core::auth::NotAToken;
+pub use sipral_core::diag::RecordLimits;
+pub use sipral_core::dialog::DialogError;
+pub use sipral_core::endpoint::{AckError, Host, RespondError, Retransmissions, SendError, TransportErrorKind};
+pub use sipral_core::msg::{
+    BuildError, HeaderError, HeaderName, HostRef, InvalidStatusCode, Limits as MessageLimits,
+    MultipartError, OwnedMessage, ParseError, ParseMode, SipUriRef, UriError, UriHeaderIter,
+    UriParamIter, UriRef, UriScheme,
+};
+pub use sipral_core::replay::{ReadError, RecordError};
+pub use sipral_core::transaction::{DialogId, TimerConfig, TimerConfigError};

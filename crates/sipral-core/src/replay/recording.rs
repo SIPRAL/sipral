@@ -53,7 +53,9 @@ impl Recording {
         self.note.as_deref()
     }
 
-    /// Every frame, in order.
+    /// Every frame, in order: the replay format's own, read by `sipral-diag`
+    /// and outside what `sipral` promises to keep the same between releases.
+    #[doc(hidden)]
     #[must_use]
     pub fn frames(&self) -> &[Frame] {
         &self.frames

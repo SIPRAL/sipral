@@ -16210,7 +16210,7 @@ t=0 0\r\nm=audio 8000 RTP/AVP 0\r\na=sendonly\r\na=label:1\r\n";
     );
     assert!(text(&invite, HeaderName::ContentType).starts_with("multipart/mixed;"));
     let read = with(&invite, |message| {
-        crate::siprec::read_recording_offer(message).map(|offer| {
+        crate::siprec::read_raw_recording_offer(message).map(|offer| {
             (
                 offer.sdp.to_vec(),
                 offer.metadata.participants.len(),
@@ -16269,7 +16269,7 @@ t=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=recvonly\r\n";
     let reinvite = only(&transmits(&mut agent), "INVITE ");
     assert!(text(&reinvite, HeaderName::ContentType).starts_with("multipart/mixed;"));
     let (sdp, name) = with(&reinvite, |message| {
-        crate::siprec::read_recording_offer(message).map(|read| {
+        crate::siprec::read_raw_recording_offer(message).map(|read| {
             (
                 String::from_utf8_lossy(read.sdp).into_owned(),
                 read.metadata.participants[0].name_ids[0].names[0]

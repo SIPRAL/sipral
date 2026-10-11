@@ -124,7 +124,7 @@ impl Reason {
     /// A repeated protocol keeps the first (§2); unreadable values are
     /// skipped.
     #[must_use]
-    pub fn all_in(message: &RawMessage<'_>) -> Box<[Self]> {
+    pub(crate) fn all_in(message: &RawMessage<'_>) -> Box<[Self]> {
         let mut read: Vec<Self> = Vec::new();
         for value in message.field_values(REASON) {
             if let Some(reason) = Self::parse(value)

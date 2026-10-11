@@ -27,7 +27,7 @@
 //! resolves references for `complete` documents only.
 
 use sipral_core::msg::{
-    BuiltMultipart, MultipartBuilder, MultipartError, NameAddrRef, Part, RawMessage,
+    BuiltMultipart, MultipartBuilder, MultipartError, NameAddrRef, OwnedMessage, Part, RawMessage,
 };
 use sipral_core::sdp::SessionDescription;
 
@@ -605,7 +605,9 @@ fn base64(bytes: &[u8]) -> String {
 ///
 /// # Errors
 /// What [`RecordingMetadata::to_xml`] refuses, and a body the multipart
-/// builder cannot write.
+/// builder cannot write. Built with the SIP core's own multipart writer, so
+/// outside what `sipral` promises to keep the same between releases.
+#[doc(hidden)]
 pub fn recording_session_body(
     sdp: &[u8],
     metadata: &RecordingMetadata,
@@ -644,14 +646,14 @@ pub fn with_src_feature_tag(contact: &str) -> String {
 /// session also needs [`SRC_FEATURE_TAG`] (or [`SRS_FEATURE_TAG`]) in
 /// `Contact`; see [`contact_has_feature_tag`].
 #[must_use]
-pub fn requires_siprec(message: &RawMessage<'_>) -> bool {
-    message.require().has(OPTION_TAG)
+pub fn requires_siprec(message: &OwnedMessage) -> bool {
+    message.as_raw().require().has(OPTION_TAG)
 }
 
 /// Whether a message's `Supported` carries the `siprec` option tag.
 #[must_use]
-pub fn supports_siprec(message: &RawMessage<'_>) -> bool {
-    message.supported().has(OPTION_TAG)
+pub fn supports_siprec(message: &OwnedMessage) -> bool {
+    message.as_raw().supported().has(OPTION_TAG)
 }
 
 /// Whether the message's `Contact` carries the given feature tag,
@@ -660,8 +662,8 @@ pub fn supports_siprec(message: &RawMessage<'_>) -> bool {
 /// Both are boolean feature tags (RFC 3840): bare or `="TRUE"` they are
 /// true, and `="FALSE"` or `="!TRUE"` says the contact is not one.
 #[must_use]
-pub fn contact_has_feature_tag(message: &RawMessage<'_>, tag: &str) -> bool {
-    let Ok(contacts) = message.contact() else {
+pub fn contact_has_feature_tag(message: &OwnedMessage, tag: &str) -> bool {
+    let Ok(contacts) = message.as_raw().contact() else {
         return false;
     };
     match contacts {
@@ -691,7 +693,7 @@ fn boolean_feature(params: &sipral_core::msg::Params<'_>, tag: &str) -> bool {
 /// agent taking recording sessions ([`crate::UserAgent::accept_recording_sessions`])
 /// reads as the offer, where it would otherwise refuse the body 415.
 pub(crate) fn session_part<'a>(message: &RawMessage<'a>) -> Option<&'a [u8]> {
-    read_recording_offer(message).ok().map(|offer| offer.sdp)
+    read_raw_recording_offer(message).ok().map(|offer| offer.sdp)
 }
 
 /// What a recording session's INVITE offers: the SDP and the metadata.
@@ -713,7 +715,12 @@ pub struct RecordingOffer<'a> {
 /// # Errors
 /// [`SiprecError::MissingPart`] when either part is absent, and whatever the
 /// body or the metadata does not survive.
-pub fn read_recording_offer<'a>(
+pub fn read_recording_offer(message: &OwnedMessage) -> Result<RecordingOffer<'_>, SiprecError> {
+    read_raw_recording_offer(&message.as_raw())
+}
+
+/// [`read_recording_offer`] on the parser's own view of a message.
+pub(crate) fn read_raw_recording_offer<'a>(
     message: &RawMessage<'a>,
 ) -> Result<RecordingOffer<'a>, SiprecError> {
     let content_type = message
@@ -1895,11 +1902,11 @@ Content-Length: {}\r\n\r\n",
         );
         let mut scratch = ParseScratch::default();
         let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
-        assert!(requires_siprec(&message));
-        assert!(supports_siprec(&message));
-        assert!(contact_has_feature_tag(&message, SRC_FEATURE_TAG));
-        assert!(!contact_has_feature_tag(&message, SRS_FEATURE_TAG));
-        let offer = read_recording_offer(&message).expect("an offer");
+        assert!(requires_siprec(&message.to_owned()));
+        assert!(supports_siprec(&message.to_owned()));
+        assert!(contact_has_feature_tag(&message.to_owned(), SRC_FEATURE_TAG));
+        assert!(!contact_has_feature_tag(&message.to_owned(), SRS_FEATURE_TAG));
+        let offer = read_raw_recording_offer(&message).expect("an offer");
         assert_eq!(offer.sdp, sdp);
         assert_eq!(offer.metadata, metadata);
     }
@@ -1920,7 +1927,7 @@ Content-Length: {}\r\n\r\n",
             let bytes = invite("", built.content_type(), built.body());
             let mut scratch = ParseScratch::default();
             let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
-            let offer = read_recording_offer(&message).expect(media);
+            let offer = read_raw_recording_offer(&message).expect(media);
             assert_eq!(offer.metadata, metadata, "{media}");
         }
     }
@@ -1945,7 +1952,7 @@ Content-Length: {}\r\n\r\n",
             let mut scratch = ParseScratch::default();
             let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
             assert_eq!(
-                contact_has_feature_tag(&message, SRC_FEATURE_TAG),
+                contact_has_feature_tag(&message.to_owned(), SRC_FEATURE_TAG),
                 src,
                 "{contact}"
             );
@@ -1958,11 +1965,11 @@ Content-Length: {}\r\n\r\n",
         let bytes = invite("Contact: <sip:a@192.0.2.1>\r\n", "application/sdp", sdp);
         let mut scratch = ParseScratch::default();
         let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
-        assert!(!requires_siprec(&message));
-        assert!(!supports_siprec(&message));
-        assert!(!contact_has_feature_tag(&message, SRC_FEATURE_TAG));
+        assert!(!requires_siprec(&message.to_owned()));
+        assert!(!supports_siprec(&message.to_owned()));
+        assert!(!contact_has_feature_tag(&message.to_owned(), SRC_FEATURE_TAG));
         assert_eq!(
-            read_recording_offer(&message).err(),
+            read_raw_recording_offer(&message).err(),
             Some(SiprecError::Multipart(MultipartError::NotMultipart))
         );
         let only_sdp = MultipartBuilder::mixed()
@@ -1972,7 +1979,7 @@ Content-Length: {}\r\n\r\n",
         let bytes = invite("", only_sdp.content_type(), only_sdp.body());
         let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
         assert_eq!(
-            read_recording_offer(&message).err(),
+            read_raw_recording_offer(&message).err(),
             Some(SiprecError::MissingPart(METADATA_CONTENT_TYPE))
         );
     }
