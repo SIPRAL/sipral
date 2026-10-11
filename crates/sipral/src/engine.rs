@@ -5479,7 +5479,7 @@ mod keying_guards {
     //! descriptions.
 
     use sipral_core::sdp::{
-        CryptoPolicy, CryptoSuite, KeySalt, Keying, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap,
+        CryptoPolicy, CryptoSuite, KeySalt, Keying, MediaPlan, NegotiatedCodec, RtpMap,
         SessionDescription, parse,
     };
 
@@ -5527,11 +5527,11 @@ mod keying_guards {
         };
 
         let mut muxed = plan(keyed());
-        muxed.rtcp = RtcpPlan::Muxed;
+        muxed.rtcp = sipral_core::sdp::RtcpPlan::Muxed;
         assert!(keying_holds(&catalog, &muxed, &theirs).is_ok());
 
         let mut split = plan(keyed());
-        split.rtcp = RtcpPlan::SeparatePort {
+        split.rtcp = sipral_core::sdp::RtcpPlan::SeparatePort {
             local: "192.0.2.1:40001".parse().expect("an address"),
             remote: "192.0.2.2:40003".parse().expect("an address"),
         };

@@ -11,7 +11,7 @@
 //! What a connection adds is that it has to exist first, and that this crate
 //! opens no socket. An account made with [`Account::on_stream`] says which
 //! protocol its connection speaks, and this module asks the application for
-//! one to the account's server — [`Event::TransportWanted`], the event RFC
+//! one to the account's server — [`UaEvent::TransportWanted`], the event RFC
 //! 3261 §18.1.1 already raises when a request outgrows a datagram — and
 //! adopts whatever transport the application binds to that address, under
 //! any number it likes.

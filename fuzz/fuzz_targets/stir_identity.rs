@@ -29,15 +29,14 @@ use sipral_stir::{
 const NOW: u64 = 1_790_000_000;
 
 fn from_request() -> Option<Claims> {
-    Some(Claims {
-        orig: Tn::new("12155551212").ok()?,
-        dest: Dest::tn(Tn::new("12125551213").ok()?),
-        iat: NOW,
-        shaken: Some(Shaken {
-            attest: Attest::A,
-            origid: OrigId::from_bytes([0x5a; 16]),
-        }),
-    })
+    Some(
+        Claims::new(
+            Tn::new("12155551212").ok()?,
+            Dest::tn(Tn::new("12125551213").ok()?),
+            NOW,
+        )
+        .with_shaken(Shaken::new(Attest::A, OrigId::from_bytes([0x5a; 16]))),
+    )
 }
 
 fuzz_target!(|data: &[u8]| {

@@ -79,7 +79,9 @@ describe('a stack signalling over TCP', () => {
     await account.registered();
     registrar.drop();
     await until(() => registrar.registers().some(([connection]) => connection === 2), 10000);
-    assert.equal(account.registrationState, SipralRegistrationState.Registered);
+    // the server's 200 is read on a later turn of the stack's loop than the
+    // REGISTER it answers was seen on, and a loaded machine stretches the gap
+    await until(() => account.registrationState === SipralRegistrationState.Registered, 5000);
   });
 
   test('nobody listening is a refused connection, with no TLS reason', async () => {

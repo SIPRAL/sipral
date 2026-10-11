@@ -10,7 +10,7 @@
 //! [`Locator`]'s; the lookups are the application's resolver's, asked for
 //! with [`UaEvent::LookupWanted`] and answered with [`UserAgent::looked_up`],
 //! the same division as the endpoint's own
-//! [`Event::ResolveNeeded`] for a
+//! [`UaEvent::ResolveNeeded`] for a
 //! dialog: the core decides what to ask and what the answers mean, and never
 //! does I/O.
 //!

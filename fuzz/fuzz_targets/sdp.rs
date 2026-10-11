@@ -33,9 +33,10 @@ use sipral_core::sdp::{
 /// the real property: that writing a description does not change what it
 /// means, not that its canonical form stays inside the size a wire policy
 /// puts on bytes a stranger sent.
-const ROUND_TRIP_LIMITS: Limits = Limits {
-    max_body_bytes: Limits::DEFAULT.max_body_bytes * 2 + 1,
-    ..Limits::DEFAULT
+const ROUND_TRIP_LIMITS: Limits = {
+    let mut limits = Limits::DEFAULT;
+    limits.max_body_bytes = Limits::DEFAULT.max_body_bytes * 2 + 1;
+    limits
 };
 
 /// The answer is read back under bounds of its own, for the same reason and
@@ -55,10 +56,11 @@ const ROUND_TRIP_LIMITS: Limits = Limits {
 /// octets it writes of its own, which is under three times the default body
 /// limit. The counts need no room: as many streams as the offer, and at most
 /// one format and three attributes in each.
-const ANSWER_LIMITS: Limits = Limits {
-    max_body_bytes: Limits::DEFAULT.max_body_bytes * 3,
-    max_line_bytes: Limits::DEFAULT.max_line_bytes + 4,
-    ..Limits::DEFAULT
+const ANSWER_LIMITS: Limits = {
+    let mut limits = Limits::DEFAULT;
+    limits.max_body_bytes = Limits::DEFAULT.max_body_bytes * 3;
+    limits.max_line_bytes = Limits::DEFAULT.max_line_bytes + 4;
+    limits
 };
 
 fuzz_target!(|data: &[u8]| {

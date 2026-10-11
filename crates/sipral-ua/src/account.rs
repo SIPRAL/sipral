@@ -602,7 +602,7 @@ impl Account {
 
     /// Use a TCP, TLS or WebSocket connection of its own to its server, which
     /// the application opens when asked by
-    /// [`Event::TransportWanted`](sipral_core::endpoint::Event::TransportWanted)
+    /// [`UaEvent::TransportWanted`](crate::UaEvent::TransportWanted)
     /// (for WebSocket, the TCP/TLS connection bound as `Ws`/`Wss`; the
     /// handshake is [`crate::websocket`]'s). The first transport of
     /// `protocol` bound to the server's address is adopted; until then a

@@ -35,7 +35,7 @@
 //! handshake answer within [`OPENING_WAIT`], fails the connection like a
 //! dead RFC 5626 §4.4.1 flow. A failed or closed connection is retired like
 //! TCP: its transactions fail, a flow account reconnects, and
-//! [`Event::FlowFailed`] tells the application to close the socket.
+//! [`UaEvent::FlowFailed`] tells the application to close the socket.
 //! [`UserAgent::websocket_failure`] says why.
 //!
 //! # The `.invalid` host (RFC 7118 Appendix B.1)
@@ -81,7 +81,6 @@ pub const DEFAULT_RESOURCE: &str = "/ws";
 
 /// One frame, or one reassembled message.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Frame {
     /// A whole text message, checked to be UTF-8.
     Text(Vec<u8>),
@@ -1116,7 +1115,7 @@ impl UserAgent {
     /// Close the WebSocket on `transport` (RFC 6455 §7.1.2): a 1000 close
     /// goes next and nothing after it. When the server's close arrives, or
     /// after [`PONG_WAIT`], the transport is retired and
-    /// [`Event::FlowFailed`] says the socket can be closed. `false` if not
+    /// [`UaEvent::FlowFailed`] says the socket can be closed. `false` if not
     /// one of ours or already closing.
     pub fn close_websocket(&mut self, transport: TransportId, now: Instant) -> bool {
         self.websockets.clock = Some(now);
