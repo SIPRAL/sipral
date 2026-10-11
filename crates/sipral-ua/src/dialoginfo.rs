@@ -165,6 +165,7 @@ pub enum Initiated {
 
 /// One participant, as far as the notifier is willing to say (§4.1.6).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Participant {
     /// The `identity` element: the participant's address of record.
     pub identity: Option<Box<str>>,
@@ -177,6 +178,7 @@ pub struct Participant {
 
 /// One dialog, or one half of one (§4.1.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WatchedDialog {
     /// The `id` attribute, the table key. Not the RFC 3261 dialog ID
     /// (§4.1.1).
@@ -223,6 +225,7 @@ impl WatchedDialog {
 
 /// One `application/dialog-info+xml` document (§4.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DialogInfo {
     /// The `version` attribute, which orders documents within a subscription.
     pub version: u32,

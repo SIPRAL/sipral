@@ -690,8 +690,7 @@ impl Nat {
                 | sipral::MappingEvent::Unanswered { local, .. } => {
                     active.signalling.get(&local).copied()
                 }
-                sipral::MappingEvent::ServerChanged { .. }
-                | sipral::MappingEvent::ServersFailed { .. } => None,
+                _ => None,
             };
             learned_all.push((learned, transport));
         }
@@ -727,6 +726,8 @@ impl Nat {
                     ));
                     continue;
                 }
+                // a mapping event this layer has no C name for yet is not reported
+                _ => continue,
             };
             let from = previous.unwrap_or(local);
             // counts a REGISTER that could not leave too: its `Contact` names `public` either way
@@ -1249,13 +1250,12 @@ impl Active {
     fn sort(&mut self) {
         while let Some(request) = self.mappings.poll_transmit() {
             if let Some(transport) = self.signalling.get(&request.local) {
-                self.signalling_out.push_back(Transmit {
-                    transport: *transport,
-                    destination: request.destination,
-                    source: None,
-                    payload: Arc::from(request.payload),
-                    protocol: TransportProtocol::Udp,
-                });
+                self.signalling_out.push_back(Transmit::new(
+                    *transport,
+                    request.destination,
+                    Arc::from(request.payload),
+                    TransportProtocol::Udp,
+                ));
             } else {
                 self.media_out
                     .retain(|queued| queued.local != request.local);
@@ -1287,7 +1287,9 @@ pub(crate) const fn protocol_of(transport: TurnTransport) -> u32 {
     crate::stack::SipralTransport::named(match transport {
         TurnTransport::Tcp => TransportProtocol::Tcp,
         TurnTransport::Tls => TransportProtocol::Tls,
-        TurnTransport::Udp => TransportProtocol::Udp,
+        // UDP, and a relay transport this layer has no name for yet, which
+        // travels as a datagram
+        _ => TransportProtocol::Udp,
     })
 }
 
@@ -1597,16 +1599,11 @@ pub(crate) fn refusal_code(failure: sipral::TurnFailure) -> u32 {
         TurnFailure::QuotaReached => 486,
         TurnFailure::InsufficientCapacity => 508,
         TurnFailure::Rejected { code } => u32::from(code),
-        TurnFailure::TimedOut
-        | TurnFailure::IntegrityViolated
-        | TurnFailure::StaleNonceLoop
-        | TurnFailure::BidDown
-        | TurnFailure::UnsupportedPasswordAlgorithm
-        | TurnFailure::Malformed
-        | TurnFailure::FamilyMismatch
-        | TurnFailure::ChannelOutOfSync
-        | TurnFailure::Oversized
-        | TurnFailure::ConnectionLost => 0,
+        // no code from the server: a timeout, an integrity failure, a nonce
+        // loop, a bid-down, an unsupported password algorithm, a malformed
+        // answer, a family mismatch, a channel out of sync, an oversized
+        // message, a lost connection, and anything newer
+        _ => 0,
     }
 }
 

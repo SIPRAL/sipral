@@ -30,6 +30,7 @@ const DYNAMIC_PAYLOADS: core::ops::RangeInclusive<u8> = 96..=127;
 
 /// One codec: agreed with a peer, or merely on offer.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NegotiatedCodec {
     /// Payload type, encoding name, clock rate and, for audio, the channel
     /// count.
@@ -129,6 +130,7 @@ pub enum Keying {
 /// (RFC 4568 §4). `key_params` is key material: the caller produces it
 /// and keeps it out of logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Crypto {
     /// The tag, unique among the crypto attributes of one media line.
     pub tag: u32,
@@ -189,6 +191,7 @@ impl Crypto {
 
 /// What a build does about SRTP, and so which transport its offer names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SrtpSupport {
     /// None: plain `RTP/AVP` with no keys in the body.
     #[default]
@@ -227,6 +230,7 @@ impl SrtpSupport {
 
 /// What this build can do, said before an offer is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MediaCapabilities {
     /// Most preferred first, the order RFC 3264 §6.1 reads.
     pub codecs: Vec<NegotiatedCodec>,
@@ -392,6 +396,7 @@ impl MediaCapabilities {
 /// What the negotiation settled on for one stream, recomputed after every
 /// re-INVITE or UPDATE.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MediaPlan {
     /// Where to receive. The caller chose it; this only reads it back.
     pub local: SocketAddr,
@@ -417,6 +422,28 @@ pub struct MediaPlan {
     /// §5.2 each side's `a=rtcp-xr` asks the other, so the peer's description
     /// decides (media level, else session level).
     pub voip_metrics_xr: bool,
+}
+
+impl MediaPlan {
+    /// A plan between two addresses on one codec, both ways: the codec's own
+    /// payload type each way, no telephone events, no RTCP, no encryption and
+    /// no VoIP metrics, each set by field where a negotiation agreed more.
+    #[must_use]
+    pub fn new(local: SocketAddr, remote: SocketAddr, codec: NegotiatedCodec) -> Self {
+        let codec_in = codec.payload();
+        Self {
+            local,
+            remote,
+            codec,
+            codec_in,
+            direction: Direction::SendRecv,
+            dtmf: None,
+            dtmf_in: None,
+            rtcp: RtcpPlan::Off,
+            keying: None,
+            voip_metrics_xr: false,
+        }
+    }
 }
 
 impl SessionDescription {

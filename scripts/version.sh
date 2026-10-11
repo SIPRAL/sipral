@@ -57,15 +57,21 @@ simple() {
 }
 
 # `deps MODE FILE`: every dependency on a Sipral crate written inline with
-# both a path and a version, `sipral-core = { path = "...", version = "..." }`.
+# both a path and a version, `sipral-core = { path = "...", version = "=..." }`.
 # Cargo refuses a path dependency whose version requirement the crate at that
-# path does not meet, so these move with the workspace.
+# path does not meet, so these move with the workspace. The requirement is
+# exact: only `sipral` promises its API between releases (docs/08-ffi.md,
+# "The Rust crates"), so each release of a crate takes the others of its own
+# release and no newer one.
 deps() {
     awk -v mode="$1" -v new="${NEW:-}" '
         /^sipral[a-z0-9-]* = \{.*path = "[^"]*".*version = "[^"]*"/ {
-            match($0, /version = "[^"]*"/)
-            if (mode == "read") print substr($0, RSTART + 11, RLENGTH - 12)
-            else $0 = substr($0, 1, RSTART - 1) "version = \"" new "\"" substr($0, RSTART + RLENGTH)
+            match($0, /version = "=?[^"]*"/)
+            if (mode == "read") {
+                v = substr($0, RSTART + 11, RLENGTH - 12)
+                print (substr(v, 1, 1) == "=" ? substr(v, 2) : "unpinned " v)
+            }
+            else $0 = substr($0, 1, RSTART - 1) "version = \"=" new "\"" substr($0, RSTART + RLENGTH)
         }
         mode == "write" { print }
     ' "$2"

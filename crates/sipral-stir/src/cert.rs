@@ -219,6 +219,7 @@ struct Anchor {
 
 /// A trust anchor that cannot be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AnchorError {
     /// Neither PEM nor DER certificates, or a certificate that does not
     /// parse.

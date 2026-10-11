@@ -42,6 +42,7 @@ pub enum AnswerMode {
 
 /// One `Answer-Mode` or `Priv-Answer-Mode` field.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct AnswerModeField {
     /// What the caller asked for.
     pub mode: AnswerMode,
@@ -87,6 +88,7 @@ pub enum RingSource {
 
 /// How an incoming call asks to be answered and rung.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Answering {
     /// `Answer-Mode` (RFC 5373 §3).
     pub answer_mode: Option<AnswerModeField>,

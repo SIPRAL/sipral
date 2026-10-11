@@ -48,6 +48,7 @@ use crate::session::MediaSession;
 
 /// What one frame of a joined pair produced for each far end.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MixOutcome {
     /// What is owed to the far end of the first session passed to [`mix_two`] (`call` on
     /// [`MediaEngine::mix`](crate::MediaEngine::mix)). `None` for a frame deliberately not sent,

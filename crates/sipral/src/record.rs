@@ -108,6 +108,7 @@ pub enum RecordingLayout {
 
 /// How a recording is written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct RecordingOptions {
     /// The file format.
     pub format: RecordingFormat,

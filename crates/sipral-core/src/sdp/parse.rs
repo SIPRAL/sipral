@@ -18,6 +18,7 @@ use super::session::{Attribute, Connection, Origin, SessionDescription, Timing};
 /// `e=`, `p=`, `b=`, `t=` and `r=` get no bound of their own: they give an
 /// attacker nothing `a=` does not, and the byte bounds cover them.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Limits {
     /// Largest body accepted.
     pub max_body_bytes: u32,

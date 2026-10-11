@@ -51,6 +51,7 @@ impl Verdict {
 
 /// What a valid PASSporT says, and on what authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Verified {
     /// The originating number, as signed.
     pub orig: Tn,
@@ -72,6 +73,7 @@ pub struct Verified {
 
 /// Why an Identity header field does not vouch for the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Failure {
     /// The request carries no Identity header field.
     MissingIdentity,
@@ -126,6 +128,7 @@ pub enum Failure {
 
 /// What about a request's time made it [`Failure::Stale`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Staleness {
     /// `iat` is outside the window around the time of verification.
     Iat,
@@ -225,6 +228,7 @@ impl std::error::Error for Failure {}
 
 /// How an Identity header field or its PASSporT is malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Malformed {
     /// Longer than [`crate::MAX_IDENTITY_LEN`].
     TooLong,
@@ -278,6 +282,7 @@ impl fmt::Display for Malformed {
 
 /// What is wrong with the certificate the `info` parameter points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InfoProblem {
     /// There is no `info` parameter.
     Missing,
@@ -321,6 +326,7 @@ impl fmt::Display for InfoProblem {
 /// A rule of certification path validation the chain breaks. `depth` counts
 /// from the signing certificate, which is 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChainProblem {
     /// A certificate that issues another is not a CA: no basic constraints
     /// extension with `cA` set (RFC 5280 §4.2.1.9).
@@ -390,6 +396,7 @@ impl fmt::Display for ChainProblem {
 /// A SIP final response: its status code and the reason phrase RFC 8224
 /// gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SipResponse {
     /// The status code.
     pub code: u16,
@@ -444,6 +451,7 @@ impl fmt::Display for SipResponse {
 /// The verification status a verifier attaches to the caller's identity,
 /// as the `verstat` tel URI parameter of 3GPP TS 24.229.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Verstat {
     /// `TN-Validation-Passed`.
     TnValidationPassed,

@@ -216,7 +216,7 @@ impl Capabilities {
 #[cfg(test)]
 mod tests {
     use super::{Capabilities, SrtpKeying};
-    use sipral_core::sdp::{Direction, KeySalt, Keying, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_core::sdp::{Direction, KeySalt, Keying, NegotiatedCodec, RtpMap};
 
     use crate::codec::{Codec, CodecCatalog};
     #[cfg(not(feature = "dtls"))]
@@ -322,25 +322,17 @@ mod tests {
             cfg!(feature = "dtls"),
             "the list and the build disagree about DTLS-SRTP"
         );
-        let handshaken = sipral_core::sdp::MediaPlan {
-            local: "192.0.2.1:40000".parse().expect("an address"),
-            remote: "192.0.2.2:40002".parse().expect("an address"),
-            codec: NegotiatedCodec::new(RtpMap {
-                payload: 0,
-                encoding: "PCMU".to_owned(),
-                clock_rate: 8_000,
-                parameters: None,
-            }),
-            direction: Direction::SendRecv,
-            dtmf: None,
-            dtmf_in: None,
-            codec_in: 0,
-            rtcp: RtcpPlan::Off,
-            keying: Some(Keying::Dtls {
+        let handshaken = {
+            let mut plan = sipral_core::sdp::MediaPlan::new(
+                "192.0.2.1:40000".parse().expect("an address"),
+                "192.0.2.2:40002".parse().expect("an address"),
+                NegotiatedCodec::new(RtpMap::new(0, "PCMU".to_owned(), 8_000, None)),
+            );
+            plan.keying = Some(Keying::Dtls {
                 fingerprints: vec!["sha-256 AA:BB".to_owned()],
                 setup: None,
-            }),
-            voip_metrics_xr: false,
+            });
+            plan
         };
         // a build that does not list DTLS-SRTP must refuse such a plan, and one that lists it must
         // open the stream waiting for the handshake

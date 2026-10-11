@@ -66,6 +66,7 @@ impl core::error::Error for RtpPortsError {}
 
 /// Every pair in a range is in use: the call that wanted one cannot have it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PortsExhausted {
     /// The range that ran out.
     pub range: RtpPorts,

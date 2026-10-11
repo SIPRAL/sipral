@@ -194,21 +194,21 @@ fn record_of(written: &str, record: RecordType, index: usize) -> Result<Record, 
     let ttl = Duration::from_secs(field::<u64>(&fields, 0, "time-to-live", index)?);
     let text = |at: usize| fields.get(at).copied().unwrap_or("");
     match record {
-        RecordType::Naptr => Ok(Record::Naptr(Naptr {
-            order: field(&fields, 1, "order", index)?,
-            preference: field(&fields, 2, "preference", index)?,
-            flags: text(3).trim_matches('"').into(),
-            service: text(4).trim_matches('"').into(),
-            replacement: text(5).into(),
+        RecordType::Naptr => Ok(Record::Naptr(Naptr::new(
+            field(&fields, 1, "order", index)?,
+            field(&fields, 2, "preference", index)?,
+            text(3).trim_matches('"'),
+            text(4).trim_matches('"'),
+            text(5),
             ttl,
-        })),
-        RecordType::Srv => Ok(Record::Srv(Srv {
-            priority: field(&fields, 1, "priority", index)?,
-            weight: field(&fields, 2, "weight", index)?,
-            port: field(&fields, 3, "port", index)?,
-            target: text(4).into(),
+        ))),
+        RecordType::Srv => Ok(Record::Srv(Srv::new(
+            field(&fields, 1, "priority", index)?,
+            field(&fields, 2, "weight", index)?,
+            field(&fields, 3, "port", index)?,
+            text(4),
             ttl,
-        })),
+        ))),
         family @ (RecordType::A | RecordType::Aaaa) => {
             let address = field::<IpAddr>(&fields, 1, "address", index)?;
             if address.is_ipv4() != (family == RecordType::A) {
@@ -304,10 +304,7 @@ entry! {
         let record = record_type(record, "record")?;
         let records = unsafe { text(records, records_len, "records") }?;
         let answer = answer_of(answer, record, records)?;
-        let query = Query {
-            name: Arc::from(name),
-            record,
-        };
+        let query = Query::new(Arc::from(name), record);
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.accounts.get(account).map_err(handle_failed)?;
             state

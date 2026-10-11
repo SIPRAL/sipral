@@ -9,6 +9,7 @@ use core::fmt;
 ///
 /// Every variant points at the offending byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseError {
     /// Nothing to parse.
     Empty,
@@ -91,6 +92,7 @@ impl core::error::Error for ParseError {}
 /// The message itself is fine; what to do is up to the layer that wanted
 /// the field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeaderError {
     /// The field is not in the message.
     Missing,

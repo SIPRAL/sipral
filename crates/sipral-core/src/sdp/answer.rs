@@ -14,6 +14,7 @@ use super::session::{Attribute, Connection, Origin, SessionDescription};
 
 /// What to do with one offered stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamAnswer {
     /// Refuse it. "An offered stream MAY be rejected in the answer, for any
     /// reason", and the way to say so is a port of zero.
@@ -24,6 +25,7 @@ pub enum StreamAnswer {
 
 /// A stream the answerer is taking, and on what terms.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AcceptedStream {
     /// Where this end wants the media. Present even for sendonly streams;
     /// RTCP uses the next port up.

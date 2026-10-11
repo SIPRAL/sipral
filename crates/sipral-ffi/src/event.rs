@@ -2343,9 +2343,7 @@ fn about_a_resolve(
 /// can point at it. `None` for kinds that need none.
 pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
     match *event {
-        UaEvent::TransportWanted { destination, .. } => {
-            Some(destination.to_string())
-        }
+        UaEvent::TransportWanted { destination, .. } => Some(destination.to_string()),
         UaEvent::ResolveNeeded { ref host, .. } => Some(host.to_string()),
         UaEvent::Located { ref targets, .. } => Some(
             targets
@@ -3200,6 +3198,7 @@ fn progress_of(heard: CallProgress) -> SipralProgressEvent {
                 AmdReason::LongGreeting => SipralAmdReason::LongGreeting,
                 AmdReason::InitialSilence => SipralAmdReason::InitialSilence,
                 AmdReason::Timeout => SipralAmdReason::Timeout,
+                _ => SipralAmdReason::None,
             } as u32;
             out.at_ms = millis(after);
             out.initial_silence_ms = millis(initial_silence);
@@ -3231,6 +3230,7 @@ const fn progress_tone(tone: ProgressTone) -> SipralProgressTone {
         ProgressTone::Congestion => SipralProgressTone::Congestion,
         ProgressTone::CallWaiting => SipralProgressTone::CallWaiting,
         ProgressTone::SpecialInformation => SipralProgressTone::SpecialInformation,
+        _ => SipralProgressTone::Unknown,
     }
 }
 

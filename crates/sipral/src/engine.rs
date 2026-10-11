@@ -222,6 +222,7 @@ impl Managed {
 ///
 /// Not `Clone`: it can carry a [`Relay`](crate::Relay), which is a server allocation for one call.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct CallMedia {
     /// What to offer, in what order.
     pub catalog: CodecCatalog,
@@ -5478,8 +5479,8 @@ mod keying_guards {
     //! descriptions.
 
     use sipral_core::sdp::{
-        CryptoPolicy, CryptoSuite, Direction, KeySalt, Keying, MediaPlan, NegotiatedCodec,
-        RtcpPlan, RtpMap, SessionDescription, parse,
+        CryptoPolicy, CryptoSuite, KeySalt, Keying, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap,
+        SessionDescription, parse,
     };
 
     use super::{keying_allows, keying_holds};
@@ -5497,22 +5498,14 @@ mod keying_guards {
     }
 
     fn plan(keying: Option<Keying>) -> MediaPlan {
-        MediaPlan {
-            local: "192.0.2.1:40000".parse().expect("an address"),
-            remote: "192.0.2.2:40002".parse().expect("an address"),
-            codec: NegotiatedCodec::new(RtpMap {
-                payload: 0,
-                encoding: "PCMU".to_owned(),
-                clock_rate: 8_000,
-                parameters: None,
-            }),
-            direction: Direction::SendRecv,
-            dtmf: None,
-            dtmf_in: None,
-            codec_in: 0,
-            rtcp: RtcpPlan::Off,
-            keying,
-            voip_metrics_xr: false,
+        {
+            let mut plan = MediaPlan::new(
+                "192.0.2.1:40000".parse().expect("an address"),
+                "192.0.2.2:40002".parse().expect("an address"),
+                NegotiatedCodec::new(RtpMap::new(0, "PCMU".to_owned(), 8_000, None)),
+            );
+            plan.keying = keying;
+            plan
         }
     }
 
@@ -5781,7 +5774,7 @@ mod counter_wiring {
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
-    use sipral_core::sdp::{Direction, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_core::sdp::{MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap};
     use sipral_ua::{
         Account, CallHandle, EndpointConfig, Input, OutgoingCall, TransportId, TransportProtocol,
         Uri, UserAgent,
@@ -5860,22 +5853,14 @@ mod counter_wiring {
         (stall_after, rtcp): (Option<Duration>, RtcpPlan),
         now: Instant,
     ) {
-        let plan = MediaPlan {
-            local: media_local(),
-            remote: media_remote(),
-            codec: NegotiatedCodec::new(RtpMap {
-                payload: 0,
-                encoding: "PCMU".to_owned(),
-                clock_rate: 8_000,
-                parameters: None,
-            }),
-            direction: Direction::SendRecv,
-            dtmf: None,
-            dtmf_in: None,
-            codec_in: 0,
-            rtcp,
-            keying: None,
-            voip_metrics_xr: false,
+        let plan = {
+            let mut plan = MediaPlan::new(
+                media_local(),
+                media_remote(),
+                NegotiatedCodec::new(RtpMap::new(0, "PCMU".to_owned(), 8_000, None)),
+            );
+            plan.rtcp = rtcp;
+            plan
         };
         let config = MediaConfig {
             stall_after,

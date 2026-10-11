@@ -334,7 +334,7 @@ pub fn send_digit(
 mod tests {
     use std::time::{Duration, Instant};
 
-    use sipral_core::sdp::{Direction, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_core::sdp::{MediaPlan, NegotiatedCodec, RtpMap};
     use sipral_headless::{AudioConfig, DtmfDigit, SampleRate, write_samples};
 
     use super::{HeadlessMediaError, HeadlessSession, dtmf_received_of, send_digit};
@@ -437,22 +437,15 @@ mod tests {
     /// to emit real datagrams.
     fn media() -> MediaSession {
         let now = Instant::now();
-        let plan = MediaPlan {
-            local: "192.0.2.1:40000".parse().expect("an address"),
-            remote: "192.0.2.2:40002".parse().expect("an address"),
-            codec: NegotiatedCodec::new(RtpMap {
-                payload: 0,
-                encoding: "PCMU".to_owned(),
-                clock_rate: 8_000,
-                parameters: None,
-            }),
-            direction: Direction::SendRecv,
-            dtmf: Some(101),
-            dtmf_in: Some(101),
-            codec_in: 0,
-            rtcp: RtcpPlan::Off,
-            keying: None,
-            voip_metrics_xr: false,
+        let plan = {
+            let mut plan = MediaPlan::new(
+                "192.0.2.1:40000".parse().expect("an address"),
+                "192.0.2.2:40002".parse().expect("an address"),
+                NegotiatedCodec::new(RtpMap::new(0, "PCMU".to_owned(), 8_000, None)),
+            );
+            plan.dtmf = Some(101);
+            plan.dtmf_in = Some(101);
+            plan
         };
         MediaSession::open(
             &plan,

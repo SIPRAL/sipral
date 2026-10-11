@@ -17,6 +17,7 @@ use crate::transaction::TimerConfig;
 /// The 200 bytes are headroom for a response that a proxy grew with
 /// `Record-Route`; 1300 is a 1500-byte MTU less that headroom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DatagramLimit {
     /// The path MTU, when the caller knows it. Nothing here measures one.
     pub path_mtu: Option<u32>,
@@ -46,6 +47,7 @@ pub struct DatagramLimit {
 /// about ninety bytes off an INVITE. A request still too large then drops
 /// `Allow` (§20.5). Stream transports are never written compact.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Compaction {
     /// Every request in full, and §18.1.1 decides on the full size.
     Never,

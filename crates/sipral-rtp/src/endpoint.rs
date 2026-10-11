@@ -109,6 +109,7 @@ pub enum Received {
 
 /// Why a datagram was not used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Discard {
     /// It is not a well-formed packet.
     Malformed(PacketError),

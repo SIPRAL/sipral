@@ -193,13 +193,15 @@ pub(crate) fn privacy_of(bits: u32) -> Result<Privacy, Fail> {
             ),
         ));
     }
-    Ok(Privacy {
-        header: bits & SIPRAL_PRIVACY_HEADER != 0,
-        session: bits & SIPRAL_PRIVACY_SESSION != 0,
-        user: bits & SIPRAL_PRIVACY_USER != 0,
-        id: bits & SIPRAL_PRIVACY_ID != 0,
-        critical: bits & SIPRAL_PRIVACY_CRITICAL != 0,
-        none: false,
+    Ok({
+        let mut privacy = Privacy::default();
+        privacy.header = bits & SIPRAL_PRIVACY_HEADER != 0;
+        privacy.session = bits & SIPRAL_PRIVACY_SESSION != 0;
+        privacy.user = bits & SIPRAL_PRIVACY_USER != 0;
+        privacy.id = bits & SIPRAL_PRIVACY_ID != 0;
+        privacy.critical = bits & SIPRAL_PRIVACY_CRITICAL != 0;
+        privacy.none = false;
+        privacy
     })
 }
 

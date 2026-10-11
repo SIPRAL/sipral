@@ -265,6 +265,7 @@ impl Replacing {
 
 /// What a [`Screen`] decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Screening {
     /// Let it through as if there were no policy.
     Take,

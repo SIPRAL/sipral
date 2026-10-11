@@ -35,6 +35,7 @@ const MAX_GAP: u16 = 64;
 
 /// What the offer and the answer settled about feedback on one stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Negotiated {
     /// Both ends listed `a=rtcp-fb` with `nack` for the stream's payload
     /// type or for `*` (RFC 4585 §4.2).
@@ -47,8 +48,21 @@ pub struct Negotiated {
     pub reduced_size: bool,
 }
 
+impl Negotiated {
+    /// What both ends agreed to (RFC 4585, RFC 5506).
+    #[must_use]
+    pub const fn new(generic_nack: bool, trr_interval: Duration, reduced_size: bool) -> Self {
+        Self {
+            generic_nack,
+            trr_interval,
+            reduced_size,
+        }
+    }
+}
+
 /// What a stream's feedback has done so far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FeedbackCounts {
     /// Generic NACK messages sent.
     pub nacks_sent: u64,

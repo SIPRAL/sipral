@@ -48,6 +48,7 @@ pub(crate) const ANONYMOUS_FROM: &[u8] = b"\"Anonymous\" <sip:anonymous@anonymou
 /// One party a header field names: its URI as written, without the angle
 /// brackets, and the display name beside it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Party {
     /// The URI, as written in the field.
     pub uri: Box<[u8]>,
@@ -71,6 +72,7 @@ impl Party {
 /// `id`), one flag per `priv-value`. All false is no privacy asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[allow(clippy::struct_excessive_bools)]
+#[non_exhaustive]
 pub struct Privacy {
     /// `header`: obscure the header fields that could identify the caller.
     pub header: bool,
@@ -206,6 +208,7 @@ impl Verstat {
 /// One `Diversion` value (RFC 5806 §4): who the call was diverted from, and
 /// why. The top-most is the most recent diversion.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Diversion {
     /// The party the call was diverted from.
     pub party: Party,
@@ -223,6 +226,7 @@ pub struct Diversion {
 /// One `History-Info` entry (RFC 7044 §9): a target the request was sent to
 /// on its way here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct HistoryEntry {
     /// The target, URI as written, escaped headers included.
     pub party: Party,
@@ -253,6 +257,7 @@ pub enum Retarget {
 
 /// One `Remote-Party-ID` value (draft-ietf-sip-privacy-04 §9).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct RemoteParty {
     /// The party named.
     pub party: Party,
@@ -267,6 +272,7 @@ pub struct RemoteParty {
 
 /// Everything an INVITE said about who is calling, beyond its `From`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CallerIdentity {
     /// Whether the INVITE came from a peer the account trusts
     /// ([`Account::trust`](crate::Account::trust)). When it did not,

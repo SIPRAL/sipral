@@ -56,7 +56,7 @@ areas:
   rust     cargo fmt, clippy, test, rustdoc and the release build of the
            workspace; the code for Windows, Linux, iOS and Android; the
            feature combinations; sipral-aec-webrtc; the fuzz targets;
-           cargo deny. --crates narrows fmt, clippy, test, rustdoc and the
+           cargo deny; sipral's API against the last release. --crates narrows fmt, clippy, test, rustdoc and the
            release build to the named packages and leaves out the rest.
   abi      the C library and its symbols, bindings/c/smoke.c linked and run,
            the C against glibc, abi-gen --check, the version rule, and the
@@ -1310,6 +1310,37 @@ step_aec_webrtc() {
         fail "meson and/or ninja are not installed: crates/sipral-aec-webrtc cannot build \
 webrtc-audio-processing-sys's bundled library without them (brew install meson ninja, or \
 apt install meson ninja-build)"
+    fi
+}
+
+# The Rust API's promise (`docs/08-ffi.md`, "The Rust crates"): `sipral`, with
+# every feature, read against the newest release tag from v1.2.0 on, the
+# first release that made it. A change a program built against that release
+# would not survive fails, named by cargo-semver-checks. Before that tag
+# exists there is no release to hold the crate to, and the line says so.
+step_rust_api() {
+    step "the Rust API against the last release"
+    if ! command -v cargo-semver-checks >/dev/null 2>&1; then
+        fail "cargo-semver-checks is not installed: cargo install cargo-semver-checks --version 0.51.0 --locked"
+        return
+    fi
+    local tag baseline=""
+    for tag in $(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
+        case "$tag" in
+            v0.*|v1.0.*|v1.1.*) ;;
+            *) baseline="$tag"; break ;;
+        esac
+    done
+    if [ -z "$baseline" ]; then
+        pass "no release has promised the Rust API yet: v1.2.0 is the first to"
+        return
+    fi
+    local out
+    if out=$(cargo semver-checks check-release -p sipral --baseline-rev "$baseline" --all-features 2>&1); then
+        pass "sipral keeps every promise $baseline made"
+    else
+        fail "sipral breaks a promise $baseline made:"
+        printf '%s\n' "$out" | grep -E '^(---|Failed|  )' | head -40 | sed 's/^/        /'
     fi
 }
 
@@ -2977,7 +3008,7 @@ area_hygiene() {
 area_rust() {
     step_build
     if [ -n "$CRATES" ]; then
-        note "--crates:$CRATES only; the other targets, sipral-aec-webrtc, the builds without Opus or DTLS, the fuzz targets and cargo deny were not run"
+        note "--crates:$CRATES only; the other targets, sipral-aec-webrtc, the builds without Opus or DTLS, the fuzz targets, cargo deny and the Rust API check were not run"
         return
     fi
     step_other_targets
@@ -2985,6 +3016,7 @@ area_rust() {
     step_without_opus
     step_fuzz_targets
     step_dependency_licences
+    step_rust_api
 }
 area_abi() {
     step_the_library

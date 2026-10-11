@@ -1,16 +1,19 @@
 [package]
 name = "sipral-stir"
 description = "STIR/SHAKEN caller authentication, sans-I/O: PASSporT, the Identity header, TNAuthList certificates, signing and verification."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# the arm crates.io reads; why the dual expression is not here is in
+# crates/sipral/Cargo.toml
+license = "AGPL-3.0-only"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish.workspace = true
+publish = true
 
 [features]
 # A throwaway PKI for other crates' tests: a root, an intermediate and a

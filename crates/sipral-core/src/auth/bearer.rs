@@ -75,6 +75,7 @@ impl BearerError {
 
 /// A `Bearer` challenge (RFC 8898 §4).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BearerChallenge {
     /// The protection domain. Optional in the grammar; an absent one is the
     /// empty string, one domain like any other.

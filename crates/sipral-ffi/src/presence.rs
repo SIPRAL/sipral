@@ -320,10 +320,7 @@ unsafe fn document(entity: &str, presence: &SipralPresence) -> Result<Presence, 
     }
     document.tuples.push(tuple);
     if let Some(activity) = activity {
-        document.person = Some(Person {
-            id: Box::from("p1"),
-            activities: vec![activity],
-        });
+        document.person = Some(Person::new(Box::from("p1"), vec![activity]));
     }
     Ok(document)
 }

@@ -196,6 +196,7 @@ impl fmt::Debug for KeySalt {
 
 /// A master key identifier and its field width in every packet (§6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct KeyIdentifier {
     /// "a positive decimal integer that is encoded as a big-endian integer in
     /// the actual SRTP packets".
@@ -206,6 +207,7 @@ pub struct KeyIdentifier {
 
 /// One `inline:` key parameter, decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Inline {
     /// The master key and salt.
     pub keys: KeySalt,
@@ -297,6 +299,7 @@ impl Inline {
 
 /// The session parameters of §6.3, as far as they change what SRTP does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SessionParams {
     /// `UNENCRYPTED_SRTP`: send and expect RTP payloads in the clear.
     pub unencrypted_rtp: bool,
@@ -395,6 +398,7 @@ impl Default for SessionParams {
 
 /// An `a=crypto` line read as values.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CryptoPolicy {
     /// The tag, which is how an answer says which offered line it took.
     pub tag: u32,

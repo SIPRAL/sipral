@@ -58,6 +58,7 @@ impl From<ParseError> for RedactError {
 
 /// What a redacted identifier becomes.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum Mode {
     /// Truncated HMAC-SHA256 under the organisation's key: stable per key.
     Hash(Vec<u8>),

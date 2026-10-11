@@ -40,6 +40,7 @@ pub const UNAVAILABLE: u8 = 127;
 /// §4.7.6: how the receiving end is concealing lost packets, the top two
 /// bits of the RX config byte.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PacketLossConcealment {
     /// `00`: "no information is available concerning the use of PLC".
     #[default]
@@ -75,6 +76,7 @@ impl PacketLossConcealment {
 /// §4.7.6: whether the jitter buffer is resizing itself, the next two bits
 /// of the RX config byte.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JitterBufferAdaptive {
     /// `00`: not specified.
     #[default]
@@ -111,6 +113,7 @@ impl JitterBufferAdaptive {
 /// §4.7.6: the receiver configuration byte, packed as `PLC(2) | JBA(2) |
 /// JB rate(4)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RxConfig {
     /// How lost packets are concealed.
     pub plc: PacketLossConcealment,
@@ -119,6 +122,14 @@ pub struct RxConfig {
     /// The adaptive jitter buffer's adjustment rate, `0..=15`; `0` means
     /// unknown. Meaningless, and left at `0`, when `jba` is not adaptive.
     pub jb_rate: u8,
+}
+
+impl RxConfig {
+    /// How loss is concealed, how the jitter buffer adapts, and its rate.
+    #[must_use]
+    pub const fn new(plc: PacketLossConcealment, jba: JitterBufferAdaptive, jb_rate: u8) -> Self {
+        Self { plc, jba, jb_rate }
+    }
 }
 
 impl RxConfig {
@@ -140,6 +151,7 @@ impl RxConfig {
 /// [`UNAVAILABLE`] rather than a guess (§4.7.4, §4.7.5: "A value of 127
 /// indicates that this parameter is unavailable").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VoipMetricsBlock {
     /// Whose reception this describes.
     pub ssrc: u32,
@@ -197,6 +209,42 @@ pub struct VoipMetricsBlock {
 }
 
 impl VoipMetricsBlock {
+    /// A block about `ssrc`'s reception with nothing measured yet: every
+    /// rate, density, duration and delay zero, every metric §4.7.4 and
+    /// §4.7.5 allow to be unavailable [`UNAVAILABLE`], Gmin at the 16
+    /// §4.7.2 recommends, and the receiver configuration unspecified. Each
+    /// is then set by field.
+    #[must_use]
+    pub const fn new(ssrc: u32) -> Self {
+        Self {
+            ssrc,
+            loss_rate: 0,
+            discard_rate: 0,
+            burst_density: 0,
+            gap_density: 0,
+            burst_duration_ms: 0,
+            gap_duration_ms: 0,
+            round_trip_delay_ms: 0,
+            end_system_delay_ms: 0,
+            signal_level_dbm0: UNAVAILABLE.cast_signed(),
+            noise_level_dbm0: UNAVAILABLE.cast_signed(),
+            rerl_db: UNAVAILABLE,
+            gmin: 16,
+            r_factor: UNAVAILABLE,
+            ext_r_factor: UNAVAILABLE,
+            mos_lq: UNAVAILABLE,
+            mos_cq: UNAVAILABLE,
+            rx_config: RxConfig {
+                plc: PacketLossConcealment::Unspecified,
+                jba: JitterBufferAdaptive::Unknown,
+                jb_rate: 0,
+            },
+            jb_nominal_ms: 0,
+            jb_maximum_ms: 0,
+            jb_abs_max_ms: 0,
+        }
+    }
+
     fn write(&self, out: &mut [u8]) -> Option<usize> {
         let need = BLOCK_HEADER_LEN + VOIP_METRICS_CONTENT_LEN;
         let out = out.get_mut(..need)?;

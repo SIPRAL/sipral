@@ -164,6 +164,7 @@ impl IcePolicy {
 /// selected. A restart (RFC 8445 §9) starts a new list.
 #[cfg(feature = "ice")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathCandidate {
     /// A pair or a relay.
     pub kind: PathKind,

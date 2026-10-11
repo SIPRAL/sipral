@@ -125,6 +125,7 @@ pub fn received_duration_ms(asked: u32) -> Result<u32, DtmfError> {
 /// Chosen per send: which one a peer takes is found by trying (see
 /// [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DtmfInfoForm {
     /// `application/dtmf-relay`: `Signal=` and `Duration=` lines.
     Relay,
@@ -144,6 +145,7 @@ pub(crate) fn relay_body(key: u8, held_ms: u32) -> Arc<[u8]> {
 
 /// A digit read from an INFO body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DtmfInfo {
     /// The key, upper-cased.
     pub digit: char,
@@ -153,6 +155,7 @@ pub struct DtmfInfo {
 
 /// Why an incoming INFO's body was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InfoRefusal {
     /// No `Content-Type`, or one that is not `application/dtmf-relay` or
     /// `application/dtmf` (RFC 3261 §21.4.13).

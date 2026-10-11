@@ -5340,10 +5340,8 @@ fn an_offer_that_changes_the_codecs_is_the_applications() {
 fn an_accepted_reoffers_answer_past_the_configured_sdp_bound_is_refused() {
     let t0 = Instant::now();
     let mut config = EndpointConfig::default();
-    config.sdp_limits = sdp::Limits {
-        max_media: 1,
-        ..sdp::Limits::DEFAULT
-    };
+    config.sdp_limits = sdp::Limits::DEFAULT;
+    config.sdp_limits.max_media = 1;
     let mut agent = agent_with(config, t0);
     let id = agent.add_account(account());
     let (call, ack) = call_up(&mut agent, id, t0);
@@ -6823,10 +6821,8 @@ fn a_reoffer_past_the_configured_sdp_bound_is_refused() {
     // application-written re-INVITE is one of them
     let t0 = Instant::now();
     let mut config = EndpointConfig::default();
-    config.sdp_limits = sdp::Limits {
-        max_media: 1,
-        ..sdp::Limits::DEFAULT
-    };
+    config.sdp_limits = sdp::Limits::DEFAULT;
+    config.sdp_limits.max_media = 1;
     let mut agent = agent_with(config, t0);
     let id = agent.add_account(account());
     // the initial offer and answer each carry one stream, inside the
@@ -8365,10 +8361,8 @@ fn allow_lists_exactly_the_methods_this_agent_has_a_handler_for() {
 fn an_early_answer_past_the_configured_sdp_bound_is_refused() {
     let t0 = Instant::now();
     let mut config = EndpointConfig::default();
-    config.sdp_limits = sdp::Limits {
-        max_media: 1,
-        ..sdp::Limits::DEFAULT
-    };
+    config.sdp_limits = sdp::Limits::DEFAULT;
+    config.sdp_limits.max_media = 1;
     let mut agent = agent_with(config, t0);
     let id = agent.add_account(account());
     let call = agent
@@ -10837,10 +10831,9 @@ fn a_ping_that_is_never_answered_takes_the_registration_with_it() {
         "{events:?}"
     );
     assert!(
-        events.iter().any(|event| matches!(
-            *event,
-            UaEvent::FlowFailed { .. }
-        )),
+        events
+            .iter()
+            .any(|event| matches!(*event, UaEvent::FlowFailed { .. })),
         "the application owns the socket and has to be told to close it"
     );
     assert_eq!(
@@ -13611,12 +13604,7 @@ fn a_dialog_that_ends_takes_what_was_waiting_to_be_sent_in_it() {
 /// How many times the endpoint asked for a connection.
 fn connections_asked_for(seen: &[UaEvent]) -> usize {
     seen.iter()
-        .filter(|event| {
-            matches!(
-                **event,
-                UaEvent::TransportWanted { .. }
-            )
-        })
+        .filter(|event| matches!(**event, UaEvent::TransportWanted { .. }))
         .count()
 }
 

@@ -71,6 +71,7 @@ const EVENTS_KEPT: usize = 64;
 
 /// Which of RFC 3903 §4's requests a PUBLISH is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PublishKind {
     /// Creates the state: a body, and no entity tag.
     Initial,

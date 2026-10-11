@@ -55,6 +55,7 @@ impl core::error::Error for MessageSummaryError {}
 ///
 /// Classes beyond the six of RFC 3458 §6.2 are kept as reported.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MessageClass {
     /// The class token, as written.
     pub name: Box<str>,
@@ -71,6 +72,7 @@ pub struct MessageClass {
 
 /// One `application/simple-message-summary` document (§3.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MessageSummary {
     /// The status line (§3.5), the one field every notifier sends.
     pub waiting: bool,

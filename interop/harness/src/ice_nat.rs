@@ -162,7 +162,8 @@ fn map(
                         "{server} never said where the media socket appears: {failure:?}"
                     ));
                 }
-                MappingEvent::Moved { .. } => {}
+                // a move, and anything newer, is waited past
+                _ => {}
             }
         }
         if now > started + patience {

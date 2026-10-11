@@ -136,6 +136,7 @@ impl From<MultipartError> for SiprecError {
 /// Whether a document is the whole metadata or a change to it (RFC 7865,
 /// RFC 7866).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DataMode {
     /// Everything the recording session has.
     #[default]
@@ -155,6 +156,7 @@ impl DataMode {
 
 /// A communication session group: sessions recorded together (RFC 7865).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Group {
     /// `group_id`.
     pub id: String,
@@ -166,6 +168,7 @@ pub struct Group {
 
 /// A communication session: one call being recorded (RFC 7865).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Session {
     /// `session_id`.
     pub id: String,
@@ -181,6 +184,7 @@ pub struct Session {
 
 /// One name of a participant, in one language.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Name {
     /// `xml:lang`.
     pub lang: Option<String>,
@@ -190,6 +194,7 @@ pub struct Name {
 
 /// A participant's address of record and the names it goes by.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NameId {
     /// `aor`: the address of record.
     pub aor: String,
@@ -199,6 +204,7 @@ pub struct NameId {
 
 /// A participant: someone whose media is recorded (RFC 7865).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Participant {
     /// `participant_id`.
     pub id: String,
@@ -208,6 +214,7 @@ pub struct Participant {
 
 /// A media stream (RFC 7865).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stream {
     /// `stream_id`.
     pub id: String,
@@ -219,6 +226,7 @@ pub struct Stream {
 
 /// When a session was, or stopped being, part of the recording session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SessionRecordingAssoc {
     /// The session.
     pub session_id: String,
@@ -230,6 +238,7 @@ pub struct SessionRecordingAssoc {
 
 /// When a participant joined, or left, a session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParticipantSessionAssoc {
     /// The participant.
     pub participant_id: String,
@@ -243,6 +252,7 @@ pub struct ParticipantSessionAssoc {
 
 /// Which streams a participant sends and which it receives.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParticipantStreamAssoc {
     /// The participant.
     pub participant_id: String,
@@ -254,6 +264,7 @@ pub struct ParticipantStreamAssoc {
 
 /// One recording metadata document (RFC 7865).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordingMetadata {
     /// `datamode`. Absent from a document, it is read as complete.
     pub data_mode: DataMode,
@@ -461,6 +472,7 @@ impl RecordingMetadata {
 
 /// One stream a party of a recorded call sends.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordedStream {
     /// `stream_id`.
     pub id: String,
@@ -468,8 +480,20 @@ pub struct RecordedStream {
     pub label: String,
 }
 
+impl RecordedStream {
+    /// A stream by its metadata id and its SDP `label`.
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+        }
+    }
+}
+
 /// One party of a recorded call.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordedParty {
     /// `participant_id`.
     pub id: String,
@@ -481,8 +505,23 @@ pub struct RecordedParty {
     pub sends: Vec<RecordedStream>,
 }
 
+impl RecordedParty {
+    /// A participant by its metadata id and address of record, sending the
+    /// given streams; its display name is set by field.
+    #[must_use]
+    pub fn new(id: impl Into<String>, aor: impl Into<String>, sends: Vec<RecordedStream>) -> Self {
+        Self {
+            id: id.into(),
+            aor: aor.into(),
+            name: None,
+            sends,
+        }
+    }
+}
+
 /// A call being recorded, from which [`RecordingMetadata`] is built.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordedCall {
     /// `session_id` of the communication session.
     pub session_id: String,
@@ -495,6 +534,21 @@ pub struct RecordedCall {
     pub started: Option<String>,
     /// The parties.
     pub parties: Vec<RecordedParty>,
+}
+
+impl RecordedCall {
+    /// A recorded call by its recording session's id, with its
+    /// participants; the SIP session, group and start are set by field.
+    #[must_use]
+    pub fn new(session_id: impl Into<String>, parties: Vec<RecordedParty>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            sip_session_id: None,
+            group_id: None,
+            started: None,
+            parties,
+        }
+    }
 }
 
 impl RecordedCall {
@@ -693,11 +747,14 @@ fn boolean_feature(params: &sipral_core::msg::Params<'_>, tag: &str) -> bool {
 /// agent taking recording sessions ([`crate::UserAgent::accept_recording_sessions`])
 /// reads as the offer, where it would otherwise refuse the body 415.
 pub(crate) fn session_part<'a>(message: &RawMessage<'a>) -> Option<&'a [u8]> {
-    read_raw_recording_offer(message).ok().map(|offer| offer.sdp)
+    read_raw_recording_offer(message)
+        .ok()
+        .map(|offer| offer.sdp)
 }
 
 /// What a recording session's INVITE offers: the SDP and the metadata.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RecordingOffer<'a> {
     /// The SDP part, as it was carried.
     pub sdp: &'a [u8],
@@ -1904,8 +1961,14 @@ Content-Length: {}\r\n\r\n",
         let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
         assert!(requires_siprec(&message.to_owned()));
         assert!(supports_siprec(&message.to_owned()));
-        assert!(contact_has_feature_tag(&message.to_owned(), SRC_FEATURE_TAG));
-        assert!(!contact_has_feature_tag(&message.to_owned(), SRS_FEATURE_TAG));
+        assert!(contact_has_feature_tag(
+            &message.to_owned(),
+            SRC_FEATURE_TAG
+        ));
+        assert!(!contact_has_feature_tag(
+            &message.to_owned(),
+            SRS_FEATURE_TAG
+        ));
         let offer = read_raw_recording_offer(&message).expect("an offer");
         assert_eq!(offer.sdp, sdp);
         assert_eq!(offer.metadata, metadata);
@@ -1967,7 +2030,10 @@ Content-Length: {}\r\n\r\n",
         let message = parse(&bytes, &mut scratch, ParseMode::Strict).expect("parses");
         assert!(!requires_siprec(&message.to_owned()));
         assert!(!supports_siprec(&message.to_owned()));
-        assert!(!contact_has_feature_tag(&message.to_owned(), SRC_FEATURE_TAG));
+        assert!(!contact_has_feature_tag(
+            &message.to_owned(),
+            SRC_FEATURE_TAG
+        ));
         assert_eq!(
             read_raw_recording_offer(&message).err(),
             Some(SiprecError::Multipart(MultipartError::NotMultipart))

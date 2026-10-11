@@ -287,11 +287,11 @@ impl Codec {
     /// stream.
     #[must_use]
     pub fn rtpmap(self, payload: u8) -> RtpMap {
-        RtpMap {
+        RtpMap::new(
             payload,
-            encoding: self.encoding_name().to_owned(),
-            clock_rate: self.clock_rate(),
-            parameters: match self {
+            self.encoding_name().to_owned(),
+            self.clock_rate(),
+            match self {
                 #[cfg(feature = "opus")]
                 Self::Opus => Some(opus::RTPMAP_CHANNELS.to_string()),
                 // one channel, which a missing count means (RFC 4566 §6)
@@ -302,7 +302,7 @@ impl Codec {
                 | Self::L16Narrowband
                 | Self::L16Wideband => None,
             },
-        }
+        )
     }
 
     /// The `a=fmtp` parameters to offer, if any.
@@ -803,6 +803,7 @@ impl CodecCatalog {
 
 /// One codec this build could have used on a call, and what became of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CodecCandidate {
     /// The codec.
     pub codec: Codec,
@@ -957,12 +958,12 @@ pub(crate) mod tests {
         let read = |value: &str| {
             let (payload, rest) = value.split_once(' ').unwrap();
             let mut parts = rest.split('/');
-            Codec::of(&NegotiatedCodec::new(RtpMap {
-                payload: payload.parse().unwrap(),
-                encoding: parts.next().unwrap().to_owned(),
-                clock_rate: parts.next().unwrap().parse().unwrap(),
-                parameters: parts.next().map(str::to_owned),
-            }))
+            Codec::of(&NegotiatedCodec::new(RtpMap::new(
+                payload.parse().unwrap(),
+                parts.next().unwrap().to_owned(),
+                parts.next().unwrap().parse().unwrap(),
+                parts.next().map(str::to_owned),
+            )))
         };
         assert_eq!(read("100 L16/16000"), Some(Codec::L16Wideband));
         assert_eq!(read("100 L16/8000/1"), Some(Codec::L16Narrowband));
@@ -1308,24 +1309,19 @@ pub(crate) mod tests {
     /// The encoding name decides, not the number.
     #[test]
     fn a_negotiated_codec_is_recognised_by_name_not_by_number() {
-        let opus = NegotiatedCodec::new(RtpMap {
-            payload: 111,
-            encoding: "OPUS".to_owned(),
-            clock_rate: 48_000,
-            parameters: Some("2".to_owned()),
-        });
+        let opus = NegotiatedCodec::new(RtpMap::new(
+            111,
+            "OPUS".to_owned(),
+            48_000,
+            Some("2".to_owned()),
+        ));
         #[cfg(feature = "opus")]
         assert_eq!(Codec::of(&opus), Some(Codec::Opus));
         // without Opus the name is not recognised
         #[cfg(not(feature = "opus"))]
         assert_eq!(Codec::of(&opus), None);
 
-        let unknown = NegotiatedCodec::new(RtpMap {
-            payload: 0,
-            encoding: "SPEEX".to_owned(),
-            clock_rate: 8_000,
-            parameters: None,
-        });
+        let unknown = NegotiatedCodec::new(RtpMap::new(0, "SPEEX".to_owned(), 8_000, None));
         assert_eq!(Codec::of(&unknown), None);
     }
 

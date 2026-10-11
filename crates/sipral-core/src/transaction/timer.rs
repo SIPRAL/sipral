@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 /// Defaults are RFC 3261 Table 4. T1 is an RTT estimate: raise it on a
 /// satellite link, lower it on a LAN, and the rest follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TimerConfig {
     /// Round-trip estimate. 500 ms.
     pub t1: Duration,

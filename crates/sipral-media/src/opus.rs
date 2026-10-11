@@ -249,6 +249,7 @@ impl FrameDuration {
 /// library's own codes and should not be reachable through this API: the
 /// arguments it would refuse are checked here first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CodecError {
     /// A sampling rate Opus does not run at.
     UnsupportedRate {

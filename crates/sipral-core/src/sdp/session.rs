@@ -15,6 +15,7 @@ const VOIP_METRICS_XR_FORMAT: &str = "voip-metrics";
 /// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
 /// (§5.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Origin {
     /// The login of whoever wrote it, or `-`.
     pub username: String,
@@ -63,6 +64,7 @@ impl fmt::Display for Origin {
 
 /// `c=<nettype> <addrtype> <connection-address>` (§5.7).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Connection {
     /// `IN`.
     pub network: String,
@@ -81,6 +83,21 @@ impl Connection {
             network: "IN".to_owned(),
             address_type: address_type_of(address).to_owned(),
             address: address.to_string(),
+        }
+    }
+
+    /// A connection line from its three fields as written: a peer's, read
+    /// from somewhere other than `c=`.
+    #[must_use]
+    pub fn written(
+        network: impl Into<String>,
+        address_type: impl Into<String>,
+        address: impl Into<String>,
+    ) -> Self {
+        Self {
+            network: network.into(),
+            address_type: address_type.into(),
+            address: address.into(),
         }
     }
 
@@ -112,6 +129,7 @@ impl fmt::Display for Connection {
 /// `t=<start-time> <stop-time>` and the `r=` lines that belong to it (§5.9,
 /// §5.10).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Timing {
     /// NTP seconds, or zero.
     pub start: u64,
@@ -145,6 +163,7 @@ impl fmt::Display for Timing {
 
 /// `a=<name>` or `a=<name>:<value>` (§5.13).
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Attribute {
     /// The part before the colon.
     pub name: String,
@@ -262,6 +281,7 @@ impl fmt::Display for Attribute {
 /// Fields follow §5's line order and are written in it, so output is
 /// deterministic. Unused lines are kept and round-trip unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SessionDescription {
     /// `o=`
     pub origin: Origin,

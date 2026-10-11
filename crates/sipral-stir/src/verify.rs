@@ -41,6 +41,7 @@ pub const DEFAULT_INFO_SCHEMES: &[&str] = &["https"];
 
 /// A verifier's policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
     /// How far `iat` may be from the time of verification, either way, in
     /// seconds, before the request is stale.

@@ -193,13 +193,12 @@ impl UserAgent {
                 self.keepalives.due.remove(&account);
                 continue;
             };
-            self.keepalives.out.push_back(Transmit {
-                transport: config.transport,
-                destination: config.remote,
-                source: None,
-                payload: Arc::from(PING),
-                protocol: TransportProtocol::Udp,
-            });
+            self.keepalives.out.push_back(Transmit::new(
+                config.transport,
+                config.remote,
+                Arc::from(PING),
+                TransportProtocol::Udp,
+            ));
             let next = now + self.jittered(every);
             self.keepalives.due.insert(account, (next, every));
         }

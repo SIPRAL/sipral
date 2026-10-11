@@ -210,9 +210,11 @@ fn gone(_: SessionUnavailable) -> CallGone {
 #[cfg(feature = "ice")]
 fn transport_of(datagram: &sipral::Datagram<'_>) -> Transport {
     match datagram.transport {
-        sipral::TurnTransport::Udp => Transport::Udp,
         sipral::TurnTransport::Tcp => Transport::Tcp,
         sipral::TurnTransport::Tls => Transport::Tls,
+        // UDP, and a relay transport this layer has no name for yet, which
+        // travels as a datagram
+        _ => Transport::Udp,
     }
 }
 

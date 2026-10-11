@@ -668,13 +668,13 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(at, (port, target))| {
-                    Record::Srv(Srv {
-                        priority: u16::try_from(at).unwrap(),
-                        weight: 0,
-                        port: *port,
-                        target: (*target).into(),
-                        ttl: Duration::from_secs(ttl),
-                    })
+                    Record::Srv(Srv::new(
+                        u16::try_from(at).unwrap(),
+                        0,
+                        *port,
+                        *target,
+                        Duration::from_secs(ttl),
+                    ))
                 })
                 .collect();
             self.with(name, RecordType::Srv, Answer::Records(records))

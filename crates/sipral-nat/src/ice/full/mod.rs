@@ -457,6 +457,7 @@ impl core::error::Error for SendError {}
 
 /// Why a call to the agent was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IceError {
     /// A username fragment or password outside the shape RFC 8839 §5.4
     /// gives them.

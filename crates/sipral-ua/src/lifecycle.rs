@@ -376,6 +376,7 @@ impl core::fmt::Display for RecoveryFailure {
 ///
 /// Counts only, so nothing allocates in the suspend window. Nothing was sent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Suspending {
     /// Bindings that were live and are now unverified.
     pub unverified: usize,
@@ -390,6 +391,7 @@ pub struct Suspending {
 /// Answers "may the application stop polling?". `next` of `None` means no
 /// deadline anywhere: a loop may block until a packet arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Idle {
     /// The next deadline in the stack, as [`UserAgent::poll_timeout`].
     pub next: Option<Instant>,

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 /// The scheme of a URI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UriScheme<'a> {
     /// `sip:`
     Sip,
@@ -68,6 +69,7 @@ pub enum HostRef<'a> {
 
 /// Why a URI could not be parsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UriError {
     /// No scheme, or a scheme that is not a token.
     BadScheme,

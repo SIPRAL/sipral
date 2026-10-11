@@ -10,10 +10,7 @@
 
 use std::time::Duration;
 
-use sipral::{
-    AmdConfig, BeepConfig, ConsentTone, DtmfDetection, ProgressConfig, ProgressDetection,
-    ToneRegion,
-};
+use sipral::{AmdConfig, BeepConfig, ConsentTone, DtmfDetection, ProgressDetection, ToneRegion};
 
 use crate::abi::{Number, codes, record};
 use crate::error::{Fail, entry, fail};
@@ -195,27 +192,31 @@ fn progress_of(config: &SipralProgressConfig) -> Result<Option<ProgressDetection
     let defaults = ProgressDetection::default();
     let amd = AmdConfig::default();
     let answering_machine =
-        toggled(config.answering_machine, "answering_machine", true)?.then(|| AmdConfig {
-            max_initial_silence_ms: or(config.max_initial_silence_ms, amd.max_initial_silence_ms),
-            max_greeting_ms: or(config.max_greeting_ms, amd.max_greeting_ms),
-            silence_after_greeting_ms: or(
+        toggled(config.answering_machine, "answering_machine", true)?.then(|| {
+            let mut amd_config = AmdConfig::default();
+            amd_config.max_initial_silence_ms =
+                or(config.max_initial_silence_ms, amd.max_initial_silence_ms);
+            amd_config.max_greeting_ms = or(config.max_greeting_ms, amd.max_greeting_ms);
+            amd_config.silence_after_greeting_ms = or(
                 config.silence_after_greeting_ms,
                 amd.silence_after_greeting_ms,
-            ),
-            max_words: or(config.max_words, amd.max_words),
-            min_word_ms: or(config.min_word_ms, amd.min_word_ms),
-            min_word_gap_ms: or(config.min_word_gap_ms, amd.min_word_gap_ms),
-            max_decision_ms: or(config.max_decision_ms, amd.max_decision_ms),
-            min_speech_above_floor_db: or(
+            );
+            amd_config.max_words = or(config.max_words, amd.max_words);
+            amd_config.min_word_ms = or(config.min_word_ms, amd.min_word_ms);
+            amd_config.min_word_gap_ms = or(config.min_word_gap_ms, amd.min_word_gap_ms);
+            amd_config.max_decision_ms = or(config.max_decision_ms, amd.max_decision_ms);
+            amd_config.min_speech_above_floor_db = or(
                 config.min_speech_above_floor_db,
                 amd.min_speech_above_floor_db,
-            ),
+            );
+            amd_config
         });
     let beep = BeepConfig::default();
-    let beep = toggled(config.beep, "beep", true)?.then(|| BeepConfig {
-        min_ms: or(config.beep_min_ms, beep.min_ms),
-        max_ms: or(config.beep_max_ms, beep.max_ms),
-        ..beep
+    let beep = toggled(config.beep, "beep", true)?.then(|| {
+        let mut beep_config = beep;
+        beep_config.min_ms = or(config.beep_min_ms, beep.min_ms);
+        beep_config.max_ms = or(config.beep_max_ms, beep.max_ms);
+        beep_config
     });
     if let Some(limits) = beep
         && limits.min_ms > limits.max_ms
@@ -228,19 +229,22 @@ fn progress_of(config: &SipralProgressConfig) -> Result<Option<ProgressDetection
             ),
         ));
     }
-    Ok(Some(ProgressDetection {
-        region,
-        tones: ProgressConfig {
-            cycles: or(config.tone_cycles, defaults.tones.cycles),
-            ..defaults.tones
-        },
-        answering_machine,
-        beep,
-        beep_window: if config.beep_window_ms == 0 {
+    Ok(Some({
+        let mut progress_detection = ProgressDetection::default();
+        progress_detection.region = region;
+        progress_detection.tones = {
+            let mut progress_config = defaults.tones;
+            progress_config.cycles = or(config.tone_cycles, defaults.tones.cycles);
+            progress_config
+        };
+        progress_detection.answering_machine = answering_machine;
+        progress_detection.beep = beep;
+        progress_detection.beep_window = if config.beep_window_ms == 0 {
             defaults.beep_window
         } else {
             Duration::from_millis(u64::from(config.beep_window_ms))
-        },
+        };
+        progress_detection
     }))
 }
 
@@ -266,13 +270,12 @@ fn consent_of(tone: &SipralConsentTone) -> Result<Option<ConsentTone>, Fail> {
             format!("attenuation_db is {attenuation}; it is 3 to 40"),
         ));
     }
-    let chosen = ConsentTone {
-        frequency_hz: or(tone.frequency_hz, defaults.frequency_hz),
-        level_dbm0: -i32::try_from(attenuation).unwrap_or(40),
-        length: millis(tone.length_ms, defaults.length),
-        interval: millis(tone.interval_ms, defaults.interval),
-        local: toggled(tone.local, "local", defaults.local)?,
-    };
+    let mut chosen = ConsentTone::default();
+    chosen.frequency_hz = or(tone.frequency_hz, defaults.frequency_hz);
+    chosen.level_dbm0 = -i32::try_from(attenuation).unwrap_or(40);
+    chosen.length = millis(tone.length_ms, defaults.length);
+    chosen.interval = millis(tone.interval_ms, defaults.interval);
+    chosen.local = toggled(tone.local, "local", defaults.local)?;
     chosen.check().map_err(|error| media_failed(&error))?;
     Ok(Some(chosen))
 }

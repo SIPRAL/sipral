@@ -557,10 +557,12 @@ fn a_refer_from_the_agent_is_a_refer_of_the_callers_call_to_the_pbx() {
                 &mut pbx.agent,
                 caller,
                 local,
-                OutgoingExtras {
-                    destination,
-                    forks: ForkPolicy::default(),
-                    headers: &[],
+                {
+                    let mut outgoing_extras = OutgoingExtras::default();
+                    outgoing_extras.destination = destination;
+                    outgoing_extras.forks = ForkPolicy::default();
+                    outgoing_extras.headers = &[];
+                    outgoing_extras
                 },
                 now,
             )

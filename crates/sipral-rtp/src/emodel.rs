@@ -57,6 +57,7 @@ const ADVANTAGE_FACTOR: f64 = 0.0;
 /// robustness factor equation 7-29 uses to turn a loss rate into
 /// `Ie,eff`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct CodecQualityModel {
     /// `Ie`: the codec's own impairment at zero packet loss.
     pub ie: f64,

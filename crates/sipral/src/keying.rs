@@ -218,6 +218,7 @@ pub enum SdesSignalling {
 /// A `None` half keeps the engine's value. A call placed with its own catalogue
 /// ([`MediaEngine::place_with`](crate::MediaEngine::place_with)) decides the rest itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AccountSrtp {
     /// The account's policy.
     pub policy: Option<SrtpPolicy>,
@@ -563,7 +564,7 @@ mod tests {
         offer_lines, opening, peer_line_holds, usable,
     };
     use sipral_core::sdp::{Crypto, CryptoSuite, KeySalt, Keying, MediaPlan, parse};
-    use sipral_core::sdp::{Direction, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_core::sdp::{NegotiatedCodec, RtpMap};
 
     #[cfg(not(feature = "dtls"))]
     #[cfg(not(feature = "dtls"))]
@@ -602,22 +603,14 @@ mod tests {
     }
 
     fn plan(keying: Option<Keying>) -> MediaPlan {
-        MediaPlan {
-            local: "192.0.2.1:40000".parse().expect("an address"),
-            remote: "192.0.2.2:40002".parse().expect("an address"),
-            codec: NegotiatedCodec::new(RtpMap {
-                payload: 0,
-                encoding: "PCMU".to_owned(),
-                clock_rate: 8_000,
-                parameters: None,
-            }),
-            direction: Direction::SendRecv,
-            dtmf: None,
-            dtmf_in: None,
-            codec_in: 0,
-            rtcp: RtcpPlan::Off,
-            keying,
-            voip_metrics_xr: false,
+        {
+            let mut plan = MediaPlan::new(
+                "192.0.2.1:40000".parse().expect("an address"),
+                "192.0.2.2:40002".parse().expect("an address"),
+                NegotiatedCodec::new(RtpMap::new(0, "PCMU".to_owned(), 8_000, None)),
+            );
+            plan.keying = keying;
+            plan
         }
     }
 

@@ -9,6 +9,7 @@ use crate::msg::{HeaderError, UriError};
 
 /// Why a message could not be made into a dialog, or used inside one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DialogError {
     /// A field a dialog is built from is missing or does not parse.
     Field(HeaderError),

@@ -75,7 +75,7 @@ use sipral_rtp::{
     CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, Frame, GoodbyeBuilder,
     JitterBufferAdaptive, PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader,
     RtpPacket, RxConfig, SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder,
-    SourceDescriptionBuilder, UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
+    SourceDescriptionBuilder, VoipMetricsBlock, XrPacketBuilder,
 };
 use sipral_stir::{
     Attest, Claims, Dest, OrigId, Shaken, Signer, Tn, TnAuthList, TnEntry, TrustAnchors, Verdict,
@@ -1017,15 +1017,12 @@ fn stir_identity_seeds() -> Result<Vec<Seed>, Wrong> {
     let pem_chain = [pem(&leaf), pem(&intermediate), pem(&root)].concat();
 
     // the claims the target rebuilds a compact form from
-    let claims = Claims {
-        orig: Tn::new(orig).map_err(|why| wrong("originating number", &why))?,
-        dest: Dest::tn(Tn::new("12125551213").map_err(|why| wrong("destination", &why))?),
-        iat: STIR_NOW,
-        shaken: Some(Shaken {
-            attest: Attest::A,
-            origid: OrigId::from_bytes([0x5a; 16]),
-        }),
-    };
+    let claims = Claims::new(
+        Tn::new(orig).map_err(|why| wrong("originating number", &why))?,
+        Dest::tn(Tn::new("12125551213").map_err(|why| wrong("destination", &why))?),
+        STIR_NOW,
+    )
+    .with_shaken(Shaken::new(Attest::A, OrigId::from_bytes([0x5a; 16])));
     let signer = Signer::new(&[0x33; 32], "https://cert.example.com/sti.pem")
         .map_err(|why| wrong("signer", &why))?;
     let full = signer
@@ -1067,32 +1064,20 @@ fn stir_identity_seeds() -> Result<Vec<Seed>, Wrong> {
 /// metadata), a body with a nested `multipart/alternative`, and one whose
 /// parts carry a disposition with `handling` and a `Content-ID`.
 fn multipart_seeds() -> Result<Vec<Seed>, Wrong> {
-    let call = RecordedCall {
-        session_id: "hVpd7YQgRW2nD22h7q60JQ==".to_owned(),
-        sip_session_id: Some("ab30317f1a784dc48ff824d0d3715d86".to_owned()),
-        group_id: None,
-        started: Some("2026-09-21T10:00:00Z".to_owned()),
-        parties: vec![
-            RecordedParty {
-                id: "srfBElmCRp2QB23b7Mpk0w==".to_owned(),
-                aor: "sip:alice@example.com".to_owned(),
-                name: Some("Alice".to_owned()),
-                sends: vec![RecordedStream {
-                    id: "i1Pz3to5hGk8fuXl+PbwCw==".to_owned(),
-                    label: "1".to_owned(),
-                }],
-            },
-            RecordedParty {
-                id: "zSfPoSvdSDCmU3A3TRDxAw==".to_owned(),
-                aor: "sip:bob@example.com".to_owned(),
-                name: None,
-                sends: vec![RecordedStream {
-                    id: "UAAMm5GRQKSCMVvLyl4rFw==".to_owned(),
-                    label: "2".to_owned(),
-                }],
-            },
-        ],
-    };
+    let mut alice = RecordedParty::new(
+        "srfBElmCRp2QB23b7Mpk0w==",
+        "sip:alice@example.com",
+        vec![RecordedStream::new("i1Pz3to5hGk8fuXl+PbwCw==", "1")],
+    );
+    alice.name = Some("Alice".to_owned());
+    let bob = RecordedParty::new(
+        "zSfPoSvdSDCmU3A3TRDxAw==",
+        "sip:bob@example.com",
+        vec![RecordedStream::new("UAAMm5GRQKSCMVvLyl4rFw==", "2")],
+    );
+    let mut call = RecordedCall::new("hVpd7YQgRW2nD22h7q60JQ==", vec![alice, bob]);
+    call.sip_session_id = Some("ab30317f1a784dc48ff824d0d3715d86".to_owned());
+    call.started = Some("2026-09-21T10:00:00Z".to_owned());
     let wrong = |what: &str, why: &dyn std::fmt::Display| Wrong(format!("the {what} seed: {why}"));
     let recording = sipral_ua::siprec::recording_session_body(&offer(), &call.metadata())
         .map_err(|why| wrong("recording-session", &why))?;
@@ -1430,33 +1415,29 @@ fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
         reports: &[],
     });
     let sources = [SSRC];
-    let voip_metrics = VoipMetricsBlock {
-        ssrc: SSRC,
-        loss_rate: 12,
-        discard_rate: 3,
-        burst_density: 84,
-        gap_density: 10,
-        burst_duration_ms: 120,
-        gap_duration_ms: 520,
-        round_trip_delay_ms: 45,
-        end_system_delay_ms: 60,
-        signal_level_dbm0: -18,
-        noise_level_dbm0: -62,
-        rerl_db: 40,
-        gmin: 16,
-        r_factor: 82,
-        ext_r_factor: UNAVAILABLE,
-        mos_lq: 38,
-        mos_cq: 36,
-        rx_config: RxConfig {
-            plc: PacketLossConcealment::Standard,
-            jba: JitterBufferAdaptive::Adaptive,
-            jb_rate: 5,
-        },
-        jb_nominal_ms: 20,
-        jb_maximum_ms: 60,
-        jb_abs_max_ms: 200,
-    };
+    let mut voip_metrics = VoipMetricsBlock::new(SSRC);
+    voip_metrics.loss_rate = 12;
+    voip_metrics.discard_rate = 3;
+    voip_metrics.burst_density = 84;
+    voip_metrics.gap_density = 10;
+    voip_metrics.burst_duration_ms = 120;
+    voip_metrics.gap_duration_ms = 520;
+    voip_metrics.round_trip_delay_ms = 45;
+    voip_metrics.end_system_delay_ms = 60;
+    voip_metrics.signal_level_dbm0 = -18;
+    voip_metrics.noise_level_dbm0 = -62;
+    voip_metrics.rerl_db = 40;
+    voip_metrics.r_factor = 82;
+    voip_metrics.mos_lq = 38;
+    voip_metrics.mos_cq = 36;
+    voip_metrics.jb_nominal_ms = 20;
+    voip_metrics.jb_maximum_ms = 60;
+    voip_metrics.jb_abs_max_ms = 200;
+    voip_metrics.rx_config = RxConfig::new(
+        PacketLossConcealment::Standard,
+        JitterBufferAdaptive::Adaptive,
+        5,
+    );
     let mut out = Vec::new();
     for (name, builder) in [
         (

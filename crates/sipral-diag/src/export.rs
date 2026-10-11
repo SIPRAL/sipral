@@ -124,9 +124,8 @@ pub fn export_replayed<T: Replayed>(
             capture.arrived(arrival, frame.at)?;
         }
         let now = origin + frame.at;
-        match replay.step(target).map_err(ExportError::Replay)? {
-            Some(Played::Cue(label)) => target.cue(label, now),
-            Some(Played::Fed) | None => {}
+        if let Some(Played::Cue(label)) = replay.step(target).map_err(ExportError::Replay)? {
+            target.cue(label, now);
         }
         while let Some(transmit) = target.poll_transmit() {
             capture.sent(&transmit, frame.at)?;

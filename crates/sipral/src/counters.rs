@@ -344,11 +344,9 @@ mod tests {
     }
 
     fn statistics(shrunk: u64, stretched: u64) -> StreamStatistics {
-        let quality = sipral_rtp::Quality {
-            shrunk,
-            stretched,
-            ..sipral_rtp::Quality::default()
-        };
+        let mut quality = sipral_rtp::Quality::default();
+        quality.shrunk = shrunk;
+        quality.stretched = stretched;
         StreamStatistics {
             codec: Codec::G722,
             quality,

@@ -88,11 +88,11 @@ pub(crate) fn negotiated(
         (Some(left), Some(right)) => left.max(right),
         (left, right) => left.or(right).unwrap_or_default(),
     };
-    Some(Negotiated {
-        generic_nack: mine.generic_nack && far.generic_nack,
+    Some(Negotiated::new(
+        mine.generic_nack && far.generic_nack,
         trr_interval,
-        reduced_size: offers_rsize(ours) && offers_rsize(theirs),
-    })
+        offers_rsize(ours) && offers_rsize(theirs),
+    ))
 }
 
 #[cfg(test)]
@@ -173,11 +173,7 @@ a=rtcp-fb:* nack pli\r\na=rtcp-rsize\r\n",
         let plain = stream("m=audio 4000 RTP/AVP 0\r\na=rtcp-fb:* nack\r\n");
         assert_eq!(
             negotiated(&full, &full, (0, 0)),
-            Some(Negotiated {
-                generic_nack: true,
-                trr_interval: Duration::ZERO,
-                reduced_size: true,
-            })
+            Some(Negotiated::new(true, Duration::ZERO, true))
         );
         assert_eq!(
             negotiated(&full, &bare, (0, 0)),

@@ -88,13 +88,12 @@ impl UserAgent {
             }
             None => {
                 self.flows_wanted.insert(account, now);
-                self.events
-                    .push_back(UaEvent::TransportWanted {
-                        protocol,
-                        destination: server,
-                        request_bytes: 0,
-                        limit_bytes: 0,
-                    });
+                self.events.push_back(UaEvent::TransportWanted {
+                    protocol,
+                    destination: server,
+                    request_bytes: 0,
+                    limit_bytes: 0,
+                });
                 Flow::Asked {
                     until: now + STREAM_WAIT,
                 }

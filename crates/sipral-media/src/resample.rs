@@ -88,6 +88,7 @@ const BLACKMAN: [i64; 3] = [450_971_566, 536_870_912, 85_899_346];
 
 /// Why no filter could be built for a pair of rates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RateError {
     /// A rate of zero, which is not a rate.
     Zero {

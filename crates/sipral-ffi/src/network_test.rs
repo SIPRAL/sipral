@@ -295,15 +295,17 @@ fn listen_to_echo(state: &mut StackState, test: &mut Running, now: Instant) {
         share
             .with(|session| {
                 let figures = session.statistics(now);
-                EchoMeasurement {
-                    received: figures.quality.received,
-                    lost: figures
+                {
+                    let mut echo_measurement = EchoMeasurement::default();
+                    echo_measurement.received = figures.quality.received;
+                    echo_measurement.lost = figures
                         .quality
                         .lost
-                        .saturating_add(figures.quality.discarded_late),
-                    jitter: figures.quality.jitter,
-                    round_trip: figures.round_trip,
-                    buffer_delay: figures.quality.delay,
+                        .saturating_add(figures.quality.discarded_late);
+                    echo_measurement.jitter = figures.quality.jitter;
+                    echo_measurement.round_trip = figures.round_trip;
+                    echo_measurement.buffer_delay = figures.quality.delay;
+                    echo_measurement
                 }
             })
             .ok()
@@ -453,10 +455,11 @@ fn rated_echo(payload: &mut SipralNetworkTestEvent, quality: &EchoQuality) {
 
 const fn nat_kind(said: NatKind) -> SipralNatKind {
     match said {
-        NatKind::Unknown => SipralNatKind::Unknown,
         NatKind::Open => SipralNatKind::Open,
         NatKind::PortPreserved => SipralNatKind::PortPreserved,
         NatKind::PortChanged => SipralNatKind::PortChanged,
+        // unknown, and a kind this layer has no C name for yet
+        _ => SipralNatKind::Unknown,
     }
 }
 

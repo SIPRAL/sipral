@@ -53,6 +53,7 @@ const QUEUE: usize = 100;
 
 /// Where to record a call, and from where.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RecordTo {
     /// The recording server's URI: the INVITE's target.
     pub server: Uri,
@@ -87,6 +88,7 @@ impl RecordTo {
 
 /// One copy of a call's audio on its way to a recording server.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct RecordingDatagram<'a> {
     /// The socket to send it from: [`RecordTo::this_end`] for this end's
     /// audio, [`RecordTo::far_end`] for the far end's.
@@ -290,33 +292,20 @@ pub(crate) fn parties(
     (this_end, far_end): (End, End),
 ) -> Parties {
     let [this_party, far_party, this_stream, far_stream] = ids;
+    let mut this = RecordedParty::new(
+        this_party,
+        this_end.0,
+        vec![RecordedStream::new(this_stream, THIS_END)],
+    );
+    this.name = this_end.1;
+    let mut far = RecordedParty::new(
+        far_party,
+        far_end.0,
+        vec![RecordedStream::new(far_stream, FAR_END)],
+    );
+    far.name = far_end.1;
     Parties {
-        call: RecordedCall {
-            session_id,
-            sip_session_id: None,
-            group_id: None,
-            started: None,
-            parties: vec![
-                RecordedParty {
-                    id: this_party,
-                    aor: this_end.0,
-                    name: this_end.1,
-                    sends: vec![RecordedStream {
-                        id: this_stream,
-                        label: THIS_END.to_owned(),
-                    }],
-                },
-                RecordedParty {
-                    id: far_party,
-                    aor: far_end.0,
-                    name: far_end.1,
-                    sends: vec![RecordedStream {
-                        id: far_stream,
-                        label: FAR_END.to_owned(),
-                    }],
-                },
-            ],
-        },
+        call: RecordedCall::new(session_id, vec![this, far]),
     }
 }
 

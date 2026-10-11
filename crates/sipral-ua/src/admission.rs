@@ -237,7 +237,7 @@ fn scheme_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     let target = request.request_uri()?.ok()?;
     match target.scheme() {
         UriScheme::Sip | UriScheme::Sips | UriScheme::Tel => None,
-        UriScheme::Other(_) => Some(OutgoingResponse::new(UNSUPPORTED_URI_SCHEME)),
+        _ => Some(OutgoingResponse::new(UNSUPPORTED_URI_SCHEME)),
     }
 }
 

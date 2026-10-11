@@ -1754,12 +1754,16 @@ crates.io, NuGet and npm and another on PyPI. The C header's version macros
 are the ABI's (`docs/08-ffi.md`, "Versioning") and move only with it: the
 1.0.0 release is at ABI 1.0.
 
-**What a release publishes** is the C library and the language packages
-over it: the table below, every row but the crates. The Rust crates are not
-part of it. Their API makes no compatibility promise, and the `sipral` name
-on crates.io is a reservation at 0.0.1 that stays what it is; `crate.sh`
-refuses, saying so, unless it is asked with `--crates-io` to check the crates
-as a publication there would need them.
+**What a release publishes** is the C library, the language packages over
+it, and from 1.2.0 the Rust crates: the table below. `sipral` is the crate
+an application names and the one whose API is promised between releases
+(`08-ffi.md`, "The Rust crates"); the workspace crates it depends on go with
+it, each at the release's exact version, since crates.io takes a crate only
+when every crate it names is there. `crate.sh` reads that set from
+`cargo metadata` and checks each crate's metadata before anything is
+packaged. crates.io takes a handful of new crate names at once and then one
+every few minutes, so the first publication of the set is spread over the
+better part of an hour; a later one, of names it already has, is not.
 
 Each script under `scripts/package/` takes `--dry-run`, which runs on the
 Mac this gate is developed on and says, in a `note` line, what it left to
@@ -1769,7 +1773,7 @@ uploads anything.
 
 | Artefact | Registry | Built by | On |
 |---|---|---|---|
-| `sipral` and the workspace crates it names: not published by a release | crates.io | `crate.sh --crates-io` | any host |
+| `sipral` and the workspace crates it depends on | crates.io | `crate.sh` | any host |
 | `Sipral`, `Sipral.Opus` | NuGet | `nuget.sh collect` per RID, then `nuget.sh pack` | the Mac (osx-arm64, osx-x64), Windows under Git Bash (win-x64, win-arm64), a Docker host (linux-x64, linux-arm64); the pack anywhere with the .NET SDK |
 | `CSipral.xcframework.zip`, and the root `Package.swift` pointed at it | an asset of this repository's release `vX.Y.Z`; the Swift package is this repository | `xcframework.sh --release` | a Mac with Xcode |
 | `sipral`, `sipral-opus` wheels | PyPI | `wheels.sh` | the Mac (`macosx_12_0_arm64`), an Intel Mac (`macosx_12_0_x86_64`), Windows under Git Bash (`win_amd64`, and `win_arm64` with `--windows-arm64`, whose import and tests run on a Windows on Arm machine), a Docker host (`--manylinux`, `--linux-arm64`) |

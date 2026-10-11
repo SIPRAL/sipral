@@ -41,6 +41,7 @@ pub enum RecordType {
 
 /// One DNS lookup the caller's resolver is asked to make.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Query {
     /// The name, as it is to be asked: `_sip._udp.example.com`, or a host.
     pub name: Arc<str>,
@@ -48,8 +49,20 @@ pub struct Query {
     pub record: RecordType,
 }
 
+impl Query {
+    /// A lookup of `record` records for `name`.
+    #[must_use]
+    pub fn new(name: impl Into<Arc<str>>, record: RecordType) -> Self {
+        Self {
+            name: name.into(),
+            record,
+        }
+    }
+}
+
 /// A NAPTR record (RFC 3403 §4.1), with the fields RFC 3263 reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Naptr {
     /// Lower first.
     pub order: u16,
@@ -65,8 +78,31 @@ pub struct Naptr {
     pub ttl: Duration,
 }
 
+impl Naptr {
+    /// A NAPTR record as a resolver read it (RFC 3403 §4.1).
+    #[must_use]
+    pub fn new(
+        order: u16,
+        preference: u16,
+        flags: impl Into<Box<str>>,
+        service: impl Into<Box<str>>,
+        replacement: impl Into<Box<str>>,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            order,
+            preference,
+            flags: flags.into(),
+            service: service.into(),
+            replacement: replacement.into(),
+            ttl,
+        }
+    }
+}
+
 /// An SRV record (RFC 2782).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Srv {
     /// Lower first.
     pub priority: u16,
@@ -80,8 +116,29 @@ pub struct Srv {
     pub ttl: Duration,
 }
 
+impl Srv {
+    /// An SRV record as a resolver read it (RFC 2782).
+    #[must_use]
+    pub fn new(
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: impl Into<Box<str>>,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            priority,
+            weight,
+            port,
+            target: target.into(),
+            ttl,
+        }
+    }
+}
+
 /// One record of an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Record {
     /// An answer to a NAPTR query.
     Naptr(Naptr),
@@ -98,6 +155,7 @@ pub enum Record {
 
 /// What the caller's resolver said to a [`Query`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Answer {
     /// The records it returned; other kinds are ignored.
     Records(Vec<Record>),
@@ -136,6 +194,7 @@ impl core::error::Error for LocateError {}
 /// Where a URI's server is: every address to try, first to last, and how long
 /// the answer holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Located {
     /// The addresses, in the order §4.3 has them tried.
     pub targets: Vec<SocketAddr>,
@@ -178,10 +237,9 @@ enum Stage {
 /// let mut locator = Locator::new(&uri, TransportProtocol::Udp, AddressFamily::Ipv4, false, 7);
 /// let srv = locator.poll_query().unwrap();
 /// assert_eq!((&*srv.name, srv.record), ("_sip._udp.pbx.example.com", RecordType::Srv));
-/// locator.answer(&srv, Answer::Records(vec![Record::Srv(Srv {
-///     priority: 10, weight: 0, port: 5080, target: "sip1.example.com".into(),
-///     ttl: Duration::from_secs(300),
-/// })]));
+/// locator.answer(&srv, Answer::Records(vec![Record::Srv(Srv::new(
+///     10, 0, 5080, "sip1.example.com", Duration::from_secs(300),
+/// ))]));
 /// let a = locator.poll_query().unwrap();
 /// locator.answer(&a, Answer::Records(vec![Record::Address {
 ///     address: "192.0.2.40".parse().unwrap(), ttl: Duration::from_secs(60),

@@ -102,6 +102,7 @@ mod verdict;
 mod verify;
 
 #[cfg(feature = "testing")]
+#[doc(hidden)]
 pub mod testing;
 // a test PKI is test code wherever it is built, and holds to the tests' own
 // discipline rather than the library's

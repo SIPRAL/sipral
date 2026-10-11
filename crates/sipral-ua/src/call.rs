@@ -310,6 +310,7 @@ impl OutgoingCall {
 /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer) takes
 /// this because the REFER already names the target.
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub struct OutgoingExtras<'a> {
     /// As [`OutgoingCall::to_address`].
     pub destination: Option<(TransportId, SocketAddr)>,
@@ -494,6 +495,7 @@ pub(crate) struct KeptBranch {
 ///
 /// Fixed for the call's life; a fork's branches share one.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CallIdentity {
     /// The `From` URI, as written in the header: no angle brackets, no
     /// header parameters such as `tag`.

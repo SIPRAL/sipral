@@ -122,6 +122,7 @@ impl Basic {
 
 /// A `note`, with its `xml:lang` when it has one (§4.1.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Note {
     /// The text.
     pub text: Box<str>,
@@ -142,6 +143,7 @@ impl Note {
 
 /// A tuple's `contact` (§4.1.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Contact {
     /// The URI.
     pub uri: Box<str>,
@@ -152,6 +154,7 @@ pub struct Contact {
 
 /// One `tuple` (§4.1.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tuple {
     /// The `id` attribute: an `xs:ID`, unique within the document.
     pub id: Box<str>,
@@ -227,6 +230,7 @@ impl Activity {
 /// The data model's `person` element (RFC 4479), as RPID uses it: the human behind
 /// the tuples.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Person {
     /// The `id` attribute, an `xs:ID`.
     pub id: Box<str>,
@@ -234,8 +238,20 @@ pub struct Person {
     pub activities: Vec<Activity>,
 }
 
+impl Person {
+    /// A `<person>` element by its `id`, with its activities.
+    #[must_use]
+    pub fn new(id: impl Into<Box<str>>, activities: Vec<Activity>) -> Self {
+        Self {
+            id: id.into(),
+            activities,
+        }
+    }
+}
+
 /// One `application/pidf+xml` document (§4.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Presence {
     /// The `entity` attribute: the presentity's URI (`pres:`, `sip:`...).
     pub entity: Box<str>,

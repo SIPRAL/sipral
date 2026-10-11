@@ -72,6 +72,7 @@ impl fmt::Display for Direction {
 /// `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<parameters>]`
 /// (RFC 4566 §6).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RtpMap {
     /// The payload type it names.
     pub payload: u8,
@@ -81,6 +82,24 @@ pub struct RtpMap {
     pub clock_rate: u32,
     /// Channel count for audio, when written.
     pub parameters: Option<String>,
+}
+
+impl RtpMap {
+    /// `a=rtpmap:<payload> <encoding>/<clock rate>[/<parameters>]`.
+    #[must_use]
+    pub fn new(
+        payload: u8,
+        encoding: impl Into<String>,
+        clock_rate: u32,
+        parameters: Option<String>,
+    ) -> Self {
+        Self {
+            payload,
+            encoding: encoding.into(),
+            clock_rate,
+            parameters,
+        }
+    }
 }
 
 impl RtpMap {
@@ -117,6 +136,7 @@ impl RtpMap {
 
 /// One `m=` block: the stream and everything said about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MediaDescription {
     /// `audio`, `video`, `application`, and the rest of §5.14's list.
     pub media: String,

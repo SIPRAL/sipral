@@ -28,8 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{
-    AddressFamily, Answer, EndpointConfig, Host, Input, Query, Record, RecordType,
-    TransportId, TransportProtocol,
+    AddressFamily, Answer, EndpointConfig, Host, Input, Query, Record, RecordType, TransportId,
+    TransportProtocol,
 };
 use sipral_core::msg::HostRef;
 
@@ -53,6 +53,7 @@ fn sleep_for(deadline: Option<Instant>, cap: Option<Duration>, now: Instant) -> 
 
 /// Whether the loop keeps going.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Control {
     /// Round again.
     Continue,
@@ -311,11 +312,7 @@ impl Runtime {
                 // RFC 5626 §4.4.1: dead flow; dropping the link closes it
                 UaEvent::FlowFailed { transport } => {
                     self.links.remove(&transport);
-                    handler.on_event(
-                        &mut self.agent,
-                        UaEvent::FlowFailed { transport },
-                        now,
-                    );
+                    handler.on_event(&mut self.agent, UaEvent::FlowFailed { transport }, now);
                 }
                 other => handler.on_event(&mut self.agent, other, now),
             }
@@ -482,7 +479,8 @@ impl Runtime {
         let family = match query.record {
             RecordType::A => AddressFamily::Ipv4,
             RecordType::Aaaa => AddressFamily::Ipv6,
-            RecordType::Naptr | RecordType::Srv => return Answer::Nothing,
+            // NAPTR, SRV, and any record type this loop does not ask for
+            _ => return Answer::Nothing,
         };
         match (self.resolver)(&Host::Name(query.name.clone()), Some(0), None) {
             Err(_) => Answer::Failed,

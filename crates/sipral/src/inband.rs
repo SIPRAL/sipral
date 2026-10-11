@@ -94,6 +94,7 @@ pub enum DtmfDetection {
 /// What to listen for on a call this end placed: the tones its network
 /// plays, and who answered.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ProgressDetection {
     /// Whose tones to listen for.
     pub region: ToneRegion,
@@ -126,6 +127,7 @@ impl Default for ProgressDetection {
 
 /// A beep that repeats while a call is being recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ConsentTone {
     /// Its frequency, from 300 to 3400 Hz: inside the band every codec in
     /// this build carries. Default 1400.

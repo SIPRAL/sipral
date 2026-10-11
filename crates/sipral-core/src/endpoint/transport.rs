@@ -226,6 +226,7 @@ impl Input<'_> {
 /// The payload is shared because a retransmission is the identical datagram
 /// (§17.1.1.2).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Transmit {
     /// Which transport to write to.
     pub transport: TransportId,
@@ -240,6 +241,33 @@ pub struct Transmit {
     pub payload: Arc<[u8]>,
     /// What the transport speaks; may differ after the §18.1.1 switch.
     pub protocol: TransportProtocol,
+}
+
+impl Transmit {
+    /// Bytes to write to `transport`, toward `destination`, from the
+    /// transport's own address.
+    #[must_use]
+    pub fn new(
+        transport: TransportId,
+        destination: SocketAddr,
+        payload: Arc<[u8]>,
+        protocol: TransportProtocol,
+    ) -> Self {
+        Self {
+            transport,
+            destination,
+            source: None,
+            payload,
+            protocol,
+        }
+    }
+
+    /// The same datagram or message with other bytes in it: a framing
+    /// layer's own, around the ones it was handed.
+    #[must_use]
+    pub fn with_payload(self, payload: Arc<[u8]>) -> Self {
+        Self { payload, ..self }
+    }
 }
 
 /// Why a transport could not deliver.

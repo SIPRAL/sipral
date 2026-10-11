@@ -118,16 +118,18 @@ pub(crate) fn options_of(options: &SipralRecordingOptions) -> Result<RecordingOp
             ));
         }
     };
-    Ok(RecordingOptions {
-        format,
-        layout,
-        sample_rate: (options.sample_rate != 0).then_some(options.sample_rate),
-        bitrate: (options.bitrate != 0).then_some(options.bitrate),
-        checkpoint: if options.checkpoint_ms == 0 {
+    Ok({
+        let mut recording_options = RecordingOptions::default();
+        recording_options.format = format;
+        recording_options.layout = layout;
+        recording_options.sample_rate = (options.sample_rate != 0).then_some(options.sample_rate);
+        recording_options.bitrate = (options.bitrate != 0).then_some(options.bitrate);
+        recording_options.checkpoint = if options.checkpoint_ms == 0 {
             defaults.checkpoint
         } else {
             Duration::from_millis(u64::from(options.checkpoint_ms))
-        },
+        };
+        recording_options
     })
 }
 

@@ -217,6 +217,7 @@ fn attach<'a>(open: &mut [XmlNode<'a>], root: &mut Option<XmlNode<'a>>, node: Xm
 /// In a [`Conference`] every element is settled, and reads
 /// [`ElementState::Full`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ElementState {
     /// This is all of it: it replaces what was held (the schema's default).
     #[default]
@@ -244,6 +245,7 @@ impl ElementState {
 /// One `entry` of `conf-uris`, `service-uris` or `host-info`'s `uris`
 /// (§5): a way into the conference, or a service around it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UriEntry {
     /// The URI, which is what the entry is keyed by.
     pub uri: Box<str>,
@@ -288,6 +290,7 @@ impl MediaStatus {
 /// One `entry` of `available-media` (§5): a stream the conference
 /// offers, keyed by its `label`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AvailableMedia {
     /// The `label` attribute, which ties it to the SDP of the focus.
     pub label: Box<str>,
@@ -301,6 +304,7 @@ pub struct AvailableMedia {
 
 /// The `conference-description` element (§5): what the conference is.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConferenceDescription {
     /// How the document described it.
     pub state: ElementState,
@@ -324,6 +328,7 @@ pub struct ConferenceDescription {
 
 /// The `host-info` element (§5): who runs the conference.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HostInfo {
     /// How the document described it.
     pub state: ElementState,
@@ -337,6 +342,7 @@ pub struct HostInfo {
 
 /// The `conference-state` element (§5): how the conference is doing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConferenceStatus {
     /// How the document described it.
     pub state: ElementState,
@@ -459,6 +465,7 @@ impl DisconnectionMethod {
 /// `joining-info` or `disconnection-info` (§5): when, why and
 /// by whom.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExecutionInfo {
     /// `when`, as written: an `xs:dateTime`.
     pub when: Option<Box<str>>,
@@ -471,6 +478,7 @@ pub struct ExecutionInfo {
 /// One `media` element (§5): a stream an endpoint has with the focus,
 /// keyed by its `id`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Media {
     /// The `id` attribute.
     pub id: Box<str>,
@@ -489,6 +497,7 @@ pub struct Media {
 /// One `endpoint` element (§5): one device of a user, keyed by its
 /// `entity`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Endpoint {
     /// How the document described it.
     pub state: ElementState,
@@ -512,6 +521,7 @@ pub struct Endpoint {
 
 /// One `user` element (§5): a participant, keyed by its `entity`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct User {
     /// How the document described it.
     pub state: ElementState,
@@ -527,6 +537,7 @@ pub struct User {
 
 /// The `users` element (§5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Users {
     /// How the document described it.
     pub state: ElementState,
@@ -536,6 +547,7 @@ pub struct Users {
 
 /// One `application/conference-info+xml` document (§5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConferenceInfo {
     /// The `entity` attribute: the conference's URI.
     pub entity: Box<str>,

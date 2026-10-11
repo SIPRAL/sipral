@@ -781,18 +781,19 @@ entry! {
         }
         let config = unsafe { read_versioned(config) }?;
         // read before locking the stack, so an unknown value builds nothing
-        let srtp = AccountSrtp {
-            policy: crate::media::srtp_policy(config.srtp, "srtp")?,
-            suites: crate::security::srtp_suites(unsafe {
+        let srtp = {
+            let mut srtp = AccountSrtp::default();
+            srtp.policy = crate::media::srtp_policy(config.srtp, "srtp")?;
+            srtp.suites = crate::security::srtp_suites(unsafe {
                 text(config.srtp_suites, config.srtp_suites_len, "srtp_suites")
-            }?)?,
-            recording_in_clear: crate::media::toggled(
+            }?)?;
+            srtp.recording_in_clear = crate::media::toggled(
                 u32::try_from(config.recording_in_clear).unwrap_or(u32::MAX),
                 "recording_in_clear",
                 false,
-            )?,
-            // no C switch: the stack's default, SDES on any transport
-            sdes_signalling: None,
+            )?;
+            // no C switch for `sdes_signalling`: the stack's default, SDES on any transport
+            srtp
         };
         let handle = with_stack(stack, |state| {
             let account = unsafe { account_from(state, &config) }?;

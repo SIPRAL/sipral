@@ -43,6 +43,7 @@ const ONE: u8 = 0xa2;
 
 /// One entry of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TnEntry {
     /// A service provider code: every number the provider it names serves.
     Spc(String),
@@ -79,6 +80,7 @@ impl std::error::Error for InvalidTnAuthList {}
 
 /// Which entry gave a certificate authority over a number.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Coverage {
     /// An entry naming exactly that number.
     Number,

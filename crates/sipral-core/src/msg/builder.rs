@@ -25,6 +25,7 @@ use super::span::ParseScratch;
 
 /// Why a message could not be written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BuildError {
     /// A field RFC 3261 §8.1.1 requires is missing.
     MissingField(&'static str),

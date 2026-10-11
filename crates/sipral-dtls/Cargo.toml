@@ -1,16 +1,19 @@
 [package]
 name = "sipral-dtls"
 description = "DTLS 1.2 for DTLS-SRTP: the record layer, handshake framing and messages, key derivation and self-signed certificates."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# the arm crates.io reads; why the dual expression is not here is in
+# crates/sipral/Cargo.toml
+license = "AGPL-3.0-only"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish.workspace = true
+publish = true
 
 [dependencies]
 # The primitives, and nothing but the primitives. The protocol around them is
@@ -49,7 +52,7 @@ zeroize = "=1.9.0"
 # the SRTP suites a negotiated profile keys, for the tests that carry a packet
 # each way under the keys a real handshake exported. Tests only: nothing in
 # this crate's library depends on how SRTP is done with the keys it hands out
-sipral-rtp = { path = "../sipral-rtp", version = "1.1.0" }
+sipral-rtp = { path = "../sipral-rtp", version = "=1.1.0" }
 
 [lints]
 workspace = true

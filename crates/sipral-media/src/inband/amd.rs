@@ -59,6 +59,7 @@ const FRAME_MS: u32 = 10;
 /// The limits of an [`AnsweringMachineDetector`], in milliseconds and
 /// words. The module docs give the reasoning behind each default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AmdConfig {
     /// The longest silence after answer before the verdict is
     /// [`Reason::InitialSilence`]. Default 3000.
@@ -109,6 +110,7 @@ pub enum Verdict {
 
 /// Which rule gave the verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Reason {
     /// A short greeting, then silence: somebody said hello and is waiting.
     ShortGreeting,

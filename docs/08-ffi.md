@@ -2952,6 +2952,43 @@ freeze" and "ABI 1.0", below) — stands, a later ABI minor only appends to
 it, and a binding built against any 1.x minor keeps loading against every
 later 1.x library.
 
+### The Rust crates
+
+From 1.2.0 the `sipral` crate on crates.io makes the same kind of promise in
+Rust, under the library version: a program that builds against `sipral` 1.k
+builds against every later 1.x. What is promised is everything this crate
+names and documents: its root, `sipral::ua` (the whole user agent),
+`sipral::sdp` and `sipral::stir`, and every type their functions, fields and
+events hand over, each of which has a name an application can write. What is
+not: an item hidden from the documentation (`#[doc(hidden)]`), which is there
+for the workspace's own layers and reaches the SIP core's own types --
+`UserAgent::endpoint` and `endpoint_ref`, `UserAgent::hand_over_info`,
+`UaEvent::Unclaimed`, `OwnedMessage::as_raw`, a recording's replay frames,
+the PUBLISH machine's request and response hooks, `BearerChallenge::read`,
+`CallIdentity::of_request` and `siprec::recording_session_body`. A request an
+event carries is promised as `OwnedMessage`'s own reading: a header by name
+or compact form, every value of one, the body, the method and the status.
+
+Growing without breaking is designed in. A type that can gain a field or a
+variant is `#[non_exhaustive]`: an application matches it with a `_` arm, and
+builds a struct with its constructor, or with `Default` and assignment to its
+fields. Two kinds are exhaustive on purpose, and a new member of either is a
+2.0 change: an enumeration a standard closes (the SDP direction, an address
+family, presence's open and closed, the three STIR attestation levels), and
+one every variant of which a stack has to handle for its security to hold
+(the SRTP suites, how a stream is keyed, how RTCP travels). ZRTP, planned for
+2.0, is a new way of keying, and is the example.
+
+The other crates of the workspace that `sipral` depends on (`sipral-core`,
+`sipral-ua`, `sipral-rtp` and the rest) are published because crates.io
+needs every dependency there, and each says it is part of `sipral`: their own
+APIs promise nothing between releases, and `sipral` depends on each at its
+exact release (`=1.2.0`), so a program never meets a newer one under an older
+`sipral`. `scripts/check.sh` holds the promise: `cargo-semver-checks` reads
+`sipral` against the newest release tag from `v1.2.0` on and fails on any
+change a program built against that release would not survive
+(`11-testing.md`, "Releasing").
+
 Which number moves is a rule about the printed surface and not about the Rust
 behind it. `SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH` in
 `crates/sipral-ffi/src/version.rs` are where they are written down, and this

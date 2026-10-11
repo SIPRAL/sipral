@@ -676,9 +676,9 @@ feasibility.
   frozen. A published name is a promise about compatibility. The exceptions
   are name reservations: `Sipral` 0.0.1 on NuGet, a stub assembly that
   implements nothing, and `sipral` 0.0.1 on crates.io, the one crate with
-  `publish = true`. The 1.0 release publishes the language packages, not the
-  crate: the reservation stays what it is, and `scripts/package/crate.sh`
-  says so rather than packaging it.
+  `publish = true`. The 1.0 and 1.1 releases published the language packages
+  and not the crates; 1.2.0 publishes them too, once the Rust API had a
+  promise of its own to make (`08-ffi.md`, "The Rust crates").
 - The ABI is not frozen before every entry the desktop client needs exists in
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping

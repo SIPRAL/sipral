@@ -32,6 +32,7 @@ use crate::verdict::{Failure, InfoProblem, Malformed};
 
 /// The PASSporT an Identity header field carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Token {
     /// All three segments, base64url as they arrived.
     Full {
@@ -51,6 +52,7 @@ pub enum Token {
 
 /// An Identity header field value.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Identity {
     /// The PASSporT.
     pub token: Token,

@@ -399,13 +399,15 @@ pub(crate) fn run_inband(lab: &Lab<'_>) -> Result<String, String> {
 /// # Errors
 /// What was heard, when it was not ringback, a machine and a beep.
 pub(crate) fn run_amd(lab: &Lab<'_>) -> Result<String, String> {
-    let detection = ProgressDetection {
-        region: ToneRegion::NorthAmerica,
-        ..ProgressDetection::default()
+    let detection = {
+        let mut progress_detection = ProgressDetection::default();
+        progress_detection.region = ToneRegion::NorthAmerica;
+        progress_detection
     };
-    let config = MediaConfig {
-        progress: Some(detection),
-        ..MediaConfig::default()
+    let config = {
+        let mut media_config = MediaConfig::default();
+        media_config.progress = Some(detection);
+        media_config
     };
     let mut ringback = None;
     let mut verdict = None;
@@ -479,19 +481,21 @@ pub(crate) fn run_recording(lab: &Lab<'_>) -> Result<String, String> {
     let wav = dir.join("sipral-call.wav");
     let ogg = dir.join("sipral-call.opus");
     let mut plan: Vec<(RecordingOptions, PathBuf)> = vec![(
-        RecordingOptions {
-            layout: RecordingLayout::Stereo,
-            sample_rate: Some(16_000),
-            ..RecordingOptions::default()
+        {
+            let mut recording_options = RecordingOptions::default();
+            recording_options.layout = RecordingLayout::Stereo;
+            recording_options.sample_rate = Some(16_000);
+            recording_options
         },
         wav.clone(),
     )];
     if let Some(format) = RecordingFormat::ogg_opus() {
         plan.push((
-            RecordingOptions {
-                format,
-                layout: RecordingLayout::Stereo,
-                ..RecordingOptions::default()
+            {
+                let mut recording_options = RecordingOptions::default();
+                recording_options.format = format;
+                recording_options.layout = RecordingLayout::Stereo;
+                recording_options
             },
             ogg.clone(),
         ));

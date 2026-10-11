@@ -87,10 +87,7 @@ fn placed(catalog: CodecCatalog, compaction: Compaction) -> (Vec<u8>, Result<Vec
         .into_iter()
         .find(|datagram| datagram.starts_with(b"INVITE "));
     let wanted = caller.heard.iter().find_map(|event| match *event {
-        Event::Signalling(UaEvent::TransportWanted {
-            request_bytes,
-            ..
-        }) => Some(request_bytes),
+        Event::Signalling(UaEvent::TransportWanted { request_bytes, .. }) => Some(request_bytes),
         _ => None,
     });
     match (answered, wanted) {

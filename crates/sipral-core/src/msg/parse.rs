@@ -11,6 +11,7 @@ use super::span::{HeaderSlot, ParseScratch, Span};
 
 /// How strict to be about what arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseMode {
     /// Accept anything that can be understood. The default for received
     /// traffic, where malformed messages are routine.
@@ -26,6 +27,7 @@ pub enum ParseMode {
 /// request it can still address with 400 or 513, and counts what it cannot
 /// (`docs/03-core-signalling.md`, "Limits, and what a refused message gets").
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Limits {
     /// Largest message accepted.
     pub max_message_bytes: u32,

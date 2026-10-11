@@ -72,6 +72,7 @@ impl core::error::Error for PinMismatch {}
 
 /// A pinned certificate that matched, with what its dates say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PinnedCertificate {
     /// Its `notBefore`, in seconds since the Unix epoch, when the DER could
     /// be read that far.

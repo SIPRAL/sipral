@@ -49,6 +49,7 @@ pub(crate) const WAITING: usize = 32;
 /// One telephone keypad key: the sixteen RFC 4733 §3.2 events 0 to 15, i.e. the twelve usual keys
 /// and the four extra column keys some PBXs still use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Digit {
     /// `0` to `9`.
     Number(u8),

@@ -95,6 +95,7 @@ fn queue_event(events: &mut VecDeque<MappingEvent>, event: MappingEvent) {
 
 /// How long a socket's mapping is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Keep {
     /// Refreshed every [`Mappings::refresh`] while mapped: the signalling socket, idle for minutes,
     /// whose mapping must outlive the silence.
@@ -119,6 +120,7 @@ pub enum MappingState {
 
 /// What [`Mappings`] learned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MappingEvent {
     /// A socket's first answer: it appears at `public`.
     Learned {
@@ -171,6 +173,7 @@ pub enum MappingEvent {
 
 /// A Binding request for the application's socket to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StunDatagram {
     /// The socket to send it from: the one the mapping is about.
     pub local: SocketAddr,

@@ -1625,10 +1625,12 @@ entry! {
                 headers.push((HeaderName::UserAgent, &**named));
             }
             headers.extend(asked);
-            let extra = OutgoingExtras {
-                destination,
-                forks,
-                headers: &headers,
+            let extra = {
+                let mut outgoing_extras = OutgoingExtras::default();
+                outgoing_extras.destination = destination;
+                outgoing_extras.forks = forks;
+                outgoing_extras.headers = &headers;
+                outgoing_extras
             };
             let placed = if let (Some(local), Some((catalog, outside))) = (media, outside) {
                 let placed = match call_media(state, &base, catalog, outside, text) {

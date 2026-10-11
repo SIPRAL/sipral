@@ -236,9 +236,11 @@ impl Host {
         let mut conference = self
             .endpoint
             .engine
-            .local_conference(LocalConferenceConfig {
-                max_members: 3,
-                local: None,
+            .local_conference({
+                let mut local_conference_config = LocalConferenceConfig::default();
+                local_conference_config.max_members = 3;
+                local_conference_config.local = None;
+                local_conference_config
             })
             .map_err(|error| error.to_string())?;
         for call in &self.calls {

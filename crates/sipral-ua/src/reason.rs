@@ -55,6 +55,7 @@ impl ReasonProtocol {
 
 /// One reason-value: a protocol, the cause it names, and the text beside it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Reason {
     /// Whose number `cause` is.
     pub protocol: ReasonProtocol,

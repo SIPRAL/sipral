@@ -77,6 +77,7 @@ impl Verdict {
 /// filtering behaviours needs a server answering from a second address (RFC 5780), which few public
 /// servers support.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum NatKind {
     /// No answer to read.
     Unknown,
@@ -132,6 +133,7 @@ impl ServerReach {
 
 /// What came back on an echo call, as the stream's statistics counted it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EchoMeasurement {
     /// Packets that arrived and were held for playout.
     pub received: u64,
@@ -148,6 +150,7 @@ pub struct EchoMeasurement {
 
 /// An echo call's figures, rated.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct EchoQuality {
     /// Lost or late, as a percentage of what was due.
     pub loss_percent: f64,
@@ -270,6 +273,7 @@ impl Probe {
 
 /// Everything one test found.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Findings {
     /// Whether a STUN server answered.
     pub stun: Probe,

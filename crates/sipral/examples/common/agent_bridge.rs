@@ -848,10 +848,11 @@ fn join(endpoint: &mut Endpoint, pair: &mut Pair, now: Instant) {
     // a new conference for the new pair: the agent's call leaves with the
     // old one
     pair.conference = None;
-    let made = endpoint.engine.local_conference(LocalConferenceConfig {
-        max_members: 2,
-        local: None,
-    });
+    let mut two = LocalConferenceConfig::default();
+    two.max_members = 2;
+    // this end bridges the two calls and takes no part
+    two.local = None;
+    let made = endpoint.engine.local_conference(two);
     let mut conference = match made {
         Ok(conference) => conference,
         Err(error) => {

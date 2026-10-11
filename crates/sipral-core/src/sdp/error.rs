@@ -8,6 +8,7 @@ use core::fmt;
 /// Why a session description could not be read, or an answer could not be
 /// built from one.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SdpError {
     /// Bytes that are not UTF-8. RFC 4566 §5 requires UTF-8 unless
     /// `a=charset` says otherwise, and that attribute is not implemented.

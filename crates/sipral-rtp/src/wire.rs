@@ -378,6 +378,7 @@ pub(crate) fn put(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
 /// These are the checks Appendix A.1 calls weak: they cost a few bits and they
 /// catch a datagram that was misaddressed, truncated, or never RTP at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PacketError {
     /// Shorter than the fixed header.
     TooShort {

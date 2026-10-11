@@ -1,16 +1,19 @@
 [package]
 name = "sipral-rtp"
 description = "RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF and SRTP."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# the arm crates.io reads; why the dual expression is not here is in
+# crates/sipral/Cargo.toml
+license = "AGPL-3.0-only"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish.workspace = true
+publish = true
 
 [dependencies]
 # The one primitive that is not written in-tree. A table-driven AES leaks its

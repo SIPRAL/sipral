@@ -71,6 +71,7 @@ const RTCP_BANDWIDTH: f64 = 500.0;
 /// A datagram to send on the media socket. Borrowed from the session's buffer to avoid allocating
 /// 50 times a second.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Datagram<'a> {
     /// Where to send it. With symmetric RTP this follows the far end's first packet.
     pub destination: SocketAddr,
@@ -143,6 +144,7 @@ pub enum HeldAudio {
 
 /// How a session behaves, as opposed to what it negotiated.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct MediaConfig {
     /// The RTCP SDES canonical name (RFC 3550 §6.5.1). `None` builds one from the media address.
     pub cname: Option<String>,
@@ -732,35 +734,36 @@ impl MediaSession {
     pub(crate) fn quality_report_metrics(&self, now: Instant) -> Option<QualityReportMetrics> {
         let block = self.rtp.voip_metrics(self.codec().quality_model())?;
         let (start, stop) = self.session_span(now);
-        Some(QualityReportMetrics {
-            local_addr: self.plan.local,
-            local_ssrc: self.rtp.local_ssrc(),
-            remote_addr: self.plan.remote,
-            remote_ssrc: block.ssrc,
+        let mut report = QualityReportMetrics::new(
+            self.plan.local,
+            self.rtp.local_ssrc(),
+            self.plan.remote,
+            block.ssrc,
             start,
             stop,
-            payload_type: self.plan.codec.payload(),
-            payload_desc: self.codec().encoding_name(),
-            sample_rate: self.plan.codec.clock_rate(),
-            loss_rate: block.loss_rate,
-            discard_rate: block.discard_rate,
-            burst_density: block.burst_density,
-            burst_duration_ms: block.burst_duration_ms,
-            gap_density: block.gap_density,
-            gap_duration_ms: block.gap_duration_ms,
-            gmin: block.gmin,
-            round_trip_delay_ms: block.round_trip_delay_ms,
-            end_system_delay_ms: block.end_system_delay_ms,
-            jitter_buffer_adaptive: block.rx_config.jba as u8,
-            jitter_buffer_rate: block.rx_config.jb_rate,
-            jitter_buffer_nominal_ms: block.jb_nominal_ms,
-            jitter_buffer_maximum_ms: block.jb_maximum_ms,
-            jitter_buffer_abs_max_ms: block.jb_abs_max_ms,
-            r_factor: (block.r_factor != UNAVAILABLE).then_some(block.r_factor),
-            mos_lq_x10: (block.mos_lq != UNAVAILABLE).then_some(block.mos_lq),
-            mos_cq_x10: (block.mos_cq != UNAVAILABLE).then_some(block.mos_cq),
-            remote: self.rtp.far_voip_metrics().as_ref().map(remote_metrics),
-        })
+        );
+        report.payload_type = self.plan.codec.payload();
+        report.payload_desc = self.codec().encoding_name();
+        report.sample_rate = self.plan.codec.clock_rate();
+        report.loss_rate = block.loss_rate;
+        report.discard_rate = block.discard_rate;
+        report.burst_density = block.burst_density;
+        report.burst_duration_ms = block.burst_duration_ms;
+        report.gap_density = block.gap_density;
+        report.gap_duration_ms = block.gap_duration_ms;
+        report.gmin = block.gmin;
+        report.round_trip_delay_ms = block.round_trip_delay_ms;
+        report.end_system_delay_ms = block.end_system_delay_ms;
+        report.jitter_buffer_adaptive = block.rx_config.jba as u8;
+        report.jitter_buffer_rate = block.rx_config.jb_rate;
+        report.jitter_buffer_nominal_ms = block.jb_nominal_ms;
+        report.jitter_buffer_maximum_ms = block.jb_maximum_ms;
+        report.jitter_buffer_abs_max_ms = block.jb_abs_max_ms;
+        report.r_factor = (block.r_factor != UNAVAILABLE).then_some(block.r_factor);
+        report.mos_lq_x10 = (block.mos_lq != UNAVAILABLE).then_some(block.mos_lq);
+        report.mos_cq_x10 = (block.mos_cq != UNAVAILABLE).then_some(block.mos_cq);
+        report.remote = self.rtp.far_voip_metrics().as_ref().map(remote_metrics);
+        Some(report)
     }
 
     /// Start of the stream and `now` as Unix time, for RFC 6035 `Timestamps`. Uses the session's
@@ -779,29 +782,29 @@ impl MediaSession {
 fn remote_metrics(block: &VoipMetricsBlock) -> RemoteQualityMetrics {
     let known = |value: u8| (value != UNAVAILABLE).then_some(value);
     let level = |value: i8| (value != UNAVAILABLE.cast_signed()).then_some(value);
-    RemoteQualityMetrics {
-        loss_rate: block.loss_rate,
-        discard_rate: block.discard_rate,
-        burst_density: block.burst_density,
-        burst_duration_ms: block.burst_duration_ms,
-        gap_density: block.gap_density,
-        gap_duration_ms: block.gap_duration_ms,
-        gmin: block.gmin,
-        round_trip_delay_ms: block.round_trip_delay_ms,
-        end_system_delay_ms: block.end_system_delay_ms,
-        signal_level_dbm0: level(block.signal_level_dbm0),
-        noise_level_dbm0: level(block.noise_level_dbm0),
-        rerl_db: known(block.rerl_db),
-        jitter_buffer_adaptive: block.rx_config.jba as u8,
-        jitter_buffer_rate: block.rx_config.jb_rate,
-        jitter_buffer_nominal_ms: block.jb_nominal_ms,
-        jitter_buffer_maximum_ms: block.jb_maximum_ms,
-        jitter_buffer_abs_max_ms: block.jb_abs_max_ms,
-        r_factor: known(block.r_factor),
-        ext_r_factor: known(block.ext_r_factor),
-        mos_lq_x10: known(block.mos_lq),
-        mos_cq_x10: known(block.mos_cq),
-    }
+    let mut remote = RemoteQualityMetrics::default();
+    remote.loss_rate = block.loss_rate;
+    remote.discard_rate = block.discard_rate;
+    remote.burst_density = block.burst_density;
+    remote.burst_duration_ms = block.burst_duration_ms;
+    remote.gap_density = block.gap_density;
+    remote.gap_duration_ms = block.gap_duration_ms;
+    remote.gmin = block.gmin;
+    remote.round_trip_delay_ms = block.round_trip_delay_ms;
+    remote.end_system_delay_ms = block.end_system_delay_ms;
+    remote.signal_level_dbm0 = level(block.signal_level_dbm0);
+    remote.noise_level_dbm0 = level(block.noise_level_dbm0);
+    remote.rerl_db = known(block.rerl_db);
+    remote.jitter_buffer_adaptive = block.rx_config.jba as u8;
+    remote.jitter_buffer_rate = block.rx_config.jb_rate;
+    remote.jitter_buffer_nominal_ms = block.jb_nominal_ms;
+    remote.jitter_buffer_maximum_ms = block.jb_maximum_ms;
+    remote.jitter_buffer_abs_max_ms = block.jb_abs_max_ms;
+    remote.r_factor = known(block.r_factor);
+    remote.ext_r_factor = known(block.ext_r_factor);
+    remote.mos_lq_x10 = known(block.mos_lq);
+    remote.mos_cq_x10 = known(block.mos_cq);
+    remote
 }
 
 impl MediaSession {

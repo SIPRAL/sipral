@@ -380,9 +380,11 @@ fn outgoing(packet: ConferencePacket) -> Outgoing {
 #[cfg(feature = "ice")]
 const fn transport_of(packet: &ConferencePacket) -> sipral_audio::Transport {
     match packet.transport {
-        sipral::TurnTransport::Udp => sipral_audio::Transport::Udp,
         sipral::TurnTransport::Tcp => sipral_audio::Transport::Tcp,
         sipral::TurnTransport::Tls => sipral_audio::Transport::Tls,
+        // UDP, and a relay transport this layer has no name for yet, which
+        // travels as a datagram
+        _ => sipral_audio::Transport::Udp,
     }
 }
 
@@ -445,15 +447,17 @@ entry! {
         if out_conference.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_conference is null"));
         }
-        let wanted = LocalConferenceConfig {
-            max_members: if config.max_members == 0 {
+        let wanted = {
+            let mut local_conference_config = LocalConferenceConfig::default();
+            local_conference_config.max_members = if config.max_members == 0 {
                 LocalConferenceConfig::default().max_members
             } else {
                 usize::try_from(config.max_members).unwrap_or(usize::MAX)
-            },
-            local: (config.local != SipralToggle::Off as u32).then_some(
+            };
+            local_conference_config.local = (config.local != SipralToggle::Off as u32).then_some(
                 if config.sample_rate == 0 { 16_000 } else { config.sample_rate },
-            ),
+            );
+            local_conference_config
         };
         let handle = with_stack(stack, |state| {
             let inner = state
@@ -982,6 +986,7 @@ pub(crate) fn drain(state: &StackState, stack: SipralHandle) -> Vec<crate::event
                         Departure::Removed => SipralDeparture::Removed,
                         Departure::Ended => SipralDeparture::Ended,
                         Departure::Incompatible => SipralDeparture::Incompatible,
+                        _ => SipralDeparture::None,
                     },
                     held.name_of(member),
                 ),
@@ -992,6 +997,11 @@ pub(crate) fn drain(state: &StackState, stack: SipralHandle) -> Vec<crate::event
                 ),
                 ConferenceChange::RecordingStopped(_) => (
                     SipralLocalConferenceChange::RecordingStopped,
+                    SipralDeparture::None,
+                    SIPRAL_HANDLE_NONE,
+                ),
+                _ => (
+                    SipralLocalConferenceChange::Unknown,
                     SipralDeparture::None,
                     SIPRAL_HANDLE_NONE,
                 ),

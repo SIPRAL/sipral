@@ -136,6 +136,7 @@ impl fmt::Display for VerificationFailure {
 
 /// The verdict of this end's verification service on one incoming call.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CallerVerification {
     /// What it came to.
     pub outcome: VerificationOutcome,

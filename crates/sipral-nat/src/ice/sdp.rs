@@ -147,12 +147,9 @@ fn rtcp_destination(media: &MediaDescription, rtp: SocketAddr) -> Option<SocketA
     let mut parts = value.split_ascii_whitespace();
     let port = parts.next()?.parse().ok()?;
     let ip = match (parts.next(), parts.next(), parts.next()) {
-        (Some(network), Some(address_type), Some(address)) => Connection {
-            network: network.to_owned(),
-            address_type: address_type.to_owned(),
-            address: address.to_owned(),
+        (Some(network), Some(address_type), Some(address)) => {
+            Connection::written(network, address_type, address).ip()?
         }
-        .ip()?,
         _ => rtp.ip(),
     };
     Some(SocketAddr::new(ip, port))

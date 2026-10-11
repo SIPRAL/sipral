@@ -201,6 +201,7 @@ pub enum Event {
 
 /// Why something stopped working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TurnError {
     /// No response, after the whole retransmission schedule.
     TimedOut,

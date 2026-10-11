@@ -2,27 +2,17 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 #
-# The Rust artefact: the `sipral` crate on crates.io, the one crate in this
-# workspace with `publish = true`.
+# The Rust artefacts: the `sipral` crate on crates.io, and the workspace
+# crates it depends on, which crates.io needs there before it takes `sipral`.
 #
 #   scripts/package/crate.sh --out DIR [--dry-run] [--publish]
-#   scripts/package/crate.sh --out DIR --crates-io [--dry-run] [--publish]
 #
-# No release publishes it. What Sipral releases are the C library and the
-# language packages over it; the Rust crates are not part of the 1.0
-# publication, their API makes no compatibility promise, and the `sipral`
-# name on crates.io is a reservation at 0.0.1 that stays what it is
-# (docs/11-testing.md, "Releasing"). So without --crates-io this script
-# refuses, saying that, and builds nothing. --crates-io runs the checks
-# below, for the day a release does publish the crates:
-#
-# crates.io takes a crate only when every dependency it names with a
-# version is already on crates.io, dev-dependencies included. `sipral`
-# names a dozen crates of this workspace, so `cargo publish -p sipral` works
-# only once each of those can be published too, before it, in dependency
-# order -- which is what a multi-package `cargo publish -p A -p B ...` does in
-# one invocation. This script reads that set from `cargo metadata` rather
-# than from a list kept here, and checks, for every crate in it:
+# A release publishes them from 1.2.0 on. `sipral`'s API is promised between
+# releases (docs/08-ffi.md, "The Rust crates"); the others say they are part
+# of it and promise nothing, and `sipral` names each at the release's exact
+# version. This script reads that set from `cargo metadata` rather than from
+# a list kept here, dependencies first (the order a multi-package `cargo
+# publish -p A -p B ...` takes), and checks, for every crate in it:
 #
 #   - that it can be published (`publish` not `false`);
 #   - the metadata crates.io shows: a description, a licence expression
@@ -36,11 +26,10 @@
 # the others; without --dry-run, `cargo package` over the set instead,
 # leaving the .crate files under DIR. Either way it runs on any host with
 # the workspace's toolchain. Nothing is uploaded: --publish prints the one
-# command the owner runs.
+# command that does.
 #
-# Until the set can be published, the run fails and says which crate stops
-# it and why: a dry run that passed there would promise a `cargo publish`
-# that crates.io then refuses.
+# A crate that stops the set fails the run and is named with why: a dry run
+# that passed there would promise a `cargo publish` that crates.io refuses.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -59,25 +48,15 @@ finish() {
 OUT=""
 DRY_RUN=0
 PUBLISH=0
-CRATES_IO=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
-        --crates-io) CRATES_IO=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[ -z "$OUT" ] && { printf 'usage: crate.sh --out DIR [--crates-io] [--dry-run] [--publish]\n' >&2; exit 2; }
-if [ "$CRATES_IO" -eq 0 ]; then
-    printf 'crate.sh: refused. The Rust crates are not part of the Sipral %s publication:\n' "$(scripts/version.sh)" >&2
-    printf '  the release is the C library and the language packages over it, and the\n' >&2
-    printf '  crates'"'"' API makes no compatibility promise. The sipral name on crates.io is\n' >&2
-    printf '  reserved with 0.0.1 and stays so (docs/11-testing.md, "Releasing").\n' >&2
-    printf '  --crates-io checks the crates as a publication there would need them.\n' >&2
-    exit 1
-fi
+[ -z "$OUT" ] && { printf 'usage: crate.sh --out DIR [--dry-run] [--publish]\n' >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
@@ -147,9 +126,7 @@ while IFS='|' read -r name problems; do
 done <"$OUT/set.txt"
 if [ "$blocked" -gt 0 ]; then
     note "$blocked of the ${#SET[@]} crates above stop \`cargo publish -p sipral\`: crates.io would"
-    note "refuse sipral for naming a crate it does not have. Publishing them all is a"
-    note "name and a compatibility promise per crate, which no release makes yet"
-    note "(docs/11-testing.md, \"Releasing\")."
+    note "refuse sipral for naming a crate it does not have."
 fi
 
 step "what the sipral .crate carries"
@@ -185,7 +162,7 @@ fi
 
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
-    printf '  not run: the owner publishes. From the tagged commit, logged in with\n'
+    printf '  not run: no script uploads. From the tagged commit, logged in with\n'
     printf '  cargo login:\n'
     printf '    cargo publish --locked %s\n' "${PACKAGE_ARGS[*]}"
 fi

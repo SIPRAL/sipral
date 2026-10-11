@@ -17,6 +17,7 @@ use crate::dialog::CallId;
 /// deciding, and a flood brings a fresh `Call-ID` each time. Losses are
 /// counted, never hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordLimits {
     /// The most decisions one record holds. Past it the oldest go, and their
     /// count is kept.

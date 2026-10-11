@@ -491,7 +491,10 @@ impl UserAgent {
     /// What a transport is bound to: its protocol and local address, or
     /// `None` when it is not bound.
     #[must_use]
-    pub fn bound_transport(&self, transport: TransportId) -> Option<(TransportProtocol, SocketAddr)> {
+    pub fn bound_transport(
+        &self,
+        transport: TransportId,
+    ) -> Option<(TransportProtocol, SocketAddr)> {
         self.endpoint.bound_transport(transport)
     }
 

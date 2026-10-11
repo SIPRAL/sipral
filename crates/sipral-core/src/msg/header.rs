@@ -18,6 +18,7 @@ use super::method::is_token_byte;
 /// Two names are equal when they denote the same field, so `Via`, `via` and
 /// `v` are one value, and `Extension("X-Foo")` equals `Extension("x-foo")`.
 #[derive(Clone, Copy, Debug, Eq)]
+#[non_exhaustive]
 pub enum HeaderName<'a> {
     /// RFC 3261 §20.1.
     Accept,

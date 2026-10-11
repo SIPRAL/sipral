@@ -30,6 +30,7 @@ const PACKETS_KEPT: usize = 1_024;
 
 /// How a conference is made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LocalConferenceConfig {
     /// The most members it holds at once, this end included: from one to
     /// [`MAX_CONFERENCE_MEMBERS`].
@@ -70,6 +71,7 @@ pub enum ConferenceDirection {
 
 /// Why a member left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Departure {
     /// [`LocalConference::remove`] took it out.
     Removed,
@@ -82,6 +84,7 @@ pub enum Departure {
 
 /// Something about a conference that changed, oldest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConferenceChange {
     /// A member joined.
     Joined(Member),
@@ -102,6 +105,7 @@ pub enum ConferenceChange {
 
 /// A packet a member's call owes its far end.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConferencePacket {
     /// The call it belongs to, whose media socket sends it.
     pub call: CallHandle,

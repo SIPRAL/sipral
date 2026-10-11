@@ -726,11 +726,12 @@ mod tests {
     use crate::audio::Heard;
 
     fn at(stretched: u64, shrunk: u64, delay: Duration, played: u32) -> (Quality, Heard) {
-        let quality = Quality {
-            stretched,
-            shrunk,
-            delay,
-            ..Quality::default()
+        let quality = {
+            let mut quality = Quality::default();
+            quality.stretched = stretched;
+            quality.shrunk = shrunk;
+            quality.delay = delay;
+            quality
         };
         // a stretched pause reaches the earpiece as a concealed frame
         let heard = Heard {

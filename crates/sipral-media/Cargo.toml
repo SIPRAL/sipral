@@ -1,16 +1,19 @@
 [package]
 name = "sipral-media"
 description = "Audio pipeline: resampling, mixing, codecs, and echo cancellation as an external module."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# the arm crates.io reads; why the dual expression is not here is in
+# crates/sipral/Cargo.toml
+license = "AGPL-3.0-only"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish.workspace = true
+publish = true
 
 [features]
 # On, so that a build nobody configured is the build everybody wants. Optional,

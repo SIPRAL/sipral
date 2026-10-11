@@ -52,6 +52,7 @@ use super::{SampleRate, count_f64, dbm0_to_power, position_f64, round_position};
 
 /// What a call-progress tone means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ProgressTone {
     /// The exchange is ready for digits.
     Dial,
@@ -70,6 +71,7 @@ pub enum ProgressTone {
 
 /// One burst of a cadence: tone for `on_ms`, then silence for `off_ms`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Burst {
     /// How long the tone sounds, in milliseconds.
     pub on_ms: u32,
@@ -79,6 +81,7 @@ pub struct Burst {
 
 /// How a tone is switched on and off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Cadence {
     /// Never off.
     Continuous,
@@ -88,6 +91,7 @@ pub enum Cadence {
 
 /// One call-progress tone of one network.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ToneSpec {
     /// What it means.
     pub tone: ProgressTone,
@@ -99,6 +103,7 @@ pub struct ToneSpec {
 
 /// A network whose tones are tabled here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Region {
     /// The 425 Hz tones common to the CEPT administrations.
     Europe,
@@ -235,6 +240,7 @@ const HISTORY: usize = 18;
 
 /// The limits of a [`ProgressDetector`].
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ProgressConfig {
     /// The least level, in dBm0, a tone's frequencies may have together.
     /// Default −38 dBm0, a judgement: well under the level a network plays

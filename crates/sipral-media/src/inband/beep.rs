@@ -39,6 +39,7 @@ const MAX_STRIDE: usize = 4;
 /// beep is, so every default here is a judgement from the beeps machines
 /// play.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct BeepConfig {
     /// The lowest a beep may be, in hertz. Default 400.
     pub min_hz: f64,

@@ -9,7 +9,7 @@
 //! started `recvonly` resumes as `recvonly`, not `sendrecv`.
 
 use sipral_core::sdp::{
-    AcceptedStream, Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription,
+    AcceptedStream, Attribute, Connection, Direction, MediaDescription, SessionDescription,
     StreamAnswer,
 };
 
@@ -18,11 +18,20 @@ use sipral_core::sdp::{
 /// Two flags because each direction is held separately: music plays for
 /// whoever was put on hold, not for whoever pressed the button.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Hold {
     /// This end asked the far end to stop sending.
     pub local: bool,
     /// The far end asked this one to.
     pub remote: bool,
+}
+
+impl Hold {
+    /// Which ends hold the call.
+    #[must_use]
+    pub const fn new(local: bool, remote: bool) -> Self {
+        Self { local, remote }
+    }
 }
 
 impl Hold {
@@ -173,10 +182,8 @@ impl Session {
             .map(|(index, offered)| self.take(index, offered, held))
             .collect();
         self.version = self.version.saturating_add(1);
-        let origin = Origin {
-            version: self.version,
-            ..self.local.as_ref()?.origin.clone()
-        };
+        let mut origin = self.local.as_ref()?.origin.clone();
+        origin.version = self.version;
         offer.answer(origin, connection, &streams).ok()
     }
 

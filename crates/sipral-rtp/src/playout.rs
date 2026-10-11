@@ -257,6 +257,7 @@ pub struct Frame<'a> {
 /// by anything the buffer does on its own; the three delays and the loss rate
 /// describe this moment and move as the call goes on.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Quality {
     /// Packets taken in and held for playout.
     pub received: u64,

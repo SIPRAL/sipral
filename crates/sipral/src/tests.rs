@@ -6181,10 +6181,7 @@ fn two_holds_that_cross_both_go_through() {
     pair.settle();
     run_for(&mut pair, Duration::from_secs(6));
 
-    let both = crate::Hold {
-        local: true,
-        remote: true,
-    };
+    let both = crate::Hold::new(true, true);
     assert_eq!(pair.caller.agent.hold_state(call), Some(both));
     assert_eq!(pair.callee.agent.hold_state(remote), Some(both));
 }
@@ -6214,17 +6211,11 @@ fn a_resume_behind_a_crossed_hold_still_arrives() {
 
     assert_eq!(
         pair.caller.agent.hold_state(call),
-        Some(crate::Hold {
-            local: false,
-            remote: true
-        })
+        Some(crate::Hold::new(false, true))
     );
     assert_eq!(
         pair.callee.agent.hold_state(remote),
-        Some(crate::Hold {
-            local: true,
-            remote: false
-        })
+        Some(crate::Hold::new(true, false))
     );
 }
 
@@ -13876,11 +13867,7 @@ fn a_call_that_asks_for_feedback_runs_avpf_with_nacks_and_reduced_size() {
     assert!(lines.contains(&"rtcp-fb:* nack".to_owned()), "{lines:?}");
     assert!(lines.contains(&"rtcp-rsize".to_owned()), "{lines:?}");
 
-    let both = crate::FeedbackAgreed {
-        generic_nack: true,
-        trr_interval: Duration::ZERO,
-        reduced_size: true,
-    };
+    let both = crate::FeedbackAgreed::new(true, Duration::ZERO, true);
     assert_eq!(agreed(&mut pair, call, remote), [Some(both), Some(both)]);
 }
 
@@ -15080,7 +15067,7 @@ fn a_call_that_replaces_the_recorded_one_on_another_codec_is_recorded_on_that_co
             let message = sipral_core::msg::parse(reoffer, &mut scratch, ParseMode::Lenient)
                 .expect("a message");
             let message = message.to_owned();
-        let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
+            let read = sipral_ua::siprec::read_recording_offer(&message).expect("SDP and metadata");
             let sdp = parse(read.sdp).expect("the offer");
             sdp.media.len() == 2 && sdp.media.iter().all(|stream| stream.formats == ["8"])
         });
@@ -15489,8 +15476,9 @@ fn a_secure_call_trimmed_into_a_datagram_is_keyed_under_the_suite_it_kept() {
     let whole = heard
         .iter()
         .find_map(|event| match *event {
-            Event::Signalling(UaEvent::TransportWanted { request_bytes, .. },
-            ) => Some(request_bytes),
+            Event::Signalling(UaEvent::TransportWanted { request_bytes, .. }) => {
+                Some(request_bytes)
+            }
             _ => None,
         })
         .expect("a stream was asked for");

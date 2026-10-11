@@ -258,6 +258,7 @@ impl fmt::Display for OrigId {
 /// The destinations of RFC 8225 §5.2.1: telephone numbers, URIs, or both,
 /// at least one in all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dest {
     /// Called numbers, canonical as [`Tn`] is.
     pub tn: Vec<Tn>,
@@ -387,6 +388,7 @@ fn normalised(part: &str) -> String {
 
 /// The two claims RFC 8588 adds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Shaken {
     /// The attestation level.
     pub attest: Attest,
@@ -394,8 +396,17 @@ pub struct Shaken {
     pub origid: OrigId,
 }
 
+impl Shaken {
+    /// The attestation level and the origination identifier.
+    #[must_use]
+    pub const fn new(attest: Attest, origid: OrigId) -> Self {
+        Self { attest, origid }
+    }
+}
+
 /// A PASSporT's claims.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Claims {
     /// The originating number, `orig.tn`.
     pub orig: Tn,
@@ -409,6 +420,27 @@ pub struct Claims {
 }
 
 impl Claims {
+    /// The claims of a plain PASSporT: who calls, whom, and when (seconds
+    /// since the Unix epoch). [`Claims::with_shaken`] adds SHAKEN's pair.
+    #[must_use]
+    pub const fn new(orig: Tn, dest: Dest, iat: u64) -> Self {
+        Self {
+            orig,
+            dest,
+            iat,
+            shaken: None,
+        }
+    }
+
+    /// The same claims with SHAKEN's `attest` and `origid` (RFC 8588).
+    #[must_use]
+    pub fn with_shaken(self, shaken: Shaken) -> Self {
+        Self {
+            shaken: Some(shaken),
+            ..self
+        }
+    }
+
     /// The claims in the deterministic form of RFC 8225 §9, with `attest`
     /// and `origid` included when [`Claims::shaken`] is set, and each
     /// `dest.uri` in the canonical form of RFC 8224 §8.5 ([`canonical_uri`]).

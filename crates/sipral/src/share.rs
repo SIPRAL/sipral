@@ -266,7 +266,7 @@ impl SessionShare {
 mod tests {
     use std::time::Instant;
 
-    use sipral_core::sdp::{Direction, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_core::sdp::{MediaPlan, NegotiatedCodec, RtpMap};
 
     use super::{SessionShare, SessionUnavailable, hold, lock};
     use crate::clock::WallClock;
@@ -275,23 +275,11 @@ mod tests {
     /// An unnegotiated session: enough to lock, not to carry a call.
     fn a_session() -> MediaSession {
         let now = Instant::now();
-        let plan = MediaPlan {
-            local: "192.0.2.1:40000".parse().expect("an address"),
-            remote: "192.0.2.2:40002".parse().expect("an address"),
-            codec: NegotiatedCodec::new(RtpMap {
-                payload: 0,
-                encoding: "PCMU".to_owned(),
-                clock_rate: 8_000,
-                parameters: None,
-            }),
-            direction: Direction::SendRecv,
-            dtmf: None,
-            dtmf_in: None,
-            codec_in: 0,
-            rtcp: RtcpPlan::Off,
-            keying: None,
-            voip_metrics_xr: false,
-        };
+        let plan = MediaPlan::new(
+            "192.0.2.1:40000".parse().expect("an address"),
+            "192.0.2.2:40002".parse().expect("an address"),
+            NegotiatedCodec::new(RtpMap::new(0, "PCMU".to_owned(), 8_000, None)),
+        );
         let identity = StreamIdentity {
             ssrc: 1,
             sequence: 0,

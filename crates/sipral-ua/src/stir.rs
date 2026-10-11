@@ -478,12 +478,11 @@ impl UserAgent {
             _ => {}
         }
         let config = self.stir.config.as_ref();
-        let verifier = Verifier::new(Config {
-            freshness: config.map_or(sipral_stir::DEFAULT_FRESHNESS, |config| config.freshness),
-            accept_service_provider_codes: config
-                .is_some_and(|config| config.accept_service_provider_codes),
-            ..Config::default()
-        });
+        let mut checks = Config::default();
+        checks.freshness = config.map_or(sipral_stir::DEFAULT_FRESHNESS, |config| config.freshness);
+        checks.accept_service_provider_codes =
+            config.is_some_and(|config| config.accept_service_provider_codes);
+        let verifier = Verifier::new(checks);
         let raw = held.request.as_raw();
         let unix = self.unix_at(now).unwrap_or(0);
         let date = raw.header(HeaderName::Date).and_then(date_of);
@@ -492,12 +491,7 @@ impl UserAgent {
             .orig
             .clone()
             .zip(held.numbers.dest())
-            .map(|(orig, dest)| Claims {
-                orig,
-                dest,
-                iat: date.unwrap_or(unix),
-                shaken: None,
-            });
+            .map(|(orig, dest)| Claims::new(orig, dest, date.unwrap_or(unix)));
         let mut seen = false;
         let mut unsupported = false;
         let mut first: Option<Failure> = None;
@@ -619,16 +613,11 @@ impl UserAgent {
         // 8224 §8.5, which is what the verifier derives from its To
         let dest = number_of(target, self.stir.plan.as_ref())
             .map_or_else(|| Dest::uri(target.as_str()), Dest::tn);
-        let claims = Claims {
-            orig: signing.orig.clone(),
-            dest,
-            iat,
-            shaken: Some(Shaken {
-                attest: attest_of(signing.attestation),
-                // drawn when the account was added, so never missing here
-                origid: signing.origid.ok_or(UaError::Signing)?,
-            }),
-        };
+        let claims = Claims::new(signing.orig.clone(), dest, iat).with_shaken(Shaken::new(
+            attest_of(signing.attestation),
+            // drawn when the account was added, so never missing here
+            signing.origid.ok_or(UaError::Signing)?,
+        ));
         let identity = signing
             .signer
             .identity(&claims)
@@ -876,11 +865,13 @@ const fn failure_of(failure: Failure) -> VerificationFailure {
         Failure::Stale { .. } => VerificationFailure::Stale,
         Failure::BadInfo(InfoProblem::Unavailable) => VerificationFailure::CertificateUnavailable,
         Failure::BadInfo(_) => VerificationFailure::CertificateUnreadable,
-        Failure::Untrusted => VerificationFailure::Untrusted,
         Failure::Expired { .. } | Failure::NotYetValid { .. } => VerificationFailure::Expired,
         Failure::InvalidChain(_) => VerificationFailure::InvalidChain,
         Failure::BadSignature => VerificationFailure::BadSignature,
         Failure::TnNotCovered => VerificationFailure::NumberNotCovered,
+        // untrusted, and a failure this layer has no name for yet: either
+        // way not a PASSporT to trust
+        _ => VerificationFailure::Untrusted,
     }
 }
 

@@ -53,6 +53,7 @@ pub(crate) struct EndedCall {
 /// The RFC 3611 VoIP Metrics figures, supplied by the caller. Plain scalars
 /// so this signalling crate does not depend on `sipral-rtp`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct QualityReportMetrics {
     /// Where this end's RTP arrived.
     pub local_addr: SocketAddr,
@@ -113,9 +114,54 @@ pub struct QualityReportMetrics {
     pub remote: Option<RemoteQualityMetrics>,
 }
 
+impl QualityReportMetrics {
+    /// A report for one stream: its two ends, their sources and the span it
+    /// covers. Every metric starts at zero or unknown and is set by field.
+    #[must_use]
+    pub const fn new(
+        local_addr: SocketAddr,
+        local_ssrc: u32,
+        remote_addr: SocketAddr,
+        remote_ssrc: u32,
+        start: SystemTime,
+        stop: SystemTime,
+    ) -> Self {
+        Self {
+            local_addr,
+            local_ssrc,
+            remote_addr,
+            remote_ssrc,
+            start,
+            stop,
+            payload_type: 0,
+            payload_desc: "",
+            sample_rate: 0,
+            loss_rate: 0,
+            discard_rate: 0,
+            burst_density: 0,
+            burst_duration_ms: 0,
+            gap_density: 0,
+            gap_duration_ms: 0,
+            gmin: 0,
+            round_trip_delay_ms: 0,
+            end_system_delay_ms: 0,
+            jitter_buffer_adaptive: 0,
+            jitter_buffer_rate: 0,
+            jitter_buffer_nominal_ms: 0,
+            jitter_buffer_maximum_ms: 0,
+            jitter_buffer_abs_max_ms: 0,
+            r_factor: None,
+            mos_lq_x10: None,
+            mos_cq_x10: None,
+            remote: None,
+        }
+    }
+}
+
 /// The far end's RFC 3611 §4.7 VoIP Metrics block about our stream. Span
 /// and codec come from [`QualityReportMetrics`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct RemoteQualityMetrics {
     /// RFC 3611 SS4.7.1's loss rate, as its own 256ths.
     pub loss_rate: u8,

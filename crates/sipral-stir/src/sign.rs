@@ -17,6 +17,7 @@ use crate::passport::{ALG, Claims, PPT_SHAKEN, header_value};
 
 /// Why a PASSporT could not be signed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignError {
     /// The private key is not a P-256 scalar: zero, or not below the group
     /// order.

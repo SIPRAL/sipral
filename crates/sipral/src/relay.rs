@@ -94,6 +94,7 @@ pub enum RelayEvent {
 
 /// A request for the TURN server, for the application's socket to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RelayDatagram {
     /// The socket to send it from: the one the allocation is for.
     pub local: SocketAddr,

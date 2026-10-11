@@ -81,6 +81,7 @@ pub const DEFAULT_RESOURCE: &str = "/ws";
 
 /// One frame, or one reassembled message.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Frame {
     /// A whole text message, checked to be UTF-8.
     Text(Vec<u8>),
@@ -814,13 +815,12 @@ impl WebSockets {
         protocol: TransportProtocol,
         bytes: Vec<u8>,
     ) {
-        self.out.push_back(Transmit {
+        self.out.push_back(Transmit::new(
             transport,
-            destination: link_remote,
-            source: None,
-            payload: Arc::from(bytes),
+            link_remote,
+            Arc::from(bytes),
             protocol,
-        });
+        ));
     }
 }
 
@@ -1040,8 +1040,7 @@ impl UserAgent {
             }
         };
         let _ = self.take(input, now);
-        self.events
-            .push_back(UaEvent::FlowFailed { transport });
+        self.events.push_back(UaEvent::FlowFailed { transport });
     }
 
     /// Frames a transmit on one of our connections; `None` while it waits
@@ -1062,10 +1061,7 @@ impl UserAgent {
         }
         let opcode = opcode_for(&transmit.payload);
         let framed = link.frame(opcode, &transmit.payload, now);
-        Some(Transmit {
-            payload: Arc::from(framed),
-            ..transmit
-        })
+        Some(transmit.with_payload(Arc::from(framed)))
     }
 
     /// Handshakes, pongs, pings and closes.

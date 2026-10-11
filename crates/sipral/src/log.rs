@@ -59,6 +59,7 @@ pub const MIN_SALT: usize = 16;
 
 /// A salt shorter than [`MIN_SALT`] bytes, refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SaltTooShort {
     /// How many bytes it had.
     pub len: usize,
@@ -122,6 +123,7 @@ pub fn derived_pseudonym_key(secret: &[u8]) -> PseudonymKey {
 /// How loud a line is. Higher is more detailed: a sink set to
 /// [`LogLevel::Info`] receives errors, warnings and information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum LogLevel {
     /// Something failed and the application is likely to see the effect.
     Error = 1,
@@ -172,6 +174,7 @@ impl fmt::Display for LogLevel {
 
 /// One line, as the sink receives it. Borrowed for the call and no longer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogRecord<'a> {
     /// How loud it is.
     pub level: LogLevel,
@@ -190,6 +193,7 @@ pub type LogSink = Arc<dyn Fn(&LogRecord<'_>) + Send + Sync>;
 
 /// Which way a SIP message went, for [`Log::sip_message`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Travel {
     /// It arrived.
     Received,

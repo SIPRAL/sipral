@@ -188,6 +188,7 @@ pub enum Progress {
 
 /// Why a transaction ended without an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Failure {
     /// Rc requests went out and Rm times the RTO passed after the last one.
     TimedOut,

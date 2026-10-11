@@ -329,7 +329,9 @@ pub use sipral_media::resample::RateError as ResampleError;
 #[cfg(feature = "ice")]
 pub use sipral_nat::ice::IceError;
 pub use sipral_rtp::srtp::SrtpError;
-pub use sipral_rtp::{CodecQualityModel, JitterBufferAdaptive, PacketError, PacketLossConcealment, RxConfig};
+pub use sipral_rtp::{
+    CodecQualityModel, JitterBufferAdaptive, PacketError, PacketLossConcealment, RxConfig,
+};
 
 /// The whole signalling layer by its own names: every type the user agent
 /// takes or hands back, the presence, conference, dialog, message-summary

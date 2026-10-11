@@ -978,10 +978,12 @@ fn timers_for(
         }
     }
 
-    let timers = TimerConfig {
-        t1: interval(config.timer_t1_ms, TimerConfig::DEFAULT.t1),
-        t2: interval(config.timer_t2_ms, TimerConfig::DEFAULT.t2),
-        t4: interval(config.timer_t4_ms, TimerConfig::DEFAULT.t4),
+    let timers = {
+        let mut timer_config = TimerConfig::default();
+        timer_config.t1 = interval(config.timer_t1_ms, TimerConfig::DEFAULT.t1);
+        timer_config.t2 = interval(config.timer_t2_ms, TimerConfig::DEFAULT.t2);
+        timer_config.t4 = interval(config.timer_t4_ms, TimerConfig::DEFAULT.t4);
+        timer_config
     };
     if timers.t2 < timers.t1 {
         return Err(fail(
@@ -1115,12 +1117,15 @@ fn media_for(config: &SipralStackConfig) -> Result<MediaConfig, Fail> {
         (true, 0) => default.stall_after,
         (true, millis) => Some(Duration::from_millis(millis)),
     };
-    Ok(MediaConfig {
-        stall_after,
-        silence_suppression: toggled(config.silence_suppression, "silence_suppression", false)?,
-        dtmf_detection: crate::inband::detection_of(config.dtmf_detection, "dtmf_detection")?,
-        held_audio: held_audio_of(config.held_audio)?,
-        ..default
+    Ok({
+        let mut media_config = default;
+        media_config.stall_after = stall_after;
+        media_config.silence_suppression =
+            toggled(config.silence_suppression, "silence_suppression", false)?;
+        media_config.dtmf_detection =
+            crate::inband::detection_of(config.dtmf_detection, "dtmf_detection")?;
+        media_config.held_audio = held_audio_of(config.held_audio)?;
+        media_config
     })
 }
 

@@ -280,6 +280,7 @@ impl Policy {
 
 /// Why a packet could not be protected or was refused on arrival.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SrtpError {
     /// Shorter than the header the transform needs to read.
     TooShort {

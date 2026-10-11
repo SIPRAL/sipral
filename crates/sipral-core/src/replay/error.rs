@@ -12,6 +12,7 @@ use super::Recording;
 /// Reported by [`Recorder::finish`](super::Recorder::finish). A recording
 /// holds every byte the stack was fed or it does not exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RecordError {
     /// Bytes arrived that the format cannot spell, such as a binary body
     /// (`docs/18-replay.md`).
@@ -40,6 +41,7 @@ impl core::error::Error for RecordError {}
 ///
 /// Every one stops the read: guessing would replay a session nobody recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadError {
     /// The first line does not name the format.
     NotARecording,
