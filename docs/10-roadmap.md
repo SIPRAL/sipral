@@ -84,6 +84,7 @@ October 2026, planned.
 - Answering-machine detection on calls the agent places *(done)*
 - SIP over WebSocket with the connection made by the stack (RFC 7118) *(done)*
 - LiveCommunicationKit on iOS *(done)*
+- The Rust API promised between releases and published on crates.io, checked on every change *(done)*
 
 ### 2.0 — Beyond audio
 

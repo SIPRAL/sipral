@@ -128,7 +128,7 @@ order they are published in.
 [`docs/10-roadmap.md`](docs/10-roadmap.md) has every release and its exit
 criteria, the same list as [sipral.org/roadmap](https://sipral.org/roadmap/).
 
-- **1.2, voice agents and more platforms:** the SIP bridge, the Pipecat transport, connectors to five speech services, a bridge run from a configuration file, OAuth2 sign-in to the PBX and the agent's own latency; Node.js and TypeScript, .NET MAUI, a network test before the call, answering-machine detection, SIP over WebSocket and LiveCommunicationKit; all done on `main`, and a week of calls with no growth is being measured.
+- **1.2, voice agents and more platforms:** the SIP bridge, the Pipecat transport, connectors to five speech services, a bridge run from a configuration file, OAuth2 sign-in to the PBX and the agent's own latency; Node.js and TypeScript, .NET MAUI, a network test before the call, answering-machine detection, SIP over WebSocket and LiveCommunicationKit; the Rust API promised between releases and published on crates.io; all done on `main`, and a week of calls with no growth is being measured.
 - **2.0:** video (VP8, VP9, AV1) and ZRTP.
 - **Ongoing:** carrier interop on paid accounts and a commercial SBC, more PBXs in the lab.
 
