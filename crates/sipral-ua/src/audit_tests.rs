@@ -640,3 +640,58 @@ fn a_session_timer_with_a_dialog_but_not_confirmed_moves_off_the_instant_it_fire
         "the timer is still due at the instant that already fired: the loop spins"
     );
 }
+
+#[test]
+fn a_wake_closes_the_dialog_of_the_subscription_it_starts_again() {
+    // Every wake demotes a subscription and resubscribes it under a new
+    // Call-ID, so the dialog its NOTIFY opened is dead. Left open, it still
+    // counts against max_dialogs: a phone watching seven lamps filled 128
+    // after a few dozen network changes and refused every call after that.
+    let t0 = Instant::now();
+    let mut config = EndpointConfig::default();
+    config.max_dialogs = 3;
+    let mut agent = UserAgent::new(config, [11; 32]).unwrap();
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding a transport");
+    let id = agent.add_account(account());
+    agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:bob@example.com"), "dialog"),
+            t0,
+        )
+        .expect("a subscription");
+    let mut subscribe = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"SUBSCRIBE "))
+        .expect("the SUBSCRIBE");
+    for round in 0..10 {
+        deliver(&mut agent, &subscribed(&subscribe, 3_600), t0);
+        deliver(
+            &mut agent,
+            &notify(&subscribe, 1, &format!("nfy{round}"), "active"),
+            t0,
+        );
+        let _ = transmits(&mut agent);
+        drop_events(&mut agent);
+        agent.suspending(t0);
+        agent.resumed(t0);
+        subscribe = transmits(&mut agent)
+            .into_iter()
+            .find(|bytes| bytes.starts_with(b"SUBSCRIBE "))
+            .expect("a fresh SUBSCRIBE after the wake");
+        drop_events(&mut agent);
+    }
+    agent
+        .call(id, &OutgoingCall::new(uri("sip:carol@example.com")), t0)
+        .expect("ten wakes left dead subscription dialogs holding the call limit");
+}

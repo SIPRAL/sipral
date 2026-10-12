@@ -616,7 +616,9 @@ impl UserAgent {
         };
         held.cseq = held.cseq.saturating_add(1);
         held.state = SubscriptionState::Requesting;
-        held.dialog = None;
+        // a wake demotes without closing (`distrust` sends nothing), so the
+        // dialog of the subscription this one replaces is closed here
+        let stale = held.dialog.take();
         held.remote_tag = None;
         held.unanswered = None;
         held.lapses_at = None;
@@ -628,6 +630,7 @@ impl UserAgent {
         held.due = Some((now + timer_n, Waiting::Notify));
         held.forks_until = Some(now + timer_n);
         let account = held.account;
+        self.forget_subscription_dialog(subscription, stale);
         self.claim_subscribe(subscription, id);
         self.events.push_back(UaEvent::Subscribing {
             subscription,
