@@ -31,6 +31,20 @@ phone line inside a voice agent without a media server in between.**
 - **Proven against what is deployed.** A container lab runs registration, calls, hold, transfers, DTMF, SRTP, DTLS-SRTP, NAT, ICE and TURN against Asterisk 22, FreeSWITCH 1.10, FusionPBX 5.6, Kamailio 6.1, OpenSIPS 4.0 and baresip — through the Rust API, again from a C program through `sipral.h`, and with the Python, Swift, Kotlin and .NET layers answering, over clean and impaired links — and a short set of them ran against a live FreePBX 16 on 29 September 2026, a live VitalPBX 4.5 on 8 October 2026 and a VICIdial dialer (ViciBox 12) on 11 October 2026, where an agent's phone was rung into its session, answered and joined to a caller ([`docs/11-testing.md`, "A live PBX"](docs/11-testing.md#a-live-pbx)).
 - **Measured, not claimed.** Ten thousand concurrent calls with audio held in one process at about 72 KB each, once the ceiling is raised to fit them: a stack holds 128 calls at once unless `max_dialogs` (`maxDialogs` in the layers, `--max-calls` on the headless agent) says otherwise, and answers the next one 503 with `Retry-After: 2`; under 1 µs per audio frame with two hundred calls on four threads, the in-band digit detector included while the far end is quiet, and about 1.4 µs more while the library listens for digits in a far end that is talking; seven days of calls against Asterisk, 3,337 of them and 6,795 registrations with no error and resident memory flat at 6.07 MB; a 5 MB shared library with Opus, SRTP, DTLS, ICE, STIR and the device engine in it ([`docs/19-numbers.md`](docs/19-numbers.md), [`docs/23-compared-with-pjsip.md`](docs/23-compared-with-pjsip.md)).
 
+## Install
+
+```sh
+pip install sipral                # or sipral-opus, with Opus
+dotnet add package Sipral         # Sipral.Opus; Sipral.Maui for iOS and Android
+npm install sipral                # Node.js; sipral-react-native for React Native
+cargo add sipral
+dart pub add sipral
+```
+
+Android and the JVM: `org.sipral:sipral` and `org.sipral:sipral-jvm` on Maven
+Central (`-opus` for the variants with Opus). Swift: this repository as a
+Swift package, from 1.2.0.
+
 ## A call, in Python
 
 ```python
