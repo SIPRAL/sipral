@@ -113,6 +113,23 @@ DIALPLAN=$(awk 'done { print } /-->/ { done = 1 }' /usr/local/share/sipral/lab_d
 sql -c "insert into v_dialplans (dialplan_uuid, domain_uuid, app_uuid, hostname, dialplan_context, dialplan_name, dialplan_number, dialplan_continue, dialplan_order, dialplan_enabled, dialplan_description, dialplan_xml)
         values ('$(uuid)', '$DOMAIN_UUID', '$(uuid)', null, '$DOMAIN', 'sipral_lab', '9000', false, 1, true, 'the lab''s numbers', '$DIALPLAN')"
 
+# Message waiting as FusionPBX offers it: mwi_subscribe.lua answers a
+# message-summary SUBSCRIBE from the voicemail tables. FusionPBX ships it
+# commented out in lua.conf.xml, and as shipped it stops at its first event:
+# resources/functions/config.lua replaces the global `debug` library with a
+# table of FusionPBX's own flags, and the event loop's xpcall then gets nil
+# for debug.traceback. The table keeps traceback here; nothing else in the
+# script is touched. Its mailboxes are numeric only, so the flow subscribes as
+# extension 1001 with a voicemail box of that number.
+sed -i 's|^\(\s*\)debug = {}$|\1debug = { traceback = debug.traceback }|' /usr/share/freeswitch/scripts/resources/functions/config.lua
+grep -q 'debug = { traceback = debug.traceback }' /usr/share/freeswitch/scripts/resources/functions/config.lua
+sed -i 's|<!--<param name="startup-script" value="app/voicemail/resources/scripts/mwi_subscribe.lua"/>-->|<param name="startup-script" value="app/voicemail/resources/scripts/mwi_subscribe.lua"/>|' /etc/freeswitch/autoload_configs/lua.conf.xml
+grep -q '^ *<param name="startup-script" value="app/voicemail/resources/scripts/mwi_subscribe.lua"/>' /etc/freeswitch/autoload_configs/lua.conf.xml
+sql -c "insert into v_extensions (extension_uuid, domain_uuid, extension, password, user_context, effective_caller_id_name, effective_caller_id_number, call_timeout, enabled)
+        values ('$(uuid)', '$DOMAIN_UUID', '1001', '$PASS', '$DOMAIN', '1001', '1001', 30, true)"
+sql -c "insert into v_voicemails (voicemail_uuid, domain_uuid, voicemail_id, voicemail_password, voicemail_enabled)
+        values ('$(uuid)', '$DOMAIN_UUID', '1001', '1001', true)"
+
 rm -rf /var/cache/fusionpbx/*
 touch /shared/ready
 printf 'FusionPBX ready: domain %s\n' "$DOMAIN"

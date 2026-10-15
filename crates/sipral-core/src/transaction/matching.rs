@@ -10,7 +10,10 @@
 //! A request finds its server transaction by branch, `Via` sent-by and method,
 //! "except for ACK, where the method of the request that created the
 //! transaction is INVITE". Sent-by guards against "accidental or malicious
-//! duplication of branch parameters from different clients".
+//! duplication of branch parameters from different clients". Every method but
+//! INVITE also compares the `CSeq` number, which a retransmission repeats: a
+//! peer that reuses a branch for its next request is otherwise answered with
+//! the last one's response.
 //!
 //! A pre-RFC 3261 peer sends no magic cookie and its branch is not unique.
 //! §17.2.3 then compares Request-URI, `Call-ID`, `CSeq` and top `Via` for the
@@ -79,6 +82,13 @@ pub(crate) enum ServerKey {
         branch: Box<[u8]>,
         sent_by: Box<[u8]>,
         method: Box<[u8]>,
+        /// The `CSeq` number, for every method but INVITE (whose ACK and
+        /// CANCEL find it by branch alone). A retransmission repeats it; a
+        /// peer that reuses one branch for the next request in a dialog
+        /// (Asterisk's `chan_sip` does, for a subscription's NOTIFYs) does
+        /// not, and without it that request is taken for a retransmission
+        /// and answered with the previous one's response.
+        cseq: Option<u32>,
     },
     /// The peer predates RFC 3261 and its branch says nothing.
     Legacy {
@@ -143,6 +153,7 @@ impl ServerKey {
                     branch,
                     sent_by,
                     method,
+                    ..
                 },
                 Self::Rfc3261 {
                     branch: aimed_branch,
@@ -227,10 +238,16 @@ impl ServerKey {
             .branch()
             .is_some_and(|branch| branch.len() > MAGIC_COOKIE.len());
         if via.has_magic_cookie() && identified {
+            let cseq = if method.as_ref() == Method::Invite.as_str().as_bytes() {
+                None
+            } else {
+                Some(request.cseq()?.seq)
+            };
             return Ok(Self::Rfc3261 {
                 branch: branch_of(&via)?,
                 sent_by: sent_by_of(&via),
                 method,
+                cseq,
             });
         }
 
@@ -325,6 +342,49 @@ Content-Length: 0\r\n\
         let request = with(INVITE, ClientKey::for_request).expect("a key");
         let response = with(RINGING, ClientKey::for_response).expect("a key");
         assert_eq!(request, response);
+    }
+
+    #[test]
+    fn a_reused_branch_with_the_next_cseq_is_a_new_transaction() {
+        // Asterisk's chan_sip sends a subscription's next NOTIFY under the
+        // branch of the one before; a retransmission repeats the CSeq too
+        let notify = |cseq: u32| {
+            format!(
+                "NOTIFY sip:alice@192.0.2.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK4b1bcafd;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:asterisk@192.0.2.9>;tag=as79c63abf\r\n\
+To: <sip:alice@192.0.2.1:5060>;tag=1\r\n\
+Call-ID: 4f671010fcac3726\r\n\
+CSeq: {cseq} NOTIFY\r\n\
+Event: message-summary\r\n\
+Subscription-State: active\r\n\
+Content-Length: 0\r\n\
+\r\n"
+            )
+            .into_bytes()
+        };
+        let first = with(&notify(102), ServerKey::for_request).expect("a key");
+        let again = with(&notify(102), ServerKey::for_request).expect("a key");
+        let next = with(&notify(103), ServerKey::for_request).expect("a key");
+        assert_eq!(first, again, "a retransmission finds its transaction");
+        assert_ne!(first, next, "the next NOTIFY is its own transaction");
+    }
+
+    #[test]
+    fn an_invite_and_its_cancel_still_meet_whatever_the_cseq() {
+        let invite = with(INVITE, ServerKey::for_request).expect("a key");
+        let cancel = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKnashds8\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let aimed = with(cancel, ServerKey::for_cancelled).expect("a key");
+        assert_eq!(invite, aimed);
     }
 
     #[test]

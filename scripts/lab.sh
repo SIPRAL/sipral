@@ -869,9 +869,6 @@ fi
 # of their own: the box's address and the accounts' password come from the
 # same env file as the step below (VICI_HOST, VICI_LAB_SECRET), and the
 # harness names the box "vicibox", which it treats as the lab's Asterisk.
-# No message waiting here: chan_sip on this box NOTIFYs a mailbox's count
-# when the subscription starts and not when a message is left
-# (docs/11-testing.md).
 vicibox_flows() {
     local file=$1 host secret
     host=$(sed -n 's/^VICI_HOST=//p' "$file")
@@ -883,7 +880,7 @@ vicibox_flows() {
     lab_run "the harness's flows against the ViciBox" $((LAB_START_S + 12 * LAB_CALL_S)) \
         --network host --add-host "vicibox:$host" \
         -e SIPRAL_USER=labuser -e SIPRAL_PASS="$secret" \
-        -e SIPRAL_FLOWS=register,call,hold,blind,attended,dtmf,dtmfinfo,srtp,dtls,message,g729,compact \
+        -e SIPRAL_FLOWS=register,call,hold,blind,attended,dtmf,dtmfinfo,srtp,dtls,message,mwi,g729,compact \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim sh -c "/harness vicibox 5060 9000"

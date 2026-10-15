@@ -401,6 +401,9 @@ fn main() -> ExitCode {
             // and FreeSWITCH behind it decides per extension, not per account
             Flow::Dtls if asterisk_like(&server) => (dtls_user.as_str(), dtls_pass.as_str()),
             Flow::Mwi if asterisk_like(&server) => (mwi_user.as_str(), mwi_pass.as_str()),
+            // FusionPBX's MWI script takes numeric mailboxes only
+            // (interop/fusionpbx/setup.sh's 1001)
+            Flow::Mwi if server == "fusionpbx" => ("1001", pass.as_str()),
             Flow::G729 if asterisk_like(&server) => (g729_user.as_str(), g729_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
@@ -826,9 +829,7 @@ fn lab_flows(server: &str) -> Vec<Flow> {
         flows.push(Flow::G729);
         flows.push(Flow::Message);
     }
-    // FusionPBX keeps MWI in a Lua service of its own, which does not run on
-    // this lab's FreeSWITCH image (docs/11-testing.md)
-    if asterisk_like(server) || server == "kamailio" || server == "opensips" {
+    if asterisk_like(server) || freeswitch {
         flows.push(Flow::Mwi);
     }
     if server == "asterisk" {

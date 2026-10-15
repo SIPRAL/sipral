@@ -322,6 +322,15 @@ that break in production:
 - **`CANCEL` racing a `200 OK`.** The RFC prescribes the answer; the test suite
   contains it as a scripted scenario from day one.
 
+A request with the cookie is matched by branch, sent-by and method, and for
+every method but INVITE by its `CSeq` number too. §17.2.3 does not ask for the
+number, since a branch is unique to its request; Asterisk's `chan_sip`
+nonetheless sends a subscription's NOTIFYs under one branch, and without the
+number the second was taken for a retransmission of the first and answered
+with the first's `200 OK`, which `chan_sip` does not accept, so it resent the
+NOTIFY and no change ever reached the subscriber. A retransmission repeats its
+number, so nothing a compliant peer sends is matched differently.
+
 A request without the RFC 3261 magic cookie — a peer that predates it —
 falls back to §17.2.3's field-by-field match, one rule for the INVITE that
 created the transaction, one for the ACK that follows it, one for every

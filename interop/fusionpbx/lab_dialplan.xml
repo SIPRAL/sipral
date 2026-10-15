@@ -12,7 +12,10 @@ silence until the caller hangs up, since send_dtmf only queues the digit and a
 channel hung up at once never sends it -- 9005
 the tone again with DTLS-SRTP required, 9004 the same with SDES required, 9008
 an echo for G.729 offered alone (setup.sh adds G.729 to the codecs the
-profile accepts) and 9013 the digit by SIP INFO both ways. The
+profile accepts), 9013 the digit by SIP INFO both ways, and 9007 a message
+left for the caller's mailbox: MESSAGE_WAITING, as FusionPBX's voicemail
+fires it, once the caller hangs up (setup.sh says how the subscription is
+answered). The
 echo is FusionPBX's own, *9196,
 which it installs in every domain.
 CONTEXT is replaced by the domain's name when the row is written.
@@ -73,5 +76,12 @@ CONTEXT is replaced by the domain's name when the row is written.
   <condition field="destination_number" expression="^9008$">
     <action application="answer"/>
     <action application="echo"/>
+  </condition>
+</extension>
+<extension name="sipral_lab_mwi" continue="false">
+  <condition field="destination_number" expression="^9007$">
+    <action application="set" data="api_hangup_hook=lua ~local e = freeswitch.Event(&quot;MESSAGE_WAITING&quot;); e:addHeader(&quot;MWI-Messages-Waiting&quot;, &quot;yes&quot;); e:addHeader(&quot;MWI-Message-Account&quot;, &quot;sip:${sip_from_user}@${sip_from_host}&quot;); e:addHeader(&quot;MWI-Voice-Message&quot;, &quot;1/0 (0/0)&quot;); e:addHeader(&quot;Sofia-Profile&quot;, &quot;internal&quot;); e:fire()"/>
+    <action application="answer"/>
+    <action application="playback" data="silence_stream://-1"/>
   </condition>
 </extension>
