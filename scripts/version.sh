@@ -8,7 +8,8 @@
 # version (it is outside the workspace), the three lockfiles, the .NET
 # project and the constant the layer reports, the Python project and its
 # `__version__`, the Pipecat integration's project and its `__version__`,
-# the Dart package, the React Native package and its lockfile, the JVM POM
+# the voice-agent connectors' project, the Dart package, the React Native
+# package and its lockfile, the Node.js package and its lockfile, the JVM POM
 # -- is written from it here and held to it here.
 # What reads the version at build time instead (the podspec and the React
 # Native Gradle build read package.json, every other crate inherits the
@@ -131,10 +132,14 @@ SIMPLE_CARRIERS=(
     'bindings/python/sipral/__init__.py||__version__ = "|"'
     'integrations/pipecat/pyproject.toml|[project]|version = "|"'
     'integrations/pipecat/sipral_pipecat/__init__.py||__version__ = "|"'
+    'integrations/agents/pyproject.toml|[project]|version = "|"'
     'bindings/dart/pubspec.yaml||version: |'
     'bindings/react-native/package.json||  "version": "|",'
     'bindings/react-native/package-lock.json||  "version": "|",'
     'bindings/react-native/package-lock.json|    "": {|      "version": "|",'
+    'bindings/node/package.json||  "version": "|",'
+    'bindings/node/package-lock.json||  "version": "|",'
+    'bindings/node/package-lock.json|    "": {|      "version": "|",'
     'bindings/jvm/pom.xml||        <revision>|</revision>'
 )
 CLASSIFIER=(

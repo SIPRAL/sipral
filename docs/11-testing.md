@@ -1745,8 +1745,9 @@ the root `Cargo.toml`'s `[workspace.package]`. `scripts/version.sh X.Y.Z`
 writes it into every file that carries a copy -- the crates' dependencies on
 each other and the three lockfiles, `Sipral.csproj` and `SipralInfo.cs`,
 `pyproject.toml` (with the Development Status its major calls for) and
-`__version__`, `pubspec.yaml`, the React Native `package.json` and its
-lockfile, and the JVM POM's `revision` -- and `scripts/version.sh --check`
+`__version__`, the Pipecat and voice-agent projects, `pubspec.yaml`, the
+React Native and Node.js `package.json` files and their lockfiles, and the
+JVM POM's `revision` -- and `scripts/version.sh --check`
 holds every copy to it. Each packaging script runs that check first and
 stops on a tree that disagrees with itself. The version is three numbers and
 nothing after them, since a pre-release suffix is spelled one way on
@@ -1781,6 +1782,7 @@ uploads anything.
 | `sipral-jvm`, `sipral-jvm-opus`, their POM and sources jar | Maven | `jvm.sh` | a Linux host with Docker, Maven and a JDK |
 | `sipral` (Dart and Flutter) | pub.dev | `pub.sh` | any host with the Dart SDK |
 | `sipral-react-native` | npm | `npm.sh` | any host with npm |
+| `sipral` (Node.js) | npm | `node.sh` | any host with npm and `bindings/node/node_modules` |
 
 The two Maven artefacts take one group id, `org.sipral`: the property
 `sipral.groupId` in `bindings/jvm/pom.xml`, which `aar.sh` reads for the
@@ -1838,8 +1840,8 @@ live, so that no package is ever published naming one that is not there yet:
    beside it), and the two Maven artefacts, signed.
 2. What resolves those by name: `sipral-react-native` on npm, whose Android
    half asks Maven for the AAR and whose iOS half asks for the Swift
-   package; and the Dart package on pub.dev, which carries no native and can
-   go at any point in this step.
+   package; and the Dart package on pub.dev and `sipral` for Node.js on npm,
+   which carry no native and can go at any point in this step.
 
 What a registry will not take back -- a version, once uploaded, can be
 yanked or unlisted but never replaced -- is why the gate, the lab and every

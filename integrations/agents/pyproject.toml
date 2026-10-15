@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sipral-agents"
-version = "1.1.0"
+version = "1.2.0"
 description = "Sipral for voice-agent APIs: a SIP phone call joined to OpenAI Realtime, Gemini Live, ElevenLabs, Vapi or Deepgram over WebSocket."
 readme = "README.md"
 requires-python = ">=3.11"

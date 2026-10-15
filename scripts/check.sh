@@ -86,8 +86,8 @@ areas:
   rn       bindings/react-native: jest, tsc, codegen, the Android library
            with Gradle, the iOS half, npm.sh --dry-run.
   node     bindings/node: tsc over the printed koffi binding and the
-           TypeScript layer, node --test against the library, npm pack
-           --dry-run.
+           TypeScript layer, node --test against the library,
+           scripts/package/node.sh --dry-run.
   site     the documentation site built and its links checked.
 
 --changed reads `git diff` against BASE (default: the merge base with
@@ -2653,8 +2653,9 @@ step_pub() {
 # tests run against the library: every record's koffi size held to the
 # layout table, two stacks calling each other on loopback with a tone each
 # way, digits and a hang-up, a transfer refused and one taken, and a
-# registration through a simulated registrar's digest challenge. npm pack
-# --dry-run lists what would be published; nothing is.
+# registration through a simulated registrar's digest challenge.
+# scripts/package/node.sh --dry-run lists what would be published, licences
+# included; nothing is.
 step_node() {
     step "the node package"
     local NODE_DIR="$ROOT/bindings/node"
@@ -2691,13 +2692,11 @@ step_node() {
         fail "node --test, bindings/node:"
         tail -40 "$PKG_WORK/node-test" | sed 's/^/        /'
     fi
-    if (cd "$NODE_DIR" && npm pack --dry-run --json) >"$PKG_WORK/node-pack" 2>&1 \
-        && grep -q '"path": "dist/sipral_abi.js"' "$PKG_WORK/node-pack" \
-        && ! grep -q '"path": "dist/test/' "$PKG_WORK/node-pack"; then
-        pass "npm pack --dry-run, bindings/node: the printed binding in, the tests out"
+    if scripts/package/node.sh --out "$PKG_WORK/node-pack" --dry-run >"$PKG_WORK/node-pack.log" 2>&1; then
+        pass "node.sh --dry-run: the printed binding and the licences in, the tests out"
     else
-        fail "npm pack --dry-run, bindings/node:"
-        tail -20 "$PKG_WORK/node-pack" | sed 's/^/        /'
+        fail "node.sh --dry-run:"
+        grep FAIL "$PKG_WORK/node-pack.log" | sed 's/^/        /'
     fi
 }
 
