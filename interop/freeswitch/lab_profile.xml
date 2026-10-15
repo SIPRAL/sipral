@@ -33,7 +33,7 @@ every start, so a new name is the only mount that survives.
     <param name="accept-blind-reg" value="false"/>
     <param name="accept-blind-auth" value="false"/>
 
-    <param name="inbound-codec-prefs" value="PCMU,PCMA"/>
+    <param name="inbound-codec-prefs" value="PCMU,PCMA,G729"/>
     <param name="outbound-codec-prefs" value="PCMU,PCMA"/>
     <param name="inbound-codec-negotiation" value="generous"/>
     <param name="disable-transcoding" value="true"/>

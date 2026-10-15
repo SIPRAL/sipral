@@ -117,4 +117,41 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="echo"/>
     </condition>
   </extension>
+  <!-- The digit again, by SIP INFO both ways (application/dtmf-relay): the
+       caller's INFO is read like any other digit, and dtmf_type=info makes
+       send_dtmf answer by INFO too, so this end's receiving half meets a
+       real peer as well as its sending one. Asterisk does the same on 9003
+       for its own labuser-infodtmf endpoint; here the method is the
+       extension's, so it has a number of its own. -->
+  <extension name="sipral_lab_dtmf_info">
+    <condition field="destination_number" expression="^9013$">
+      <action application="set" data="dtmf_type=info"/>
+      <action application="answer"/>
+      <action application="read" data="1 1 silence_stream://1 digit 5000 #"/>
+      <action application="send_dtmf" data="${digit}"/>
+      <action application="playback" data="silence_stream://-1"/>
+    </condition>
+  </extension>
+  <!-- SDES required (RFC 4568), the number Asterisk gives it: an offer
+       this end could not key is refused rather than answered in the clear,
+       and the call is the cadenced tone of 9002. -->
+  <extension name="sipral_lab_srtp">
+    <condition field="destination_number" expression="^9004$">
+      <action application="set" data="rtp_secure_media=mandatory"/>
+      <action application="answer"/>
+      <action application="playback" data="tone_stream://%(1200,600,350,440);loops=-1"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
+  <!-- G.729 offered alone and echoed, the number Asterisk gives it.
+       FreeSWITCH carries G.729 without decoding it, so the echo sends this
+       end's own frames back untouched: what is proven is the negotiation and
+       this end's encoder and decoder meeting each other through a real
+       server, not the server's codec. -->
+  <extension name="sipral_lab_g729">
+    <condition field="destination_number" expression="^9008$">
+      <action application="answer"/>
+      <action application="echo"/>
+    </condition>
+  </extension>
 </include>

@@ -88,6 +88,14 @@ DOMAIN_UUID=$(uuid)
 sql -c "insert into v_domains (domain_uuid, domain_name, domain_enabled) values ('$DOMAIN_UUID', '$DOMAIN', true)"
 php core/upgrade/upgrade.php --defaults
 
+# G.729 among the codecs every profile accepts, after the ones FusionPBX
+# lists, so 9008 can be offered G.729 alone: the profile negotiates as the
+# INVITE arrives, before any dialplan could name a codec for the call. Both
+# the variable's row and the vars.xml the defaults wrote from it.
+sql -c "update v_vars set var_value = var_value || ',G729' where var_name = 'global_codec_prefs' and var_value not like '%G729%'"
+sed -i 's/\(global_codec_prefs=[^"]*\)"/\1,G729"/' /etc/freeswitch/vars.xml
+grep -q 'global_codec_prefs=[^"]*G729' /etc/freeswitch/vars.xml
+
 # the harness's account, an extension like any a phone registers as
 sql -c "insert into v_extensions (extension_uuid, domain_uuid, extension, password, user_context, effective_caller_id_name, effective_caller_id_number, call_timeout, enabled)
         values ('$(uuid)', '$DOMAIN_UUID', 'labuser', '$PASS', '$DOMAIN', 'labuser', 'labuser', 30, true)"

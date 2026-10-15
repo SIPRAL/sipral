@@ -383,69 +383,25 @@ fn main() -> ExitCode {
     // matched
     let _ = RUN_SEED.set(this_run_seed);
 
-    let mut flows = vec![
-        Flow::Register,
-        Flow::Call,
-        Flow::Hold,
-        Flow::Blind,
-        Flow::Attended,
-    ];
-    // this lab's own SDES endpoint and codec-change dialplan exist only on
-    // Asterisk; see `docs/11-testing.md` for why they are not on FreeSWITCH
-    // or through the proxy. The DTMF check runs on all three: FreeSWITCH's
-    // 9003, behind the proxy, and FusionPBX's (interop/fusionpbx), with no
-    // proxy in front of it, both keep the call up after `send_dtmf` until
-    // this end hangs up, since a hangup straight after it ended the call
-    // before the digit was ever sent
-    if server == "asterisk" || server == "fusionpbx" || server == "kamailio" {
-        flows.push(Flow::Dtmf4733);
-    }
-    if server == "asterisk" {
-        flows.push(Flow::Renumbered);
-        flows.push(Flow::DtmfInfo);
-        flows.push(Flow::Srtp);
-        flows.push(Flow::HoldCodecChange);
-        flows.push(Flow::Message);
-        flows.push(Flow::Mwi);
-        flows.push(Flow::G729);
-    }
-    // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
-    flows.push(Flow::Dtls);
-    flows.extend(signalling_flows(&server));
-    // the phone-to-phone peer: gated on SIPRAL_PEER rather than on
-    // `server`, because this run and the plain kamailio one above both name
-    // "kamailio" as their server — that is the proxy's own address either
-    // way — and only this one may dial an account interop/asterisk and
-    // interop/freeswitch know nothing about. scripts/lab.sh sets it only for
-    // its own "baresip" step, so neither of the ordinary runs ever pushes
-    // these two.
-    if env::var("SIPRAL_PEER").as_deref() == Ok("baresip") {
-        flows.push(Flow::PeerSrtp);
-        flows.push(Flow::PeerDtls);
-    }
-    // a second, dedicated peer (interop/baresip/config-hangup), never the
-    // three phone-to-phone flows' own "baresip": `Flow::PeerHangup` needs
-    // `scripts/lab.sh`'s own `baresip_ctrl_hangup` reaching a `ctrl_tcp`
-    // port nothing else in this lab exposes, and a run of the ordinary
-    // three flows above must never share it, or a command meant for this
-    // flow's own call could land on one of theirs instead.
-    if env::var("SIPRAL_PEER").as_deref() == Ok("baresip-hangup") {
-        flows.push(Flow::PeerHangup);
-    }
+    let flows = lab_flows(&server);
 
     let mut failures = 0;
     for flow in flows {
         if !wanted.is_empty() && !wanted.split(',').any(|name| name.trim() == flow.key()) {
             continue;
         }
+        // FreeSWITCH decides per extension, not per account: these
+        // accounts are Asterisk's own endpoints
         let (this_user, this_pass) = match flow {
-            Flow::Srtp => (srtp_user.as_str(), srtp_pass.as_str()),
-            Flow::DtmfInfo => (infodtmf_user.as_str(), infodtmf_pass.as_str()),
+            Flow::Srtp if server == "asterisk" => (srtp_user.as_str(), srtp_pass.as_str()),
+            Flow::DtmfInfo if server == "asterisk" => {
+                (infodtmf_user.as_str(), infodtmf_pass.as_str())
+            }
             // Asterisk's own DTLS endpoint; the proxy knows only the one user,
             // and FreeSWITCH behind it decides per extension, not per account
             Flow::Dtls if server == "asterisk" => (dtls_user.as_str(), dtls_pass.as_str()),
-            Flow::Mwi => (mwi_user.as_str(), mwi_pass.as_str()),
-            Flow::G729 => (g729_user.as_str(), g729_pass.as_str()),
+            Flow::Mwi if server == "asterisk" => (mwi_user.as_str(), mwi_pass.as_str()),
+            Flow::G729 if server == "asterisk" => (g729_user.as_str(), g729_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -828,6 +784,63 @@ fn extra_flows(
         failures += 1;
     }
     failures
+}
+
+/// The flows run against `server`, in order: the common ones, then what
+/// only some servers have a dialplan entry for, then the phone-to-phone
+/// peers `SIPRAL_PEER` names.
+fn lab_flows(server: &str) -> Vec<Flow> {
+    let mut flows = vec![
+        Flow::Register,
+        Flow::Call,
+        Flow::Hold,
+        Flow::Blind,
+        Flow::Attended,
+    ];
+    // the digits, SDES and G.729 run on every server: FreeSWITCH behind
+    // either proxy and FusionPBX (interop/fusionpbx) answer 9003, 9004,
+    // 9008 and 9013 as Asterisk answers its own, and keep a digit's call up
+    // after `send_dtmf` until this end hangs up, since a hangup straight
+    // after it ended the call before the digit was ever sent. The renumbered
+    // answer, the codec change, MESSAGE and MWI have dialplan entries on
+    // Asterisk alone
+    let freeswitch = matches!(server, "kamailio" | "opensips" | "fusionpbx");
+    if server == "asterisk" || freeswitch {
+        flows.push(Flow::Dtmf4733);
+        flows.push(Flow::DtmfInfo);
+        flows.push(Flow::Srtp);
+        flows.push(Flow::G729);
+    }
+    if server == "asterisk" {
+        flows.push(Flow::Renumbered);
+        flows.push(Flow::HoldCodecChange);
+        flows.push(Flow::Message);
+        flows.push(Flow::Mwi);
+    }
+    // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
+    flows.push(Flow::Dtls);
+    flows.extend(signalling_flows(server));
+    // the phone-to-phone peer: gated on SIPRAL_PEER rather than on
+    // `server`, because this run and the plain kamailio one above both name
+    // "kamailio" as their server — that is the proxy's own address either
+    // way — and only this one may dial an account interop/asterisk and
+    // interop/freeswitch know nothing about. scripts/lab.sh sets it only for
+    // its own "baresip" step, so neither of the ordinary runs ever pushes
+    // these two.
+    if env::var("SIPRAL_PEER").as_deref() == Ok("baresip") {
+        flows.push(Flow::PeerSrtp);
+        flows.push(Flow::PeerDtls);
+    }
+    // a second, dedicated peer (interop/baresip/config-hangup), never the
+    // three phone-to-phone flows' own "baresip": `Flow::PeerHangup` needs
+    // `scripts/lab.sh`'s own `baresip_ctrl_hangup` reaching a `ctrl_tcp`
+    // port nothing else in this lab exposes, and a run of the ordinary
+    // three flows above must never share it, or a command meant for this
+    // flow's own call could land on one of theirs instead.
+    if env::var("SIPRAL_PEER").as_deref() == Ok("baresip-hangup") {
+        flows.push(Flow::PeerHangup);
+    }
+    flows
 }
 
 /// One scripted exchange, with what has to be true for it to have passed.
@@ -2228,9 +2241,10 @@ impl Script {
     /// (9000 unless told otherwise) for every flow except the ones that need
     /// a dialplan entry of their own: `Flow::Dtmf4733` and `Flow::DtmfInfo`
     /// (interop/asterisk and interop/freeswitch both add 9003 for the first;
-    /// only Asterisk runs the second, over its own `labuser-infodtmf`
-    /// endpoint), `Flow::Srtp` (9004), `Flow::Mwi`'s own voicemail
-    /// extension (9007) and `Flow::G729`'s echo (9008), all Asterisk only — see
+    /// the second is 9003 again over Asterisk's own `labuser-infodtmf`
+    /// endpoint, and 9013 on FreeSWITCH, which chooses INFO per extension),
+    /// `Flow::Srtp` (9004) and `Flow::G729`'s echo (9008), on both,
+    /// `Flow::Mwi`'s own voicemail extension (9007), Asterisk only — see
     /// `interop/asterisk/extensions.conf` — and `Flow::Dtls` (9005, on both).
     /// `Flow::Message` places no call at all; its own extension (9006) is
     /// named directly in `advance`. `Flow::Call` and `Flow::Hold` reused
@@ -2242,6 +2256,8 @@ impl Script {
     /// number, since baresip is a single client rather than a dialplan.
     fn call_extension(&self) -> String {
         match self.flow {
+            // FreeSWITCH chooses INFO per extension (interop/freeswitch/lab.xml)
+            Flow::DtmfInfo if self.server != "asterisk" => "9013".to_owned(),
             Flow::Dtmf4733 | Flow::Renumbered | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
             Flow::Dtls => "9005".to_owned(),

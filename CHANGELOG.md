@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **The lab runs digits by SIP INFO, SDES and G.729 against FreeSWITCH and FusionPBX, and RFC 4733 digits through OpenSIPS.** FreeSWITCH, behind Kamailio and behind OpenSIPS, and FusionPBX answer the numbers Asterisk answers for them (`interop/freeswitch/lab.xml`, `interop/fusionpbx/lab_dialplan.xml`), with the digit by INFO on 9013 since FreeSWITCH chooses the method per extension, and G.729 among the codecs their profiles accept. G.729 comes back as this end wrote it, as through Asterisk, and FreeSWITCH answers `annexb=yes`, so the call runs with Annex B on (`docs/11-testing.md`).
+
 ### Fixed
 
 - **The voice-agent demo starts on the `sipral` wheel from PyPI.** It asked for Opus first, and the `sipral` package is built without Opus, so the stack refused the codec order and the demo never answered; it now offers Opus only where the build has it. The demo runs from a checkout over `pip install sipral websockets`, with no native build.
