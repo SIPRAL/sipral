@@ -792,7 +792,7 @@ of its way to enable the feature and depend on the example's own code.
 
 | Component | What it is | Licence |
 |---|---|---|
-| `rustls` 0.23.45 | the TLS 1.2/1.3 client, `default-features = false` plus `ring`/`std`/`tls12` | MIT OR Apache-2.0 OR ISC |
+| `rustls` 0.23.46 | the TLS 1.2/1.3 client, `default-features = false` plus `ring`/`std`/`tls12` | MIT OR Apache-2.0 OR ISC |
 | `rustls-native-certs` 0.8.4 | reads the platform's trust store into a `rustls::RootCertStore` | MIT OR Apache-2.0 OR ISC |
 | `rustls-pki-types` 1.15.1 | the certificate and server-name types both of the above share | MIT OR Apache-2.0 |
 | `ring` (via `rustls`'s `ring` feature) | the cryptographic provider `rustls` calls into; chosen over the default `aws_lc_rs` because it needs only a C compiler, not `cmake` | Apache-2.0 AND ISC |

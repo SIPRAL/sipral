@@ -23,8 +23,8 @@ ABI 1.0, which is 0.36's surface under the first frozen major (`08-ffi.md`,
 "ABI 1.0"): a binding built against ABI 1.k loads against every later 1.x
 library. The library's version and the ABI's are two numbers, each moved by
 its own rule (`08-ffi.md`, "Versioning"). What 1.0 publishes is the C library
-and the language packages over it; the Rust crates are not part of it, and
-their API promises nothing (`11-testing.md`, "Releasing").
+and the language packages over it; the Rust crates joined at 1.2.0, which
+promises the `sipral` crate's API (`08-ffi.md`, "The Rust crates").
 
 It does not wait for what only a third party can supply — a paid carrier
 account (phase 1), real phones and the two stores (phase 4), a public
@@ -38,6 +38,12 @@ part of the C surface: the headless agent's steady 20 ms clock and its wait
 on the SIP socket, Opus rebuilding lost frames from in-band FEC, a lighter
 in-band DTMF detector, the gate holding every published figure to its
 budget, and the fixes `CHANGELOG.md` lists.
+
+**1.2.0 is released** (15 October 2026), at ABI 1.2, which only adds to 1.0
+and 1.1: the voice-agent bridge and its connectors, OAuth2 sign-in to the PBX,
+the Node.js and .NET MAUI packages, SIP over a WebSocket the stack opens,
+the Rust API promised between releases and published on crates.io, a week of
+calls with no error, and the fixes `CHANGELOG.md` lists.
 
 ## Releases
 
@@ -65,7 +71,7 @@ October 2026, released.
 
 ### 1.2 — Voice agents, the enterprise and more platforms
 
-October 2026, planned.
+October 2026, released.
 
 - A SIP bridge from a PBX line to any voice agent that answers SIP, the outcome handed back to the PBX *(done)*
 - Call audio at the rate a speech service asks for, in every language *(done)*
@@ -77,7 +83,7 @@ October 2026, planned.
 - A call as a participant in a LiveKit room, as an example *(done)*
 - A phone voice agent that runs in five minutes, speech to speech, from one command *(done)*
 - Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published *(done)*
-- Calls held for a day and for a week with no growth in memory or processor time, measured and published *(in progress)*
+- Calls held for a day and for a week with no growth in memory or processor time, measured and published *(done)*
 - Node.js and TypeScript package *(done)*
 - .NET MAUI package for iOS and Android *(done)*
 - A network test before the call *(done)*

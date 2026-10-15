@@ -619,7 +619,7 @@ the Android NDK and the `maui-ios` and `maui-android` workloads (.NET MAUI
 
 ```sh
 dotnet workload install maui-ios maui-android
-scripts/package/maui.sh            # target/maui/Sipral.Maui.1.1.0.nupkg
+scripts/package/maui.sh            # target/maui/Sipral.Maui.1.2.0.nupkg
 scripts/package/maui.sh --natives-only   # only target/maui/natives
 ```
 

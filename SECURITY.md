@@ -110,10 +110,10 @@ advisory published after a commit still stops the next release.
 ## Supported versions
 
 From 1.0.0 on, security fixes reach the current minor release and the one
-before it: at 1.1.0, that is 1.1.x and 1.0.x. The supported artefacts are the C
-library and the language packages a release publishes; the Rust crates are
-not part of a release (`docs/11-testing.md`, "Releasing"). A fix that reaches
-only the current minor still reaches every application: the C ABI is at 1.0,
+before it: at 1.2.0, that is 1.2.x and 1.1.x. The supported artefacts are the C
+library, the language packages and the `sipral` crate a release publishes
+(`docs/11-testing.md`, "Releasing"). A fix that reaches only the current
+minor still reaches every application: the C ABI only grows within 1.x,
 and a binding built against any 1.x ABI loads against a later 1.x library
 (`docs/08-ffi.md`, "ABI 1.0"), so updating the native library alone takes
 the fix.

@@ -11,6 +11,11 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-15
+
+A PBX line bridged to any voice agent, with a Pipecat transport and connectors to five speech services; OAuth2 sign-in to the PBX, SIP over a WebSocket the stack opens, LiveCommunicationKit on iOS, and Node.js and .NET MAUI packages. The `sipral` crate's Rust API is promised between releases and published on crates.io, and a week of calls held with no error.
+At C ABI 1.2, which only adds: an application built on 1.0 or 1.1 works unchanged.
+
 ### Added
 
 - **The Rust API is promised, and published on crates.io.** From 1.2.0 a program that builds against `sipral` 1.k builds against every later 1.x, as a binding built against an ABI minor loads against every later one. Promised is everything the crate names and documents: its root, the whole user agent as `sipral::ua`, the session descriptions as `sipral::sdp`, STIR/SHAKEN as `sipral::stir`, and every type their functions, fields and events hand over, each of which now has a name an application can write. A type that can grow is `#[non_exhaustive]`, built with its constructor or with `Default` and field assignment; enumerations a standard closes, and the ones every variant of which a stack has to handle for its security (SRTP suites, keying, how RTCP travels), stay exhaustive and grow only in 2.0. The workspace crates `sipral` depends on are published as its parts, promise nothing of their own, and are named at the release's exact version. `scripts/check.sh` runs `cargo-semver-checks` on `sipral` against the newest release tag from `v1.2.0` on (`docs/08-ffi.md`, "The Rust crates"). No C ABI change.
@@ -63,6 +68,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Fixed
 
+- **The TLS examples build against `rustls` 0.23.46.** RUSTSEC-2026-0348 and RUSTSEC-2026-0349 were published against 0.23.45; `rustls` is reached only by the `example-tls` feature, which nothing the release ships turns on.
 - **A wake or a network change no longer leaves a subscription's dialog counting against `max_dialogs`.** Recovery starts each subscription again under a new `Call-ID`, but the dialog the old one's NOTIFY had opened stayed open, so every recovery held one more dialog per subscription. An application watching seven busy lamps reached the default 128 after a few dozen network changes, and from then on every call it placed failed with `LimitReached` and every call it was offered was refused with 503. The old dialog is now closed when its subscription starts again.
 - **The headless agent tries a network move again when it could not bind at the new address.** The example noted the new route before rebinding there, so a failed bind left it at the old address for good; the route now stays at the old address and the next check, half a second later, tries the move again.
 - **The VoIP metrics block reports this end's end-system delay, and the call's own rating counts it.** RFC 3611 §4.7.3's end system delay was always sent as 0; it is now the jitter buffer's nominal delay plus one packet time, and the one-way delay G.107's `Id` is rated on is §4.7.3's "(RTD + ESD(A) + ESD(B)) / 2", with the far end's own end-system delay once its block arrives, rather than half the round trip and nothing else (`docs/05-media.md`). No C ABI change: `voip_end_system_delay_us` was already there.

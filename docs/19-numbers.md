@@ -1415,6 +1415,24 @@ hour, pjsua's 23.4, baresip's 30.6 and linphonec's 105.8, at 0.95, 5.65, 2.21 an
 core. What each ships to make calls on Linux: `libsipral_ffi.so` 6.36 MB in one file, PJSIP
 11.38 MB in 22, baresip 13.22 MB in 22, Linphone 208.50 MB in 173.
 
+## 15 October 2026 — `1.2.0`: a week
+
+The same `scripts/soak.sh endurance` pair, on the fix above, from 7 October 23:34 UTC to 14
+October 23:34 UTC, 168 hours on the second lab machine: 10,081 samples, 3,337 calls and 6,795
+registrations, no error. Descriptors stayed between 7 and 8 and threads at 3; processor time
+averaged 2.17 % of one core, never above 3.1 %, the same on the seventh day as on the first.
+
+Resident memory went from 4.7 MB idle to 6.00 MB within six hours and 6.02 MB at one day,
+then 6.06 MB from the thirty-sixth hour and 6.07 MB from the sixth day to the end: 48 KB
+over the last six days, in 4 KB pages, the last 16 KB of it in two steps over five and a half
+days and about 2,600 calls. The day's run grew 72 KB over its last fifteen hours; the leak it
+found is gone. What is left is the allocator's: the counting test above holds the library at
+a plateau to 35,000 calls, and resident memory cannot tell a page the allocator keeps from
+one the library holds.
+
+The logs stay on the lab machine, under `/opt/sipral/soak-logs/endurance-20261008`
+(`app.log`, `agent.log`, `samples.csv`).
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty

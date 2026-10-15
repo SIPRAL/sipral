@@ -86,8 +86,8 @@ Node.js layer runs device or application mode, signalling over UDP, TCP or TLS.
 
 ## Status
 
-**1.1.0, at C ABI 1.0.** These are two numbers on purpose: 1.1.0 is the
-release every package ships under, and 1.0 is the version of the C
+**1.2.0, at C ABI 1.2.** These are two numbers on purpose: 1.2.0 is the
+release every package ships under, and 1.2 is the version of the C
 interface, which `sipral_abi_check` compares when a binding loads
 ([`docs/08-ffi.md`, "Versioning"](docs/08-ffi.md#versioning)).
 
@@ -102,8 +102,9 @@ loads whether it speaks the ABI the binding was printed against, and that
 check keeps older applications working: a binding built against ABI 1.k
 loads against any library at 1.m with m ≥ k, and one built against a later
 minor than the library's is refused at load with both versions named.
-The Rust crates are not part of the release and their API promises nothing;
-the `sipral` name on crates.io stays the 0.0.2 reservation it is. Security
+From 1.2.0 the `sipral` crate on crates.io is part of the release too, and
+its Rust API carries the same promise for every later 1.x
+([`docs/08-ffi.md`, "The Rust crates"](docs/08-ffi.md#the-rust-crates)). Security
 fixes reach the current minor release and the one before it
 ([`SECURITY.md`](SECURITY.md)). The artefacts in the table above, the
 Swift package over the XCFramework, the Dart package and the React Native
