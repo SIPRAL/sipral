@@ -1776,6 +1776,7 @@ uploads anything.
 |---|---|---|---|
 | `sipral` and the workspace crates it depends on | crates.io | `crate.sh` | any host |
 | `Sipral`, `Sipral.Opus` | NuGet | `nuget.sh collect` per RID, then `nuget.sh pack` | the Mac (osx-arm64, osx-x64), Windows under Git Bash (win-x64, win-arm64), a Docker host (linux-x64, linux-arm64); the pack anywhere with the .NET SDK |
+| `Sipral.Maui` | NuGet | `maui.sh` | a Mac with Xcode, the Android NDK and the .NET MAUI workloads |
 | `CSipral.xcframework.zip`, and the root `Package.swift` pointed at it | an asset of this repository's release `vX.Y.Z`; the Swift package is this repository | `xcframework.sh --release` | a Mac with Xcode |
 | `sipral`, `sipral-opus` wheels | PyPI | `wheels.sh` | the Mac (`macosx_12_0_arm64`), an Intel Mac (`macosx_12_0_x86_64`), Windows under Git Bash (`win_amd64`, and `win_arm64` with `--windows-arm64`, whose import and tests run on a Windows on Arm machine), a Docker host (`--manylinux`, `--linux-arm64`) |
 | `sipral.aar`, `sipral-opus.aar`, their POM and sources jar | Maven | `android.sh`, whose image runs `aar.sh` | a Docker host |

@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- **The voice-agent demo starts on the `sipral` wheel from PyPI.** It asked for Opus first, and the `sipral` package is built without Opus, so the stack refused the codec order and the demo never answered; it now offers Opus only where the build has it. The demo runs from a checkout over `pip install sipral websockets`, with no native build.
+
 ## [1.2.0] - 2026-10-15
 
 A PBX line bridged to any voice agent, with a Pipecat transport and connectors to five speech services; OAuth2 sign-in to the PBX, SIP over a WebSocket the stack opens, LiveCommunicationKit on iOS, and Node.js and .NET MAUI packages. The `sipral` crate's Rust API is promised between releases and published on crates.io, and a week of calls held with no error.

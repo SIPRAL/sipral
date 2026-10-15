@@ -285,10 +285,11 @@ picture are allowed to meet. An application that just wants a softphone stack
 depends on this one crate and gets `sipral-ua` plus a media pipeline
 re-exported under one name.
 
-It is the only crate with `publish = true`, and that is for the name: `sipral`
-0.0.1 on crates.io is a reservation. The 1.0 release publishes the C library
-and the language packages, not the crates (`11-testing.md`, "Releasing").
-What it now also carries is the join:
+It is the crate an application names on crates.io, and from 1.2.0 its Rust
+API carries the same promise between 1.x releases as the C ABI (`08-ffi.md`,
+"The Rust crates"); the workspace crates it depends on are published beside it
+at the release's exact version, as parts it does not promise
+(`11-testing.md`, "Releasing"). What it now also carries is the join:
 
 - **`CodecCatalog` and `Codec`** — what this build actually contains, in the
   order it is offered, and what one live call settled on. A name the build has

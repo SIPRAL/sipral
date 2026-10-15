@@ -26,6 +26,14 @@ Two layers, the way every binding here is two layers:
 ## Install
 
 ```sh
+pip install sipral          # or sipral-opus, the same package with Opus in it
+```
+
+The wheels carry the native library for macOS (arm64, x86_64), Windows (x64,
+arm64) and Linux (x86_64 and aarch64, manylinux 2.28; `sipral-opus` on
+x86_64). From a checkout instead:
+
+```sh
 cd bindings/python
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .

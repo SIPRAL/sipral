@@ -28,7 +28,7 @@ and Pipecat the speech recognition, the model and the speech.
 
 ## Install
 
-Until 1.2 reaches PyPI, from a checkout of this repository:
+From a checkout of this repository; the `sipral` package it depends on comes from PyPI:
 
 ```sh
 pip install ./integrations/pipecat "pipecat-ai[deepgram,openai,silero]"

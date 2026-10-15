@@ -18,9 +18,15 @@ layer, `src/sipral_abi.ts` (`sipral/abi`), is printed from the ABI's
 declarations by `tools/abi-gen` and never edited by hand; the classes below
 are written over it.
 
+## Install
+
+```bash
+npm install sipral
+```
+
 ## The library
 
-The package looks for `libsipral_ffi` (`.dylib`, `.so` or `sipral_ffi.dll`)
+The package carries no native library of its own. It looks for `libsipral_ffi` (`.dylib`, `.so` or `sipral_ffi.dll`)
 in this order: `SIPRAL_LIBRARY` (the file or its directory), beside the
 package, then a checkout's `target/release` and `target/debug`. Build it with:
 

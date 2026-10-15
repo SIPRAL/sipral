@@ -99,12 +99,12 @@ sipral-ffi`) is found through `SIPRAL_LIBRARY=target/release`.
 
 ## A voice agent in five minutes
 
-From a checkout of this repository (the package is not on PyPI yet):
+From a checkout of this repository, over the `sipral` package from PyPI
+(`sipral-opus` to offer Opus first):
 
 ```sh
-cargo build --release -p sipral-ffi
-python3 -m pip install websockets cffi
-export SIPRAL_LIBRARY=target/release PYTHONPATH=integrations/agents:bindings/python
+python3 -m pip install sipral websockets
+export PYTHONPATH=integrations/agents
 python3 -m sipral_agents.demo
 ```
 

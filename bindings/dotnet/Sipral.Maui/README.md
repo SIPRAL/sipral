@@ -10,6 +10,10 @@ linked into the application) and Android (arm64-v8a, armeabi-v7a, x86_64)
 inside, plus `SipralMicrophone` for the microphone permission and
 `SipralAppLifecycle` for the move to the background and back.
 
+```sh
+dotnet add package Sipral.Maui
+```
+
 ```csharp
 builder.UseMauiApp<App>().UseSipral(out var lifecycle);
 // later, once there is a stack and an account

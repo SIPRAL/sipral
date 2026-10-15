@@ -2057,13 +2057,13 @@ sending from each call's own socket; on Android, whose devices the library
 does not open, the Kotlin telecom helper's `SipralCallAudios` runs every
 call's `AudioRecord`/`AudioTrack` instead.
 
-## One declaration, and every printed file (the header, the five bindings and the JNI shim)
+## One declaration, and every printed file (the header, the six bindings and the JNI shim)
 
 B7's failure is a C seam declared in several places that have to agree: a
 function added to the Rust and forgotten in one binding produced a build that
 compiled and failed at run time, on one platform, in the field. The answer here
-is that the header and the five bindings — Swift, .NET, Kotlin, Python and
-Dart — are not declarations at all. They are
+is that the header and the six bindings — Swift, .NET, Kotlin, Python, Dart
+and Node.js — are not declarations at all. They are
 printed, by `tools/abi-gen`, from what `crates/sipral-ffi` declares, and they
 are committed — a consumer of a released library must not have to run a
 generator — and `scripts/check.sh` prints them again and fails when what is
@@ -2128,7 +2128,7 @@ still have to reach C somehow, and the only way to do that is `entry!`, which
 
 **What the descriptor records is the spelling, not the layout.** `usize` becomes
 `size_t` by a rule in the generator, `*const c_char` becomes `const char *`, and
-a rule that is wrong is wrong in the header and all five bindings at once — the
+a rule that is wrong is wrong in the header and all six bindings at once — the
 gate would compare wrong output against wrong output and pass. That is the
 price of one source of truth, and it is the right price: a mistake that is
 everywhere is a mistake somebody finds, where a mistake in one binding of five
@@ -2205,9 +2205,9 @@ throw from. See "Kotlin" below for what that costs.
 
 A function, a struct, a union, an enumeration, a constant or an alias added,
 removed or renamed on the Rust side and not reaching the header or any of the
-five bindings. A member appended to a struct, a value added to an enumeration,
+six bindings. A member appended to a struct, a value added to an enumeration,
 a parameter added to a function, a type changed. The number an event kind
-spends, which travels into every printed file (the header, the five
+spends, which travels into every printed file (the header, the six
 bindings and the JNI shim). Every one of those is a difference
 between what is committed under `bindings/` and what the declarations produce,
 and the gate prints which file and says what to run.

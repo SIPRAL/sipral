@@ -30,8 +30,8 @@ from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve as ws_serve
 from websockets.exceptions import ConnectionClosed
 
-from sipral import Stack
-from sipral.enums import AudioMode
+from sipral import Stack, features
+from sipral.enums import AudioMode, Feature
 
 from .core import AgentCall, AgentEventKind, Provider
 from .openai_realtime import OpenAIRealtime
@@ -131,7 +131,10 @@ async def run(
             return OpenAIRealtime(model="echo", api_key="none", url=echo_url)
 
         print("agent: local echo (set OPENAI_API_KEY for OpenAI Realtime)", flush=True)
-    stack = Stack(host, port, loop=loop, audio=AudioMode.APPLICATION, codecs="opus,G722,PCMU,PCMA")
+    # Opus first where the build has it: the `sipral` wheel is built without
+    # it, and a codec order naming what the build lacks is refused
+    codecs = "opus,G722,PCMU,PCMA" if Feature.OPUS in features() else "G722,PCMU,PCMA"
+    stack = Stack(host, port, loop=loop, audio=AudioMode.APPLICATION, codecs=codecs)
     try:
         aor = environ.get("SIPRAL_AOR", "sip:agent@sipral.invalid")
         account = stack.add_account(
