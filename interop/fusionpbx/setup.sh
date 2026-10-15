@@ -96,6 +96,12 @@ sql -c "update v_vars set var_value = var_value || ',G729' where var_name = 'glo
 sed -i 's/\(global_codec_prefs=[^"]*\)"/\1,G729"/' /etc/freeswitch/vars.xml
 grep -q 'global_codec_prefs=[^"]*G729' /etc/freeswitch/vars.xml
 
+# 9006 answers a MESSAGE with one of its own, as Asterisk's does: mod_sms
+# routes a MESSAGE from an extension through the chatplan's public context,
+# which FusionPBX ships with nothing but a commented-out demo
+sed -i 's|<context name="public">|<context name="public">\n<extension name="sipral_lab_message"><condition field="to_user" expression="^9006$"><action application="reply" data="echo: ${_body}"/></condition></extension>|' /etc/freeswitch/chatplan/default.xml
+grep -q sipral_lab_message /etc/freeswitch/chatplan/default.xml
+
 # the harness's account, an extension like any a phone registers as
 sql -c "insert into v_extensions (extension_uuid, domain_uuid, extension, password, user_context, effective_caller_id_name, effective_caller_id_number, call_timeout, enabled)
         values ('$(uuid)', '$DOMAIN_UUID', 'labuser', '$PASS', '$DOMAIN', 'labuser', 'labuser', 30, true)"

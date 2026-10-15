@@ -393,15 +393,15 @@ fn main() -> ExitCode {
         // FreeSWITCH decides per extension, not per account: these
         // accounts are Asterisk's own endpoints
         let (this_user, this_pass) = match flow {
-            Flow::Srtp if server == "asterisk" => (srtp_user.as_str(), srtp_pass.as_str()),
-            Flow::DtmfInfo if server == "asterisk" => {
+            Flow::Srtp if asterisk_like(&server) => (srtp_user.as_str(), srtp_pass.as_str()),
+            Flow::DtmfInfo if asterisk_like(&server) => {
                 (infodtmf_user.as_str(), infodtmf_pass.as_str())
             }
             // Asterisk's own DTLS endpoint; the proxy knows only the one user,
             // and FreeSWITCH behind it decides per extension, not per account
-            Flow::Dtls if server == "asterisk" => (dtls_user.as_str(), dtls_pass.as_str()),
-            Flow::Mwi if server == "asterisk" => (mwi_user.as_str(), mwi_pass.as_str()),
-            Flow::G729 if server == "asterisk" => (g729_user.as_str(), g729_pass.as_str()),
+            Flow::Dtls if asterisk_like(&server) => (dtls_user.as_str(), dtls_pass.as_str()),
+            Flow::Mwi if asterisk_like(&server) => (mwi_user.as_str(), mwi_pass.as_str()),
+            Flow::G729 if asterisk_like(&server) => (g729_user.as_str(), g729_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -786,6 +786,19 @@ fn extra_flows(
     failures
 }
 
+/// Whether `server` answers the lab's numbers with the lab's own Asterisk
+/// accounts: the lab's Asterisk, and the one inside a ViciBox
+/// (interop/live/vicibox), named "vicibox" by scripts/lab.sh.
+fn asterisk_like(server: &str) -> bool {
+    matches!(server, "asterisk" | "vicibox")
+}
+
+/// Whether this run's digit flows go to baresip's digit echo
+/// (scripts/lab.sh's `flows_baresip_dtmf`) rather than a dialplan.
+fn digit_peer() -> bool {
+    env::var("SIPRAL_PEER").as_deref() == Ok("baresip-dtmf")
+}
+
 /// The flows run against `server`, in order: the common ones, then what
 /// only some servers have a dialplan entry for, then the phone-to-phone
 /// peers `SIPRAL_PEER` names.
@@ -797,25 +810,30 @@ fn lab_flows(server: &str) -> Vec<Flow> {
         Flow::Blind,
         Flow::Attended,
     ];
-    // the digits, SDES and G.729 run on every server: FreeSWITCH behind
-    // either proxy and FusionPBX (interop/fusionpbx) answer 9003, 9004,
-    // 9008 and 9013 as Asterisk answers its own, and keep a digit's call up
-    // after `send_dtmf` until this end hangs up, since a hangup straight
-    // after it ended the call before the digit was ever sent. The renumbered
-    // answer, the codec change, MESSAGE and MWI have dialplan entries on
-    // Asterisk alone
+    // the digits, SDES, G.729 and MESSAGE run on every server: FreeSWITCH
+    // behind either proxy and FusionPBX (interop/fusionpbx) answer 9003,
+    // 9004, 9006, 9008 and 9013 as Asterisk answers its own, and the
+    // Asterisk inside a ViciBox has the lab's numbers and accounts
+    // (interop/live/vicibox). A digit's call stays up after `send_dtmf`
+    // until this end hangs up, since a hangup straight after it ended the
+    // call before the digit was ever sent. The renumbered answer and the
+    // codec change have dialplan entries on the lab's Asterisk alone
     let freeswitch = matches!(server, "kamailio" | "opensips" | "fusionpbx");
-    if server == "asterisk" || freeswitch {
+    if asterisk_like(server) || freeswitch {
         flows.push(Flow::Dtmf4733);
         flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
         flows.push(Flow::G729);
+        flows.push(Flow::Message);
+    }
+    // FusionPBX keeps MWI in a Lua service of its own, which does not run on
+    // this lab's FreeSWITCH image (docs/11-testing.md)
+    if asterisk_like(server) || server == "kamailio" || server == "opensips" {
+        flows.push(Flow::Mwi);
     }
     if server == "asterisk" {
         flows.push(Flow::Renumbered);
         flows.push(Flow::HoldCodecChange);
-        flows.push(Flow::Message);
-        flows.push(Flow::Mwi);
     }
     // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
     flows.push(Flow::Dtls);
@@ -2256,8 +2274,12 @@ impl Script {
     /// number, since baresip is a single client rather than a dialplan.
     fn call_extension(&self) -> String {
         match self.flow {
+            // baresip's own digit echo, one account per way a digit travels
+            // (interop/baresip/config-dtmf)
+            Flow::Dtmf4733 if digit_peer() => "baresip-dtmf".to_owned(),
+            Flow::DtmfInfo if digit_peer() => "baresip-dtmfinfo".to_owned(),
             // FreeSWITCH chooses INFO per extension (interop/freeswitch/lab.xml)
-            Flow::DtmfInfo if self.server != "asterisk" => "9013".to_owned(),
+            Flow::DtmfInfo if !asterisk_like(&self.server) => "9013".to_owned(),
             Flow::Dtmf4733 | Flow::Renumbered | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
             Flow::Dtls => "9005".to_owned(),

@@ -66,6 +66,7 @@ services:
       - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/public/zz_sipral_lab.xml:ro
       - ./freeswitch/lab_profile.xml:/etc/freeswitch/sip_profiles/zz_sipral_lab.xml:ro
       - ./freeswitch/lab_late_profile.xml:/etc/freeswitch/sip_profiles/zz_sipral_lab_late.xml:ro
+      - ./freeswitch/lab_chatplan.xml:/etc/freeswitch/chatplan/zz_sipral_lab.xml:ro
       - ./freeswitch/lab_event_socket.conf.xml:/etc/freeswitch/autoload_configs/event_socket.conf.xml:ro
     networks: [lab]
 
@@ -119,6 +120,18 @@ services:
     volumes:
       - ./baresip/config-hangup/config:/etc/sipral-baresip/config:ro
       - ./baresip/config-hangup/accounts:/etc/sipral-baresip/accounts:ro
+    networks: [lab]
+
+  # The same image again, for the digit flows (interop/baresip/config-dtmf):
+  # ctrl_tcp loaded so interop/baresip/dtmf_echo.py can send back each digit
+  # baresip hears, the way baresip's own accounts say.
+  baresip-dtmf:
+    build:
+      context: ./baresip
+    profiles: ["baresip"]
+    volumes:
+      - ./baresip/config-dtmf/config:/etc/sipral-baresip/config:ro
+      - ./baresip/config-dtmf/accounts:/etc/sipral-baresip/accounts:ro
     networks: [lab]
 
   # 8.5.5's pair: a STUN server on the lab network, and a NAT between it and

@@ -30,6 +30,10 @@ every start, so a new name is the only mount that survives.
     <!-- the proxy in front has already authenticated the user; challenging
          again is what made the first version of this lab answer 407 -->
     <param name="auth-calls" value="false"/>
+    <!-- the same for what is not a call: a MESSAGE and a SUBSCRIBE relayed
+         by the proxy were answered 407 -->
+    <param name="auth-messages" value="false"/>
+    <param name="auth-subscriptions" value="false"/>
     <param name="accept-blind-reg" value="false"/>
     <param name="accept-blind-auth" value="false"/>
 
@@ -38,7 +42,9 @@ every start, so a new name is the only mount that survives.
     <param name="inbound-codec-negotiation" value="generous"/>
     <param name="disable-transcoding" value="true"/>
 
-    <param name="manage-presence" value="false"/>
+    <!-- on, so a message-summary SUBSCRIBE is answered and a mailbox's
+         MESSAGE_WAITING goes out to it as a NOTIFY -->
+    <param name="manage-presence" value="true"/>
     <param name="tls" value="false"/>
   </settings>
 </profile>

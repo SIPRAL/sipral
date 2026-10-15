@@ -69,6 +69,8 @@ FLOW_SECTIONS = {
     "register, call, hold, resume, transfer -- straight at Asterisk": ("asterisk", "rust"),
     "the same, through the C ABI -- straight at Asterisk": ("asterisk", "c"),
     "phone to phone -- baresip through the proxy": ("baresip", "rust"),
+    "digits phone to phone -- baresip's echo through the proxy": ("baresip", "rust"),
+    "a ViciBox 12 -- the lab's flows against the Asterisk inside it": ("vicibox_live", "rust"),
     "the same, through the C ABI -- baresip through the proxy": ("baresip", "c"),
     "behind a NAT -- STUN against coturn, then register and call Asterisk, in C": ("nat_stun", "c"),
     "called behind a NAT -- STUN against coturn, then Asterisk calls in, in C": ("nat_stun", "c"),

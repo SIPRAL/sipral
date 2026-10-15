@@ -154,4 +154,19 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="echo"/>
     </condition>
   </extension>
+  <!-- A mailbox that gets a message, 9007 as on Asterisk: once the caller
+       hangs up, a MESSAGE_WAITING for the caller's own account, as
+       mod_voicemail fires when a message is left, which mod_sofia sends to
+       that account's message-summary subscription as a NOTIFY counting one
+       new voice message. Fired from Lua because the event application can
+       only name a custom event, which mod_sofia never reads; Sofia-Profile
+       names the profile the subscription came in on, which mod_sofia would
+       otherwise look for under the account's host, the proxy's name. -->
+  <extension name="sipral_lab_mwi">
+    <condition field="destination_number" expression="^9007$">
+      <action application="set" data="api_hangup_hook=lua ~local e = freeswitch.Event(&quot;MESSAGE_WAITING&quot;); e:addHeader(&quot;MWI-Messages-Waiting&quot;, &quot;yes&quot;); e:addHeader(&quot;MWI-Message-Account&quot;, &quot;sip:${sip_from_user}@${sip_from_host}&quot;); e:addHeader(&quot;MWI-Voice-Message&quot;, &quot;1/0 (0/0)&quot;); e:addHeader(&quot;Sofia-Profile&quot;, &quot;lab&quot;); e:fire()"/>
+      <action application="answer"/>
+      <action application="playback" data="silence_stream://-1"/>
+    </condition>
+  </extension>
 </include>

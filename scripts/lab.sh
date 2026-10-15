@@ -301,7 +301,10 @@
 #                               conference, 102 dials that conference, tones
 #                               both ways and a digit through it, 102 leaves,
 #                               the agent is logged out and the dialer ends
-#                               101's call (interop/live/vicidial.py).
+#                               101's call (interop/live/vicidial.py); first,
+#                               the lab's own flows against the Asterisk
+#                               inside it, on the accounts and numbers
+#                               interop/live/vicibox/install.sh puts there
 #                               VICIDIAL_LIVE_ENV names the account file;
 #                               without it the step says it did not run and
 #                               exits 2. No lab lock, as above
@@ -596,7 +599,7 @@ if [ "$WANT" = pipewire ]; then
 elif [ "$WANT" = compare ]; then
     HARNESS=""
     printf '  note  not used by the comparison, which runs the headless agent\n'
-elif [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ]; then
+elif [ "$WANT" = vitalpbx-live ]; then
     HARNESS=""
     printf '  note  not used by the %s step, which runs the Python layer\n' "$WANT"
 elif [ "$WANT" = bridge ]; then
@@ -861,7 +864,37 @@ if [ "$WANT" = vitalpbx-live ]; then
     live_pbx_step "the live VitalPBX" VITALPBX_LIVE_ENV $((LAB_START_APT_S + 2 * LAB_CALL_S)) vitalpbx.py
 fi
 
+# The lab's own flows against the Asterisk inside a ViciBox, on the
+# accounts and numbers interop/live/vicibox/install.sh put there in a context
+# of their own: the box's address and the accounts' password come from the
+# same env file as the step below (VICI_HOST, VICI_LAB_SECRET), and the
+# harness names the box "vicibox", which it treats as the lab's Asterisk.
+# No message waiting here: chan_sip on this box NOTIFYs a mailbox's count
+# when the subscription starts and not when a message is left
+# (docs/11-testing.md).
+vicibox_flows() {
+    local file=$1 host secret
+    host=$(sed -n 's/^VICI_HOST=//p' "$file")
+    secret=$(sed -n 's/^VICI_LAB_SECRET=//p' "$file")
+    if [ -z "$host" ] || [ -z "$secret" ]; then
+        printf '  note  %s names no VICI_HOST or VICI_LAB_SECRET\n' "$file"
+        return 0
+    fi
+    lab_run "the harness's flows against the ViciBox" $((LAB_START_S + 12 * LAB_CALL_S)) \
+        --network host --add-host "vicibox:$host" \
+        -e SIPRAL_USER=labuser -e SIPRAL_PASS="$secret" \
+        -e SIPRAL_FLOWS=register,call,hold,blind,attended,dtmf,dtmfinfo,srtp,dtls,message,g729,compact \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim sh -c "/harness vicibox 5060 9000"
+}
+
 if [ "$WANT" = vicidial-live ]; then
+    if [ -n "${VICIDIAL_LIVE_ENV:-}" ] && [ -r "$VICIDIAL_LIVE_ENV" ]; then
+        step "a ViciBox 12 -- the lab's flows against the Asterisk inside it"
+        vicibox_flows "$VICIDIAL_LIVE_ENV" && pass "the lab's flows on the ViciBox" \
+            || fail "the lab's flows on the ViciBox"
+    fi
     step "a ViciBox 12 -- two extensions, then an agent's session"
     live_pbx_step "the ViciBox" VICIDIAL_LIVE_ENV $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
         vitalpbx.py vicidial.py
@@ -957,6 +990,14 @@ if [ "$profile_seen" -eq 1 ]; then
     pass "freeswitch: lab profile running"
 else
     printf '  note  freeswitch never confirmed the lab profile running; carrying on\n'
+fi
+# mod_sms routes a MESSAGE through the chatplan (interop/freeswitch's own
+# lab_chatplan.xml answers 9006); vanilla's modules.conf.xml leaves it
+# commented out, and that file is one the image copies over every start
+if ( cd interop && docker compose exec -T freeswitch fs_cli -x 'load mod_sms' 2>/dev/null ) | found '+OK'; then
+    pass "freeswitch: mod_sms loaded"
+else
+    printf '  note  freeswitch did not load mod_sms; the MESSAGE flows will say so\n'
 fi
 wait_for asterisk "Asterisk Ready" || exit 1
 
@@ -1637,6 +1678,30 @@ flows_baresip() {
             sleep 1
             kill %1 2>/dev/null
             exit \$status"
+}
+
+# The digit flows against baresip, which has no dialplan to echo a digit
+# with: interop/baresip/dtmf_echo.py, on the baresip-dtmf container's own
+# ctrl_tcp port, sends back each digit baresip hears, by RFC 4733 for
+# baresip-dtmf and by SIP INFO for baresip-dtmfinfo
+# (interop/baresip/config-dtmf). SIPRAL_PEER=baresip-dtmf is what points
+# the harness's two digit flows at those two accounts.
+flows_baresip_dtmf() {
+    local status
+    docker rm -f sipral-lab-dtmf-echo >/dev/null 2>&1
+    docker run -d --name sipral-lab-dtmf-echo --network "$LAB_NETWORK" \
+        -v "$ROOT/interop/baresip/dtmf_echo.py:/dtmf_echo.py:ro" \
+        python:3.13-slim python3 -u /dtmf_echo.py baresip-dtmf 4444 >/dev/null
+    lab_run "the harness's digits to baresip" $((LAB_START_S + 2 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_PEER=baresip-dtmf -e SIPRAL_FLOWS=dtmf,dtmfinfo \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim sh -c "/harness kamailio 5060 baresip-dtmf"
+    status=$?
+    docker logs sipral-lab-dtmf-echo 2>&1 | sed 's/^/    /'
+    docker rm -f sipral-lab-dtmf-echo >/dev/null 2>&1
+    return "$status"
 }
 
 # The same, through the C ABI. See flows_c() above for why this is a
@@ -3578,7 +3643,7 @@ fi
 # do.
 if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
     step "phone to phone -- baresip through the proxy"
-    if ( cd interop && docker compose --profile baresip up -d baresip baresip-hangup ) \
+    if ( cd interop && docker compose --profile baresip up -d baresip baresip-hangup baresip-dtmf ) \
             >/dev/null 2>&1; then
         pass "baresip: built and started"
         # the plain account is required -- without it neither flow below has
@@ -3601,6 +3666,14 @@ if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
                 optional baresip || true
             flows_baresip proxy-baresip && pass "sipral to baresip" \
                 || fail "sipral to baresip"
+            # a step of its own: scripts/interop-matrix.py reads one
+            # harness run per step
+            step "digits phone to phone -- baresip's echo through the proxy"
+            if wait_for baresip-dtmf "baresip-dtmfinfo@kamailio: (prio 0) {0/UDP/v4} 200 OK" \
+                    required baresip; then
+                flows_baresip_dtmf && pass "baresip sent each digit back" \
+                    || fail "baresip's digits"
+            fi
             if [ -n "$HARNESS_C" ]; then
                 step "the same, through the C ABI -- baresip through the proxy"
                 flows_baresip_c proxy-baresip-c && pass "sipral to baresip, in C" \
@@ -3620,10 +3693,10 @@ if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
             fi
         fi
     else
-        fail "docker compose up baresip baresip-hangup"
+        fail "docker compose up baresip baresip-hangup baresip-dtmf"
     fi
-    ( cd interop && docker compose stop baresip baresip-hangup \
-        && docker compose rm -f baresip baresip-hangup ) >/dev/null 2>&1
+    ( cd interop && docker compose stop baresip baresip-hangup baresip-dtmf \
+        && docker compose rm -f baresip baresip-hangup baresip-dtmf ) >/dev/null 2>&1
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = nat ]; then

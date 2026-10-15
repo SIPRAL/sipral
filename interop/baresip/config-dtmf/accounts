@@ -1,0 +1,11 @@
+#
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+#
+# Two accounts, one per way a digit travels: baresip-dtmf sends and expects
+# RFC 4733 telephone events, baresip-dtmfinfo SIP INFO (application/dtmf-
+# relay). Same password as the other accounts (interop/kamailio/kamailio.cfg's
+# own BARESIP_PASS).
+#
+<sip:baresip-dtmf@kamailio>;auth_pass=baresippass;answermode=auto;answerdelay=0;audio_codecs=pcmu,pcma;dtmfmode=rtpevent
+<sip:baresip-dtmfinfo@kamailio>;auth_pass=baresippass;answermode=auto;answerdelay=0;audio_codecs=pcmu,pcma;dtmfmode=info

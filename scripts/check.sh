@@ -898,6 +898,14 @@ step_interop_matrix() {
             sed 's/^/        /' "$matrix_out"
             printf '        regenerate it: scripts/interop-matrix.py interop/fixtures/lab-run.log\n'
         fi
+        # its own tests, among them that every flow a live step prints
+        # stands for a feature in interop/features.toml
+        if python3 scripts/interop-matrix.py --self-test >"$matrix_out" 2>&1; then
+            pass "scripts/interop-matrix.py's own tests"
+        else
+            fail "scripts/interop-matrix.py --self-test:"
+            grep -E '^(FAIL|ERROR|AssertionError)' "$matrix_out" | sed 's/^/        /'
+        fi
         rm -f "$matrix_out"
     else
         fail "python3 not found, and scripts/interop-matrix.py needs it"

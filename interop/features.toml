@@ -42,7 +42,7 @@ flows = ["register", "both extensions registered at the live PBX"]
 name = "Call setup and teardown"
 implemented = true
 unit_tested = true
-flows = ["call", "a call to FusionPBX's own echo", "a call between two extensions, answered, audio both ways", "a call ended by the caller", "a call ended by the callee", "a caller joined to the agent's session, audio both ways"]
+flows = ["call", "a call to FusionPBX's own echo", "a call between two extensions, answered, audio both ways", "a call ended by the caller", "a call ended by the callee", "a caller joined to the agent's session, audio both ways", "the agent's login rang the phone into its session, answered", "the caller left and the agent's session stayed up", "the agent's logout ended the session call from the dialer's side"]
 
 [[feature]]
 name = "Hold and resume"

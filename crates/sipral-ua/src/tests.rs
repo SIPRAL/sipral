@@ -12266,6 +12266,54 @@ algorithm=MD5,qop=\"auth\"\r\n";
 }
 
 #[test]
+fn a_subscribe_challenged_by_a_proxy_goes_again_with_proxy_credentials() {
+    // FusionPBX answers a message-summary SUBSCRIBE from a registered
+    // extension with 407 and Proxy-Authenticate, where its REGISTER got 401
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "secret")));
+    agent.register(id, t0).expect("the REGISTER goes");
+    let register = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(
+            &register,
+            401,
+            "Unauthorized",
+            "WWW-Authenticate: Digest realm=\"fusionpbx\", nonce=\"a5208dd1\", algorithm=MD5, qop=\"auth\"\r\n",
+        ),
+        t0,
+    );
+    let answered = sent(&mut agent);
+    deliver(&mut agent, &granted(&answered, 300), t0);
+    events(&mut agent);
+
+    let aor = agent.account(id).expect("the account").aor().clone();
+    let handle = agent
+        .subscribe(id, &Subscribe::new(aor, "message-summary"), t0)
+        .expect("the SUBSCRIBE goes");
+    let first = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &reply(
+            &first,
+            407,
+            "Proxy Authentication Required",
+            "Proxy-Authenticate: Digest realm=\"fusionpbx\", nonce=\"abc123\", algorithm=MD5, qop=\"auth\"\r\n",
+        ),
+        t0,
+    );
+
+    let retry = only(&transmits(&mut agent), "SUBSCRIBE ");
+    credentials_of(&retry, HeaderName::ProxyAuthorization);
+    assert_eq!(header(&retry, HeaderName::CSeq), b"2 SUBSCRIBE");
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Requesting)
+    );
+}
+
+#[test]
 fn a_challenge_that_comes_back_a_second_time_is_the_password_being_wrong() {
     let t0 = Instant::now();
     let mut agent = agent(t0);

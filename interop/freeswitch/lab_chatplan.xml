@@ -1,0 +1,17 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Sytek
+
+The lab's MESSAGE echo, 9006 as on Asterisk: mod_sms routes a MESSAGE that
+reaches the lab profile through the chatplan in the profile's own context,
+public, which vanilla's chatplan does not have, so a file of its own adds it.
+-->
+<include>
+  <context name="public">
+    <extension name="sipral_lab_message">
+      <condition field="to_user" expression="^9006$">
+        <action application="reply" data="echo: ${_body}"/>
+      </condition>
+    </extension>
+  </context>
+</include>
