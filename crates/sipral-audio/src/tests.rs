@@ -1274,7 +1274,13 @@ fn a_duplex_platform_rings_on_a_device_of_its_own_without_a_second_unit() {
     assert!(fake.played_by("builtin-out").iter().any(|s| *s != 0));
     assert!(fake.played_by("headset").iter().all(|s| *s == 0));
     engine.stop_ringing();
-    assert_eq!(fake.units_alive(), 0);
+    // an automatic stop does not wait for the devices (`settle`), so the
+    // unit goes on the pump's own thread, a moment later under load
+    let started = Instant::now();
+    while fake.units_alive() != 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "never let go");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// What an application in device mode does around a call, three times

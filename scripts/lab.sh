@@ -286,7 +286,11 @@
 #                               a BYE from each side, then both unregistered
 #                               (interop/live/vitalpbx.py). Two calls of a
 #                               few seconds each, and no retry anywhere: a
-#                               refused REGISTER ends the run.
+#                               refused REGISTER ends the run. Then, with two
+#                               more extensions of the same tenant, a blind
+#                               and an attended transfer, a digit by SIP
+#                               INFO, a MESSAGE and message waiting on a
+#                               voicemail left (interop/live/pbx_features.py)
 #                               VITALPBX_LIVE_ENV names the file the host and
 #                               the two accounts are read from; without it the
 #                               step says it did not run and exits 2. Needs
@@ -308,6 +312,16 @@
 #                               VICIDIAL_LIVE_ENV names the account file;
 #                               without it the step says it did not run and
 #                               exits 2. No lab lock, as above
+#   scripts/lab.sh freepbx-live
+#                               a FreePBX (Asterisk with PJSIP), by hand only
+#                               like vitalpbx-live: the lab's own flows
+#                               against its Asterisk, on the accounts and
+#                               numbers interop/live/freepbx/install.sh puts
+#                               there beside FreePBX's own extensions.
+#                               FREEPBX_LIVE_ENV names the file with
+#                               FREEPBX_HOST, FREEPBX_PORT and
+#                               FREEPBX_LAB_SECRET; without it the step says
+#                               it did not run and exits 2. No lab lock
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -378,11 +392,11 @@ ROOT="$PWD"
 # SIPRAL_LAB_LOCK_HELD=1 is for: set once the lock is taken, inherited by any
 # child this process starts, and checked here so a nested run skips locking
 # instead of deadlocking against its own parent.
-# `vitalpbx-live` and `vicidial-live` take no lock: they start no Compose service and
+# `vitalpbx-live`, `vicidial-live` and `freepbx-live` take no lock: they start no Compose service and
 # reaches no container of the lab's, so it has nothing to race, and an hour
 # of somebody else's run holding the lock is no reason for it to wait.
 LAB_LOCK_WANTED=1
-case " $* " in *" vitalpbx-live "* | *" vicidial-live "*) LAB_LOCK_WANTED=0 ;; esac
+case " $* " in *" vitalpbx-live "* | *" vicidial-live "* | *" freepbx-live "*) LAB_LOCK_WANTED=0 ;; esac
 if [ -z "${SIPRAL_LAB_LOCK_HELD:-}" ] && [ "$LAB_LOCK_WANTED" -eq 1 ]; then
     LOCK="/var/lock/sipral-lab.lock"
     [ -e "$LOCK" ] || LOCK="$ROOT/.sipral-lab.lock"
@@ -663,7 +677,8 @@ fi
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
 if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ] \
-    || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ]; then
+    || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ] \
+    || [ "$WANT" = freepbx-live ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
     printf '  note  not used by the %s step\n' "$WANT"
@@ -701,7 +716,7 @@ elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
 elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ] \
-    || [ "$WANT" = vicidial-live ]; then
+    || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ]; then
     SWIFT_AGENT=""
     printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -861,40 +876,62 @@ live_pbx_step() {
 
 if [ "$WANT" = vitalpbx-live ]; then
     step "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet"
-    live_pbx_step "the live VitalPBX" VITALPBX_LIVE_ENV $((LAB_START_APT_S + 2 * LAB_CALL_S)) vitalpbx.py
+    live_pbx_step "the live VitalPBX" VITALPBX_LIVE_ENV $((LAB_START_APT_S + 8 * LAB_CALL_S)) \
+        vitalpbx.py pbx_features.py
 fi
 
-# The lab's own flows against the Asterisk inside a ViciBox, on the
-# accounts and numbers interop/live/vicibox/install.sh put there in a context
-# of their own: the box's address and the accounts' password come from the
-# same env file as the step below (VICI_HOST, VICI_LAB_SECRET), and the
-# harness names the box "vicibox", which it treats as the lab's Asterisk.
-vicibox_flows() {
-    local file=$1 host secret
-    host=$(sed -n 's/^VICI_HOST=//p' "$file")
-    secret=$(sed -n 's/^VICI_LAB_SECRET=//p' "$file")
+# The lab's own flows against an Asterisk that is not the lab's -- the one
+# inside a ViciBox, or under a FreePBX -- on the accounts and numbers
+# interop/live/<box>/install.sh put there in a context of their own. The
+# box's address, port and the accounts' password come from an env file
+# (<PREFIX>_HOST, <PREFIX>_PORT, 5060 when left out, <PREFIX>_LAB_SECRET),
+# and the harness names the box "vicibox" or "freepbx", either of which it
+# treats as the lab's Asterisk. DWELL, when given, is how long each call
+# carries its tone: FreePBX keeps no voicemail under a second (minsecs), and
+# the default two seconds leave less than that once 9007's greeting and beep
+# have played.
+asterisk_live_flows() {
+    local name=$1 prefix=$2 file=$3 dwell=${4:-} host port secret
+    host=$(sed -n "s/^${prefix}_HOST=//p" "$file")
+    port=$(sed -n "s/^${prefix}_PORT=//p" "$file")
+    secret=$(sed -n "s/^${prefix}_LAB_SECRET=//p" "$file")
     if [ -z "$host" ] || [ -z "$secret" ]; then
-        printf '  note  %s names no VICI_HOST or VICI_LAB_SECRET\n' "$file"
-        return 0
+        printf '  note  %s names no %s_HOST or %s_LAB_SECRET\n' "$file" "$prefix" "$prefix"
+        return 1
     fi
-    lab_run "the harness's flows against the ViciBox" $((LAB_START_S + 12 * LAB_CALL_S)) \
-        --network host --add-host "vicibox:$host" \
+    lab_run "the harness's flows against $name" $((LAB_START_S + 12 * LAB_CALL_S)) \
+        --network host --add-host "$name:$host" \
         -e SIPRAL_USER=labuser -e SIPRAL_PASS="$secret" \
         -e SIPRAL_FLOWS=register,call,hold,blind,attended,dtmf,dtmfinfo,srtp,dtls,message,mwi,g729,compact \
+        ${dwell:+-e SIPRAL_DWELL_MS=$dwell} \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
-        debian:trixie-slim sh -c "/harness vicibox 5060 9000"
+        debian:trixie-slim sh -c "/harness $name ${port:-5060} 9000"
 }
 
 if [ "$WANT" = vicidial-live ]; then
     if [ -n "${VICIDIAL_LIVE_ENV:-}" ] && [ -r "$VICIDIAL_LIVE_ENV" ]; then
         step "a ViciBox 12 -- the lab's flows against the Asterisk inside it"
-        vicibox_flows "$VICIDIAL_LIVE_ENV" && pass "the lab's flows on the ViciBox" \
+        asterisk_live_flows vicibox VICI "$VICIDIAL_LIVE_ENV" && pass "the lab's flows on the ViciBox" \
             || fail "the lab's flows on the ViciBox"
     fi
     step "a ViciBox 12 -- two extensions, then an agent's session"
     live_pbx_step "the ViciBox" VICIDIAL_LIVE_ENV $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
         vitalpbx.py vicidial.py
+fi
+
+if [ "$WANT" = freepbx-live ]; then
+    step "a FreePBX -- the lab's flows against its Asterisk"
+    if [ -z "${FREEPBX_LIVE_ENV:-}" ] || [ ! -r "$FREEPBX_LIVE_ENV" ]; then
+        printf '  note  FREEPBX_LIVE_ENV names no file this user can read\n'
+        printf '\nthe FreePBX step did not run\n'
+        exit 2
+    fi
+    asterisk_live_flows freepbx FREEPBX "$FREEPBX_LIVE_ENV" 4000 && pass "the lab's flows on the FreePBX" \
+        || fail "the lab's flows on the FreePBX"
+    printf '\n'
+    [ "$FAIL" -eq 0 ] && { printf 'the FreePBX agrees\n'; exit 0; }
+    printf 'the FreePBX does not agree\n'; exit 1
 fi
 
 step "the lab"

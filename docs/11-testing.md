@@ -1048,6 +1048,22 @@ test. Nothing was left registered afterwards.
 | the same with `SIPRAL_HELD_AUDIO_APPLICATION`: the application's tone sent on through the hold | C harness | pass: the tone's frames left through the hold as the application wrote them; 120 sent, 124 back |
 | registered, Opus, PCMU and PCMA offered, `1` and `2` sent as named events 3 s in, held 10 s in from this end, resumed and hung up | Python layer's datagram caller | pass: PCMU, unencrypted; the `1` started the echo and the `2` came back from it as a named event; held, resumed, 1055 packets sent and 1050 received; the binding taken back |
 
+On 16 October 2026 the lab's own flows ran on the same FreePBX, the way they
+run on the ViciBox below: `interop/live/freepbx/install.sh` puts the lab's
+accounts (`labuser`, and the SDES, DTLS-SRTP, SIP INFO, mailbox and G.729
+ones) and its numbers there, in a context of their own, included from
+`pjsip_custom_post.conf` and `extensions_custom.conf`, the files FreePBX
+keeps for that and never writes, with mailbox 9007 in `voicemail.conf`'s
+`[default]`; `scripts/lab.sh freepbx-live` then runs the harness against it,
+from a container on the PBX host's own network. Register, call, hold and
+resume, blind and attended transfer, the digit by RFC 4733 and by SIP INFO,
+SDES, MESSAGE echoed, message waiting on a message `VoiceMail()` records,
+G.729 echoed and every request compact passed. DTLS-SRTP did not: this
+FreePBX 16 runs on a system whose OpenSSL is 1.0.2, which predates RFC 7627,
+so its handshake carries no extended master secret, and the stack does not
+export SRTP keys from a session without one (`sipral-dtls`, as RFC 7627 §5.4
+requires). Asterisk logs it as the stack's `handshake_failure` alert.
+
 Known peer behaviours worth writing down rather than rediscovering:
 
 - FreeSWITCH ships with 100rel disabled. PRACK is implemented for carriers, not
@@ -1069,6 +1085,11 @@ Known peer behaviours worth writing down rather than rediscovering:
 - FreeSWITCH, at the start of a DTLS-SRTP call, sends two packets, pauses, and
   resumes with a timestamp that has not moved, against RFC 3550 §5.1.
 - `MinivmMWI()` publishes a mailbox count rather than adding to one.
+- FreePBX sets the global `TRANSFER_CONTEXT` to its own `from-internal-xfer`,
+  so a blind REFER from an endpoint in any other context is looked up there
+  and answered 404; `set_var=TRANSFER_CONTEXT=...` on the endpoint puts it
+  back. Its `voicemail.conf` has `minsecs=1`, which drops a message shorter
+  than a second, and two seconds after a greeting and a beep are not enough.
 - FreeSWITCH running FusionPBX's configuration logs `Failed to set
   SCHED_FIFO scheduler` and `Could not set nice level` in a container without
   `CAP_SYS_NICE`; both are harmless to a lab call.

@@ -790,10 +790,11 @@ fn extra_flows(
 }
 
 /// Whether `server` answers the lab's numbers with the lab's own Asterisk
-/// accounts: the lab's Asterisk, and the one inside a ViciBox
-/// (interop/live/vicibox), named "vicibox" by scripts/lab.sh.
+/// accounts: the lab's Asterisk, the one inside a ViciBox
+/// (interop/live/vicibox) and the one under a FreePBX (interop/live/freepbx),
+/// named "vicibox" and "freepbx" by scripts/lab.sh.
 fn asterisk_like(server: &str) -> bool {
-    matches!(server, "asterisk" | "vicibox")
+    matches!(server, "asterisk" | "vicibox" | "freepbx")
 }
 
 /// Whether this run's digit flows go to baresip's digit echo
@@ -816,8 +817,8 @@ fn lab_flows(server: &str) -> Vec<Flow> {
     // the digits, SDES, G.729 and MESSAGE run on every server: FreeSWITCH
     // behind either proxy and FusionPBX (interop/fusionpbx) answer 9003,
     // 9004, 9006, 9008 and 9013 as Asterisk answers its own, and the
-    // Asterisk inside a ViciBox has the lab's numbers and accounts
-    // (interop/live/vicibox). A digit's call stays up after `send_dtmf`
+    // Asterisks inside a ViciBox and under a FreePBX have the lab's numbers
+    // and accounts (interop/live). A digit's call stays up after `send_dtmf`
     // until this end hangs up, since a hangup straight after it ended the
     // call before the digit was ever sent. The renumbered answer and the
     // codec change have dialplan entries on the lab's Asterisk alone
