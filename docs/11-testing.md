@@ -1153,6 +1153,29 @@ three packets in a row from the latched address (`docs/05-media.md`), the run
 after it passed every scenario: the callee of the second call took 146 of
 150 datagrams from the two sources, and heard the tone in 143 frames of 150.
 
+The same step then runs `interop/live/pbx_features.py` on four extensions of
+another test tenant of the same VitalPBX (150 to 153; extensions are dialled
+by number, so the four share a tenant): a blind transfer and an attended one
+(REFER with Replaces), each passing only when the transferred party and the
+target hear each other's tone; a digit sent as SIP INFO; a MESSAGE from one
+extension to another; and message waiting on a voicemail left. On 16 October
+2026 both transfers, the INFO digit (passed on by the PBX as an RFC 4733
+event) and the MESSAGE passed. Message waiting did not: this VitalPBX ties
+each mailbox to the endpoint, answers a subscription to `message-summary`
+404, and sends its NOTIFYs unasked, which the stack answers 481 as RFC 6665
+§4.1.3 has it for a NOTIFY outside any subscription. SDES, DTLS-SRTP and
+G.729 are not tried: the tenant's extensions offer PCMA alone and no media
+encryption.
+
+### FreePBX 17
+
+On 16 October 2026 the FreePBX step also ran against a FreePBX 17 (Asterisk
+22.10.1, Debian 12, OpenSSL 3.0) set up for testing, the same way as on the
+FreePBX 16 above, with Docker installed for the run and removed after it.
+FreePBX 17 has no `[default]` mailbox context until an extension has
+voicemail, and `install.sh` adds one. All thirteen flows passed, DTLS-SRTP
+among them, which settles that the FreePBX 16 failure was its OpenSSL.
+
 ### VICIdial: an agent's phone
 
 A call centre's dialer uses a phone differently from a PBX. The agent logs in

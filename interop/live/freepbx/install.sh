@@ -35,8 +35,15 @@ grep -q '^#include extensions_sipral_lab.conf' "$ETC/extensions_custom.conf" \
 
 # the mailbox 9007 leaves a message in, and its unavailable greeting: a
 # second of silence, so 9007's VoiceMail() starts recording at once
-grep -q '^9007 =>' "$ETC/voicemail.conf" \
-    || sed -i '/^\[default\]/a 9007 => 9007,Sipral lab,,,attach=no|saycid=no|envelope=no|delete=no' "$ETC/voicemail.conf"
+# (a FreePBX where no extension has voicemail yet has no [default] at all)
+MAILBOX='9007 => 9007,Sipral lab,,,attach=no|saycid=no|envelope=no|delete=no'
+if ! grep -q '^9007 =>' "$ETC/voicemail.conf"; then
+    if grep -q '^\[default\]' "$ETC/voicemail.conf"; then
+        sed -i "/^\[default\]/a $MAILBOX" "$ETC/voicemail.conf"
+    else
+        printf '\n[default]\n%s\n' "$MAILBOX" >>"$ETC/voicemail.conf"
+    fi
+fi
 mkdir -p /var/spool/asterisk/voicemail/default/9007
 cp /var/lib/asterisk/sounds/en/silence/1.ulaw /var/spool/asterisk/voicemail/default/9007/unavail.ulaw
 chown -R asterisk:asterisk /var/spool/asterisk/voicemail/default/9007

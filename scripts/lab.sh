@@ -286,8 +286,8 @@
 #                               a BYE from each side, then both unregistered
 #                               (interop/live/vitalpbx.py). Two calls of a
 #                               few seconds each, and no retry anywhere: a
-#                               refused REGISTER ends the run. Then, with two
-#                               more extensions of the same tenant, a blind
+#                               refused REGISTER ends the run. Then, on four
+#                               extensions of one tenant, a blind
 #                               and an attended transfer, a digit by SIP
 #                               INFO, a MESSAGE and message waiting on a
 #                               voicemail left (interop/live/pbx_features.py)

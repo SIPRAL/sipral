@@ -6,29 +6,31 @@ calls of `interop/live/vitalpbx.py`: `scripts/lab.sh vitalpbx-live` runs
 this after it, by hand only. Nothing dialled is anything but the
 extensions the account file names, and nothing on the PBX is changed.
 
-Four Python ``Stack`` objects in one process, one per extension: 101, 102,
-and the first two other extensions the file names, in number order (A and B
-below). Each scenario is short:
+Four Python ``Stack`` objects in one process, one per extension, all of one
+tenant: the four other extensions the file names besides 101 and 102 when
+it names four, in number order, or else 101, 102 and the first two others.
+Below they are X, Y, A and B. Each scenario is short:
 
-1. Blind transfer: 101 calls 102, then REFERs it to A. A answers, and 102
-   and A have to hear each other's tone; 101's REFER has to end in a 2xx
-   and its call has to end.
-2. Attended transfer: 101 calls 102, holds it, calls A, then hands 102 to A
-   (REFER with Replaces, RFC 3891). 102 and A have to hear each other, and
-   both of 101's calls have to end.
-3. A digit by SIP INFO: 101 calls 102 and sends 7 as an INFO; 102 has to
-   receive a 7, however the PBX passes it on.
-4. MESSAGE (RFC 3428): 101 sends a text to 102, which has to receive it.
-5. Message waiting (RFC 3842): B subscribes to its own message-summary,
-   101 calls B, B refuses the call busy so the PBX sends it to voicemail,
-   101 leaves four seconds of tone and hangs up, and B's new-message count
-   has to rise.
+1. Blind transfer: X calls Y, then REFERs it to A. A answers, and Y and A
+   have to hear each other's tone; X's REFER has to end in a 2xx and its
+   call has to end.
+2. Attended transfer: X calls Y, holds it, calls A, then hands Y to A
+   (REFER with Replaces, RFC 3891). Y and A have to hear each other, and
+   both of X's calls have to end.
+3. A digit by SIP INFO: X calls Y and sends 7 as an INFO; Y has to receive
+   a 7, however the PBX passes it on.
+4. MESSAGE (RFC 3428): X sends a text to Y, which has to receive it.
+5. Message waiting (RFC 3842): B subscribes to its own message-summary, X
+   calls B, B refuses the call busy so the PBX sends it to voicemail, X
+   leaves four seconds of tone and hangs up, and B's new-message count has
+   to rise.
 
 A scenario the PBX does not carry -- no MESSAGE routing, no voicemail on B
 -- fails with what the PBX answered, and the next one runs.
 
-The file is the one `vitalpbx.py` reads (``VITALPBX_LIVE_ENV``), with two
-more extensions: ``<PREFIX>_<N>_USER`` and ``<PREFIX>_<N>_SECRET`` for each.
+The file is the one `vitalpbx.py` reads (``VITALPBX_LIVE_ENV``), with two or
+four more extensions: ``<PREFIX>_<N>_USER`` and ``<PREFIX>_<N>_SECRET`` for
+each. Extensions are dialled by number, so all four have to be on one tenant.
 Lines, the redaction and the exit status are `vitalpbx.py`'s.
 """
 
@@ -43,13 +45,12 @@ import time
 import vitalpbx as base
 from vitalpbx import HEARD_FRAMES, NOT_RUN, PATIENCE_S, WINDOW_S, Leg, Redacting, say
 
-# whole cycles in 20 ms, away from 101's and 102's and from every DTMF
-# frequency
-EXTRA_TONES = (2200.0, 600.0)
+# whole cycles in 20 ms, and away from every DTMF frequency
+FOUR_TONES = (400.0, 1000.0, 2200.0, 600.0)
 
 
 def account_details(values: dict[str, str]):
-    """The host, each extension's (user, secret), the two extra extensions
+    """The host, the four extensions' (user, secret) in the order X, Y, A, B,
     and the codec, or why not."""
     first = base.account_details(values)
     if isinstance(first, str):
@@ -65,32 +66,34 @@ def account_details(values: dict[str, str]):
         - set(extensions),
         key=lambda n: (len(n), n),
     )
-    extra = []
+    extra = {}
     for number in numbers:
         user = values.get(f"{prefix}_{number}_USER", "")
         secret = values.get(f"{prefix}_{number}_SECRET", "")
         if user and secret:
-            extensions[number] = (user, secret)
-            extra.append(number)
-        if len(extra) == 2:
-            break
-    if len(extra) < 2:
-        return f"the file names {len(extra)} extension(s) besides 101 and 102, not two"
-    return host, extensions, extra, codec
+            extra[number] = (user, secret)
+    if len(extra) >= 4:
+        chosen = dict(list(extra.items())[:4])
+    elif len(extra) >= 2:
+        chosen = {**extensions, **dict(list(extra.items())[:2])}
+    else:
+        return f"the file names {len(extra)} extension(s) besides 101 and 102, not two or four"
+    return host, chosen, codec
 
 
 class Features(base.Run):
     """`vitalpbx.Run` with four extensions, and the events it ignores."""
 
-    def __init__(self, host, address, extensions, extra, codec) -> None:
+    def __init__(self, host, address, extensions, codec) -> None:
         super().__init__(host, address, extensions, codec)
-        self.a, self.b = extra
+        self.x, self.y, self.a, self.b = extensions
         self.peer: dict[str, str] = {}
         self.refuse: set[str] = set()
         self.transfers: dict[int, tuple[int, bool]] = {}
         self.sent: dict[int, int] = {}
         self.received: list[tuple[str, str, bytes]] = []
         self.waiting: list[tuple[float, bool, int]] = []
+        self.subscription_ended: int | None = None
 
     def handle(self, extension: str, event) -> None:
         from sipral.enums import EventKind
@@ -103,7 +106,7 @@ class Features(base.Run):
                 stack.reject_call(event, 486)
                 return
             call = stack.answer_call(event, codecs=self.codec)
-            leg = Leg(extension, call, self.peer.get(extension, "101"))
+            leg = Leg(extension, call, self.peer.get(extension, self.x))
             leg.far = base.media_endpoint(fields.get("remote_sdp"))
             self.legs[(extension, call.handle)] = leg
             leg.task = asyncio.create_task(base.carry(leg))
@@ -116,6 +119,16 @@ class Features(base.Run):
             self.received.append((extension, fields["content_type"], fields["body"]))
         elif kind == EventKind.MESSAGES_WAITING:
             self.waiting.append((time.monotonic(), fields["waiting"], fields["new_messages"]))
+        elif kind == EventKind.SUBSCRIPTION_CHANGED:
+            from sipral.enums import SubscriptionState
+
+            try:
+                state = SubscriptionState(fields["state"]).name
+            except ValueError:
+                state = str(fields["state"])
+            say(f"note {extension}: subscription {state}, status {fields['status_code']}")
+            if state == "ENDED":
+                self.subscription_ended = fields["status_code"]
         super().handle(extension, event)
 
     async def register(self) -> bool:
@@ -128,7 +141,7 @@ class Features(base.Run):
         )
         ok = all(self.registration.get(e) == "registered" for e in everyone)
         said = ", ".join(f"{e} {self.registration.get(e, 'no answer')}" for e in everyone)
-        self.result(ok, "four extensions registered at the live PBX", said)
+        self.result(ok, "four extensions of one tenant registered at the live PBX", said)
         return ok
 
     def answered(self, extension: str, besides: Leg | None = None) -> Leg | None:
@@ -164,11 +177,11 @@ class Features(base.Run):
 
     async def blind(self) -> None:
         label = "a blind transfer"
-        first, second = await self.call("101", "102")
+        first, second = await self.call(self.x, self.y)
         if second is None:
-            self.result(False, label, f"101 to 102 never answered ({first.ended or 'no answer'})")
+            self.result(False, label, f"{self.x} to {self.y} never answered ({first.ended or 'no answer'})")
             return await self.hang_up_all()
-        self.peer[self.a] = "102"
+        self.peer[self.a] = self.y
         first.call.transfer(f"sip:{self.a}@{self.host}")
         await self.until(
             lambda: self.answered(self.a) is not None or first.call.handle in self.transfers,
@@ -182,12 +195,14 @@ class Features(base.Run):
             return await self.hang_up_all()
         second.other = self.a
         at_second, at_target = await self.heard(second, target)
+        say(f"note {second.describe()}")
+        say(f"note {target.describe()}")
         self.result(
             200 <= status < 300 and first.ended is not None
             and at_second >= HEARD_FRAMES and at_target >= HEARD_FRAMES,
             label,
-            f"101 sent 102 to {self.a}: REFER {status}, 101 {first.ended[0] if first.ended else 'still up'}; "
-            f"{self.a}'s tone heard at 102 in {at_second} frames, 102's at {self.a} in {at_target} "
+            f"{self.x} sent {self.y} to {self.a}: REFER {status}, {self.x} {first.ended[0] if first.ended else 'still up'}; "
+            f"{self.a}'s tone heard at {self.y} in {at_second} frames, {self.y}'s at {self.a} in {at_target} "
             f"(of {int(WINDOW_S * 50)})",
         )
         await self.hang_up_all()
@@ -197,17 +212,17 @@ class Features(base.Run):
         from sipral.errors import call as checked
 
         label = "an attended transfer"
-        held, second = await self.call("101", "102")
+        held, second = await self.call(self.x, self.y)
         if second is None:
-            self.result(False, label, f"101 to 102 never answered ({held.ended or 'no answer'})")
+            self.result(False, label, f"{self.x} to {self.y} never answered ({held.ended or 'no answer'})")
             return await self.hang_up_all()
         held.call.hold()
         await self.until(lambda: held.held or held.ended is not None, 3.0)
-        consult, target = await self.call("101", self.a)
+        consult, target = await self.call(self.x, self.a)
         if target is None:
-            self.result(False, label, f"101 to {self.a} never answered ({consult.ended or 'no answer'})")
+            self.result(False, label, f"{self.x} to {self.a} never answered ({consult.ended or 'no answer'})")
             return await self.hang_up_all()
-        stack = self.stacks["101"]
+        stack = self.stacks[self.x]
         checked(
             lambda: lib.sipral_call_transfer_to(stack.handle, held.call.handle, consult.call.handle, stack.now_ms()),
             "sipral_call_transfer_to",
@@ -215,15 +230,17 @@ class Features(base.Run):
         await self.until(lambda: held.ended is not None and consult.ended is not None, PATIENCE_S)
         status = self.transfers.get(held.call.handle, (0, False))
         second.other = self.a
-        target.other = "102"
+        target.other = self.y
         at_second, at_target = await self.heard(second, target)
+        say(f"note {second.describe()}")
+        say(f"note {target.describe()}")
         self.result(
             held.ended is not None and consult.ended is not None
             and at_second >= HEARD_FRAMES and at_target >= HEARD_FRAMES,
             label,
-            f"101 handed 102 to {self.a}: REFER {status[0] or 'unanswered'} (attended={int(status[1])}), "
-            f"101's calls {held.ended[0] if held.ended else 'up'} and {consult.ended[0] if consult.ended else 'up'}; "
-            f"{self.a}'s tone heard at 102 in {at_second} frames, 102's at {self.a} in {at_target} "
+            f"{self.x} handed {self.y} to {self.a}: REFER {status[0] or 'unanswered'} (attended={int(status[1])}), "
+            f"{self.x}'s calls {held.ended[0] if held.ended else 'up'} and {consult.ended[0] if consult.ended else 'up'}; "
+            f"{self.a}'s tone heard at {self.y} in {at_second} frames, {self.y}'s at {self.a} in {at_target} "
             f"(of {int(WINDOW_S * 50)})",
         )
         await self.hang_up_all()
@@ -232,9 +249,9 @@ class Features(base.Run):
         from sipral.enums import DtmfVia
 
         label = "a digit by SIP INFO carried end to end"
-        caller, callee = await self.call("101", "102")
+        caller, callee = await self.call(self.x, self.y)
         if callee is None:
-            self.result(False, label, f"101 to 102 never answered ({caller.ended or 'no answer'})")
+            self.result(False, label, f"{self.x} to {self.y} never answered ({caller.ended or 'no answer'})")
             return await self.hang_up_all()
         await self.until(lambda: caller.ended is not None, 1.0)
         caller.call.send_dtmf("7", via=int(DtmfVia.INFO_RELAY))
@@ -243,7 +260,7 @@ class Features(base.Run):
         self.result(
             got is not None and got[0] == "7",
             label,
-            f"7 sent by 101 as an INFO, 102 received {got[0] + ' as ' + got[1] if got else 'nothing'}",
+            f"7 sent by {self.x} as an INFO, {self.y} received {got[0] + ' as ' + got[1] if got else 'nothing'}",
         )
         await self.hang_up_all()
 
@@ -252,9 +269,9 @@ class Features(base.Run):
         from sipral.errors import call as checked
 
         label = "MESSAGE between two extensions"
-        stack = self.stacks["101"]
-        account = self.accounts["101"]
-        target = f"sip:102@{self.host}".encode()
+        stack = self.stacks[self.x]
+        account = self.accounts[self.x]
+        target = f"sip:{self.y}@{self.host}".encode()
         kind = b"text/plain"
         body = b"sipral live check"
         out = ffi.new("sipral_handle_t *")
@@ -267,16 +284,16 @@ class Features(base.Run):
         )
         handle = int(out[0])
         await self.until(
-            lambda: handle in self.sent and any(r[0] == "102" for r in self.received)
+            lambda: handle in self.sent and any(r[0] == self.y for r in self.received)
             or (handle in self.sent and not 200 <= self.sent[handle] < 300),
             PATIENCE_S,
         )
-        got = next((r for r in self.received if r[0] == "102"), None)
+        got = next((r for r in self.received if r[0] == self.y), None)
         status = self.sent.get(handle, 0)
         self.result(
             200 <= status < 300 and got is not None and body in got[2],
             label,
-            f"101 to 102: answered {status or 'nothing'}; 102 received "
+            f"{self.x} to {self.y}: answered {status or 'nothing'}; {self.y} received "
             + (f"{got[1]}, {len(got[2])} bytes" if got else "nothing"),
         )
 
@@ -286,17 +303,30 @@ class Features(base.Run):
         account = self.accounts[b]
         user = self.extensions[b][0]
         account.subscribe(f"sip:{user}@{self.host}", "message-summary")
-        await self.until(lambda: bool(self.waiting), PATIENCE_S)
-        if not self.waiting:
-            self.result(False, label, f"{b}'s subscription to its own message-summary was never notified")
+        await self.until(lambda: bool(self.waiting) or self.subscription_ended is not None, PATIENCE_S)
+        if not self.waiting and self.subscription_ended is not None:
+            # a PBX that ties the mailbox to the endpoint refuses the
+            # subscription and NOTIFYs unasked, which this stack answers 481
+            # (RFC 6665 §4.1.3): nothing is left, and the extension's own
+            # phones are not rung for it
+            self.result(
+                False, label,
+                f"{b}'s subscription to its own message-summary refused {self.subscription_ended}: "
+                "the PBX sends message waiting unsolicited, which the stack does not take",
+            )
             return
-        before = self.waiting[-1][2]
+        if self.waiting:
+            before = self.waiting[-1][2]
+        else:
+            # a message is left all the same, to see whether a NOTIFY follows it
+            say(f"note {b}: no NOTIFY for the subscription yet; leaving a message anyway")
+            before = 0
         self.refuse.add(b)
-        caller, _ = await self.call("101", b)
+        caller, _ = await self.call(self.x, b)
         if not caller.confirmed:
             self.result(
                 False, label,
-                f"{b} refused busy and nothing answered for it (no voicemail?): 101 {caller.ended or 'no answer'}",
+                f"{b} refused busy and nothing answered for it (no voicemail?): {self.x} {caller.ended or 'no answer'}",
             )
             return await self.hang_up_all()
         await self.until(lambda: caller.ended is not None, 6.0)
@@ -307,7 +337,7 @@ class Features(base.Run):
         self.result(
             after is not None and after > before,
             label,
-            f"{b} had {before} new message(s); after 101 left one, "
+            f"{b} had {before} new message(s); after {self.x} left one, "
             + (f"{after}" if after is not None else "no NOTIFY came"),
         )
 
@@ -326,8 +356,8 @@ async def main() -> int:
     if isinstance(details, str):
         say(f"not run: {details}")
         return NOT_RUN
-    host, extensions, extra, codec = details
-    for number, hz in zip(extra, EXTRA_TONES):
+    host, extensions, codec = details
+    for number, hz in zip(extensions, FOUR_TONES):
         base.TONES[number] = hz
 
     replacements = [(host, "<pbx>")]
@@ -344,7 +374,7 @@ async def main() -> int:
     sys.stdout = Redacting(sys.__stdout__, replacements)
     sys.stderr = Redacting(sys.__stderr__, replacements)
 
-    run = Features(host, (addresses[0], 5060), extensions, extra, codec)
+    run = Features(host, (addresses[0], 5060), extensions, codec)
     try:
         run.start()
         if await run.register():

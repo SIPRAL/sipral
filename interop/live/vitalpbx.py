@@ -314,13 +314,13 @@ async def carry(leg: Leg) -> None:
     media = call.media
     rate = media.sample_rate
     frame = tone_frame(TONES[leg.extension], media.frame_samples, rate)
-    listening = TONES[leg.other]
     while not call.ended:
         try:
             received = await asyncio.wait_for(media.frames.get(), 0.5)
         except TimeoutError:
             continue
-        if hears(received, listening, rate):
+        # read each frame: a transfer hands this end to another far end
+        if hears(received, TONES[leg.other], rate):
             leg.heard.append(time.monotonic())
         try:
             media.send_audio(frame)
