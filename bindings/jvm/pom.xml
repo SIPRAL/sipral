@@ -63,7 +63,7 @@ own tests, and the loopback tests then fail at the first native call.
         <java.release>17</java.release>
         <maven.compiler.release>${java.release}</maven.compiler.release>
 
-        <kotlin.version>2.4.20</kotlin.version>
+        <kotlin.version>2.4.21</kotlin.version>
         <!-- The language and API version the classes are compiled for, the
              same as scripts/package/aar.sh's KOTLIN_TARGET: a consumer on
              Kotlin 2.1 or later compiles against them. -->

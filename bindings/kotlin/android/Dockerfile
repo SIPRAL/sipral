@@ -92,16 +92,16 @@ RUN yes | sdkmanager --licenses >/dev/null \
 
 ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK
 
-ARG KOTLIN_VERSION=2.4.20
-ARG KOTLIN_SHA256=59e9ca74c7904ef2c122b12114937673ccce68de820a663f0ed66ccf8799e0b7
+ARG KOTLIN_VERSION=2.4.21
+ARG KOTLIN_SHA256=7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd
 RUN cd /tmp \
     && curl -fsSL -o kotlin.zip "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip" \
     && echo "$KOTLIN_SHA256  kotlin.zip" | sha256sum -c - \
     && unzip -q kotlin.zip -d /opt \
     && rm kotlin.zip
 
-ARG GRADLE_VERSION=9.8.0
-ARG GRADLE_SHA256=bafd5ce9cfaea0fbccfdc8439a1ac42fbd4cd9c89dc9a988228d8a2639a58e6c
+ARG GRADLE_VERSION=9.8.1
+ARG GRADLE_SHA256=dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f
 RUN cd /tmp \
     && curl -fsSL -o gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
     && echo "$GRADLE_SHA256  gradle.zip" | sha256sum -c - \

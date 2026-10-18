@@ -9,7 +9,7 @@
 # project under bindings/dotnet names a NuGet package, so `dotnet run`
 # itself still touches nothing outside the container once it is there.
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0
+FROM mcr.microsoft.com/dotnet/sdk:10.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \

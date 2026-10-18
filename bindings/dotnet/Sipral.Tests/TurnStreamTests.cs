@@ -234,7 +234,7 @@ public sealed class TurnStreamTests
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
             new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
         using var made = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
-        return new X509Certificate2(made.Export(X509ContentType.Pfx));
+        return X509CertificateLoader.LoadPkcs12(made.Export(X509ContentType.Pfx), null);
     }
 
     private static async Task<T> FirstMatchingAsync<T>(IAsyncEnumerable<T> source, Func<T, bool> predicate, TimeSpan timeout)
@@ -330,7 +330,7 @@ public sealed class TurnStreamTests
         using (var stun = new NatTests.FakeStunServer("203.0.113.48", 40048))
         using (var server = new FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate))
         {
-            var roots = new X509Certificate2Collection { new X509Certificate2(certificate.Export(X509ContentType.Cert)) };
+            var roots = new X509Certificate2Collection { X509CertificateLoader.LoadCertificate(certificate.Export(X509ContentType.Cert)) };
             await CallThroughAsync(host, stun, server, SipralTransport.Tls, roots, relay =>
             {
                 Assert.Equal(SipralNatRelay.Allocated, relay.Outcome);

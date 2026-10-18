@@ -704,7 +704,7 @@ fi
 # executable target, over the same C ABI `HARNESS_C` above and the Python
 # agent both prove, carried through `SipralStack`/`Account`/`Call`/`Media`
 # instead. Needs `libsipral_ffi.so`, already built by the C harness step
-# above -- built here, once, in a `swift:6.1` container (Swift on Linux is
+# above -- built here, once, in a `swift:6.4` container (Swift on Linux is
 # never assumed to be on the host's own `PATH`), the same reasoning as the
 # socket-framed agent's own build: skipped rather than fatal when either is
 # missing, so a machine that cannot build one still runs the rest of the lab.
@@ -727,7 +727,7 @@ else
     # the C harness was built, so that directory is mounted there instead.
     SWIFT_LIB_DIR=$(cd "$(dirname "$HARNESS_C")" && pwd)
     if docker run --rm -v "$ROOT":/work -v "$SWIFT_LIB_DIR":/work/target/release:ro \
-        -w /work/bindings swift:6.1 \
+        -w /work/bindings swift:6.4 \
         swift build -c release --product SipralLabAgent >/dev/null 2>&1; then
         SWIFT_AGENT="$ROOT/bindings/.build/release/SipralLabAgent"
         pass "built"
@@ -1458,7 +1458,7 @@ kotlin_agent() {
 # reason: what the loopback tests in `bindings/swift/Tests` cannot show is
 # that what the agent advertises is somewhere a real server can reach, and
 # that the tone the server plays comes back through its own echo. Run in a
-# `swift:6.1` container for the runtime `SWIFT_AGENT` was linked against,
+# `swift:6.4` container for the runtime `SWIFT_AGENT` was linked against,
 # with `libsipral_ffi.so` mounted at the same absolute path
 # (`$ROOT`/`/work`) the build step above used, since the binary's own
 # `-rpath` is that path.
@@ -1472,7 +1472,7 @@ swift_agent() {
         -e SIPRAL_AOR=sip:labuser-agent-swift@asterisk \
         -e SIPRAL_REGISTRAR=sip:asterisk \
         -e SIPRAL_AUTH_USER=labuser-agent-swift -e SIPRAL_AUTH_PASSWORD=labpass \
-        swift:6.1 sh -c '
+        swift:6.4 sh -c '
             address=$(getent hosts asterisk | cut -d" " -f1)
             SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
                 exec /work/bindings/.build/release/SipralLabAgent' >/dev/null \
@@ -1539,7 +1539,7 @@ csharp_agent() {
         -e SIPRAL_AUTH_USER=labuser-agent-csharp -e SIPRAL_AUTH_PASSWORD=labpass \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/bindings/dotnet:/src-dotnet:ro" \
-        mcr.microsoft.com/dotnet/sdk:8.0 sh -c '
+        mcr.microsoft.com/dotnet/sdk:10.0 sh -c '
             cp -r /src-dotnet /dotnet
             address=$(getent hosts asterisk | cut -d" " -f1)
             cd /dotnet/samples/Sipral.Sample.Agent
@@ -2662,7 +2662,7 @@ nat_pair_call() {
         # branch above: the same $SWIFT_AGENT binary swift_agent() runs, and
         # the same mounts -- its own -rpath is the absolute path they land
         # on -- so nothing is built again here but
-        # interop/nat/Dockerfile.swift, the same `swift:6.1` with `ip` added
+        # interop/nat/Dockerfile.swift, the same `swift:6.4` with `ip` added
         # -- `inside` has no route out to anywhere at all, so that is built
         # in ahead of time too (interop/nat/Dockerfile.python's own
         # reasoning). Built once per run and cached by Docker after that.
@@ -4162,7 +4162,7 @@ tls_csharp_agent() {
     tls_agent_start csharp labuser-agent-csharp-tls tls \
         -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
         -v "$beside:/lib-sipral:ro" -v "$ROOT/bindings/dotnet:/src-dotnet:ro" -- \
-        mcr.microsoft.com/dotnet/sdk:8.0 \
+        mcr.microsoft.com/dotnet/sdk:10.0 \
         'cp -r /src-dotnet /dotnet
          dotnet build -c Release -o /agent /dotnet/samples/Sipral.Sample.Agent >/dev/null 2>&1 || exit 1' \
         'dotnet /agent/Sipral.Sample.Agent.dll' || return 1
@@ -4252,7 +4252,7 @@ tls_two_lines_flow() {
 tls_swift_agent() {
     tls_agent_start swift labuser-agent-swift-tcp tcp \
         -v "$ROOT:/work:ro" -v "${SWIFT_LIB_DIR:-$ROOT/target/release}:/work/target/release:ro" -- \
-        swift:6.1 ':' '/work/bindings/.build/release/SipralLabAgent' || return 1
+        swift:6.4 ':' '/work/bindings/.build/release/SipralLabAgent' || return 1
     tls_agent_call swift labuser-agent-swift-tcp tcp 60
 }
 

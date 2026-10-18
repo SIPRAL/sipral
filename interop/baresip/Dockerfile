@@ -22,7 +22,7 @@
 # needs, nothing to build with, and no shell script of its own -- module_app
 # account.so reads interop/baresip/config/accounts directly.
 
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS build
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates curl pkg-config \
@@ -91,7 +91,7 @@ RUN curl -fsSL -o baresip.tar.gz \
 # runtime package name Debian has changed before (bookworm's own
 # libssl3 -> libssl3t64 -> libssl3 round trip is the reason this file does
 # not trust a name and reaches for the bytes that were actually linked).
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 COPY --from=build /usr/local/bin/baresip /usr/local/bin/baresip
 COPY --from=build /usr/local/lib/ /usr/local/lib/

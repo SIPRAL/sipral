@@ -139,7 +139,7 @@ sipral-stir = { path = "../sipral-stir", version = "=1.2.0", optional = true }
 # version here: wiping the SRTP master key and salt draw_key hands out (8.2.9)
 # needs a write the optimiser is not allowed to remove, and that needs
 # `unsafe`, which this crate denies.
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 # `example-tls`, used by `examples/tls.rs` alone: `default-features = false`
 # plus `ring` drops the default `aws_lc_rs` provider, which needs `cmake` to
 # build; `ring` needs only a C compiler, already required elsewhere in this

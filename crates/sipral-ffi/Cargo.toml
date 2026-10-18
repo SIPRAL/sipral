@@ -92,7 +92,7 @@ sipral-audio = { path = "../sipral-audio", version = "=1.2.0" }
 # the two seeds a stack is created with, wiped once the engine and the agent
 # hold their own copies; the version `sipral` names, so nothing new enters
 # the build
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 
 [dev-dependencies]
 # the engine's fake platform, for this crate's own tests of device mode:

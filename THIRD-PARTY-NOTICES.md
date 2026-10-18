@@ -157,11 +157,11 @@ RFC and proved against its own §16–§17 test vectors.
 | `crypto-common` 0.2.2 | shared key and block types | MIT OR Apache-2.0 |
 | `hybrid-array` 0.4.15 | const-generic arrays behind those types | MIT OR Apache-2.0 |
 | `typenum` 1.20.1 | type-level integers `hybrid-array` uses | MIT OR Apache-2.0 |
-| `inout` 0.2.2 | in-place buffer views | MIT OR Apache-2.0 |
+| `inout` 0.2.4 | in-place buffer views | MIT OR Apache-2.0 |
 | `cpufeatures` 0.3.1 | runtime detection of the AES instructions | MIT OR Apache-2.0 |
 | `cpubits` 0.1.1 | the bit twiddling that detection needs | MIT OR Apache-2.0 |
-| `libc` 0.2.189 | how `cpufeatures` asks the operating system | MIT OR Apache-2.0 |
-| `zeroize` 1.9.0 | wiping keys on drop | Apache-2.0 OR MIT |
+| `libc` 0.2.191 | how `cpufeatures` asks the operating system | MIT OR Apache-2.0 |
+| `zeroize` 1.9.1 | wiping keys on drop | Apache-2.0 OR MIT |
 
 All ten are permissive and dual-licensed the same way, so one MIT notice
 covers the set. `zeroize` is named directly as well as through `aes`: keys
@@ -175,7 +175,7 @@ the same version, so neither brings a second copy.
 
 #### Build-time only
 
-`cmake` 0.1.58, `cc` 1.4.5, `shlex` 2.0.1 and `find-msvc-tools` 0.1.12 arrive
+`cmake` 0.1.58, `cc` 1.8.0, `shlex` 2.0.1 and `find-msvc-tools` 0.1.14 arrive
 through `opusic-sys`. All four are MIT OR Apache-2.0, all four run during the
 build, and none of them is linked into anything that ships.
 
@@ -230,13 +230,13 @@ beside it.
 | `ghash` 0.6.0 | GHASH, GCM's authenticator | Apache-2.0 OR MIT |
 | `polyval` 0.7.3 | POLYVAL, which `ghash` is built on | Apache-2.0 OR MIT |
 | `universal-hash` 0.6.1 | universal hash traits | MIT OR Apache-2.0 |
-| `sha2` 0.11.0 | SHA-256 | MIT OR Apache-2.0 |
+| `sha2` 0.11.1 | SHA-256 | MIT OR Apache-2.0 |
 | `hmac` 0.13.0 | HMAC | MIT OR Apache-2.0 |
 | `digest` 0.11.3 | hash function traits | MIT OR Apache-2.0 |
 | `block-buffer` 0.12.1 | the block buffering of the hashes | MIT OR Apache-2.0 |
 | `const-oid` 0.10.2 | object identifiers the hash traits carry | Apache-2.0 OR MIT |
-| `cfg-if` 1.0.4 | compile-time selection inside `sha2` | MIT OR Apache-2.0 |
-| `ctutils` 0.4.2 | constant-time comparison and selection | Apache-2.0 OR MIT |
+| `cfg-if` 1.0.5 | compile-time selection inside `sha2` | MIT OR Apache-2.0 |
+| `ctutils` 0.4.3 | constant-time comparison and selection | Apache-2.0 OR MIT |
 | `cmov` 0.5.4 | constant-time conditional moves `ctutils` uses | Apache-2.0 OR MIT |
 | `rsa` 0.10.0-rc.19 | RSA public keys and RSASSA-PKCS1-v1_5 verification; its signing and decryption are never called | MIT OR Apache-2.0 |
 | `crypto-primes` 0.7.2 | prime generation, arriving with `rsa`; unused here, since no key is generated | Apache-2.0 OR MIT |
@@ -296,7 +296,7 @@ manifest, and every component ships its licence files beside it.
 | Component | What it is | Licence |
 |---|---|---|
 | `x509-cert` 0.3.0 | X.509 certificates, read | Apache-2.0 OR MIT |
-| `spki` 0.8.0 | the SubjectPublicKeyInfo and AlgorithmIdentifier types `x509-cert` uses | Apache-2.0 OR MIT |
+| `spki` 0.8.1 | the SubjectPublicKeyInfo and AlgorithmIdentifier types `x509-cert` uses | Apache-2.0 OR MIT |
 | `der_derive` 0.8.0 | the derive macros `x509-cert` builds its types with; build time only | Apache-2.0 OR MIT |
 | `flagset` 0.4.7 | the bit-flag type of the key usage extension | Apache-2.0 |
 | `base64ct` 1.8.3 | named by `spki` for its optional `base64` feature, which nothing enables; in the lockfile, never built | Apache-2.0 OR MIT |
@@ -432,7 +432,7 @@ ships the rest of them too.
 | Component | What it is | Used by | Licence |
 |---|---|---|---|
 | `kotlinx-coroutines-android` 1.11.0 | coroutines' Android main dispatcher, over `kotlinx-coroutines-core` | helper, at run time | Apache-2.0 |
-| Kotlin standard library 2.4.20 | what compiled Kotlin calls into | helper and sample, at run time | Apache-2.0 |
+| Kotlin standard library 2.4.21 | what compiled Kotlin calls into | helper and sample, at run time | Apache-2.0 |
 | Jetpack Compose (`compose-bom` 2026.09.00: `ui`, `material3` and what they bring) | the sample's user interface | sample, at run time | Apache-2.0 |
 | `androidx.activity:activity-compose` 1.13.0 | a Compose screen in an activity | sample, at run time | Apache-2.0 |
 | `androidx.lifecycle:lifecycle-runtime-compose` 2.11.0 | lifecycle-aware state for Compose | sample, at run time | Apache-2.0 |
@@ -459,10 +459,10 @@ that is not one `deny.toml` allows.
 
 | Build tool | What it is | Licence |
 |---|---|---|
-| Gradle 9.8.0 | the build, and the wrapper `android.sh` generates from it | Apache-2.0 |
+| Gradle 9.8.1 | the build, and the wrapper `android.sh` generates from it | Apache-2.0 |
 | Android Gradle Plugin 9.4.1 | Android builds under Gradle | Apache-2.0 |
-| Kotlin Gradle plugin and Compose compiler plugin 2.4.20 | the Kotlin compiler under Gradle, and Compose's compiler step | Apache-2.0 |
-| Kotlin compiler 2.4.20 | `kotlinc`, which `aar.sh` compiles `sipral.aar`'s classes with | Apache-2.0 |
+| Kotlin Gradle plugin and Compose compiler plugin 2.4.21 | the Kotlin compiler under Gradle, and Compose's compiler step | Apache-2.0 |
+| Kotlin compiler 2.4.21 | `kotlinc`, which `aar.sh` compiles `sipral.aar`'s classes with | Apache-2.0 |
 | `cargo-ndk` 4.1.2 | drives `cargo` for Android's ABIs | Apache-2.0 OR MIT |
 
 The two plugins bring 115 artefacts onto the build's own classpath
@@ -525,11 +525,11 @@ later embed, and the Android Gradle Plugin 9.4 needs Gradle 9.6 or later.
 
 ### The Node.js package
 
-`bindings/node` has one runtime dependency, koffi 3.3.2 (MIT, Copyright (C)
+`bindings/node` has one runtime dependency, koffi 3.3.3 (MIT, Copyright (C)
 2026 Niels Martignène), which loads the library and calls it; npm installs
 with it the prebuilt Node-API module for the platform, one of its
 `@koromix/koffi-*` packages, under the same licence. Nothing is compiled at
-install. TypeScript 7.0.2 (Apache-2.0) and `@types/node` 26.6.4 (MIT) build
+install. TypeScript 7.0.2 (Apache-2.0) and `@types/node` 26.6.5 (MIT) build
 the package and are in no artefact.
 
 ### The Pipecat integration
@@ -741,10 +741,16 @@ crate rather than opening the allow-list.
 `bindings/dotnet/Sipral.Tests` carries its own test-only NuGet dependencies,
 declared in that project alone and never referenced from `bindings/dotnet/Sipral`
 itself, so none of them reaches an application that only links the package
-that ships: `xunit` 2.9.3, `xunit.runner.visualstudio` 4.0.0 and the packages
-either pulls in (`xunit.core`, `xunit.assert`, `xunit.extensibility.core`,
-`xunit.extensibility.execution`, `xunit.analyzers`, `xunit.abstractions`), all
-Apache-2.0, plus `Microsoft.NET.Test.Sdk` 18.10.1, MIT.
+that ships: `xunit.v3.mtp-off` 4.0.2, `xunit.runner.visualstudio` 4.0.1 and
+the packages either pulls in (`xunit.v3.core.mtp-off`, `xunit.v3.assert`,
+`xunit.v3.common`, `xunit.v3.extensibility.core`, `xunit.v3.runner.common`,
+`xunit.v3.runner.inproc.console`, `xunit.analyzers`), all Apache-2.0, plus
+`Microsoft.NET.Test.Sdk` 18.11.0 and what it pulls in
+(`Microsoft.CodeCoverage`, `Microsoft.TestPlatform.ObjectModel`,
+`Microsoft.TestPlatform.TestHost`, `Microsoft.Bcl.AsyncInterfaces`,
+`Microsoft.Win32.Registry`, `System.Security.AccessControl`), all MIT. The
+`mtp-off` variant is the one without the Microsoft Testing Platform, whose
+telemetry client would otherwise run with every test.
 
 `bindings/dotnet/Sipral.Maui` and its sample build with `UseMaui`, which makes
 the `Sipral.Maui` package depend on .NET MAUI 10.0.110 (`Microsoft.Maui.Controls`,
@@ -793,7 +799,7 @@ of its way to enable the feature and depend on the example's own code.
 | Component | What it is | Licence |
 |---|---|---|
 | `rustls` 0.23.46 | the TLS 1.2/1.3 client, `default-features = false` plus `ring`/`std`/`tls12` | MIT OR Apache-2.0 OR ISC |
-| `rustls-native-certs` 0.8.4 | reads the platform's trust store into a `rustls::RootCertStore` | MIT OR Apache-2.0 OR ISC |
+| `rustls-native-certs` 0.8.5 | reads the platform's trust store into a `rustls::RootCertStore` | MIT OR Apache-2.0 OR ISC |
 | `rustls-pki-types` 1.15.1 | the certificate and server-name types both of the above share | MIT OR Apache-2.0 |
 | `ring` (via `rustls`'s `ring` feature) | the cryptographic provider `rustls` calls into; chosen over the default `aws_lc_rs` because it needs only a C compiler, not `cmake` | Apache-2.0 AND ISC |
 

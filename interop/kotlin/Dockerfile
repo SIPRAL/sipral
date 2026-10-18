@@ -7,7 +7,7 @@
 # compiler from Debian's mirrors every time the step starts -- a slow mirror
 # used to eat the whole of the step's wait for the agent to register.
 
-FROM eclipse-temurin:21-jdk
+FROM eclipse-temurin:25-jdk
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev \

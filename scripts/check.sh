@@ -1281,6 +1281,11 @@ step_other_targets() {
 # warns an unmeasured "wide enough" does.
 step_aec_webrtc() {
     step "sipral-aec-webrtc, outside the workspace"
+    # An empty pkg-config path: meson builds abseil-cpp from its own wrap, the
+    # version THIRD-PARTY-LICENSES.txt names, rather than linking a copy some
+    # other package put on the machine (Homebrew's node brings one).
+    local PKG_CONFIG_LIBDIR=
+    export PKG_CONFIG_LIBDIR
     if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
         manifest=crates/sipral-aec-webrtc/Cargo.toml
         cargo fmt --manifest-path "$manifest" --check >/dev/null 2>&1 \
@@ -1818,10 +1823,10 @@ step_dotnet_compiles() {
     if command -v dotnet >/dev/null 2>&1; then
         (cd "$ROOT/bindings/dotnet/Sipral" && dotnet build -c Release --nologo) >/dev/null 2>&1 \
             && pass "dotnet build" || fail "dotnet build -c Release, in bindings/dotnet/Sipral"
-        # The lab's own headless agent (scripts/lab.sh's csharp_agent) -- net8.0,
-        # not net8.0-windows, so it builds here same as the layer it sits on.
+        # The lab's own headless agent (scripts/lab.sh's csharp_agent) -- net10.0,
+        # not net10.0-windows, so it builds here same as the layer it sits on.
         # bindings/dotnet/samples/Sipral.Sample.Wpf is deliberately not built on
-        # this machine: it targets net8.0-windows, which only Windows carries,
+        # this machine: it targets net10.0-windows, which only Windows carries,
         # and the layer it is a thin skeleton over is exactly what the dotnet
         # build above and the "the dotnet bindings" step below already cover.
         (cd "$ROOT/bindings/dotnet/samples/Sipral.Sample.Agent" && dotnet build -c Release --nologo) >/dev/null 2>&1 \
@@ -2229,18 +2234,15 @@ step_swift() {
 # not just the happy path: events land on the poll thread and not the
 # caller's, SIPRAL_STATUS_BUSY surfaces rather than blocking, and disposing
 # a stack with events still queued behind it does not touch a freed handle.
-# `DOTNET_ROLL_FORWARD=LatestMajor` covers a machine, like this one, whose
-# SDK is newer than the net8.0 runtime it shipped beside; a machine that
-# actually has the net8.0 runtime installed sees no difference.
 step_dotnet_tests() {
     step "the dotnet bindings"
     if ! command -v dotnet >/dev/null 2>&1; then
-        skip "dotnet test: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 8.0)"
+        skip "dotnet test: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 10.0)"
     elif [ ! -s "$DYLIB" ]; then
         fail "the dotnet bindings: $DYLIB is not there to load (the build of the library, above, says why)"
     else
         work=$(mktemp -d)
-        if DOTNET_ROLL_FORWARD=LatestMajor dotnet test "$ROOT/bindings/dotnet/Sipral.Tests" \
+        if dotnet test "$ROOT/bindings/dotnet/Sipral.Tests" \
             -c Release --nologo -v minimal >"$work/out" 2>&1; then
             pass "dotnet test, bindings/dotnet/Sipral.Tests"
         else

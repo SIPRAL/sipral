@@ -675,7 +675,7 @@ been made.
 ## Samples
 
 `samples/Sipral.Sample.Agent` — a headless voice agent (answers, echoes,
-hangs up on `"#"`), net8.0, builds and runs on any platform the SDK
+hangs up on `"#"`), net10.0, builds and runs on any platform the SDK
 targets. It is both a runnable example of the layer above and the agent
 `scripts/lab.sh`'s own `csharp_agent` runs in the lab, headless, as
 `labuser-agent-csharp` — in application mode on purpose, a voice agent's
@@ -695,7 +695,7 @@ are the devices Windows has (refreshed when one arrives or leaves), with
 microphone gain, volume, mute, a meter per direction and the echo return
 loss the two meters read while the far end talks; registration, a call
 placed or answered with the caller shown as the network asserted them,
-hold/resume and DTMF. `net8.0-windows`, runs only on Windows;
+hold/resume and DTMF. `net10.0-windows`, runs only on Windows;
 `scripts/check.sh` does not build it on macOS or Linux, and covers the
 layer it sits on through the two steps above instead
 (`dotnet build -p:EnableWindowsTargeting=true` compiles it elsewhere).

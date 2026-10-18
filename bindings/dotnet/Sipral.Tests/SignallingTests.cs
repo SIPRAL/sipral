@@ -43,7 +43,7 @@ public sealed class SignallingTests
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
             new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
         using var made = request.CreateSelfSigned(from, until);
-        return new X509Certificate2(made.Export(X509ContentType.Pfx));
+        return X509CertificateLoader.LoadPkcs12(made.Export(X509ContentType.Pfx), null);
     }
 
     internal static X509Certificate2 Good() => Certificate(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
@@ -127,7 +127,7 @@ public sealed class SignallingTests
             {
                 if (_plainToTls)
                 {
-                    stream.Read(new byte[4096], 0, 4096);
+                    stream.ReadAtLeast(new byte[4096], 1, throwOnEndOfStream: false);
                     stream.Write(Encoding.UTF8.GetBytes("SIP/2.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n"));
                     client.Dispose();
                     return;
@@ -270,8 +270,8 @@ public sealed class SignallingTests
         using var signed = leafRequest.Create(authority, now.AddMinutes(-5), now.AddDays(1),
             new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
         using var withKey = signed.CopyWithPrivateKey(leafKey);
-        using var leaf = new X509Certificate2(withKey.Export(X509ContentType.Pfx));
-        using var trusted = new X509Certificate2(authority.Export(X509ContentType.Cert));
+        using var leaf = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
+        using var trusted = X509CertificateLoader.LoadCertificate(authority.Export(X509ContentType.Cert));
         using var registrar = new Registrar(leaf);
         using var stack = Over(registrar.Address, trust: SipralTlsTrust.OnlyAuthority(trusted));
         Assert.True(stack.Connected);

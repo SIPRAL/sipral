@@ -97,8 +97,10 @@ if (cd "$STAGE" && npm "${PACK_ARGS[@]}") >"$OUT/pack.json" 2>"$OUT/pack.log"; t
 else
     fail "npm ${PACK_ARGS[*]}:"; tail -20 "$OUT/pack.log" | sed 's/^/        /'; finish
 fi
+# npm 11.20 and later print an object keyed by package name, older npm a list
 node -e '
-const r = require(process.argv[1])[0];
+const j = require(process.argv[1]);
+const r = Array.isArray(j) ? j[0] : Object.values(j)[0];
 console.log(r.filename);
 for (const f of r.files) console.log(f.path);
 ' "$OUT/pack.json" >"$OUT/pack.list"

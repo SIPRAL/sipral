@@ -56,16 +56,16 @@
     "react-native": ">=0.87.1"
   },
   "devDependencies": {
-    "@babel/core": "8.0.6",
+    "@babel/core": "8.0.7",
     "@babel/plugin-transform-modules-commonjs": "8.0.1",
-    "@babel/preset-typescript": "8.0.1",
-    "@react-native/codegen": "0.87.1",
+    "@babel/preset-typescript": "8.0.7",
+    "@react-native/codegen": "0.88.0",
     "@types/jest": "30.0.0",
     "@types/react": "19.3.0",
     "babel-jest": "30.5.2",
     "jest": "30.5.2",
-    "react": "19.3.0",
-    "react-native": "0.87.1",
+    "react": "19.3.1",
+    "react-native": "0.88.0",
     "typescript": "7.0.2"
   }
 }

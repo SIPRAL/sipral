@@ -27,7 +27,7 @@ p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 x509-cert = { version = "=0.3.0", default-features = false }
 # the scalar a signing key is read out of, wiped when it has been read;
 # already beneath `p256`, at the version `sipral-rtp` pins
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 
 [lints]
 workspace = true
