@@ -6,11 +6,20 @@
 # added on top -- `inside` has no route out to anywhere at all, so this has
 # to be built rather than fetched once the container is placed there, the
 # same reasoning Dockerfile.python gives for Python and cffi. Neither
-# project under bindings/dotnet names a NuGet package, so `dotnet run`
-# itself still touches nothing outside the container once it is there.
+# project under bindings/dotnet names a NuGet package, but the .NET 10 SDK
+# carries only its own targeting pack, and bindings/dotnet/Sipral targets
+# net8.0: restoring an empty net8.0 project here puts that pack in the
+# image's package cache, so `dotnet run` touches nothing outside the
+# container once it is there.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir /tmp/net8 \
+    && printf '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>\n' \
+        > /tmp/net8/net8.csproj \
+    && dotnet restore /tmp/net8 \
+    && rm -rf /tmp/net8
