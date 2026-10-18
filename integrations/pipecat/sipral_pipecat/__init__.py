@@ -24,7 +24,7 @@ from .transport import (
     wait_for_media,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 __all__ = [
     "PipelineFactory",

@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sipral-pipecat"
-version = "1.2.0"
+version = "1.2.1"
 description = "Sipral for Pipecat: a SIP phone call as a Pipecat transport, for AI voice agents."
 readme = "README.md"
 # Pipecat itself needs 3.11

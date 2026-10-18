@@ -1,6 +1,6 @@
 {
   "name": "sipral",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Sipral - Session Initiation Protocol Rust Audio Layer. The SIP stack for Node.js: accounts, registration, calls, DTMF, transfer, presence, messages and conferences over UDP, TCP or TLS, with PCM media or the machine's own devices, over the C ABI.",
   "keywords": [
     "sip",

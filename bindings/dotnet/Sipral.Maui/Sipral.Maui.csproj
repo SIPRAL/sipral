@@ -16,7 +16,7 @@
     <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
     <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
     <PackageId>Sipral.Maui</PackageId>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <Authors>Sytek</Authors>
     <Copyright>Copyright (c) 2026 Sytek</Copyright>
     <Description>Sipral - Session Initiation Protocol Rust Audio Layer. The .NET binding for .NET MAUI on iOS and Android, with the native library for both inside the package, the microphone permission and the suspend/resume wiring. Licensed under AGPL-3.0-only, or under the Sipral commercial licence for closed-source products: https://sipral.org/terms/</Description>

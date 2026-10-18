@@ -45,6 +45,10 @@ the Node.js and .NET MAUI packages, SIP over a WebSocket the stack opens,
 the Rust API promised between releases and published on crates.io, a week of
 calls with no error, and the fixes `CHANGELOG.md` lists.
 
+**1.2.1 is released** (19 October 2026), at ABI 1.2 unchanged: a subscription's
+NOTIFYs from Asterisk's `chan_sip` taken as the new requests they are, and
+every dependency and build tool at its newest release.
+
 ## Releases
 
 What each release brings, the same list as <https://sipral.org/roadmap/>: the site renders this section from its own roadmap and its check fails on any difference, so the two cannot drift. The phases below are the engineering underneath it, ordered by exit criterion rather than date.

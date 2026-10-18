@@ -11,6 +11,11 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-19
+
+A fix for subscriptions on Asterisk's `chan_sip`, every dependency and build tool at its newest release, and the lab's flows run against FreePBX, a VitalPBX tenant and a ViciBox.
+At C ABI 1.2, unchanged: an application built on 1.0, 1.1 or 1.2.0 works unchanged.
+
 ### Fixed
 
 - **A NOTIFY that reuses the branch of the one before it is answered as its own request.** Asterisk's `chan_sip` (VICIdial, older FreePBX) sends a subscription's NOTIFYs under one `Via` branch, and the stack took the second for a retransmission of the first and answered it with the first's `200 OK`. `chan_sip` refused that answer and kept resending, so a message-waiting count, or anything else a subscription reports, never changed after its first NOTIFY. Every request but INVITE is now also matched on its `CSeq` number, which a retransmission repeats (`docs/03-core-signalling.md`). Found on a ViciBox, where message waiting now passes.
