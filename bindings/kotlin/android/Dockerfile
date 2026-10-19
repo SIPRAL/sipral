@@ -27,7 +27,7 @@
 # dl.google.com/android/repository/repository2-3.xml (NDK r30 is the current
 # LTS), services.gradle.org and the Kotlin releases.
 
-FROM rust:1.99-trixie
+FROM rust:1.99.1-trixie
 
 ARG ANDROID_SDK_LICENSE_ACCEPTED=no
 RUN if [ "$ANDROID_SDK_LICENSE_ACCEPTED" != "yes" ]; then \

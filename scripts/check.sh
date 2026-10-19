@@ -2957,6 +2957,22 @@ step_dependency_list() {
     fi
 }
 
+# A Rust image named by its minor (rust:1.99) carries the patch release it was
+# pulled at, with the targets its Dockerfile added for that one; when
+# rust-toolchain.toml then pins a later patch, rustup installs it in the
+# container without them and every cross build there fails.
+step_rust_images() {
+    step "every Rust image is the toolchain rust-toolchain.toml pins"
+    local channel wrong
+    channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT/rust-toolchain.toml")
+    wrong=$(tracked '*Dockerfile*' | while read -r f; do
+        sed -n 's/^FROM rust:\([^ -]*\).*/\1/p' "$ROOT/$f" | grep -qvxF "$channel" && echo "$f"
+    done)
+    if [ -z "$wrong" ]; then pass "every FROM rust: is rust:$channel"; else
+        fail "FROM rust: other than rust:$channel-trixie:"; printf '        %s\n' $wrong
+    fi
+}
+
 # The figures the README, docs/19-numbers.md, docs/23-compared-with-pjsip.md
 # and the website publish, measured and held to docs/numbers.toml, which says
 # for each one its published value, how far a measurement may pass it and
@@ -3032,6 +3048,7 @@ area_hygiene() {
     step_secrets
     step_vulnerabilities
     step_dependency_list
+    step_rust_images
 }
 area_rust() {
     step_build

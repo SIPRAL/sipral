@@ -13,7 +13,8 @@
 #   scripts/package/nuget.sh collect --out DIR [--rid RID ...]
 #       builds whatever RIDs *this* host can build for real -- osx-arm64 and
 #       osx-x64 on macOS with cargo, linux-x64 on Linux with Docker's
-#       rust:1.99-trixie (the toolchain this workspace is pinned to),
+#       rust:<rust-toolchain.toml's channel>-trixie (the toolchain this
+#       workspace is pinned to),
 #       linux-arm64 in the aarch64 cross image wherever Docker is, win-x64
 #       and win-arm64 on Windows under Git Bash with Rust's MSVC toolchain --
 #       and writes DIR/<rid>/<native file>. The packing host then takes every
@@ -51,6 +52,9 @@ found() { grep "$@" >/dev/null; }
 
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
+# the image of exactly the toolchain rust-toolchain.toml pins: a minor's tag
+# (rust:1.99) stays on whichever patch release it was pulled at
+RUST_IMAGE="rust:$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT/rust-toolchain.toml")-trixie"
 
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
@@ -165,17 +169,17 @@ if [ "$CMD" = "collect" ]; then
                     note "$rid: skipped, this host is $HOST_OS (run collect on the Linux box)"; continue
                 fi
                 if ! command -v docker >/dev/null 2>&1; then
-                    fail "$rid: docker not found, and rust:1.99-trixie is how this build matches rust-toolchain.toml"
+                    fail "$rid: docker not found, and $RUST_IMAGE is how this build matches rust-toolchain.toml"
                     continue
                 fi
                 rm -f "$OUT/$rid/$FEATURES_MARKER"
                 neutral_docker_env /usr/local/cargo /usr/local/rustup /work
                 if docker run --rm -v "$ROOT:/work:ro" -v "$OUT:/out" -w /work \
                     -e CARGO_TARGET_DIR=/tmp/target "${NEUTRAL_DOCKER_ENV[@]}" \
-                    rust:1.99-trixie \
+                    "$RUST_IMAGE" \
                     sh -c "apt-get update -qq && apt-get install -qq -y --no-install-recommends cmake >/dev/null && cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple --config \"\$NEUTRAL_PATHS_CONFIG\" && mkdir -p /out/$rid && cp /tmp/target/$triple/release/$(cargo_artifact_of "$rid") /out/$rid/$(native_name_of "$rid") && echo $FFI_FEATURES >/out/$rid/$FEATURES_MARKER" \
                     >"$OUT/.build-$rid.log" 2>&1; then
-                    pass "$rid: docker run rust:1.99-trixie, cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
+                    pass "$rid: docker run $RUST_IMAGE, cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
                     neutral_paths_held "$rid/$(native_name_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
                 else
                     fail "$rid: docker build failed:"
