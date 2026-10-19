@@ -1,0 +1,6 @@
+# What the published packages bring in that no lockfile records, one line each,
+# for the advisory watch that reads lockfiles: bindings/jvm/pom.xml (the JVM
+# package, and the Android package's POM, scripts/package/aar.sh). The gate
+# fails when a version here differs from the one the manifest names.
+maven org.jetbrains.kotlin:kotlin-stdlib 2.4.21
+maven org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm 1.11.0

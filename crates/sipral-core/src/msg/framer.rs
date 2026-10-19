@@ -304,7 +304,13 @@ impl StreamFramer {
     /// Whether the blank line that ends the headers has arrived, resuming the
     /// search where it stopped last time.
     fn headers_are_complete(&mut self) -> bool {
-        let from = self.scanned.max(self.start).saturating_sub(3);
+        // back far enough for a blank line split across reads, never into the
+        // message already handed out: its own blank line is not this one's
+        let from = self
+            .scanned
+            .max(self.start)
+            .saturating_sub(3)
+            .max(self.start);
         let Some(window) = self.buf.get(from..) else {
             return false;
         };
@@ -433,6 +439,42 @@ Content-Length: 0\r\n\
                 .expect("no error")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_blank_line_of_a_message_handed_out_does_not_end_the_next_head() {
+        // BYE's CRLF CRLF and a leading LF of what follows read as LF LF
+        let after = b"\nTo: <sip:bob@example.com>\nl: 0\n\r\n";
+        let mut whole = BYE.to_vec();
+        whole.extend_from_slice(after);
+
+        let mut f = framer();
+        f.push(&whole).expect("pushed");
+        assert_eq!(
+            message(f.next_message(ParseMode::Strict).expect("no error")).method(),
+            Some(Method::Bye)
+        );
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none(),
+            "a head with no blank line of its own was taken as ended"
+        );
+
+        // the same bytes a byte at a time come out the same
+        let mut f = framer();
+        let mut handed = 0;
+        for byte in whole.chunks(1) {
+            f.push(byte).expect("pushed");
+            while f
+                .next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_some()
+            {
+                handed += 1;
+            }
+        }
+        assert_eq!(handed, 1);
     }
 
     #[test]

@@ -2939,6 +2939,24 @@ step_vulnerabilities() {
     fi
 }
 
+# dependinte.txt names, for a watch that reads only lockfiles, what the JVM and
+# Android packages bring in from a pom.xml, which has none. A version moved in
+# the pom and not there would leave the watch on the old one.
+step_dependency_list() {
+    step "dependinte.txt follows bindings/jvm/pom.xml"
+    local pom="$ROOT/bindings/jvm/pom.xml" stale="" coordinate property version
+    for pair in org.jetbrains.kotlin:kotlin-stdlib=kotlin.version \
+        org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm=coroutines.version; do
+        coordinate="${pair%%=*}"
+        property="${pair#*=}"
+        version=$(sed -n "s|.*<$property>\(.*\)</$property>.*|\1|p" "$pom")
+        grep -qxF "maven $coordinate $version" "$ROOT/dependinte.txt" || stale="$stale $coordinate:$version"
+    done
+    if [ -z "$stale" ]; then pass "dependinte.txt names the pom's versions"; else
+        fail "dependinte.txt lacks the line for:$stale (as 'maven <group>:<artifact> <version>')"
+    fi
+}
+
 # The figures the README, docs/19-numbers.md, docs/23-compared-with-pjsip.md
 # and the website publish, measured and held to docs/numbers.toml, which says
 # for each one its published value, how far a measurement may pass it and
@@ -3013,6 +3031,7 @@ area_hygiene() {
     step_third_party_licences
     step_secrets
     step_vulnerabilities
+    step_dependency_list
 }
 area_rust() {
     step_build

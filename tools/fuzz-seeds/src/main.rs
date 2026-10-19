@@ -285,13 +285,27 @@ fn framer_seeds() -> Result<Vec<Seed>, Wrong> {
     })?;
     let mut split_name = vec![cut];
     split_name.extend_from_slice(&named);
+    // a head with no blank line of its own, in the same read as the message
+    // before it: that message's CRLF CRLF and the line feed in front read as LF LF
+    let tail: &[u8] = b"\nTo: <sip:bob@example.com>\nl: 0\n\r\n";
+    // the largest read size whose read holding the response's last byte holds
+    // the whole of what follows it too
+    let (last, end) = (response.len() - 1, response.len() + tail.len() - 1);
+    let read = (1..=u8::MAX)
+        .rev()
+        .find(|&size| last / usize::from(size) == end / usize::from(size))
+        .ok_or_else(|| Wrong("no read size holds the 200 OK's end and what follows".to_owned()))?;
+    let mut blank_line_before = vec![read];
+    blank_line_before.extend_from_slice(&response);
+    blank_line_before.extend_from_slice(tail);
     let out = vec![
         ("invite-whole", whole),
         ("ok-one-byte-at-a-time", byte_at_a_time),
         ("two-messages-in-one-read", two_in_a_row),
         ("utf8-name-cut-mid-character", split_name),
+        ("blank-line-of-the-message-before", blank_line_before),
     ];
-    for ((name, bytes), messages) in out.iter().zip([1, 1, 2, 1]) {
+    for ((name, bytes), messages) in out.iter().zip([1, 1, 2, 1, 1]) {
         through_framer(name, bytes, messages)?;
     }
     Ok(out)

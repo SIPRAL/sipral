@@ -13,12 +13,13 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [1.2.1] - 2026-10-19
 
-A fix for subscriptions on Asterisk's `chan_sip`, every dependency and build tool at its newest release, and the lab's flows run against FreePBX, a VitalPBX tenant and a ViciBox.
+A fix for subscriptions on Asterisk's `chan_sip`, one for messages read off TCP and TLS, every dependency and build tool at its newest release, and the lab's flows run against FreePBX, a VitalPBX tenant and a ViciBox.
 At C ABI 1.2, unchanged: an application built on 1.0, 1.1 or 1.2.0 works unchanged.
 
 ### Fixed
 
 - **A NOTIFY that reuses the branch of the one before it is answered as its own request.** Asterisk's `chan_sip` (VICIdial, older FreePBX) sends a subscription's NOTIFYs under one `Via` branch, and the stack took the second for a retransmission of the first and answered it with the first's `200 OK`. `chan_sip` refused that answer and kept resending, so a message-waiting count, or anything else a subscription reports, never changed after its first NOTIFY. Every request but INVITE is now also matched on its `CSeq` number, which a retransmission repeats (`docs/03-core-signalling.md`). Found on a ViciBox, where message waiting now passes.
+- **Where a TCP or TLS read ends no longer changes what the stack reads.** The search for the blank line that ends a message's header fields stepped back three bytes to catch a blank line split between two reads, and after one message had been taken from a read, those three bytes were the end of that message. Its blank line, joined to a line feed at the start of what followed, could pass for the next message's, so a malformed head that arrived in the same read as the message before it was refused at once, where the same bytes in separate reads were held until their head ended. The search no longer steps back past the message it is looking for. Found by the `framer` fuzz target, whose input is now one of its seeds.
 - **The voice-agent demo starts on the `sipral` wheel from PyPI.** It asked for Opus first, and the `sipral` package is built without Opus, so the stack refused the codec order and the demo never answered; it now offers Opus only where the build has it. The demo runs from a checkout over `pip install sipral websockets`, with no native build.
 - **The gate builds `sipral-aec-webrtc` with the abseil-cpp it names.** On a machine where another package had installed abseil (Homebrew's Node.js 26 brings one), meson linked that copy rather than building the version its wrap pins, and the crate's licence list no longer matched what it was built from. `scripts/check.sh` now builds the crate with an empty pkg-config path, so meson always builds abseil-cpp from its own wrap.
 
