@@ -11,6 +11,11 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-20
+
+The start of a call heard in device mode: the devices open as the call is placed, the far end's first words are held until the loudspeaker runs, and on macOS the voice unit is built ahead of the call on the chosen devices.
+At C ABI 1.2, unchanged: an application built on 1.0, 1.1 or 1.2.x works unchanged.
+
 ### Fixed
 
 - **In device mode the start of a call is heard.** A far end that answers with a recorded greeting starts speaking within a fraction of a second, and the devices used to start opening only then: on a Mac, with a USB DECT headset chosen beside the Mac's own microphone, the voice unit took 3.4 seconds to open, stopped the headset twice on the way (the base drops its radio link each time, heard as the sound connecting and reconnecting) and the far end's audio was let go of until it had. Three changes, each on every platform where it applies (`docs/05-media.md`, "The built-in engine: device mode"):

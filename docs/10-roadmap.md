@@ -45,9 +45,14 @@ the Node.js and .NET MAUI packages, SIP over a WebSocket the stack opens,
 the Rust API promised between releases and published on crates.io, a week of
 calls with no error, and the fixes `CHANGELOG.md` lists.
 
-**1.2.1 is released** (19 October 2026), at ABI 1.2 unchanged: a subscription's
-NOTIFYs from Asterisk's `chan_sip` taken as the new requests they are, and
-every dependency and build tool at its newest release.
+**1.2.2 is released** (20 October 2026), at ABI 1.2 unchanged: in device
+mode the start of a call is heard, the devices opening as the call is placed
+and the far end's first words held until the loudspeaker runs, with macOS's
+voice unit built ahead of the call on the chosen devices.
+
+**1.2.1 was released** on 19 October 2026, at ABI 1.2 unchanged: a
+subscription's NOTIFYs from Asterisk's `chan_sip` taken as the new requests
+they are, and every dependency and build tool at its newest release.
 
 ## Releases
 
