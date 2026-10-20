@@ -50,3 +50,6 @@ interop/wasapi/pjsip_local.generated.conf
 # happen here or on our own servers, so no CI configuration is carried:
 # scripts/check.sh is the gate and scripts/lab.sh is the interop lab.
 .github/workflows/
+
+# The lab's lock where /var/lock does not have it, as on a Mac.
+.sipral-lab.lock
