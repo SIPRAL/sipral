@@ -2093,7 +2093,9 @@ enum class SipralAudio(val value: Int) {
  */
 enum class SipralAudioActivation(val value: Int) {
     /**
-     * With the first managed call's media or ring; closed with the last.
+     * With the first managed call placed or answered, its media or a
+     * ring, so that a greeting from the far end finds them running;
+     * closed with the last.
      */
     AUTOMATIC(0),
     /**

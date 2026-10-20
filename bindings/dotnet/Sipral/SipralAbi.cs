@@ -1929,7 +1929,9 @@ public enum SipralAudio : uint
 public enum SipralAudioActivation : uint
 {
     /// <summary>
-    /// With the first managed call's media or ring; closed with the last.
+    /// With the first managed call placed or answered, its media or a
+    /// ring, so that a greeting from the far end finds them running;
+    /// closed with the last.
     /// </summary>
     Automatic = 0,
     /// <summary>

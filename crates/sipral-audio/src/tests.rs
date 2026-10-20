@@ -1810,3 +1810,211 @@ fn a_call_ending_between_the_open_answering_and_the_service_tears_nothing_down_i
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+// -- a call's start is not lost to a device that is still opening -------------
+
+/// Wait, at most five seconds, for the fake's history to say `entry`.
+fn wait_for_history(fake: &FakeControl, entry: &str) {
+    let started = Instant::now();
+    while !fake.history().iter().any(|seen| seen == entry) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "never {entry}: {:?}",
+            fake.history()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Service until the loudspeaker has landed.
+fn wait_for_speaker(engine: &mut Engine) {
+    let started = Instant::now();
+    while engine.running_on(Role::Speaker).is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the devices never landed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        engine.service();
+    }
+}
+
+/// The level each frame of what a device played was at, a run of equal
+/// frames counted once: what the device played, in order.
+fn levels_played(fake: &FakeControl, identity: &str) -> Vec<i16> {
+    let mut levels: Vec<i16> = Vec::new();
+    for sample in fake.played_by(identity) {
+        if levels.last() != Some(&sample) {
+            levels.push(sample);
+        }
+    }
+    levels
+}
+
+/// A platform with something slow to do ahead of an open gets it done while
+/// nothing is open: when the engine is made, and again when a device is
+/// chosen, on the device chosen. Not while a call is carried, whose devices
+/// are open already.
+#[test]
+fn the_devices_are_prepared_while_nothing_is_open() {
+    let fake = a_desk();
+    fake.set_preparation(Some(Duration::from_millis(20)));
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    wait_for_history(&fake, "prepared default default");
+    engine.refresh().unwrap();
+    let headset = handle_of(&engine, "headset");
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    wait_for_history(&fake, "prepared default headset");
+    engine
+        .select(Role::Microphone, Selection::Device(headset))
+        .unwrap();
+    wait_for_history(&fake, "prepared headset headset");
+
+    let call = FakeCallControl::new(RATE, 1_000, destination());
+    engine.attach(1, call.call()).unwrap();
+    wait_for_speaker(&mut engine);
+    let prepared = fake
+        .history()
+        .iter()
+        .filter(|seen| seen.starts_with("prepared"))
+        .count();
+    engine.select(Role::Speaker, Selection::System).unwrap();
+    serviced(&mut engine);
+    wait_ticks(&engine, 5);
+    assert_eq!(
+        fake.history()
+            .iter()
+            .filter(|seen| seen.starts_with("prepared"))
+            .count(),
+        prepared,
+        "prepared under a call: {:?}",
+        fake.history()
+    );
+}
+
+/// An open asked for while a preparation runs waits for it, so the two
+/// never race for the platform's one unit, and the open finds it ready.
+#[test]
+fn an_open_waits_for_a_preparation_under_way() {
+    let fake = a_desk();
+    fake.set_preparation(Some(Duration::from_millis(150)));
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    let call = FakeCallControl::new(RATE, 1_000, destination());
+    engine.attach(1, call.call()).unwrap();
+    wait_for_speaker(&mut engine);
+    let history = fake.history();
+    assert_eq!(
+        history.first().map(String::as_str),
+        Some("prepared default default"),
+        "{history:?}"
+    );
+}
+
+/// What the far end says while the loudspeaker is still opening is held
+/// and played from its start once the loudspeaker is there, nothing of it
+/// lost: a greeting that begins as the call is answered is heard whole.
+#[test]
+fn a_far_end_heard_while_the_loudspeaker_opens_is_played_from_its_start() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    fake.set_open_delay(Some(Duration::from_millis(300)));
+    let call = FakeCallControl::new(RATE, 1_000, destination());
+    // a word with no pause in it, longer than the open
+    let words: Vec<i16> = (1..=40).map(|frame| 2_000 + frame).collect();
+    call.set_script(words.clone());
+    engine.attach(1, call.call()).unwrap();
+    wait_for_speaker(&mut engine);
+    wait_ticks(&engine, 60);
+    let played = levels_played(&fake, "builtin-out");
+    let heard: Vec<i16> = played
+        .iter()
+        .copied()
+        .filter(|level| words.contains(level))
+        .collect();
+    assert_eq!(heard, words, "played {played:?}");
+}
+
+/// What was held is caught up in the far end's pauses: past a pause the
+/// loudspeaker is back with the far end, and the canceller's reference,
+/// which ran ahead by what was held, is told so.
+#[test]
+fn what_was_held_is_caught_up_in_the_far_ends_pauses() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    fake.set_open_delay(Some(Duration::from_millis(400)));
+    let call = FakeCallControl::new(RATE, 3_000, destination());
+    // a sentence, a pause of a second and a half, then talk that goes on
+    let mut script = vec![2_000_i16; 10];
+    script.extend(std::iter::repeat_n(0, 75));
+    call.set_script(script);
+    engine.attach(1, call.call()).unwrap();
+    wait_for_speaker(&mut engine);
+    wait_ticks(&engine, 2);
+    let behind = call.render_delay().unwrap();
+    assert!(
+        behind >= Duration::from_millis(200),
+        "the canceller was not told what is held: {behind:?}"
+    );
+    wait_ticks(&engine, 120);
+    let played = fake.played_by("builtin-out");
+    let sentence = played.iter().position(|&sample| sample == 2_000).unwrap();
+    let talk = played.iter().position(|&sample| sample == 3_000).unwrap();
+    let frame = (RATE / 50) as usize;
+    // ten frames of sentence and seventy-five of pause, of which what was
+    // held while the loudspeaker opened (four hundred milliseconds and
+    // more) is skipped: the pause is live, and only that much of it is not
+    assert!(
+        talk - sentence <= 65 * frame,
+        "the pause was played out whole: {} frames",
+        (talk - sentence) / frame
+    );
+    assert!(
+        call.render_delay().unwrap() < behind,
+        "the canceller still runs ahead"
+    );
+}
+
+/// A call placed opens the devices before its media starts, so they are
+/// running when its first audio arrives; its detach, with no attach in
+/// between when it never connected, closes them again.
+#[test]
+fn a_call_expected_opens_the_devices_before_its_media() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    engine.expect(1).unwrap();
+    assert!(engine.is_active());
+    wait_for_speaker(&mut engine);
+
+    // its media starts and ends, and the call is still up until it is
+    // detached
+    let call = FakeCallControl::new(RATE, 1_000, destination());
+    engine.attach(1, call.call()).unwrap();
+    wait_ticks(&engine, 3);
+    assert_eq!(
+        engine.running_on(Role::Speaker),
+        Some(handle_of(&engine, "builtin-out"))
+    );
+    engine.detach(1);
+    assert!(!engine.is_active(), "the devices stayed open");
+
+    // one that never connects lets them go too
+    engine.expect(2).unwrap();
+    wait_for_speaker(&mut engine);
+    engine.detach(2);
+    assert!(!engine.is_active(), "the devices stayed open");
+}
+
+/// Under manual activation an expected call opens nothing: the platform
+/// says when audio is the application's.
+#[test]
+fn a_call_expected_under_manual_activation_opens_nothing() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.expect(1).unwrap();
+    assert!(!engine.is_active());
+}

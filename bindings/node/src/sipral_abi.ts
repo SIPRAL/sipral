@@ -2314,7 +2314,9 @@ koffi.alias('sipral_audio_t', 'uint32_t');
  */
 export const SipralAudioActivation = Object.freeze({
   /**
-   * With the first managed call's media or ring; closed with the last.
+   * With the first managed call placed or answered, its media or a
+   * ring, so that a greeting from the far end finds them running;
+   * closed with the last.
    */
   Automatic: 0,
   /**

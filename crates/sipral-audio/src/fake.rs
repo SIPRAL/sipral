@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use sipral_io_common::level::{Channel, Controls, window_samples};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
-    Promoted, RawDevice, StreamCommon,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Preparation,
+    Promote, Promoted, RawDevice, StreamCommon,
 };
 use crate::call::{CallAudio, CallGone, Outgoing};
 
@@ -63,6 +63,11 @@ struct State {
     scheduling: Option<bool>,
     /// The names of the threads that asked for it.
     scheduled: Arc<Mutex<Vec<String>>>,
+    /// How long a preparation takes, for a fake that has one to offer.
+    preparation: Option<Duration>,
+    /// What happened, in order: a preparation finished with the devices it
+    /// was for, a stream opened.
+    history: Arc<Mutex<Vec<String>>>,
 }
 
 /// Whether a stream being let go of is held there, as a platform whose
@@ -150,6 +155,8 @@ impl FakeControl {
                     teardown: Arc::new(Teardown::default()),
                     scheduling: None,
                     scheduled: Arc::new(Mutex::new(Vec::new())),
+                    preparation: None,
+                    history: Arc::new(Mutex::new(Vec::new())),
                 }),
                 Condvar::new(),
             )),
@@ -292,6 +299,24 @@ impl FakeControl {
     /// `None`: what a USB headset under the voice unit takes.
     pub fn set_open_delay(&self, delay: Option<Duration>) {
         lock(&self.state).open_delay = delay;
+    }
+
+    /// Offer the engine a preparation that takes `takes`, as macOS builds
+    /// its voice unit ahead of an open, or none for `None`.
+    pub fn set_preparation(&self, takes: Option<Duration>) {
+        lock(&self.state).preparation = takes;
+    }
+
+    /// What happened, in order: `prepared <microphone> <speaker>` for each
+    /// preparation that finished, `default` standing for the system's
+    /// device, and `opened <identity>` for each stream opened.
+    #[must_use]
+    pub fn history(&self) -> Vec<String> {
+        lock(&self.state)
+            .history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Hold every stream being let go of until
@@ -487,6 +512,11 @@ impl FakeBackend {
                 / wanted.sample_rate_hz.max(1) as usize,
         };
         state.opens += 1;
+        state
+            .history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(format!("opened {identity}"));
         let cancels = state.system_echo_cancellation && state.echo_asked;
         Ok((
             identity,
@@ -576,6 +606,29 @@ impl Backend for FakeBackend {
 
     fn duplex_only(&self) -> bool {
         lock(&self.state).duplex_only
+    }
+
+    fn preparation(
+        &self,
+        microphone: Option<&str>,
+        speaker: Option<&str>,
+        _wanted: Format,
+    ) -> Option<Preparation> {
+        let state = lock(&self.state);
+        let takes = state.preparation?;
+        let history = Arc::clone(&state.history);
+        let entry = format!(
+            "prepared {} {}",
+            microphone.unwrap_or("default"),
+            speaker.unwrap_or("default")
+        );
+        Some(Box::new(move || {
+            std::thread::sleep(takes);
+            history
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(entry);
+        }))
     }
 
     fn pump_scheduling(&self) -> Option<Promote> {
@@ -725,6 +778,8 @@ struct FakeCallState {
     destination: Option<std::net::SocketAddr>,
     render_delay: Option<Duration>,
     pulls: usize,
+    /// What each pull plays, in order, before `plays` takes over.
+    script: Vec<i16>,
 }
 
 /// The test's side of a [`FakeCall`].
@@ -748,6 +803,7 @@ impl FakeCallControl {
                 destination: Some(destination),
                 render_delay: None,
                 pulls: 0,
+                script: Vec::new(),
             })),
         }
     }
@@ -794,6 +850,15 @@ impl FakeCallControl {
         let mut state = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         state.rate_hz = rate_hz;
         state.frame_samples = (rate_hz / 50) as usize;
+    }
+
+    /// Play `levels[k]` in every sample of the `k`th frame pulled from now,
+    /// counting from the first pull of the call, and `plays` after them.
+    pub fn set_script(&self, levels: Vec<i16>) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .script = levels;
     }
 
     /// End the call's media.
@@ -843,8 +908,13 @@ impl CallAudio for FakeCall {
         if state.ended {
             return Err(CallGone::Ended);
         }
+        let level = state
+            .script
+            .get(state.pulls)
+            .copied()
+            .unwrap_or(state.plays);
         state.pulls += 1;
-        out.fill(state.plays);
+        out.fill(level);
         Ok(())
     }
 

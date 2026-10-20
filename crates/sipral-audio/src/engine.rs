@@ -159,6 +159,9 @@ pub struct Engine {
     transmit: Option<Transmit>,
     now: Arc<dyn Fn() -> Instant + Send + Sync>,
     attached: Vec<CallId>,
+    /// Calls whose media is on its way ([`Engine::expect`]), holding the
+    /// devices open until they are detached.
+    expected: Vec<CallId>,
     /// The attached calls' audio while no pump runs to carry it: a call
     /// attached before a manual activation, and every call across a
     /// deactivation, handed to the next pump when it starts.
@@ -283,7 +286,7 @@ impl Engine {
             speaker: backend.chooses(Role::Speaker),
             ringer: backend.chooses(Role::Ringer),
         };
-        Self {
+        let mut engine = Self {
             backend: Arc::new(Mutex::new(backend)),
             duplex_only,
             chooses,
@@ -298,6 +301,7 @@ impl Engine {
             transmit: Some(transmit),
             now,
             attached: Vec::new(),
+            expected: Vec::new(),
             parked: Vec::new(),
             call_channels: HashMap::new(),
             ringing: false,
@@ -307,7 +311,9 @@ impl Engine {
             generation: 0,
             opening: None,
             wanted: Vec::new(),
-        }
+        };
+        engine.prepare();
+        engine
     }
 
     /// The same, on the system's own clock.
@@ -464,6 +470,9 @@ impl Engine {
                     Selection::Device(handle) => Some(handle),
                 },
             });
+            if role != Role::Ringer {
+                self.prepare();
+            }
         }
         Ok(())
     }
@@ -553,6 +562,7 @@ impl Engine {
         }
         self.config.system_echo_cancellation = on;
         if !self.is_active() {
+            self.prepare();
             return;
         }
         self.finish_opening();
@@ -589,9 +599,10 @@ impl Engine {
     ///
     /// Never waits on a device: opening a headset can take 1.5 s, which
     /// would stall signalling. The pump starts at once without devices
-    /// (silence out, incoming audio discarded and counted in
+    /// (silence out; incoming audio held, its newest 1.5 s, and counted in
     /// [`Engine::frames_without_device`]) while devices open on another
-    /// thread. The next [`Engine::service`] after they answer installs them
+    /// thread. What was held plays first once the loudspeaker is there, the
+    /// quiet frames in it skipped until it has caught up with the far end. The next [`Engine::service`] after they answer installs them
     /// with `Reopened` per role, or `Unavailable` if refused or slower than
     /// [`Config::probe_wait`].
     ///
@@ -687,10 +698,30 @@ impl Engine {
         self.call_channel(id, direction).map(Channel::level)
     }
 
-    /// Stop carrying it. Under [`Activation::Automatic`] the last one closes
-    /// the devices, unless a ring is playing.
+    /// A call whose media is on its way, from the moment it is placed or
+    /// answered: under [`Activation::Automatic`] the devices open now, in the
+    /// background as for [`Engine::attach`], so that they are running when
+    /// its first audio arrives rather than starting to open then. They stay
+    /// open until it is detached, attached in between or not.
+    ///
+    /// # Errors
+    /// As [`Engine::attach`].
+    pub fn expect(&mut self, id: CallId) -> Result<(), BackendError> {
+        if !self.expected.contains(&id) {
+            self.expected.push(id);
+        }
+        if self.config.activation == Activation::Automatic && !self.is_active() {
+            self.start_later()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Stop carrying it, or expecting it. Under [`Activation::Automatic`]
+    /// the last one closes the devices, unless a ring is playing.
     pub fn detach(&mut self, id: CallId) {
         self.attached.retain(|attached| *attached != id);
+        self.expected.retain(|expected| *expected != id);
         self.parked.retain(|(parked, _)| *parked != id);
         if let Some(pump) = self.pump.as_ref() {
             let _ = pump.sender.send(Command::Detach(id));
@@ -707,6 +738,7 @@ impl Engine {
     fn settle(&mut self) {
         if self.config.activation == Activation::Automatic
             && self.attached.is_empty()
+            && self.expected.is_empty()
             && !self.ringing
         {
             // called from the stack's poll: do not wait for the devices
@@ -969,6 +1001,56 @@ impl Engine {
             closed.wait(deadline.saturating_duration_since(Instant::now()));
         }
         self.closing.retain(|closed| !closed.is_set());
+    }
+
+    /// While nothing is open, have the platform get its call devices ready
+    /// on the roles' current choices, on a thread of its own
+    /// ([`Backend::preparation`]): an open waits for that to finish as for a
+    /// release, and then has nothing slow left to do.
+    fn prepare(&mut self) {
+        if self.is_active() {
+            return;
+        }
+        let microphone = self.identity_for(Role::Microphone);
+        let speaker = self.identity_for(Role::Speaker);
+        let wanted = Format::twenty_ms(self.config.device_rate_hz);
+        let echo = self.config.system_echo_cancellation;
+        let job = match self.backend.try_lock() {
+            Ok(mut backend) => {
+                backend.set_system_echo_cancellation(echo);
+                backend.preparation(microphone.as_deref(), speaker.as_deref(), wanted)
+            }
+            Err(TryLockError::Poisoned(poisoned)) => {
+                let mut backend = poisoned.into_inner();
+                backend.set_system_echo_cancellation(echo);
+                backend.preparation(microphone.as_deref(), speaker.as_deref(), wanted)
+            }
+            // a probe holds the platform; the next choice or notice asks again
+            Err(TryLockError::WouldBlock) => None,
+        };
+        let Some(job) = job else {
+            return;
+        };
+        self.closing.retain(|closed| !closed.is_set());
+        let before = self.closing.clone();
+        let wait = self.config.probe_wait;
+        let prepared = Arc::new(Done::default());
+        let done = Arc::clone(&prepared);
+        let spawned = std::thread::Builder::new()
+            .name("sipral-audio-prepare".to_owned())
+            .spawn(move || {
+                // after whatever is being let go of, which may leave the
+                // platform's unit behind for this to reuse
+                let deadline = Instant::now() + wait;
+                for closed in &before {
+                    closed.wait(deadline.saturating_duration_since(Instant::now()));
+                }
+                job();
+                done.set();
+            });
+        if spawned.is_ok() {
+            self.closing.push(prepared);
+        }
     }
 
     fn open_pair(&mut self) -> Duplex {
@@ -1458,6 +1540,9 @@ impl Engine {
             // the platform is busy with a probe or open; try next service
             Err(TryLockError::WouldBlock) => Vec::new(),
         };
+        // a device that came, went or became the default may be where the
+        // next call opens
+        let moved = !notices.is_empty();
         for notice in notices {
             match notice {
                 Notice::ListChanged => {
@@ -1486,6 +1571,9 @@ impl Engine {
                     }
                 }
             }
+        }
+        if moved {
+            self.prepare();
         }
         let Some(pump) = self.pump.as_ref() else {
             return;

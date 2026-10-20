@@ -1169,7 +1169,9 @@ public enum SipralAudio: UInt32, Sendable {
 /// When the devices are opened, in device mode:
 /// `sipral_stack_config_t::audio_activation`.
 public enum SipralAudioActivation: UInt32, Sendable {
-    /// With the first managed call's media or ring; closed with the last.
+    /// With the first managed call placed or answered, its media or a
+    /// ring, so that a greeting from the far end finds them running;
+    /// closed with the last.
     case automatic = 0
     /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`:
     /// for CallKit and the telecom framework, which own the audio session.

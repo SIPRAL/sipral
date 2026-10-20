@@ -532,7 +532,7 @@ asyncio.run(main())
 On this machine the Python run listed the five devices macOS reported, chose
 a speaker and muted the microphone; `stack.audio.selection(...)` answered
 `(2, None)` — chosen, and not running, since device mode opens the devices
-with the first call (`AudioActivation.AUTOMATIC`).
+when the first call is placed or answered (`AudioActivation.AUTOMATIC`).
 
 - **A local conference** is the one bridge-shaped thing: two calls joined,
   so that each far end hears the other and this end's microphone, which is

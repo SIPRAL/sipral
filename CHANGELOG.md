@@ -11,6 +11,16 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- **In device mode the start of a call is heard.** A far end that answers with a recorded greeting starts speaking within a fraction of a second, and the devices used to start opening only then: on a Mac, with a USB DECT headset chosen beside the Mac's own microphone, the voice unit took 3.4 seconds to open, stopped the headset twice on the way (the base drops its radio link each time, heard as the sound connecting and reconnecting) and the far end's audio was let go of until it had. Three changes, each on every platform where it applies (`docs/05-media.md`, "The built-in engine: device mode"):
+  - the devices open as a managed call is placed or answered, not when its media starts (`Engine::expect`); the microphone indicator comes on with the call rather than with its answer;
+  - the far end's audio is held while the loudspeaker opens, its newest second and a half, and played from its start; the loudspeaker catches up by skipping the quiet frames in what was held, and a call's echo canceller is told the held audio as part of the loudspeaker's delay;
+  - on macOS the voice unit is built ahead of the first call, on the chosen devices, whenever nothing is open (`sipral_io_coreaudio::prepare`), instead of on the system's defaults and then moved at the start of the call. On the same headset the open then took 1.1 seconds, starting the headset once and never stopping it, and the engine's loudspeaker ran 0.4 seconds after the call was attached. Building the unit still interrupts what else plays on those devices for a few seconds; that now happens when no call is up.
+
+  On a loopback device, a three-second greeting starting with the call was heard for 0.73 seconds before and for all of it after. At C ABI 1.2, unchanged.
+- **A voice unit reused after echo cancellation was switched off processes again when it is switched back on.** The unit a closed stream leaves for the next one kept the bypass the stream before it asked for, since an open only ever set the bypass on; it is now set either way. Found in the code while making the change above.
+
 ## [1.2.1] - 2026-10-19
 
 A fix for subscriptions on Asterisk's `chan_sip`, one for messages read off TCP and TLS, every dependency and build tool at its newest release, and the lab's flows run against FreePBX, a VitalPBX tenant and a ViciBox.

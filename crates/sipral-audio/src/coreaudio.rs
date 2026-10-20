@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 use sipral_io_common::level::Controls;
 use sipral_io_coreaudio::{Stream, StreamConfig, StreamEvent, StreamFormat, StreamKind};
 
+#[cfg(target_os = "macos")]
+use crate::backend::Preparation;
 use crate::backend::{
     Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
     Promoted, RawDevice, StreamCommon,
@@ -99,6 +101,35 @@ impl CoreAudioBackend {
         wanted: Format,
         voice_processing: bool,
     ) -> Result<Arc<Unit>, BackendError> {
+        let config = Self::config_for(kind, speaker, microphone, wanted, voice_processing)?;
+        let voice = kind == StreamKind::Voice;
+        if voice {
+            wait_for_room();
+        }
+        let mut stream = Stream::open(config).map_err(|error| refused(&error))?;
+        stream.start().map_err(|error| refused(&error))?;
+        let (output, input) = landed(&stream, voice);
+        let latency = stream.latency();
+        Ok(Arc::new(Unit {
+            stream: Mutex::new(Some(stream)),
+            lost: AtomicBool::new(false),
+            format: wanted,
+            output,
+            input,
+            latency,
+            voice,
+            processing: voice && voice_processing,
+        }))
+    }
+
+    /// What a unit of `kind` on these devices is opened with.
+    fn config_for(
+        kind: StreamKind,
+        speaker: Option<&str>,
+        microphone: Option<&str>,
+        wanted: Format,
+        voice_processing: bool,
+    ) -> Result<StreamConfig, BackendError> {
         let frame = u32::try_from(wanted.frame_samples).unwrap_or(960);
         let format = StreamFormat::new(wanted.sample_rate_hz, frame).ok_or_else(|| {
             BackendError::Refused(format!(
@@ -123,24 +154,7 @@ impl CoreAudioBackend {
         // iOS has no device to name: the route is the session's
         #[cfg(not(target_os = "macos"))]
         let _ = (speaker, microphone);
-        let voice = kind == StreamKind::Voice;
-        if voice {
-            wait_for_room();
-        }
-        let mut stream = Stream::open(config).map_err(|error| refused(&error))?;
-        stream.start().map_err(|error| refused(&error))?;
-        let (output, input) = landed(&stream, voice);
-        let latency = stream.latency();
-        Ok(Arc::new(Unit {
-            stream: Mutex::new(Some(stream)),
-            lost: AtomicBool::new(false),
-            format: wanted,
-            output,
-            input,
-            latency,
-            voice,
-            processing: voice && voice_processing,
-        }))
+        Ok(config)
     }
 }
 
@@ -290,6 +304,29 @@ impl Backend for CoreAudioBackend {
         Ok(Box::new(Half {
             unit,
             capture: false,
+        }))
+    }
+
+    /// The voice unit built and parked on these devices. A Mac only: on
+    /// iOS the unit is not to be touched before the session is active.
+    #[cfg(target_os = "macos")]
+    fn preparation(
+        &self,
+        microphone: Option<&str>,
+        speaker: Option<&str>,
+        wanted: Format,
+    ) -> Option<Preparation> {
+        let config = Self::config_for(
+            StreamKind::Voice,
+            speaker,
+            microphone,
+            wanted,
+            self.voice_processing,
+        )
+        .ok()?;
+        Some(Box::new(move || {
+            // a unit that could not be built is built by the open, as before
+            let _ = sipral_io_coreaudio::prepare(&config);
         }))
     }
 

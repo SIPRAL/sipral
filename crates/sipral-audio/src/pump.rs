@@ -32,6 +32,36 @@ pub(crate) const FRAME: Duration = Duration::from_millis(20);
 /// buffering nobody asked for.
 const TARGET_QUEUED_FRAMES: usize = 2;
 
+/// The most of a call's far end kept while it has no loudspeaker, its
+/// newest part: a greeting that starts while the device is still opening
+/// is played from its start once it has.
+const HELD_MOST: Duration = Duration::from_millis(1_500);
+
+/// How long what was held may run behind the far end. It catches up by
+/// skipping its quiet frames; whatever a far end with no pause in it (music)
+/// has left behind by then is dropped at once.
+const CATCH_UP_MOST: Duration = Duration::from_secs(8);
+
+/// The mean magnitude under which a frame is quiet enough to skip while
+/// catching up: about 46 dB under full scale, below speech and above a
+/// line's own noise.
+const QUIET_MEAN: u64 = 164;
+
+/// Samples of `span` at `rate_hz`.
+fn samples_of(span: Duration, rate_hz: u32) -> usize {
+    usize::try_from(span.as_millis().saturating_mul(u128::from(rate_hz)) / 1_000).unwrap_or(0)
+}
+
+/// Whether a frame is quiet enough to skip.
+fn quiet(frame: &[i16]) -> bool {
+    let total: u64 = frame
+        .iter()
+        .map(|sample| u64::from(sample.unsigned_abs()))
+        .sum();
+    let len = u64::try_from(frame.len()).unwrap_or(u64::MAX).max(1);
+    total / len < QUIET_MEAN
+}
+
 /// Whether a loudspeaker takes another frame this tick, `written` being how
 /// many it has already been given in it.
 ///
@@ -363,6 +393,15 @@ struct Call {
     up_from_hz: u32,
     down_to_hz: u32,
     frame: Vec<i16>,
+    /// The far end while there was no loudspeaker, at the call's rate.
+    held: VecDeque<i16>,
+    /// Samples the call owes the held queue, so that it is pulled at the
+    /// pace the far end sends whatever its frame length.
+    owed: usize,
+    /// Samples played out of the held queue since it last emptied.
+    caught_up: usize,
+    /// How far behind the call was when its canceller was last told.
+    told_behind: Duration,
 }
 
 impl Call {
@@ -390,7 +429,60 @@ impl Call {
             up_from_hz: microphone_hz,
             down_to_hz: speaker_hz,
             frame: vec![0; frame_samples],
+            held: VecDeque::new(),
+            owed: 0,
+            caught_up: 0,
+            told_behind: Duration::ZERO,
         })
+    }
+
+    /// One tick's worth of the far end, kept for a loudspeaker that is not
+    /// there yet; past [`HELD_MOST`] the oldest goes.
+    fn hold(&mut self) -> Result<(), CallGone> {
+        self.owed = self.owed.saturating_add(samples_of(FRAME, self.rate_hz));
+        while self.owed >= self.frame.len() && !self.frame.is_empty() {
+            self.audio.playback(&mut self.frame)?;
+            self.held.extend(self.frame.iter().copied());
+            self.owed -= self.frame.len();
+        }
+        let most = samples_of(HELD_MOST, self.rate_hz);
+        let over = self.held.len().saturating_sub(most);
+        self.held.drain(..over);
+        self.caught_up = 0;
+        Ok(())
+    }
+
+    /// The next frame for the loudspeaker, into `frame`: the far end's
+    /// own, or while something is held, the oldest held frame that is not
+    /// quiet, with the far end's own queued behind it.
+    fn next_frame(&mut self) -> Result<(), CallGone> {
+        self.owed = 0;
+        self.audio.playback(&mut self.frame)?;
+        if self.held.is_empty() {
+            return Ok(());
+        }
+        self.held.extend(self.frame.iter().copied());
+        let len = self.frame.len();
+        loop {
+            for (slot, sample) in self.frame.iter_mut().zip(self.held.drain(..len)) {
+                *slot = sample;
+            }
+            self.caught_up = self.caught_up.saturating_add(len);
+            if self.held.len() < len || !quiet(&self.frame) {
+                break;
+            }
+        }
+        if self.caught_up >= samples_of(CATCH_UP_MOST, self.rate_hz) {
+            self.held.clear();
+        }
+        Ok(())
+    }
+
+    /// How far behind the far end the loudspeaker runs.
+    fn behind(&self) -> Duration {
+        let rate = u64::from(self.rate_hz.max(1));
+        let held = u64::try_from(self.held.len()).unwrap_or(u64::MAX);
+        Duration::from_micros(held.saturating_mul(1_000_000) / rate)
     }
 
     fn lanes_for(&mut self, microphone_hz: u32, speaker_hz: u32) {
@@ -415,6 +507,8 @@ impl Call {
             self.up = Lane::between(self.up_from_hz, rate_hz);
             self.down = Lane::between(rate_hz, self.down_to_hz);
             self.channels.up.set_window(window_samples(rate_hz));
+            // held at the old rate
+            self.held.clear();
         }
         if frame_samples != self.frame.len() {
             self.frame.resize(frame_samples, 0);
@@ -646,8 +740,11 @@ impl Pump {
             // what was queued was on its way to a device that is not there
             call.up.clear();
             call.down.clear();
-            // and the new device's own delay is what a canceller now needs
-            call.audio.set_render_delay(delay);
+            // and the new device's own delay is what a canceller now needs,
+            // with what is held still to play ahead of the far end's own
+            call.told_behind = call.behind();
+            call.audio
+                .set_render_delay(delay.saturating_add(call.told_behind));
         }
     }
 
@@ -770,13 +867,21 @@ impl Pump {
     }
 
     /// Every call's playback summed into the loudspeaker; without one,
-    /// pulled and dropped so calls keep draining and their echo reference moves.
+    /// pulled at the far end's pace and held ([`HELD_MOST`]) for the
+    /// loudspeaker to come.
     fn play(&mut self) {
         let format = match self.speaker.as_ref() {
             Some(stream) => stream.format(),
             None => Format::twenty_ms(self.device_hz),
         };
         let mut ended = Vec::new();
+        if self.speaker.is_none() {
+            for call in &mut self.calls {
+                if call.hold().is_err() {
+                    ended.push(call.id);
+                }
+            }
+        }
         let mut frames = 0_usize;
         loop {
             let room = match self.speaker.as_ref() {
@@ -792,8 +897,11 @@ impl Pump {
             self.out.clear();
             self.out.resize(format.frame_samples, 0);
             for call in &mut self.calls {
+                if self.speaker.is_none() {
+                    continue;
+                }
                 while !call.down.has(format.frame_samples) {
-                    match call.audio.playback(&mut call.frame) {
+                    match call.next_frame() {
                         Ok(()) => call.down.push(&call.frame),
                         Err(CallGone::Ended) => {
                             ended.push(call.id);
@@ -838,6 +946,18 @@ impl Pump {
             };
             if !stream.write(&self.out) {
                 break;
+            }
+        }
+        // what a canceller hears as the loudspeaker is what was pulled, which
+        // runs ahead of what plays by whatever is held
+        if self.speaker.is_some() {
+            let base = self.render_delay();
+            for call in &mut self.calls {
+                let behind = call.behind();
+                if behind != call.told_behind {
+                    call.told_behind = behind;
+                    call.audio.set_render_delay(base.saturating_add(behind));
+                }
             }
         }
         self.let_go(&ended);

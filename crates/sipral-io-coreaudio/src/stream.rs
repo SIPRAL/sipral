@@ -1164,6 +1164,21 @@ impl Playback<'_> {
 /// Order matters: enable I/O, name devices, set formats, then initialise.
 fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Result<(), Error> {
     let voice = config.kind == StreamKind::Voice;
+    route(unit, config, voice)?;
+    set(
+        unit,
+        "AudioUnitSetProperty (MaximumFramesPerSlice)",
+        abi::PROPERTY_MAXIMUM_FRAMES_PER_SLICE,
+        abi::SCOPE_GLOBAL,
+        0,
+        &MAX_FRAMES_PER_SLICE,
+    )?;
+    formats_and_callbacks(unit, config, shared, voice)
+}
+
+/// The directions, the devices and the processing: what [`prepare`] does
+/// ahead of an open, and what the open does again on the unit it takes.
+fn route(unit: sys::Unit, config: &StreamConfig, voice: bool) -> Result<(), Error> {
     // input off for playback, so no microphone permission is needed
     let capture_enabled = u32::from(voice);
     let enabled: u32 = 1;
@@ -1187,8 +1202,10 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
     #[cfg(target_os = "macos")]
     name_devices(unit, config, voice)?;
 
-    if voice && !config.voice_processing {
-        let bypassed: u32 = 1;
+    if voice {
+        // said both ways: a unit taken from `SPARE` keeps what the stream
+        // before it asked for
+        let bypassed = u32::from(!config.voice_processing);
         set(
             unit,
             "AudioUnitSetProperty (BypassVoiceProcessing)",
@@ -1198,16 +1215,51 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
             &bypassed,
         )?;
     }
+    Ok(())
+}
 
-    set(
-        unit,
-        "AudioUnitSetProperty (MaximumFramesPerSlice)",
-        abi::PROPERTY_MAXIMUM_FRAMES_PER_SLICE,
-        abi::SCOPE_GLOBAL,
-        0,
-        &MAX_FRAMES_PER_SLICE,
-    )?;
-    formats_and_callbacks(unit, config, shared, voice)
+/// Build the voice unit ahead of its first stream, on the devices `config`
+/// names, and park it where the next [`Stream::open`] takes it from.
+///
+/// Creating the unit is the slow part of an open: the framework builds it on
+/// the system's default devices first and then moves each half, two seconds
+/// and more, during which a device already playing is stopped and started
+/// again, a wireless headset dropping its radio link each time. Done here,
+/// before a call, the open that follows finds the unit on its devices and
+/// only initialises and starts it, without stopping them. Building the unit
+/// interrupts what else plays on those devices for a few seconds, as the open
+/// did; parked, it holds none of them and captures nothing.
+///
+/// Returns `false`, having done nothing, while a voice stream is open or
+/// another preparation runs: that stream parks its unit on its own devices
+/// when it closes. Takes seconds; call it off any thread that must answer.
+///
+/// # Errors
+/// What the framework said; the unit is then disposed of, not parked.
+#[cfg(target_os = "macos")]
+pub fn prepare(config: &StreamConfig) -> Result<bool, Error> {
+    if config.kind != StreamKind::Voice {
+        return Ok(false);
+    }
+    let Some(claim) = VOICE_UNIT.take() else {
+        return Ok(false);
+    };
+    let unit = match SPARE.take() {
+        Some(unit) => unit,
+        None => new_unit(StreamKind::Voice)?,
+    };
+    if let Err(error) = route(unit, config, true) {
+        // SAFETY: uninitialised, so it calls no callback a stream before it
+        // left installed, and nothing else holds it.
+        unsafe { sys::dispose_component(unit) };
+        return Err(error);
+    }
+    if let Some(other) = SPARE.keep(unit) {
+        // SAFETY: an uninitialised unit nobody else holds.
+        unsafe { sys::dispose_component(other) };
+    }
+    drop(claim);
+    Ok(true)
 }
 
 /// Settable only while uninitialised, hence `Stream::recover` reopens.
@@ -2938,6 +2990,46 @@ mod tests {
         reopening.spare = false;
         reopening.close().expect("disposed of");
         assert_eq!(SPARE.take(), None, "nor is one the stream may not keep");
+    }
+
+    /// A preparation parks a voice unit for the next open, and stands back
+    /// while the room is taken and for a unit that only plays.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_preparation_parks_a_unit_for_the_next_open_and_stands_back_for_an_open_one() {
+        use super::{SPARE, StreamConfig, VOICE_UNIT, prepare};
+        let _units = voice_units();
+        let format = StreamFormat::narrowband();
+        assert!(
+            matches!(prepare(&StreamConfig::playback(format)), Ok(false)),
+            "a unit that only plays was prepared"
+        );
+        let held = VOICE_UNIT.take().expect("the room is free");
+        assert!(
+            matches!(prepare(&StreamConfig::new(format)), Ok(false)),
+            "prepared beside an open unit"
+        );
+        drop(held);
+        // looked at and put back, for the preparation to reuse
+        let parked = SPARE.take();
+        if let Some(unit) = parked {
+            assert_eq!(SPARE.keep(unit), None);
+        }
+        match prepare(&StreamConfig::new(format)) {
+            Ok(true) => {}
+            // a system with no voice-processing unit has nothing to prepare
+            Err(_) => return,
+            Ok(false) => panic!("the room was free and nothing was prepared"),
+        }
+        let unit = SPARE.take().expect("the prepared unit is parked");
+        if let Some(before) = parked {
+            assert_eq!(
+                unit, before,
+                "the unit parked before was not the one reused"
+            );
+        }
+        assert_eq!(SPARE.keep(unit), None);
+        assert_eq!(super::voice_units_open(), 0, "the room was kept");
     }
 
     /// Repeated open/close rounds with a mid-round microphone change, all on

@@ -158,6 +158,21 @@ pub trait Backend: Send {
         (capture, playback)
     }
 
+    /// Work that makes the next [`Backend::open_duplex`] on these devices
+    /// quick, for the engine to run on a thread of its own while nothing is
+    /// open, or nothing where an open has nothing slow to do ahead of time.
+    ///
+    /// Nothing by default. macOS builds its voice unit here, the seconds an
+    /// open would otherwise spend at the start of a call.
+    fn preparation(
+        &self,
+        _microphone: Option<&str>,
+        _speaker: Option<&str>,
+        _wanted: Format,
+    ) -> Option<Preparation> {
+        None
+    }
+
     /// Whether this platform runs the microphone and the loudspeaker as one
     /// unit, so that the two halves are opened and reopened together
     /// ([`Backend::open_duplex`]).
@@ -189,6 +204,9 @@ pub trait Backend: Send {
         None
     }
 }
+
+/// What [`Backend::preparation`] hands the engine to run off its own thread.
+pub type Preparation = Box<dyn FnOnce() + Send>;
 
 /// A real-time scheduling class the calling thread holds for as long as this
 /// value lives.

@@ -2013,9 +2013,11 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   `audio_probe_ms` (default three seconds):
   `SIPRAL_STATUS_DEVICE_TIMED_OUT` (15), and the entry point returns.
 - **Ending a call never waits on a device, nor on the application's main
-  thread.** `sipral_stack_poll` does not open or close a device: a call's
-  media starting starts the engine at once on no device — silence to the far
-  end, the far end's audio drained at its own pace — while the devices open
+  thread.** `sipral_stack_poll` does not open or close a device: a managed
+  call placed or answered starts the engine at once on no device, so that
+  its devices open before its media starts — silence to the far end, the far
+  end's audio held, its newest second and a half, and played from its start
+  once the loudspeaker is there — while the devices open
   on a thread of their own, and a later poll puts them under the call with a
   `SIPRAL_AUDIO_CHANGE_REOPENED` per role (`UNAVAILABLE` for one that did
   not answer within `audio_probe_ms`, then `REOPENED` when it does); the

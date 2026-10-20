@@ -84,6 +84,8 @@ const AUDIO_BUSY_RETRY: Duration = Duration::from_millis(20);
 
 /// A call the audio engine is to take up, with its session, or let go of.
 enum AudioOp {
+    /// A call placed or answered, whose media is on its way.
+    Expect(SipralHandle),
     Attach(SipralHandle, sipral::SessionShare),
     Detach(SipralHandle),
 }
@@ -818,6 +820,16 @@ impl StackState {
 
     fn unmanage(&mut self, call: CallHandle) {
         self.managed.retain(|managed| *managed != call);
+    }
+
+    /// In device mode, have the devices open for a call this stack carries
+    /// the audio of from now, ahead of its media: placed, or answered.
+    pub(crate) fn expect_audio(&mut self, call: CallHandle) {
+        if self.audio.is_some()
+            && let Ok(handle) = self.calls.name_of(call)
+        {
+            self.audio_backlog.push(AudioOp::Expect(handle));
+        }
     }
 
     /// Say who is on a call, once, when it is placed or arrives.
@@ -1703,6 +1715,9 @@ fn run(
         if let Some(mut engine) = held {
             for op in std::mem::take(&mut state.audio_backlog) {
                 match op {
+                    AudioOp::Expect(handle) => {
+                        let _ = engine.expect(handle);
+                    }
                     AudioOp::Attach(handle, share) => {
                         let _ = engine.attach(handle, Box::new(share));
                     }
@@ -1840,6 +1855,12 @@ fn drain(
         farewell(state, call, bytes.destination, bytes.payload, protocol);
     }
     for call in ended {
+        // a call expected that never got media lets the devices go too
+        if state.audio.is_some()
+            && let Ok(handle) = state.calls.name_of(call)
+        {
+            state.audio_backlog.push(AudioOp::Detach(handle));
+        }
         if let Some(dialog) = state.agent.call_dialog(call) {
             state.dialogs.forget(dialog);
         }

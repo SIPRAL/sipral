@@ -63,7 +63,9 @@ codes! {
     /// `sipral_stack_config_t::audio_activation`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralAudioActivation: u32 {
-        /// With the first managed call's media or ring; closed with the last.
+        /// With the first managed call placed or answered, its media or a
+        /// ring, so that a greeting from the far end finds them running;
+        /// closed with the last.
         Automatic = 0,
         /// Only between `sipral_audio_activate` and `sipral_audio_deactivate`:
         /// for CallKit and the telecom framework, which own the audio session.
@@ -1136,7 +1138,9 @@ pub(crate) mod tests {
         sipral_audio_call_gain, sipral_audio_call_level, sipral_audio_call_muted,
         sipral_audio_call_set_gain, sipral_audio_call_set_muted,
     };
-    use crate::call::tests::{hangup, media_call_tuned};
+    use crate::call::tests::{
+        answered_with, deliver, hangup, managed_config, media_call_tuned, media_line, one, place,
+    };
     use crate::error::last_error_text;
     use crate::event::SipralEventKind;
     use crate::handle::SipralHandle;
@@ -1190,16 +1194,25 @@ pub(crate) mod tests {
     ) -> (SipralHandle, SipralHandle, Packets) {
         FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
         let packets: Packets = Arc::new(Mutex::new(Vec::new()));
-        let leaked: &'static Packets = Box::leak(Box::new(Arc::clone(&packets)));
         let (stack, call) = media_call_tuned(observed, |config| {
-            config.audio = SipralAudio::Device as u32;
-            config.audio_activation = activation as u32;
-            config.audio_transmit_callback = Some(transmit);
-            config.audio_transmit_user_data = ptr::from_ref(leaked).cast_mut().cast::<c_void>();
-            config.audio_probe_ms = 500;
+            in_device_mode(config, activation, &packets);
         });
         FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
         (stack, call, packets)
+    }
+
+    /// Device mode, `activation`, and the packets handed to `packets`.
+    fn in_device_mode(
+        config: &mut crate::stack::SipralStackConfig,
+        activation: SipralAudioActivation,
+        packets: &Packets,
+    ) {
+        let leaked: &'static Packets = Box::leak(Box::new(Arc::clone(packets)));
+        config.audio = SipralAudio::Device as u32;
+        config.audio_activation = activation as u32;
+        config.audio_transmit_callback = Some(transmit);
+        config.audio_transmit_user_data = ptr::from_ref(leaked).cast_mut().cast::<c_void>();
+        config.audio_probe_ms = 500;
     }
 
     fn refresh(stack: SipralHandle) -> usize {
@@ -1968,6 +1981,35 @@ pub(crate) mod tests {
         hangup(stack, call, 3_000);
         poll(stack, 3_100);
         wait_until("the devices to close with the last call", || {
+            info(stack).active == 0
+        });
+    }
+
+    /// A call placed in device mode opens the devices as it is placed, so
+    /// that they are running when its answer brings the far end's first
+    /// words; one refused before any media lets them go again.
+    #[test]
+    fn a_call_placed_opens_the_devices_before_it_is_answered() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
+        let packets: Packets = Arc::new(Mutex::new(Vec::new()));
+        let (stack, account) = media_line(&mut observed, |config| {
+            in_device_mode(config, SipralAudioActivation::Automatic, &packets);
+        });
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
+        assert_eq!(info(stack).active, 0, "open before any call");
+        let (status, _call) = place(stack, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        poll(stack, 1_000);
+        assert_eq!(info(stack).active, 1, "the placed call opened nothing");
+        landed(stack, 1_050);
+        assert_ne!(info(stack).speaker, 0, "no loudspeaker before the answer");
+        let invite = one(stack);
+        deliver(stack, &answered_with(&invite, 486, "Busy Here"), 1_100);
+        poll(stack, 1_100);
+        wait_until("the devices to close with the refused call", || {
+            poll(stack, 1_200);
             info(stack).active == 0
         });
     }

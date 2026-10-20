@@ -634,6 +634,7 @@ entry! {
                     let placed = placed.map_err(|error| media_failed(&error))?;
                     crate::nat::Nat::spent(state, local, now);
                     state.manage(placed);
+                    state.expect_audio(placed);
                     placed
                 }
                 None => state
@@ -784,6 +785,9 @@ unsafe fn described(
         sent.map_err(|error| media_failed(&error))?;
         crate::nat::Nat::spent(state, local, now);
         state.manage(id);
+        if reply == Reply::Answer {
+            state.expect_audio(id);
+        }
         Ok(())
     })
 }
@@ -864,6 +868,7 @@ entry! {
             answered.map_err(|error| media_failed(&error))?;
             crate::nat::Nat::spent(state, local, now);
             state.manage(id);
+            state.expect_audio(id);
             Ok(())
         })
     }
@@ -1652,6 +1657,7 @@ entry! {
                 let placed = placed.map_err(|error| media_failed(&error))?;
                 crate::nat::Nat::spent(state, local, now);
                 state.manage(placed);
+                state.expect_audio(placed);
                 placed
             } else {
                 let Some(offer) = (unsafe { description(config.sdp, config.sdp_len) })? else {

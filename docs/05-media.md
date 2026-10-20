@@ -2567,16 +2567,26 @@ against a backend made of fakes, with no device in the room:
 - the gain and the mute of a direction are the engine's and are applied to
   whatever stream the direction is on next;
 - the ring has an output of its own;
-- the devices open with the first call or the first ring and close with
-  the last, or only when the application says, for the platforms whose
-  frameworks say when audio is the application's;
+- the devices open with the first call placed or answered
+  (`Engine::expect`) or the first ring and close with the last, or only
+  when the application says, for the platforms whose frameworks say when
+  audio is the application's. Opened as the call is placed rather than when
+  its media starts, they are running when a far end that answers with a
+  recorded greeting starts speaking;
 - nothing the stack's poll does waits on a device. A call's media starting
-  starts the pump at once, on no device: silence to the far end, the far
-  end's audio pulled at its own pace and let go of, each frame counted
+  starts the pump at once, on no device if none has opened yet: silence to
+  the far end, and the far end's audio pulled at its own pace and held, its
+  newest second and a half, each frame counted
   (`Engine::frames_without_device`), while the devices open on a thread of
   their own — a USB headset under the voice unit was seen to take a second
   and a half — and the next service after they answer puts them under the
-  call; a device lost or a default moved is reopened the same way. The
+  call. What was held plays first, so a greeting is heard from its start,
+  and the loudspeaker catches up with the far end by skipping the quiet
+  frames of what was held; whatever a far end with no pause in it has left
+  behind after eight seconds is dropped at once. A call's echo canceller is
+  told the held audio as part of the loudspeaker's delay, since what it
+  hears as rendered was pulled that much before it played. A device lost or
+  a default moved is reopened the same way. The
   last call's media ending stops the pump, which hands back what the next
   one needs and only then lets its devices go, on its own thread, so a BYE
   the hangup queued leaves with the poll's transmit drain rather than after
@@ -2612,7 +2622,20 @@ under the guard allocator, to read freed memory on the framework's own
 property-listener thread within a few rounds of activation, whatever the
 order or the spacing of stop, uninitialise and dispose. A unit whose device
 was lost, or that would not uninitialise, is disposed of, and so is the one a
-recovery replaces. The capture
+recovery replaces. The unit is also built before the first call: whenever
+nothing is open — the engine made, a device chosen, the echo cancellation
+switched, a device come, gone or made the default — the engine has
+`sipral-io-coreaudio::prepare` build it, or move the one parked, onto the
+chosen devices on a thread of its own, and an open waits for that as for a
+teardown. The framework builds a new unit on the system's default devices
+and then moves each half: on a USB DECT headset chosen beside the Mac's own
+microphone that took 3.4 seconds, stopped the headset twice and dropped its
+radio link with it, at the start of the call. Prepared, the same open took
+1.1 seconds with the headset started once and never stopped, and through the
+engine the loudspeaker ran 0.4 seconds after the call was attached. The
+interruption to whatever else plays on the devices while the unit is built
+moves with it, to when no call is up; a parked unit holds no device and
+captures nothing. The capture
 callback renders exactly the frames it is told of, into a buffer that holds
 a whole device slice converted to the stream's rate, or not at all. On iOS
 the route is the audio session's, so only the loudspeaker role is chosen.
