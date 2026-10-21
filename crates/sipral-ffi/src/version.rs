@@ -23,7 +23,7 @@ constants! {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 2;
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 3;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;

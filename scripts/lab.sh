@@ -24,6 +24,22 @@
 #                               watching a mailbox and a lamp, then moved to
 #                               another socket, registered, watched and
 #                               called there (part of the nat run too)
+#   scripts/lab.sh push         only a phone that sleeps, woken by a push:
+#                               the C harness registered with RFC 8599's
+#                               pn-* parameters through interop/push-gateway,
+#                               the proxy half Asterisk lacks, its stack
+#                               frozen and destroyed; Asterisk's call held by
+#                               the gateway, the lab's notification service
+#                               waking the harness, which thaws, announces
+#                               and refreshes, and the call delivered and
+#                               answered -- matched by its Call-ID, then by
+#                               its caller -- then a MESSAGE held the same
+#                               way, a push lost (480 at the bucket timer)
+#                               and a phone that answers late (480, and its
+#                               announced call reported missing). About two
+#                               minutes; part of a run that names nothing.
+#                               SIPRAL_PUSH_GATEWAY names a gateway built
+#                               elsewhere
 #   scripts/lab.sh nat-idle     only the call placed 330 seconds after the
 #                               REGISTER, behind the NAT, with the registrar
 #                               keep-alive on (part of a run that names
@@ -675,6 +691,25 @@ else
     [ -n "$HARNESS_C" ] || printf '  note  no libsipral_ffi to link against; the C flows are skipped\n'
 fi
 
+# The proxy half of RFC 8599 the `push` step puts in front of Asterisk
+# (interop/push-gateway). Built like the harness, or taken as given with
+# SIPRAL_PUSH_GATEWAY on a machine that builds elsewhere; a Linux binary
+# either way. Only the steps that use it build it.
+PUSH_GATEWAY=""
+if [ "$WANT" = all ] || [ "$WANT" = push ]; then
+    step "the push gateway"
+    if [ -n "${SIPRAL_PUSH_GATEWAY:-}" ]; then
+        [ -x "$SIPRAL_PUSH_GATEWAY" ] || { fail "SIPRAL_PUSH_GATEWAY is not an executable file"; exit 1; }
+        PUSH_GATEWAY="$SIPRAL_PUSH_GATEWAY"
+        pass "taken as given: $PUSH_GATEWAY"
+    elif cargo build --release -p sipral-push-gateway >/dev/null 2>&1; then
+        PUSH_GATEWAY="$ROOT/target/release/sipral-push-gateway"
+        pass "built"
+    else
+        printf '  note  could not build the push gateway; the push step is skipped\n'
+    fi
+fi
+
 # 8.5.4's own flow: the application that carries the call and speaks
 # `sipral-headless`'s wire protocol on a socket, and the reference agent that
 # answers over it — two binaries, `headless_socket_agent` below runs both.
@@ -683,7 +718,7 @@ fi
 step "the socket-framed agent"
 if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ] \
     || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ] \
-    || [ "$WANT" = freepbx-live ]; then
+    || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
     printf '  note  not used by the %s step\n' "$WANT"
@@ -721,7 +756,7 @@ elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
 elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ] \
-    || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ]; then
+    || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ]; then
     SWIFT_AGENT=""
     printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -2043,6 +2078,85 @@ nat_move_flow() {
     docker rm -f "$NAT_MOVE_NAME" >/dev/null 2>&1
     nat_down
     [ "$status" = 0 ]
+}
+
+# 8.12.25's step: a phone that sleeps, woken by a push. interop/push-gateway
+# runs in front of Asterisk as the RFC 8599 proxy Asterisk does not have,
+# with the lab's own notification service beside it in the same container
+# (`fake-pns`), reached by the lab as `pushgw`: 5060 for SIP, 5099 for the
+# service. The bucket timer is eight seconds rather than twenty, so the cases
+# that wait it out are short. Each case is the C harness in `push` mode
+# (interop/harness-c's `run_push` says what each one proves) at
+# `labuser-push`, set up as FreePBX sets up an extension; once it says it is
+# asleep, Asterisk calls the account (extension 9010 echoes for eight seconds
+# and hangs up) or, for `message`, sends it a MESSAGE from extension 9040.
+# What the gateway and the service printed during the case is shown after
+# the harness's own lines, and `$2` has to be among them: the gateway's own
+# word for what it did with what it held.
+PUSH_GW_NAME="${COMPOSE_PROJECT_NAME:-sipral-interop}-push-gw"
+push_gateway_up() {
+    local tries=0
+    docker rm -f "$PUSH_GW_NAME" >/dev/null 2>&1
+    docker run -d --name "$PUSH_GW_NAME" --network "$LAB_NETWORK" --network-alias pushgw \
+        -v "$PUSH_GATEWAY:/push-gateway:ro" \
+        debian:trixie-slim sh -c '
+            /push-gateway fake-pns --listen 0.0.0.0:5099 &
+            exec /push-gateway run --pbx asterisk:5060 --listen 0.0.0.0:5060 \
+                --fake-pns 127.0.0.1:5099 --invite-bucket-ms 8000 --other-bucket-ms 8000' \
+        >/dev/null || return 1
+    until docker logs "$PUSH_GW_NAME" 2>&1 | found '^  gw    in front of the PBX'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$PUSH_GW_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            docker logs "$PUSH_GW_NAME" 2>&1
+            return 1
+        fi
+        sleep 1
+    done
+    docker logs "$PUSH_GW_NAME" 2>&1
+}
+push_gateway_down() {
+    docker rm -f "$PUSH_GW_NAME" >/dev/null 2>&1
+}
+push_case() {
+    local which="$1" expected="$2" beside status before tries=0
+    local name="${COMPOSE_PROJECT_NAME:-sipral-interop}-push-$which"
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    before=$(docker logs "$PUSH_GW_NAME" 2>&1 | wc -l)
+    docker rm -f "$name" >/dev/null 2>&1
+    docker run -d --name "$name" --network "$LAB_NETWORK" \
+        -e SIPRAL_PUSH_CASE="$which" -e SIPRAL_PNS=pushgw:5099 \
+        -e SIPRAL_USER=labuser-push -e SIPRAL_PASS=labpass \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        debian:trixie-slim /harness-c push pushgw 5060 >/dev/null \
+        || { printf '  could not start the harness\n'; return 1; }
+    until docker logs "$name" 2>&1 | found '^  push  asleep'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 45 ]; then
+            printf '  the harness never fell asleep\n'
+            docker logs "$name" 2>&1
+            docker rm -f "$name" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 1
+    done
+    if [ "$which" = message ]; then
+        ( cd interop && docker compose exec -T asterisk asterisk -rx \
+            "channel originate Local/9040@lab application Wait 1" ) >/dev/null 2>&1
+    else
+        ( cd interop && docker compose exec -T asterisk asterisk -rx \
+            "channel originate PJSIP/labuser-push extension 9010@lab" ) >/dev/null 2>&1
+    fi
+    status=$(timeout 120 docker wait "$name" 2>/dev/null || echo 1)
+    docker logs "$name" 2>&1
+    docker rm -f "$name" >/dev/null 2>&1
+    docker logs "$PUSH_GW_NAME" 2>&1 | tail -n +"$((before + 1))"
+    [ "$status" = 0 ] || return 1
+    docker logs "$PUSH_GW_NAME" 2>&1 | tail -n +"$((before + 1))" | found -F "$expected"
 }
 
 # The same called flow, with the call placed 330 seconds after the REGISTER
@@ -3824,6 +3938,40 @@ if [ "$WANT" = all ] || [ "$WANT" = nat ] || [ "$WANT" = natmove ]; then
         fail "moved behind a NAT: there is no C harness to run it with"
     else
         printf '  note  no C harness, so the move behind a NAT is skipped with the other C flows\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = push ]; then
+    if [ -n "$HARNESS_C" ] && [ -n "$PUSH_GATEWAY" ]; then
+        if push_gateway_up; then
+            step "woken by a push through the RFC 8599 gateway, matched by the INVITE's Call-ID, in C"
+            push_case call "the held INVITE goes to" \
+                && pass "asleep, pushed, refreshed, and the held INVITE was the call announced by its Call-ID alone, answered and heard" \
+                || fail "woken by a push, matched by Call-ID"
+            step "the same, announced by the caller alone"
+            push_case fallback "the held INVITE goes to" \
+                && pass "with no Call-ID the caller matched the INVITE to the announcement" \
+                || fail "woken by a push, matched by caller"
+            step "a MESSAGE held for a phone that sleeps, on FCM's terms"
+            push_case message "the held MESSAGE goes to" \
+                && pass "the MESSAGE waited in the bucket and arrived once the woken phone refreshed" \
+                || fail "a MESSAGE held for a sleeping phone"
+            step "a push that never arrives"
+            push_case lost "the bucket timer ran out: 480 to the held INVITE" \
+                && pass "nothing woke the phone, and the gateway answered the INVITE 480 at its bucket timer" \
+                || fail "a push that never arrives"
+            step "a phone that answers its push late"
+            push_case late "the bucket timer ran out: 480 to the held INVITE" \
+                && pass "480 at the bucket timer, and the late phone reported its announced call missing" \
+                || fail "a phone that answers its push late"
+        else
+            fail "the push gateway did not start"
+        fi
+        push_gateway_down
+    elif [ "$WANT" = push ]; then
+        fail "woken by a push: there is no C harness or no push gateway to run it with"
+    else
+        printf '  note  no C harness or no push gateway, so the push step is skipped\n'
     fi
 fi
 

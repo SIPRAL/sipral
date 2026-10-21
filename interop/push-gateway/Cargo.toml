@@ -1,0 +1,39 @@
+[package]
+name = "sipral-push-gateway"
+description = "The proxy half of RFC 8599 for the lab: holds a sleeping device's calls and wakes it with a push."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+# The parser the stack itself reads SIP with: a proxy that disagreed with the
+# stack about what a header says would be testing itself, not the device.
+sipral-core.workspace = true
+# Everything below is already in this workspace's lockfile, at the same
+# versions, for `crates/sipral`'s TLS example (THIRD-PARTY-NOTICES.md, "Test
+# tooling"): naming it here adds no crate to the tree.
+#
+# The connection to APNs and to Google: TLS 1.2/1.3 with ALPN, and `ring` as
+# the provider, which needs a C compiler and not `cmake`.
+rustls = { version = "0.23.46", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+# the platform's trust store, so Apple's and Google's chains are checked the
+# way any client checks them
+rustls-native-certs = "0.8.5"
+# the PEM in an APNs `.p8` and in a service account's `private_key`
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
+# ES256 for the APNs provider token, RS256 for the service account's
+# assertion, SHA-256 for this proxy's own branches, and the random source a
+# PURR is drawn from: the primitives, not the protocols
+ring = "0.17.14"
+
+[lints]
+workspace = true

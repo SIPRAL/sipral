@@ -8340,6 +8340,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_account_announce(ulong stack, ulong account, sbyte[] caller, nuint callerLen, out ulong announcement, out ulong call, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_announce_call(ulong stack, ulong account, sbyte[] caller, nuint callerLen, sbyte[] callId, nuint callIdLen, out ulong announcement, out ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_refresh_binding(ulong stack, ulong account, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -8902,7 +8905,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 2;
+    public const uint AbiVersionMinor = 3;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9784,6 +9787,36 @@ public static partial class Sipral
         var callerSigned = new sbyte[callerBytes.Length];
         Buffer.BlockCopy(callerBytes, 0, callerSigned, 0, callerBytes.Length);
         Check(NativeMethods.sipral_account_announce(stack, account, callerSigned, (nuint)callerSigned.Length, out var announcement, out var call, nowMs));
+        return (announcement, call);
+    }
+
+    /// <summary>
+    /// `sipral_account_announce`, with the `Call-ID` the push carried (ABI
+    /// 1.3).
+    ///
+    /// A proxy that holds the INVITE while it pushes (RFC 8599 §5.6.2) can
+    /// put the INVITE's `Call-ID` in the push. Given here, the INVITE with
+    /// that `Call-ID` on this account is the announced call, whoever its
+    /// `From` names; when none carries it, the caller decides, as in
+    /// `sipral_account_announce`. Compared as written, case and all. A
+    /// `call_id_len` of zero is `sipral_account_announce` exactly, whatever
+    /// the pointer.
+    ///
+    /// Safety
+    ///
+    /// `caller` must be readable for `caller_len` bytes, `call_id` for
+    /// `call_id_len` bytes or be null with a length of zero, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static (ulong Announcement, ulong Call) AccountAnnounceCall(ulong stack, ulong account, string caller, string callId, ulong nowMs)
+    {
+        var callerBytes = Encoding.UTF8.GetBytes(caller);
+        var callerSigned = new sbyte[callerBytes.Length];
+        Buffer.BlockCopy(callerBytes, 0, callerSigned, 0, callerBytes.Length);
+        var callIdBytes = Encoding.UTF8.GetBytes(callId);
+        var callIdSigned = new sbyte[callIdBytes.Length];
+        Buffer.BlockCopy(callIdBytes, 0, callIdSigned, 0, callIdBytes.Length);
+        Check(NativeMethods.sipral_account_announce_call(stack, account, callerSigned, (nuint)callerSigned.Length, callIdSigned, (nuint)callIdSigned.Length, out var announcement, out var call, nowMs));
         return (announcement, call);
     }
 

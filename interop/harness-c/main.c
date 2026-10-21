@@ -35,7 +35,12 @@
  *
  *     harness-c robust <peer> [port]
  *
- * which the comment above `ROBUST_MARKER` describes.
+ * which the comment above `ROBUST_MARKER` describes, and one that sleeps
+ * until a push wakes it:
+ *
+ *     harness-c push <gateway> [port]
+ *
+ * which the comment above `run_push` describes.
  *
  * The lab passes no credentials in the environment -- it calls the harness
  * with three arguments and nothing else -- so the account names below are the
@@ -482,6 +487,14 @@ struct seen {
     int challenge_declined;
     uint32_t declined_refusal;
     char declined_realms[256];
+    /* `harness-c push`: the announcement a call was matched to, and the
+     * event count when it was and when the call itself was reported, which
+     * says which came first; and an announcement that ran out instead */
+    sipral_handle_t announced;
+    int announced_at;
+    int incoming_at;
+    int announce_missing;
+    uint64_t announce_waited_ms;
     int events;
     char fault[192];
 };
@@ -540,6 +553,7 @@ static void on_event(const sipral_event_t *event, void *user_data)
             seen->incoming = event->call;
             seen->incoming_account = event->account;
             seen->incoming_verification = event->payload.call.verification;
+            seen->incoming_at = seen->events;
             keep(seen->invited, sizeof seen->invited, event->message, event->message_len);
         }
         break;
@@ -688,6 +702,14 @@ static void on_event(const sipral_event_t *event, void *user_data)
         } else {
             seen->transfer_failed = 1;
         }
+        break;
+    case SIPRAL_EVENT_KIND_CALL_ANNOUNCED:
+        seen->announced = event->payload.announce.announcement;
+        seen->announced_at = seen->events;
+        break;
+    case SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING:
+        seen->announce_missing = 1;
+        seen->announce_waited_ms = event->payload.announce.waited_ms;
         break;
     case SIPRAL_EVENT_KIND_MESSAGE_RECEIVED:
         seen->message_received = 1;
@@ -918,6 +940,14 @@ static uint32_t stir_verification_for_this_flow;
  * one per line (NULL, the ones its REGISTERs meet, on every flow but
  * `FLOW_TWO_REALMS`). */
 static uint32_t held_audio_for_this_flow;
+
+/* `harness-c push`: the RFC 8599 parameters the account being opened puts on
+ * its REGISTER -- the service, the token the lab's notification service
+ * handed out, and the service's own parameter -- or NULL for an account
+ * that asks for no push, which is every other one. */
+static const char *push_provider_for_this_flow;
+static const char *push_prid_for_this_flow;
+static const char *push_param_for_this_flow;
 static const char *realms_for_this_flow;
 
 /* Whether SIPRAL_REGISTRAR_KEEPALIVE says `off`. */
@@ -1915,6 +1945,16 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     account.registrar_address_len = strlen(registrar_address);
     account.srtp = account_srtp_for_this_flow;
     account.stir_verification = stir_verification_for_this_flow;
+    if (push_provider_for_this_flow != NULL && push_prid_for_this_flow != NULL) {
+        account.push_provider = push_provider_for_this_flow;
+        account.push_provider_len = strlen(push_provider_for_this_flow);
+        account.push_prid = push_prid_for_this_flow;
+        account.push_prid_len = strlen(push_prid_for_this_flow);
+        if (push_param_for_this_flow != NULL) {
+            account.push_param = push_param_for_this_flow;
+            account.push_param_len = strlen(push_param_for_this_flow);
+        }
+    }
     if (realms_for_this_flow != NULL) {
         account.realms = realms_for_this_flow;
         account.realms_len = strlen(realms_for_this_flow);
@@ -5285,6 +5325,374 @@ static int run_listen(const char *server, uint16_t port, const char *user, const
     return 1;
 }
 
+/* -- `harness-c push`: a phone asleep, woken by a push -------------------- */
+
+/* `harness-c push <gateway> [port]`: the device half of RFC 8599 against the
+ * lab's push gateway (interop/push-gateway) in front of Asterisk, the way a
+ * phone lives it. Subscribed to the lab's notification service, which hands
+ * out a token as APNs or FCM would, it registers through the gateway with
+ * `pn-provider`, `pn-prid` and `pn-param`, and has to be told `+sip.pns` back
+ * (`sipral_account_push_echo`). Then it goes to sleep the way an application
+ * the system suspends and later ends does: the registration written down with
+ * `sipral_account_freeze`, the stack destroyed and both sockets closed, only
+ * the notification service's channel left open. It says "asleep" and waits;
+ * scripts/lab.sh then has Asterisk call or message the account.
+ *
+ * Woken, it starts from cold on sockets of its own -- `sipral_stack_cold_start`,
+ * `sipral_account_thaw` -- and announces what the push named, which sends the
+ * refresh the gateway is waiting for before it lets the held request go
+ * (§5.6.2). SIPRAL_PUSH_CASE says what is proved:
+ *
+ *   call      announced with the INVITE's Call-ID from the push and a caller
+ *             the INVITE does not name, so only the Call-ID can match it
+ *             (`sipral_account_announce_call`); the INVITE has to arrive as
+ *             the announced call, reported before the call itself, and is
+ *             answered: the tone goes to Asterisk's echo and comes back, and
+ *             Asterisk's BYE ends it
+ *   fallback  the same with no Call-ID and the caller the push named
+ *             (`sipral_account_announce`), matched by the caller
+ *   message   on FCM's terms, which carry a MESSAGE wake-up and APNs' do
+ *             not: woken for a MESSAGE, the binding refreshed with nothing
+ *             announced, and the MESSAGE has to arrive
+ *   lost      the service accepts the push and loses it: nothing may wake
+ *             this end; the gateway's 480 is scripts/lab.sh's to read
+ *   late      woken, but refreshing only after the gateway's bucket timer
+ *             (SIPRAL_PUSH_LATE_MS): the announcement has to run out as
+ *             `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` and no call arrive
+ *
+ * SIPRAL_PNS names the notification service, `host:port`. Every line it
+ * prints starts `  push`; a failure is `push: <why>`. */
+
+#define PUSH_PATIENCE_MS 60000u
+#define PUSH_LOST_WAIT_MS 15000u
+#define PUSH_LATE_MS 12000u
+#define PUSH_SNAPSHOT 512u
+
+/* The lab's own parameters: a Team ID and a VoIP topic for APNs (RFC 8599
+ * §10), a project ID for FCM (§11). Nothing outside the lab knows them. */
+#define PUSH_APNS_PARAM "ABCDE12345.org.sipral.lab.voip"
+#define PUSH_FCM_PARAM "sipral-lab"
+
+/* A caller no INVITE in the lab names, for the case that proves the Call-ID
+ * alone does the matching. */
+#define PUSH_DECOY_CALLER "sip:someone-else@sipral.invalid"
+
+static int push_says(const char *why)
+{
+    printf("push: %s\n", why);
+    (void)fflush(stdout);
+    return 1;
+}
+
+/* One datagram from the notification service, within `patience_ms`, into
+ * `out`, NUL-terminated. Answers whether one came. */
+static int push_read(int fd, unsigned patience_ms, char *out, size_t room)
+{
+    uint64_t deadline = now_ms() + patience_ms;
+    while (now_ms() < deadline) {
+        ssize_t got = recv(fd, out, room - 1u, 0);
+        if (got > 0) {
+            out[got] = '\0';
+            return 1;
+        }
+        sleep_ms(20);
+    }
+    return 0;
+}
+
+/* A token from the lab's notification service: SUBSCRIBE, and its answer. */
+static int push_subscribe(int fd, const struct sockaddr_in *service, int lose, char *token,
+                          size_t room)
+{
+    char answer[256];
+    const char *ask = lose ? "SUBSCRIBE lose" : "SUBSCRIBE deliver";
+    unsigned tries;
+    for (tries = 0; tries < 5u; tries++) {
+        (void)sendto(fd, ask, strlen(ask), 0, (const struct sockaddr *)service, sizeof *service);
+        if (push_read(fd, 1000u, answer, sizeof answer)
+            && strncmp(answer, "TOKEN ", 6) == 0) {
+            keep(token, room, answer + 6, strlen(answer + 6));
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* A string member of a flat JSON object the gateway wrote, unescaped, into
+ * `out`; an empty string when it is not there. */
+static void push_field(const char *payload, const char *name, char *out, size_t room)
+{
+    char key[64];
+    const char *at;
+    size_t used = 0;
+    out[0] = '\0';
+    (void)snprintf(key, sizeof key, "\"%s\":\"", name);
+    at = strstr(payload, key);
+    if (at == NULL) {
+        return;
+    }
+    at += strlen(key);
+    while (*at != '\0' && *at != '"' && used + 1u < room) {
+        if (*at == '\\' && at[1] != '\0') {
+            at++;
+        }
+        out[used++] = *at++;
+    }
+    out[used] = '\0';
+}
+
+static int message_or_nothing(const struct endpoint *end)
+{
+    return end->seen.message_received;
+}
+
+static int called_or_missed(const struct endpoint *end)
+{
+    return end->seen.incoming != SIPRAL_HANDLE_NONE || end->seen.announce_missing;
+}
+
+static int run_push(const char *gateway, uint16_t port, const char *user, const char *pass)
+{
+    const char *which = getenv("SIPRAL_PUSH_CASE");
+    const char *pns_text = getenv("SIPRAL_PNS");
+    const char *late_text = getenv("SIPRAL_PUSH_LATE_MS");
+    unsigned late_ms = late_text != NULL ? (unsigned)strtoul(late_text, NULL, 10) : PUSH_LATE_MS;
+    struct sockaddr_in remote;
+    struct sockaddr_in service;
+    struct endpoint end;
+    char pns_host[128];
+    char token[96];
+    char payload[1024];
+    char kind[32];
+    char caller[256];
+    char call_id[256];
+    uint8_t snapshot[PUSH_SNAPSHOT];
+    size_t snapshot_len = 0;
+    uint64_t asleep_at;
+    sipral_push_echo_t echo;
+    sipral_status_t status;
+    const char *colon;
+    int fd;
+    int lost;
+    int message;
+    int late;
+
+    if (which == NULL || which[0] == '\0') {
+        which = "call";
+    }
+    lost = strcmp(which, "lost") == 0;
+    message = strcmp(which, "message") == 0;
+    late = strcmp(which, "late") == 0;
+    if (!lost && !message && !late && strcmp(which, "call") != 0
+        && strcmp(which, "fallback") != 0) {
+        return push_says("SIPRAL_PUSH_CASE is call, fallback, message, lost or late");
+    }
+    if (pns_text == NULL || (colon = strrchr(pns_text, ':')) == NULL
+        || (size_t)(colon - pns_text) >= sizeof pns_host) {
+        return push_says("SIPRAL_PNS has to name the notification service as host:port");
+    }
+    memcpy(pns_host, pns_text, (size_t)(colon - pns_text));
+    pns_host[colon - pns_text] = '\0';
+    if (resolve(gateway, port, &remote) != 0
+        || resolve(pns_host, (uint16_t)atoi(colon + 1), &service) != 0) {
+        return push_says("cannot resolve the gateway or the notification service");
+    }
+    printf("  push  case %s, through the gateway at %s:%u\n", which, gateway, (unsigned)port);
+
+    /* the notification service's channel, which the system keeps open while
+     * the application sleeps */
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return push_says("no socket for the notification service");
+    }
+    (void)fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    if (push_subscribe(fd, &service, lost, token, sizeof token) != 0) {
+        (void)close(fd);
+        return push_says("the notification service handed out no token");
+    }
+    printf("  push  token %.8s... from the notification service%s\n", token,
+           lost ? ", which will lose every push for it" : "");
+
+    push_provider_for_this_flow = message ? "fcm" : "apns";
+    push_prid_for_this_flow = token;
+    push_param_for_this_flow = message ? PUSH_FCM_PARAM : PUSH_APNS_PARAM;
+    trouble[0] = '\0';
+    if (open_endpoint(&end, 97u, "asterisk", &remote, user, pass) != 0) {
+        (void)close(fd);
+        return push_says(trouble);
+    }
+    status = sipral_account_register(end.stack, end.account, now_ms());
+    if (status != SIPRAL_STATUS_OK || !wait_until(&end, registered, FLOW_PATIENCE_MS)
+        || end.seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        close_endpoint(&end);
+        (void)close(fd);
+        return push_says("never registered through the gateway");
+    }
+    memset(&echo, 0, sizeof echo);
+    echo.size = sizeof echo;
+    status = sipral_account_push_echo(end.stack, end.account, &echo);
+    if (status != SIPRAL_STATUS_OK || !echo.accepted) {
+        close_endpoint(&end);
+        (void)close(fd);
+        return push_says("the 2xx did not promise pushes: no +sip.pns for the service asked for");
+    }
+    printf("  push  registered at %s as %s, and the 2xx said +sip.pns=\"%s\"\n",
+           end.sip_address, user, push_provider_for_this_flow);
+
+    status = sipral_account_freeze(end.stack, end.account, snapshot, sizeof snapshot,
+                                   &snapshot_len, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        close_endpoint(&end);
+        (void)close(fd);
+        return push_says("the registration could not be written down");
+    }
+    /* suspended, and then ended: nothing of the stack outlives this */
+    close_endpoint(&end);
+    asleep_at = now_ms();
+    printf("  push  asleep: registration frozen in %u bytes, stack destroyed, sockets closed\n",
+           (unsigned)snapshot_len);
+    (void)fflush(stdout);
+
+    if (lost) {
+        int woken = push_read(fd, PUSH_LOST_WAIT_MS, payload, sizeof payload);
+        (void)close(fd);
+        if (woken) {
+            return push_says("a push arrived that the service was told to lose");
+        }
+        printf("  push  nothing woke this end in %u s: the push was lost\n",
+               PUSH_LOST_WAIT_MS / 1000u);
+        return 0;
+    }
+    if (!push_read(fd, PUSH_PATIENCE_MS, payload, sizeof payload)
+        || strncmp(payload, "WAKE\n", 5) != 0) {
+        (void)close(fd);
+        return push_says("no push arrived");
+    }
+    (void)close(fd);
+    push_field(payload + 5, "kind", kind, sizeof kind);
+    push_field(payload + 5, "caller", caller, sizeof caller);
+    push_field(payload + 5, "call-id", call_id, sizeof call_id);
+    printf("  push  woken %u ms after falling asleep: %s\n",
+           (unsigned)(now_ms() - asleep_at), payload + 5);
+    if (late) {
+        printf("  push  refreshing only %u ms after the push\n", late_ms);
+        (void)fflush(stdout);
+        sleep_ms(late_ms);
+    }
+
+    /* from cold, on sockets of its own */
+    trouble[0] = '\0';
+    if (open_endpoint(&end, 98u, "asterisk", &remote, user, pass) != 0) {
+        return push_says(trouble);
+    }
+    (void)sipral_stack_cold_start(end.stack, now_ms());
+    status = sipral_account_thaw(end.stack, end.account, snapshot, snapshot_len,
+                                 now_ms() - asleep_at, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        close_endpoint(&end);
+        return push_says("the frozen registration was refused");
+    }
+    printf("  push  awake at %s, the registration thawed\n", end.sip_address);
+
+    if (message) {
+        if (strcmp(kind, "message") != 0) {
+            close_endpoint(&end);
+            return push_says("the push was not a MESSAGE's");
+        }
+        status = sipral_account_refresh_binding(end.stack, end.account, now_ms());
+        if (status != SIPRAL_STATUS_OK || !wait_until(&end, message_or_nothing, FLOW_PATIENCE_MS)) {
+            finish(&end);
+            close_endpoint(&end);
+            return push_says("the held MESSAGE never arrived after the refresh");
+        }
+        printf("  push  the held MESSAGE arrived once the refresh was accepted\n");
+        finish(&end);
+        close_endpoint(&end);
+        return 0;
+    }
+
+    {
+        sipral_handle_t announcement = SIPRAL_HANDLE_NONE;
+        sipral_handle_t arrived = SIPRAL_HANDLE_NONE;
+        int by_call_id = strcmp(which, "fallback") != 0;
+        const char *announced_caller = strcmp(which, "call") == 0 ? PUSH_DECOY_CALLER : caller;
+        uint32_t has_ready = 0;
+        uint64_t ready_ms = 0;
+        if (strcmp(kind, "call") != 0 || caller[0] == '\0' || (by_call_id && call_id[0] == '\0')) {
+            close_endpoint(&end);
+            return push_says("the push named no call: kind, caller and call-id are wanted");
+        }
+        status = sipral_account_announce_call(end.stack, end.account, announced_caller,
+                                              strlen(announced_caller),
+                                              by_call_id ? call_id : NULL,
+                                              by_call_id ? strlen(call_id) : 0u, &announcement,
+                                              &arrived, now_ms());
+        if (status != SIPRAL_STATUS_OK || announcement == SIPRAL_HANDLE_NONE) {
+            close_endpoint(&end);
+            return push_says("the call could not be announced");
+        }
+        if (by_call_id) {
+            printf("  push  announced by Call-ID %s, as %s\n", call_id, announced_caller);
+        } else {
+            printf("  push  announced by caller alone, as %s\n", announced_caller);
+        }
+        (void)fflush(stdout);
+        if (!wait_until(&end, called_or_missed, 30000u)) {
+            close_endpoint(&end);
+            return push_says("neither a call nor the announcement's end came");
+        }
+        if (late) {
+            if (!end.seen.announce_missing || end.seen.incoming != SIPRAL_HANDLE_NONE) {
+                finish(&end);
+                close_endpoint(&end);
+                return push_says("a call came after the gateway had given up on this end");
+            }
+            printf("  push  no INVITE followed: the announcement was reported missing after %u ms\n",
+                   (unsigned)end.seen.announce_waited_ms);
+            finish(&end);
+            close_endpoint(&end);
+            return 0;
+        }
+        if (end.seen.incoming == SIPRAL_HANDLE_NONE || end.seen.announced != announcement
+            || end.seen.announced_at == 0 || end.seen.announced_at > end.seen.incoming_at) {
+            finish(&end);
+            close_endpoint(&end);
+            return push_says("the INVITE that came was not reported as the announced call first");
+        }
+        printf("  push  the held INVITE arrived as the announced call, named before it was reported\n");
+        if (sipral_account_time_to_ready(end.stack, end.account, &has_ready, &ready_ms)
+                == SIPRAL_STATUS_OK
+            && has_ready) {
+            printf("  push  reachable %u ms after the cold start\n", (unsigned)ready_ms);
+        }
+        end.call = end.seen.incoming;
+        status = sipral_call_answer_media(end.stack, end.call, end.rtp_address,
+                                          strlen(end.rtp_address), now_ms());
+        if (status != SIPRAL_STATUS_OK || !wait_until(&end, answered, FLOW_PATIENCE_MS)
+            || end.seen.ended || open_media(&end, end.call) != 0) {
+            finish(&end);
+            close_endpoint(&end);
+            return push_says("the call was not confirmed");
+        }
+        if (!wait_until(&end, hung_up, CALLED_ENDS_MS)
+            || end.seen.end_reason != SIPRAL_CALL_END_REASON_REMOTE_HANGUP) {
+            finish(&end);
+            close_endpoint(&end);
+            return push_says("the far end's BYE never arrived");
+        }
+        if (end.audible == 0) {
+            finish(&end);
+            close_endpoint(&end);
+            return push_says("nothing audible came back");
+        }
+        printf("  push  answered, and Asterisk hung up: %u sent, %u back, %u audible\n", end.sent,
+               end.received, end.audible);
+        finish(&end);
+        close_endpoint(&end);
+    }
+    return 0;
+}
+
 /* -- `harness-c robust`: the field failures that need a real network ------ */
 
 /* `harness-c robust <peer> [port]`: the stack against a peer that only
@@ -5999,7 +6407,7 @@ int main(int argc, char **argv)
     listening = strcmp(server, "listen") == 0;
     robust = strcmp(server, "robust") == 0;
     server_for_this_run = server;
-    if (!listening && !robust && strcmp(server, "stir") != 0) {
+    if (!listening && !robust && strcmp(server, "stir") != 0 && strcmp(server, "push") != 0) {
         if (resolve(server, port, &remote) != 0
             || address_text(&remote, remote_text, sizeof remote_text) != 0) {
             printf("cannot resolve %s:%u\n", server, (unsigned)port);
@@ -6040,6 +6448,13 @@ int main(int argc, char **argv)
     if (robust) {
         uint16_t peer_port = (uint16_t)(argc > 3 ? atoi(argv[3]) : 5060);
         return run_robust(argc > 2 ? argv[2] : "listener", peer_port == 0 ? 5060u : peer_port);
+    }
+
+    /* `harness-c push <gateway> [port]`: the same */
+    if (strcmp(server, "push") == 0) {
+        uint16_t gateway_port = (uint16_t)(argc > 3 ? atoi(argv[3]) : 5060);
+        return run_push(argc > 2 ? argv[2] : "pushgw", gateway_port == 0 ? 5060u : gateway_port,
+                        user, pass);
     }
 
     /* `harness-c listen <server> [port]`: the words move one to the right */

@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR 2
+#define SIPRAL_ABI_VERSION_MINOR 3
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -8393,6 +8393,26 @@ sipral_status_t sipral_account_message(sipral_handle_t stack, sipral_handle_t ac
  * `out_announcement` and `out_call` must point at one `sipral_handle_t`.
  */
 sipral_status_t sipral_account_announce(sipral_handle_t stack, sipral_handle_t account, const char *caller, size_t caller_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms);
+
+/**
+ * `sipral_account_announce`, with the `Call-ID` the push carried (ABI
+ * 1.3).
+ *
+ * A proxy that holds the INVITE while it pushes (RFC 8599 §5.6.2) can
+ * put the INVITE's `Call-ID` in the push. Given here, the INVITE with
+ * that `Call-ID` on this account is the announced call, whoever its
+ * `From` names; when none carries it, the caller decides, as in
+ * `sipral_account_announce`. Compared as written, case and all. A
+ * `call_id_len` of zero is `sipral_account_announce` exactly, whatever
+ * the pointer.
+ *
+ * Safety
+ *
+ * `caller` must be readable for `caller_len` bytes, `call_id` for
+ * `call_id_len` bytes or be null with a length of zero, and each of
+ * `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_account_announce_call(sipral_handle_t stack, sipral_handle_t account, const char *caller, size_t caller_len, const char *call_id, size_t call_id_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms);
 
 /**
  * Refresh the binding now, without announcing anything (C3).

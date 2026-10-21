@@ -761,6 +761,19 @@ carried inside the package: an application that uses MAUI already has it.
 The RFC 4475 torture test corpus under `fixtures/rfc4475/` is IETF Trust
 material, reproduced under the IETF Trust Legal Provisions.
 
+The lab's push gateway under `interop/push-gateway` (the `sipral-push-gateway`
+crate, never published and never linked into anything shipped) links
+`rustls` 0.23.46 with `ring`, `rustls-native-certs` 0.8.5,
+`rustls-pki-types` 1.15.1 and `ring` 0.17.14 directly: TLS to APNs and to
+Google, the platform's trust store, the PEM of a `.p8` key and of a service
+account, and ES256, RS256 and SHA-256. Every one is the copy, at the version,
+that `crates/sipral`'s TLS example below already brings into the lockfile,
+with the licences the table there gives, so the gateway adds no crate to the
+tree. HTTP/2, HPACK, JSON and the JSON Web Tokens are written in the crate
+from RFC 9113, RFC 7541, RFC 8259 and RFC 7515/7519; the HPACK Huffman table
+is RFC 7541 Appendix B, IETF Trust material reproduced under the IETF Trust
+Legal Provisions.
+
 `crates/sipral`'s own `[dev-dependencies]` carry `rcgen` 0.14.10 (MIT OR
 Apache-2.0) and, through it, `yasna`, `pem`, `time` and a handful of smaller
 crates, all MIT or Apache-2.0 or both. It mints a throwaway, self-signed TLS

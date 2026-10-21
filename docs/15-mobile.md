@@ -85,14 +85,27 @@ event means reading two sets of logs that nobody has.
 
 ### The matching rule
 
-**Same account, and the same user and host in the `From` URI. Time is only a
-tie-break.**
+**The `Call-ID`, when the push carries one. Otherwise, and always as the
+fallback, the same account and the same user and host in the `From` URI. Time
+is only a tie-break.**
 
-A push carries no SIP identifier and cannot be made to. RFC 8599 §13 says the
-mechanism "does not require a proxy to insert any payload", and §5.6.2 has the
-proxy hold the request rather than describe it. There is no `Call-ID` to match
-on, and there never will be. What a push does carry is who is calling and which
-account, so that is what is compared.
+RFC 8599 §13 says the mechanism "does not require a proxy to insert any
+payload", and §5.6.2 has the proxy hold the request rather than describe it,
+so a push need not carry any SIP identifier, and from many senders it does
+not. What a push from any sender does carry is who is calling and which
+account, so that is the rule that always applies.
+
+A proxy that holds the INVITE while it pushes has the INVITE in hand, and
+nothing stops it putting the `Call-ID` in the push; `interop/push-gateway`
+does (below). `announce_call` (`sipral_account_announce_call` through
+`sipral.h`, ABI 1.3) takes it: the INVITE with that `Call-ID` on the same
+account is the announced call, whoever its `From` names, which tells two
+calls from one caller apart where the caller rule can only take the oldest.
+The `Call-ID` is compared as written, case and all (RFC 3261 §20.8). When no
+INVITE carries it, the caller rule decides, over every announcement: an
+intermediary that changed the `Call-ID` after the push was sent costs the
+exact match, not a second call screen. `announce` is `announce_call` with no
+`Call-ID`.
 
 Nothing else about the URI is compared, and that is the deliberate part. RFC
 3261 §19.1.4 equivalence insists that a parameter present in one URI be present
@@ -153,7 +166,8 @@ harmlessly.
 ### Through `sipral.h`
 
 `sipral_account_announce` is `announce`: it fills `out_call` when the INVITE
-came first and `out_announcement` otherwise. `sipral_account_refresh_binding`
+came first and `out_announcement` otherwise; `sipral_account_announce_call`
+is `announce_call`, the same with the push's `Call-ID`. `sipral_account_refresh_binding`
 is `refresh_binding`, and `sipral_announcement_forget` is
 `forget_announcement`. The events are `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` (31),
 then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is
@@ -353,10 +367,159 @@ one of two things:
 - **a push gateway in front of a PBX that does not**: a proxy that plays that
   role and passes everything else through.
 
-This stack ships neither, and the credentials never belong on the device.
+The library ships neither, and the credentials never belong on the device.
 Whether the registrar a device talks to is one of the two is exactly what
 `push_echo` reports: `+sip.pns` naming the service asked for is the network
 saying it will send the pushes, and anything else means nobody has.
+
+### The lab's push gateway
+
+The second of the two is in this repository as a test tool, so the whole
+wake-up can be run before a phone is in the room: `interop/push-gateway`
+(`sipral-push-gateway`, never published), written from RFC 8599, its proxy
+logic in `src/proxy.rs` with no socket or clock of its own and its tests
+beside it. In front of one PBX it does what §5.6 asks — `+sip.pns` added to
+a REGISTER that asks for pushes and to its 2xx, `+sip.pnsreg="121"` for a
+device that wakes itself, a PURR in `+sip.pnspurr` (§6.2.1), 423 for a
+binding too short to wake, 555 when told no other proxy could push; an INVITE
+or a MESSAGE for such a binding held in the bucket while the device is pushed,
+forwarded once the device's refresh is answered 2xx, and answered 480 when
+the bucket timer runs out or the push fails, a CANCEL meanwhile answered 487;
+a request inside a dialog whose target names a PURR held the same way
+(§6.2.3); and a push to refresh a binding 120 seconds before it lapses (§5.5).
+
+It also does what a PBX that knows nothing of push needs from it: the
+REGISTER's `Contact` is given the gateway's address, keeping every URI
+parameter, so the PBX sends the account's calls to the gateway, `pn-*` and
+all, whether it rewrites `Contact`s (FreePBX's default) or not, and with no
+`Path` (RFC 3327) support asked of it; the 2xx is given the device's own
+`Contact` back. Every other `Contact` a device sends carries its own address
+in one parameter, so what the PBX sends inside a dialog reaches the device
+behind any NAT, with no dialog state kept. Everything a device sends goes to
+the PBX.
+
+What a push carries is `kind` (`call`, `message`, `dialog`, `refresh`),
+`caller` (the held request's `From` URI, which `PushKitAdapter` reads),
+`name` when the `From` has one, and `call-id` (the held request's, for
+`announce_call`). The Swift and Kotlin push bridges announce by caller alone
+so far; the `Call-ID` is there for an application, and for them, to pass on.
+
+**On APNs only an INVITE is pushed.** A VoIP push is the only kind that
+reaches a VoIP application, and since iOS 13 one that reports no call to
+CallKit gets the application terminated and, repeated, its VoIP pushes
+stopped. So on APNs a MESSAGE or a request inside a dialog goes straight to
+the device's last address, and no refresh push is sent: an iOS binding has to
+be refreshed by the application itself while it runs, or registered long. On
+FCM, whose high-priority data message carries no such rule, all four kinds
+are pushed.
+
+It is the lab's, and its limits are a test tool's: UDP only on both sides,
+no TLS (§13 asks for TLS, or signalling secured some other way, wherever
+this runs for real), one PBX, every binding and every held request in memory
+and gone on a restart, no forking, one connection per push to Apple and to
+Google rather than one kept open. Its own `Contact` for a device is the same
+whatever socket the device registers from, which is what lets a woken phone's
+refresh replace the binding it had; the price is that a removal, which
+carries no `pn-prid` (§4.1.2), also removes the binding of another device of
+the same account and the same `pn-param` through the same gateway.
+
+**What the lab proves**, `scripts/lab.sh push`, run on 21 October 2026 on
+the second lab machine and ending "the lab agrees": the gateway in front of
+the lab's Asterisk (`labuser-push`, set up as FreePBX sets up an extension),
+the lab's own notification service beside it standing in for APNs and FCM,
+and the C harness as the phone (`interop/harness-c`'s `run_push`). The
+harness takes a token from the service, registers through the gateway and
+reads `+sip.pns="apns"` back with `sipral_account_push_echo`, then sleeps as
+an application the system suspends and then ends: the registration frozen
+(79 bytes), the stack destroyed, both sockets closed. Asterisk calls the
+account; the gateway holds the INVITE and pushes; the service delivers
+`{"kind":"call","caller":"sip:anonymous@anonymous.invalid","name":"Anonymous","call-id":"…"}`
+about 1.3 seconds after the harness fell asleep. Woken, the harness starts
+from cold on new sockets, thaws the registration and announces the call; the
+refresh goes, the gateway releases the INVITE to the new socket once
+Asterisk has answered the refresh 200, and the harness reports
+`SIPRAL_EVENT_KIND_CALL_ANNOUNCED` before `SIPRAL_EVENT_KIND_INCOMING_CALL`,
+13 ms after its cold start, answers, hears the tone come back from
+extension 9010 (266 of 391 frames audible) and is hung up by Asterisk. Run
+twice: announced by the push's `Call-ID` with a caller the INVITE does not
+name, so that only the `Call-ID` can have matched it, and announced by the
+caller alone. Then a MESSAGE, on FCM's terms, held and delivered after the
+refresh; a push the service accepts and loses, which leaves the harness
+asleep and the INVITE answered 480 by the gateway at its bucket timer; and a
+push the harness answers twelve seconds late, past the timer: 480 at the
+gateway, and the announced call reported missing after twenty seconds.
+
+What it does not prove is the last hop: Apple's and Google's own delivery to
+a phone, and a phone's own suspend and wake. The senders for both are in the
+gateway (`src/apns.rs`: HTTP/2 to `api.sandbox.push.apple.com` or
+`api.push.apple.com`, an ES256 provider token from the `.p8` key, `apns-topic`
+the bundle with `.voip`, `apns-push-type: voip`; `src/fcm.rs`: the service
+account's RS256 assertion traded for an access token, then a high-priority
+data message to the HTTP v1 API), with HTTP/2 and HPACK written from
+RFC 9113 and RFC 7541. Their request building and token signing are tested
+against the documented formats, and `probe`, run the same day without any
+credentials, reached all three endpoints and was answered as it should be:
+APNs `403 InvalidProviderToken` to a token signed by a key made up for the
+probe, on the sandbox and on production; Google's token endpoint
+`400 invalid_request` to an assertion nobody signed; FCM `401 UNAUTHENTICATED`
+to an access token nobody issued. With a real key, nothing has been sent.
+
+### Device day: the gateway with real keys
+
+What the owner creates once, and keeps outside the repository:
+
+- **APNs** (Apple Developer, Certificates, Identifiers & Profiles): an App ID
+  for the application with the Push Notifications capability; under Keys, a
+  key with "Apple Push Notifications service (APNs)" enabled — for a build
+  installed from Xcode, one for the Sandbox environment — downloaded once as
+  `AuthKey_<KEYID>.p8`; its 10-character Key ID; the Team ID (Membership
+  details). The application's `pn-param` is `<TEAMID>.<bundle id>.voip` and
+  its `pn-prid` the PushKit token in hexadecimal (RFC 8599 §10).
+- **FCM** (Firebase console): the Android application added to a project
+  (its `google-services.json` goes into the application); under Project
+  settings, Service accounts, "Generate new private key", a JSON file. The
+  application's `pn-param` is the project ID and its `pn-prid` the FCM
+  registration token (§11).
+
+On a machine both the phone and the PBX reach — with `ca-certificates`
+installed, since the senders check Apple's and Google's chains against the
+system's store — first the keys alone, before any phone:
+
+```sh
+sipral-push-gateway probe apns --apns-key /secure/AuthKey_ABC123DEFG.p8 \
+    --apns-key-id ABC123DEFG --apns-team DEF123GHIJ --topic org.example.app.voip
+sipral-push-gateway probe fcm --fcm-service-account /secure/service-account.json
+```
+
+What a working key should be answered with, by Apple's and Google's
+documentation, since nothing here has seen it yet: from APNs a refusal of
+the device token (`400 BadDeviceToken`) rather than of the provider token
+(`403 InvalidProviderToken`, what a key it does not know gets); from Google
+an access token, then a refusal of the registration token
+(`400 INVALID_ARGUMENT`) rather than `401 UNAUTHENTICATED`.
+`--apns-production` sends to production, for a TestFlight or App Store
+build; the sandbox is the default. With the phone's own token as
+`--device-token`, the probe pushes a call from `sip:probe@sipral.invalid`
+that never comes: the push leg alone, which on the phone should raise the
+call screen and then report the announced call missing twenty seconds later.
+Then the gateway itself, in front of the PBX:
+
+```sh
+sipral-push-gateway run --pbx pbx.example.com:5060 --listen 0.0.0.0:5070 \
+    --advertise <address the phone and the PBX reach>:5070 \
+    --apns-key /secure/AuthKey_ABC123DEFG.p8 --apns-key-id ABC123DEFG \
+    --apns-team DEF123GHIJ \
+    --fcm-service-account /secure/service-account.json
+```
+
+The same values can come from `SIPRAL_APNS_KEY_FILE`, `SIPRAL_APNS_KEY_ID`,
+`SIPRAL_APNS_TEAM` and `SIPRAL_FCM_SERVICE_ACCOUNT`; nothing of a key is
+printed. The phone's account keeps the PBX as its registrar and its address
+of record and names the gateway as the address its requests go to
+(`registrar_address` in `sipral_account_config_t`), with the push parameters
+above. The PBX needs no SIP setting changed, but a firewall in front of it
+(FreePBX has one) has to let the gateway's address in. The gateway prints one
+line per thing it does, the same lines the lab reads.
 
 ## Android, run on an emulator
 
