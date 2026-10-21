@@ -483,8 +483,9 @@ the PBX.
 What a push carries is `kind` (`call`, `message`, `dialog`, `refresh`),
 `caller` (the held request's `From` URI, which `PushKitAdapter` reads),
 `name` when the `From` has one, and `call-id` (the held request's, for
-`announce_call`). The Swift and Kotlin push bridges announce by caller alone
-so far; the `Call-ID` is there for an application, and for them, to pass on.
+`announce_call`). `PushKitAdapter` reads `call-id` beside `caller`, and the
+Swift push bridge announces with it whenever the push has one
+(`Account.announce(caller:callId:)`).
 
 **On APNs only an INVITE is pushed.** A VoIP push is the only kind that
 reaches a VoIP application, and since iOS 13 one that reports no call to

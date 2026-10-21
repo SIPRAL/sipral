@@ -9,9 +9,13 @@ public struct VoipPush: Sendable {
     /// The caller's URI, matched against the INVITE's `From` by account,
     /// user and host, unescaped (`docs/15-mobile.md`).
     public let callerId: String
+    /// The held INVITE's `Call-ID`, when the proxy that pushed put it in
+    /// the push (`call-id`); matched before the caller is.
+    public let callId: String?
 
-    public init(callerId: String) {
+    public init(callerId: String, callId: String? = nil) {
         self.callerId = callerId
+        self.callId = callId
     }
 }
 
@@ -59,7 +63,7 @@ public final class PushKitBridge: @unchecked Sendable {
 
         let announced: (announcement: SipralHandle?, call: SipralHandle?)
         do {
-            announced = try account.announce(caller: push.callerId)
+            announced = try account.announce(caller: push.callerId, callId: push.callId)
         } catch {
             callKit.endShown(uuid: uuid, reason: .failed)
             throw error

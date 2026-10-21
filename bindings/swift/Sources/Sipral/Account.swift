@@ -374,10 +374,16 @@ public final class Account: @unchecked Sendable {
 
     /// `sipral_account_announce`: called when a VoIP push arrives, possibly
     /// before its INVITE. Returns an announcement waiting for the INVITE, or
-    /// the call if it already came.
-    public func announce(caller: String) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+    /// the call if it already came. With the INVITE's `callId`, when the push
+    /// carries it, `sipral_account_announce_call`: that `Call-ID` is matched
+    /// first, the caller when no INVITE carries it.
+    public func announce(caller: String, callId: String? = nil) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
         let result = try retryingBusy {
-            try Sipral.accountAnnounce(stack: stack.handle, account: handle, caller: caller, nowMs: stack.nowMs())
+            if let callId, !callId.isEmpty {
+                try Sipral.accountAnnounceCall(stack: stack.handle, account: handle, caller: caller, callId: callId, nowMs: stack.nowMs())
+            } else {
+                try Sipral.accountAnnounce(stack: stack.handle, account: handle, caller: caller, nowMs: stack.nowMs())
+            }
         }
         if result.call != Sipral.handleNone {
             return (nil, result.call)

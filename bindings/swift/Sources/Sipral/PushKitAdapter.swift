@@ -73,6 +73,7 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
             return
         }
         let callerId = payload.dictionaryPayload["caller"] as? String
+        let callId = payload.dictionaryPayload["call-id"] as? String
         let account = self.account()
         let bridge = self.bridge
         let received = self.received
@@ -80,7 +81,7 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
         // path does, not by this completion handler.
         Task {
             if let callerId, let account {
-                let pending = try? await bridge.handle(push: VoipPush(callerId: callerId), account: account)
+                let pending = try? await bridge.handle(push: VoipPush(callerId: callerId, callId: callId), account: account)
                 received?(pending)
             } else {
                 await bridge.reportUnusable(callerId: callerId)

@@ -204,7 +204,7 @@ final class PushTests: XCTestCase {
         let bobEvents: Recorder<SipralEvent>
     }
 
-    private func woken() async throws -> Woken {
+    private func woken(callId: String? = nil) async throws -> Woken {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
         let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
@@ -213,7 +213,9 @@ final class PushTests: XCTestCase {
         let callKit = CallKitBridge(provider: provider)
         let pushKit = PushKitBridge(callKit: callKit)
         let bobEvents = Recorder(bob.events())
-        let pending = try await pushKit.handle(push: VoipPush(callerId: "sip:alice@sipral.invalid"), account: bobAccount)
+        let pending = try await pushKit.handle(
+            push: VoipPush(callerId: "sip:alice@sipral.invalid", callId: callId), account: bobAccount
+        )
         return Woken(
             alice: alice, aliceAccount: aliceAccount, bob: bob, provider: provider, callKit: callKit,
             pushKit: pushKit, pending: pending, bobEvents: bobEvents
@@ -277,6 +279,21 @@ final class PushTests: XCTestCase {
         XCTAssertTrue(ended, "the screen was left up")
         let reason = await phone.provider.ended.first { $0.uuid == phone.pending.uuid }?.reason
         XCTAssertEqual(reason, .unanswered)
+    }
+
+    /// A push that carries a `Call-ID` no INVITE has: the caller still
+    /// matches the INVITE to it, through `sipral_account_announce_call`.
+    func testAPushsCallIdThatNoInviteCarriesFallsBackToTheCaller() async throws {
+        let phone = try await woken(callId: "no-such-call@sipral.invalid")
+        defer { phone.alice.close(); phone.bob.close() }
+        let outcome = Outcome()
+        phone.callKit.handleAnswer(uuid: phone.pending.uuid) { outcome.record($0) }
+
+        let (aliceCall, bobCall, aliceEvents) = try await inviteArrives(phone)
+        defer { aliceCall.close(); bobCall.close() }
+        let confirmed = await aliceEvents.first(within: 5) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(confirmed, "the caller never saw the answer")
+        XCTAssertEqual(outcome.all, ["answered"])
     }
 
     /// Declined on the push's screen before the INVITE: the INVITE, when it
