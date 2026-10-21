@@ -131,18 +131,6 @@ whether it is met; *in part* is followed by what is missing.
 | 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`, `a=ice-pacing`, `a=ice-mismatch`); `a=remote-candidates` waits for an offer that would carry one | sipral-nat, sipral, sipral-ua | phase 2; the facade writes the attributes and the user agent carries them onto an answer it writes itself |
 | 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |
 
-## Deliberately not implemented
-
-| Area | Why |
-|---|---|
-| Video and its payload formats | Not before 1.0, so the audio path stays deep; phase 6 after it, per [10-roadmap.md](10-roadmap.md) |
-| SIP server roles: proxy, registrar, B2BUA | Sipral is an endpoint |
-| MSRP (RFC 4975), session-mode messaging | Out of scope. Pager-mode messaging, the MESSAGE method, is phase 2 |
-| IMS: 3GPP registration, `P-Access-Network-Info` | Different product |
-| iLBC (RFC 3951) | Opus covers the same ground — speech over a lossy link — and covers it better. Nothing in the field asks for iLBC and refuses Opus |
-| AMR and AMR-WB (RFC 4867) | Mobile radio codecs, and patented. On the IP leg an operator offers G.711 or Opus; carrying AMR through would mean licensing it to reach a peer that already speaks something else |
-
-Anything moving out of this table needs a written reason in a design document
-before code exists. Trickle ICE (RFC 8838, RFC 8840) and SIP-T and SIP-I
-(RFC 3204, RFC 3372) moved out on 21 October 2026, for 1.4; the reason is
-`10-roadmap.md`, "Phase 7".
+What is planned next, with its RFCs, is in [10-roadmap.md](10-roadmap.md):
+video in phase 6, WebRTC peers, trickle ICE (RFC 8838, RFC 8840) and SIP-T
+and SIP-I (RFC 3204, RFC 3372) in phase 7.

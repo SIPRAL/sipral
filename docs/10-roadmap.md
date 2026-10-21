@@ -718,7 +718,7 @@ unchanged from the audio-only build.
 ## Phase 7 — WebRTC peers and the telephone network, 1.3 and 1.4
 
 Decided on 21 October 2026: WebRTC for audio, trickle ICE and SIP-T/SIP-I
-move out of "Deliberately not implemented" (`09-rfc-index.md`), each for a
+join the plan, each for a
 reason that did not exist when they went in.
 
 - **A PBX WebRTC line (1.3).** Asterisk's `webrtc=yes` endpoints, FreeSWITCH
@@ -732,8 +732,7 @@ reason that did not exist when they went in.
   a WebSocket and offers its candidates as it finds them; a call to it has to
   take trickled candidates (RFC 8838, carried in SIP by RFC 8840's INFO
   package) and can send its own the same way, so the call is up before the
-  last relay answers. Data channels, SFUs and simulcast stay out: this is a
-  SIP client stack carrying audio, not a WebRTC stack.
+  last relay answers.
 - **SIP-T and SIP-I (1.4).** A carrier gateway carries the ISUP of the call
   inside SIP (RFC 3204's `application/ISUP` body, RFC 3372's SIP-T, ITU-T
   Q.1912.5's SIP-I). An endpoint on such a trunk reads the calling number,

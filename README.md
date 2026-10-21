@@ -126,18 +126,11 @@ package are built by `scripts/package/`, and
 [`docs/11-testing.md`, "Releasing"](docs/11-testing.md#releasing) is the
 order they are published in.
 
-## What it does not do
+## Not yet
 
-- **No server side.** Sipral is an endpoint: no proxy, registrar, B2BUA or
-  SBC, and no PBX features of its own.
-- **No media server.** Calls are joined in the process (a local conference,
-  or two calls bridged), not through a mixer you have to run.
-- **No agent logic in the core.** The connectors to speech services live in
-  their own packages ([`integrations/`](integrations/)); the library carries
-  audio and never decides what to say.
-- **No WebRTC and no video yet.** Audio on a PBX WebRTC line comes in 1.3, a
-  browser at the other end and trickle ICE in 1.4, video in 2.0. No data
-  channels, SFU or simulcast.
+- **Video** comes in 2.0.
+- **WebRTC:** a PBX WebRTC line comes in 1.3, a browser at the other end and
+  trickle ICE in 1.4.
 
 ## Roadmap
 
