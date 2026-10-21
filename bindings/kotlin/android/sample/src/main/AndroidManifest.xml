@@ -9,9 +9,21 @@ Copyright (c) 2026 Sytek
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Granted by default on Android 14 and later only to applications that
+         Google Play accepts as calling applications; refused, an incoming call
+         is a heads-up notification (the Readiness screen says so). -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- MANAGE_OWN_CALLS, the call's foreground service and its
+         FOREGROUND_SERVICE_PHONE_CALL and FOREGROUND_SERVICE_MICROPHONE come
+         from the telecom helper's manifest. -->
 
+    <!-- No backup and no device-to-device transfer of the account: the
+         passwords' key lives in this device's Keystore and would not follow. -->
     <application
+        android:name=".SampleApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
         android:label="Sipral sample"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
@@ -25,5 +37,27 @@ Copyright (c) 2026 Sytek
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- A simulated push, from adb: DUMP is held by the shell and by no
+             installed application. -->
+        <receiver
+            android:name=".PushReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="org.sipral.sample.SIMULATE_PUSH" />
+            </intent-filter>
+        </receiver>
+
+        <!-- The diagnostics bundle, handed to the share sheet. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostics_paths" />
+        </provider>
     </application>
 </manifest>

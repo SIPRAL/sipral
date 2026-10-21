@@ -764,11 +764,50 @@ tie), which agrees with the library's whenever the two readings of the URI
 do. An `ANNOUNCED_CALL_MISSING` is the oldest announcement still waiting,
 because every announcement waits the same window.
 
+A phone's lifecycle (`docs/15-mobile.md`, "Lifecycle on Android"):
+`client.suspending()`, `resumed()`, `interfaceLost()`,
+`nameResolutionLost()` and `coldStart()`; `account.freeze()`,
+`thaw(snapshot, asleepMs)`, `timeToReadyMs` and `pushEcho`; and over them
+`SipralLifecycle`, which writes every accepted registration down in a
+`SipralSnapshotStore` and suspends and resumes the client, and
+`wakeForPush(client, account, bridge, lifecycle, key, caller)`, the cold
+start after a push in the order a push needs it. On Android,
+`SipralKeystoreStore` keeps the records sealed by the Keystore and
+`SipralAppLifecycle(application, lifecycle)` drives it from the
+application's screens:
+
+```kotlin
+val lifecycle = SipralLifecycle(SipralKeystoreStore(context))
+SipralAppLifecycle(application, lifecycle)          // in Application.onCreate
+// in the push handler, in a process the push may have started:
+val client = SipralClient.open(bindHost = SipralNetworkMonitor.current(context).address)
+val account = client.addAccount(aor, registrarAddress, registrar, authUser = user, authPassword = password)
+// ... the bridge wired as above ...
+lifecycle.attach(client, scope)
+wakeForPush(client, account, bridge, lifecycle, key = aor, caller = callerFromThePush)
+```
+
+`SipralNetworkMonitor(context, client, calls, scope, initial)` follows
+Android's default network into `networkChanged` and moves every call the
+stack asks to move; `SipralCallForeground.follow(context, bridge, scope,
+ui)` holds `SipralCallService`, the call's foreground service of types
+`phoneCall` and `microphone`, from the moment a call is placed or answered
+until the last one ends, with the notification the application's
+`OngoingCallUi` builds. `IdiomaticSipCalls` with no `mediaHost` binds each
+call's media on the network that is up when the call starts.
+
 `android/sample` is a Compose skeleton, not a product: register, call, a
 simulated push standing in for a push service, answer and decline, hold, a
 DTMF keypad and the audio routes, with every call's microphone and speaker
 run by `SipralCallAudios` and every audio transition in its log -- it has no
-audio code of its own.
+audio code of its own. Around it, what a store build needs: the call's
+foreground service, a Readiness screen (microphone, notifications, calls
+over the lock screen, battery optimisation, background restriction and
+standby bucket, each with what it means for a call), the account's
+passwords sealed by the Keystore, the lifecycle above, and a Diagnostics
+screen whose Share log hands over one zip of the sample's and the stack's
+logs, the decision records, the state snapshot and the application's
+logcat, with no password in it.
 
 `scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
 three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the
@@ -780,7 +819,9 @@ wrapper's properties are committed and its jar is not: the jar is a binary,
 so the script generates the wrapper from the Gradle distribution in the
 image and checks it reproduces the committed pin. `scripts/check.sh` does not
 compile `android/`, since this machine has no Android SDK to compile it
-against.
+against. With `--release` it also builds the sample's store APK and bundle,
+unsigned, and `scripts/package/android-sign.sh` signs them on the machine
+that holds the key (`docs/15-mobile.md`, "The store build").
 
 Proven off a phone: the logic, by `TelecomCheck.kt`; the connection's
 callbacks reaching it, by the helper's unit tests; the three artefacts, built

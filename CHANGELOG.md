@@ -11,6 +11,17 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **A phone's lifecycle in the Kotlin layer, as in .NET MAUI.** `SipralClient.suspending`, `resumed`, `interfaceLost`, `nameResolutionLost` and `coldStart`; `SipralAccount.freeze`, `thaw`, `timeToReadyMs` and `pushEcho`; `SipralLifecycle`, which writes every accepted registration down and suspends and resumes the client; `wakeForPush`, the cold start after a push in the order the platform needs it (the call rings first, the last process's registration is carried on); and on Android `SipralKeystoreStore` and `SipralAppLifecycle` (`docs/15-mobile.md`, "Lifecycle on Android").
+- **The Android telecom helper holds a call's foreground service and follows the network.** `SipralCallService` (types `phoneCall` and `microphone`) from the moment a call is placed or answered until the last one ends, through `SipralCallForeground`; `SipralNetworkMonitor` moves the registration and every call when Android's default network changes, measured on an emulator at about a second without audio for Wi-Fi to mobile data. `IdiomaticSipCalls` with no `mediaHost` binds each call's media on the network up when it starts.
+- **The Android sample is ready for a store and for a real phone.** A Readiness screen (microphone, notifications, calls over the lock screen, battery optimisation, background restriction, standby bucket), the passwords sealed by the Keystore, no backups, a Diagnostics screen whose Share log hands over the sample's and the stack's logs, the decision records, the state and the application's logcat with no password in them, and a release APK and Play bundle, with or without Opus, signed by `scripts/package/android-sign.sh` on the machine that holds the key (`scripts/package/android.sh --release`). `docs/15-mobile.md` says what ran on an emulator against a live PBX and lists what to run on a real phone.
+
+### Fixed
+
+- **A Kotlin client that names no address registers at a server named by a URI elsewhere.** The REGISTER the location released left with the loopback address the account had before its server was known and was refused as an unreachable `Contact`; once the account is pointed at its route, the registration (or the withdrawal) is sent again from there, as in .NET.
+- **`sipral-telecom.aar` compiles into an application on the Android Gradle Plugin's built-in Kotlin 2.2.** Its classes carried Kotlin 2.4 metadata; they are compiled as 2.2, like `sipral.aar`'s, and `android.sh` checks it.
+
 ### Changed
 
 - The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").

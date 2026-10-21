@@ -16,10 +16,25 @@
 # directory, each an ELF shared object for the machine that directory names,
 # needing nothing a device does not have; the classes each is supposed to
 # carry; the service and permission the helper's manifest declares. Before
-# that, the helper's unit tests run, and every artefact Gradle resolved for
-# the helper, the sample and those tests is held to deny.toml's licences.
+# that, the helper's and the sample's unit tests run, and every artefact
+# Gradle resolved for the helper, the sample and those tests is held to
+# deny.toml's licences.
 #
-#   scripts/package/android.sh --out DIR --accept-android-sdk-licenses [--with-opus]
+# With --release, the sample is also built for a store, unsigned:
+#
+#   sipral-sample-release-unsigned.apk   to install directly once signed
+#   sipral-sample-release-unsigned.aab   to upload to Google Play once signed
+#
+# each checked like the debug APK, and for what a store asks besides: not
+# debuggable, the target API level, and every 64-bit native aligned for 16 KB
+# pages (each ELF LOAD segment, and the APK's uncompressed libraries). Neither is
+# signed here: scripts/package/android-sign.sh signs them on the machine
+# that holds the key, so the key never enters the build image or the
+# machine it runs on. --version-code N sets the version code a store upload
+# needs to be higher than the last one; without it the code is derived from
+# the workspace version (sample/build.gradle.kts).
+#
+#   scripts/package/android.sh --out DIR --accept-android-sdk-licenses [--with-opus] [--release [--version-code N]]
 #   scripts/package/android.sh --out DIR --dry-run [--with-opus]
 #
 # --dry-run installs nothing and needs no Docker, so it asks for no licence:
@@ -33,7 +48,8 @@
 # feature and every other default kept (scripts/package/features.sh says why
 # and how); with it, aar.sh builds the variant that carries libopus, and the
 # two artefacts that carry natives are sipral-opus.aar and
-# sipral-sample-opus.apk. The local Maven repository the helper and the
+# sipral-sample-opus.apk (and sipral-sample-opus-release-unsigned.apk and
+# .aab, version name 1.2.3-opus). The local Maven repository the helper and the
 # sample build against keeps the coordinate org.sipral:sipral either way,
 # with the variant named in its POM's description.
 #
@@ -60,7 +76,7 @@ fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
 step() { printf '\n%s\n' "$1"; }
 
 usage() {
-    printf 'usage: android.sh --out DIR --accept-android-sdk-licenses [--with-opus]\n' >&2
+    printf 'usage: android.sh --out DIR --accept-android-sdk-licenses [--with-opus] [--release [--version-code N]]\n' >&2
     printf '       android.sh --out DIR --dry-run [--with-opus]\n' >&2
     exit 2
 }
@@ -76,6 +92,8 @@ ACCEPTED=0
 IMAGE="sipral-android-build"
 WITH_OPUS=0
 DRY_RUN=0
+RELEASE=0
+VERSION_CODE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
@@ -83,10 +101,18 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY_RUN=1; shift ;;
         --image) IMAGE="$2"; shift 2 ;;
         --with-opus) WITH_OPUS=1; shift ;;
+        --release) RELEASE=1; shift ;;
+        --version-code) VERSION_CODE="$2"; shift 2 ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
     esac
 done
 [ -z "$OUT" ] && usage
+if [ -n "$VERSION_CODE" ]; then
+    [ "$RELEASE" -eq 1 ] || { printf -- '--version-code is for a --release build\n' >&2; usage; }
+    case "$VERSION_CODE" in
+        '' | *[!0-9]*) printf -- '--version-code takes a positive number\n' >&2; usage ;;
+    esac
+fi
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 . "$ROOT/scripts/package/features.sh"
@@ -98,6 +124,15 @@ VARIANT_ARGS=()
 [ "$WITH_OPUS" -eq 1 ] && VARIANT_ARGS=(--with-opus)
 AAR_NAME="sipral$VARIANT_SUFFIX.aar"
 APK_NAME="sipral-sample$VARIANT_SUFFIX.apk"
+RELEASE_APK="sipral-sample$VARIANT_SUFFIX-release-unsigned.apk"
+RELEASE_AAB="sipral-sample$VARIANT_SUFFIX-release-unsigned.aab"
+# What the image's own run is told on top of the variant, and what Gradle is.
+INSIDE_ARGS=(${VARIANT_ARGS[@]+"${VARIANT_ARGS[@]}"})
+[ "$RELEASE" -eq 1 ] && INSIDE_ARGS+=(--release)
+[ -n "$VERSION_CODE" ] && INSIDE_ARGS+=(--version-code "$VERSION_CODE")
+GRADLE_PROPS=()
+[ "$WITH_OPUS" -eq 1 ] && GRADLE_PROPS+=(-Psipral.variant=opus)
+[ -n "$VERSION_CODE" ] && GRADLE_PROPS+=(-Psipral.versionCode="$VERSION_CODE")
 
 VERSION=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}' "$ROOT/Cargo.toml")
 ABIS=(arm64-v8a armeabi-v7a x86_64)
@@ -165,7 +200,7 @@ if [ "$MODE" = "host" ]; then
         -v sipral-android-gradle:/cache/gradle \
         -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}" \
         "$IMAGE" \
-        bash /src/scripts/package/android.sh inside --out /out ${VARIANT_ARGS[@]+"${VARIANT_ARGS[@]}"}
+        bash /src/scripts/package/android.sh inside --out /out ${INSIDE_ARGS[@]+"${INSIDE_ARGS[@]}"}
     exit $?
 fi
 
@@ -269,9 +304,11 @@ if [ ! -x gradlew ]; then
         printf '\nandroid.sh: failed\n'; exit 1
     fi
 fi
-if ./gradlew --no-daemon --console=plain -Psipral.repo="$OUT/maven" \
-    :telecom:assembleRelease :sample:assembleDebug >"$OUT/gradle.log" 2>&1; then
-    pass ":telecom:assembleRelease :sample:assembleDebug"
+TASKS=(:telecom:assembleRelease :sample:assembleDebug)
+[ "$RELEASE" -eq 1 ] && TASKS+=(:sample:assembleRelease :sample:bundleRelease)
+if ./gradlew --no-daemon --console=plain -Psipral.repo="$OUT/maven" ${GRADLE_PROPS[@]+"${GRADLE_PROPS[@]}"} \
+    "${TASKS[@]}" >"$OUT/gradle.log" 2>&1; then
+    pass "${TASKS[*]}${GRADLE_PROPS[*]+ ${GRADLE_PROPS[*]}}"
 else
     fail "Gradle:"
     grep -E '^e: |error:|FAILURE|What went wrong' -A3 "$OUT/gradle.log" | head -60 | sed 's/^/        /'
@@ -280,26 +317,33 @@ else
 fi
 cp telecom/build/outputs/aar/telecom-release.aar "$OUT/sipral-telecom.aar"
 cp sample/build/outputs/apk/debug/sample-debug.apk "$OUT/$APK_NAME"
-
-# The connection's callbacks, on the JVM (telecom/src/test). What ran is
-# read out of the results, because a test task that found nothing to run
-# succeeds too.
-step "the helper's unit tests"
-if ./gradlew --no-daemon --console=plain -Psipral.repo="$OUT/maven" \
-    :telecom:testDebugUnitTest >"$OUT/unit-tests.log" 2>&1; then
-    results=telecom/build/test-results/testDebugUnitTest
-    counted=$(cat "$results"/*.xml 2>/dev/null | grep -o '<testsuite [^>]*>' \
-        | sed -E 's/.* tests="([0-9]+)".* failures="([0-9]+)".* errors="([0-9]+)".*/\1 \2 \3/' \
-        | awk '{t += $1; f += $2 + $3} END {print t + 0, f + 0}')
-    if [ "${counted% *}" -gt 0 ] && [ "${counted#* }" -eq 0 ]; then
-        pass ":telecom:testDebugUnitTest, ${counted% *} tests"
-    else
-        fail ":telecom:testDebugUnitTest ran ${counted% *} tests with ${counted#* } failing"
-    fi
-else
-    fail ":telecom:testDebugUnitTest:"
-    grep -E 'FAILED|Exception|Error|What went wrong' -A3 "$OUT/unit-tests.log" | head -60 | sed 's/^/        /'
+if [ "$RELEASE" -eq 1 ]; then
+    cp sample/build/outputs/apk/release/sample-release-unsigned.apk "$OUT/$RELEASE_APK"
+    cp sample/build/outputs/bundle/release/sample-release.aab "$OUT/$RELEASE_AAB"
 fi
+
+# The connection's callbacks and the network monitor (telecom/src/test), the
+# sample's diagnostics bundle and readiness screen (sample/src/test), on the
+# JVM. What ran is read out of the results, because a test task that found
+# nothing to run succeeds too.
+step "the helper's and the sample's unit tests"
+for project in telecom sample; do
+    if ./gradlew --no-daemon --console=plain -Psipral.repo="$OUT/maven" ${GRADLE_PROPS[@]+"${GRADLE_PROPS[@]}"} \
+        ":$project:testDebugUnitTest" >"$OUT/unit-tests-$project.log" 2>&1; then
+        results=$project/build/test-results/testDebugUnitTest
+        counted=$(cat "$results"/*.xml 2>/dev/null | grep -o '<testsuite [^>]*>' \
+            | sed -E 's/.* tests="([0-9]+)".* failures="([0-9]+)".* errors="([0-9]+)".*/\1 \2 \3/' \
+            | awk '{t += $1; f += $2 + $3} END {print t + 0, f + 0}')
+        if [ "${counted% *}" -gt 0 ] && [ "${counted#* }" -eq 0 ]; then
+            pass ":$project:testDebugUnitTest, ${counted% *} tests"
+        else
+            fail ":$project:testDebugUnitTest ran ${counted% *} tests with ${counted#* } failing"
+        fi
+    else
+        fail ":$project:testDebugUnitTest:"
+        grep -E 'FAILED|Exception|Error|What went wrong' -A3 "$OUT/unit-tests-$project.log" | head -60 | sed 's/^/        /'
+    fi
+done
 
 # Every artefact Gradle actually resolved -- not what the build files
 # declare -- for what the helper ships, what the sample ships and what the
@@ -351,7 +395,8 @@ resolved_in() {
 }
 : >"$OUT/licences.txt"
 for pair in ":telecom releaseRuntimeClasspath helper-runtime" ":sample debugRuntimeClasspath sample-runtime" \
-    ":telecom debugUnitTestRuntimeClasspath helper-unit-tests"; do
+    ":sample releaseRuntimeClasspath sample-release-runtime" \
+    ":telecom debugUnitTestRuntimeClasspath helper-unit-tests" ":sample debugUnitTestRuntimeClasspath sample-unit-tests"; do
     read -r project configuration label <<<"$pair"
     report="$OUT/dependencies-$label.txt"
     if ! ./gradlew --no-daemon -q -Psipral.repo="$OUT/maven" "$project:dependencies" \
@@ -485,6 +530,11 @@ for class in org/sipral/android/telecom/SipralConnectionService.class \
     org/sipral/android/telecom/AndroidTelecomPlatform.class \
     org/sipral/android/telecom/SipralCallAudio.class \
     org/sipral/android/telecom/SipralCallAudios.class \
+    org/sipral/android/telecom/SipralNetworkMonitor.class \
+    org/sipral/android/telecom/SipralCallService.class \
+    org/sipral/android/telecom/SipralCallForeground.class \
+    org/sipral/android/telecom/SipralAppLifecycle.class \
+    org/sipral/android/telecom/SipralKeystoreStore.class \
     org/sipral/android/telecom/AndroidAudioDevice.class; do
     # grep reads to the end rather than -q: under pipefail, grep -q leaving
     # at the first match kills the writer with SIGPIPE and fails the
@@ -506,34 +556,106 @@ telecom_mv=$(javap -v -cp "$X/telecom-classes" org.sipral.android.telecom.Sipral
     | sed -n 's/^ *mv=\[\([0-9]*\),\([0-9]*\),.*/\1.\2/p' | head -1)
 [ "$telecom_mv" = "2.2" ] && pass "sipral-telecom.aar: Kotlin metadata 2.2" \
     || fail "sipral-telecom.aar: Kotlin metadata '$telecom_mv', not 2.2"
+# the call's foreground service, with both types a store review asks about
+grep -q 'android:name="org.sipral.android.telecom.SipralCallService"' "$manifest" \
+    && grep -q 'android:foregroundServiceType="phoneCall|microphone"' "$manifest" \
+    && grep -q 'android.permission.FOREGROUND_SERVICE_PHONE_CALL' "$manifest" \
+    && grep -q 'android.permission.FOREGROUND_SERVICE_MICROPHONE' "$manifest" \
+    && pass "sipral-telecom.aar: SipralCallService, phoneCall and microphone, with their permissions" \
+    || fail "sipral-telecom.aar: the call's foreground service is not declared as it should be"
+
+# The sample as an APK: its natives, its classes, what it asks of the phone.
+check_apk() {
+    local name="$1" dir="$2"
+    unzip -q "$OUT/$name" -d "$dir"
+    check_natives "$name" "$dir" lib
+    local dexes classes badging
+    dexes=$(ls "$dir"/classes*.dex 2>/dev/null | wc -l)
+    [ "$dexes" -gt 0 ] && pass "$name: $dexes dex file(s)" || fail "$name carries no dex"
+    classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --defined-only "$OUT/$name" 2>/dev/null \
+        | awk '$1 == "C" {print $NF}')
+    for class in org.sipral.telecom.TelecomBridge org.sipral.telecom.CallAudio org.sipral.idiomatic.SipralClient \
+        org.sipral.SipralEventListeners org.sipral.android.telecom.SipralConnectionService \
+        org.sipral.android.telecom.SipralCallAudio org.sipral.android.telecom.SipralCallAudios \
+        org.sipral.android.telecom.SipralNetworkMonitor org.sipral.sample.MainActivity \
+        org.sipral.android.telecom.SipralCallService org.sipral.idiomatic.SipralLifecycle \
+        org.sipral.sample.PushReceiver; do
+        printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
+            && pass "$name: $class" || fail "$name is missing $class"
+    done
+    badging=$("$BUILD_TOOLS/aapt2" dump badging "$OUT/$name" 2>/dev/null)
+    for permission in android.permission.MANAGE_OWN_CALLS android.permission.RECORD_AUDIO \
+        android.permission.FOREGROUND_SERVICE_PHONE_CALL android.permission.FOREGROUND_SERVICE_MICROPHONE \
+        android.permission.POST_NOTIFICATIONS android.permission.USE_FULL_SCREEN_INTENT; do
+        printf '%s\n' "$badging" | grep "uses-permission: name='$permission'" >/dev/null \
+            && pass "$name: $permission" || fail "$name does not request $permission"
+    done
+    printf '%s\n' "$badging" | grep -x "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" >/dev/null \
+        && pass "$name: native code for arm64-v8a, armeabi-v7a and x86_64" \
+        || fail "$name: $(printf '%s\n' "$badging" | grep native-code)"
+    printf '%s\n' "$badging" | grep -x "targetSdkVersion:'37'" >/dev/null \
+        && pass "$name: targets API level 37" || fail "$name: $(printf '%s\n' "$badging" | grep targetSdkVersion)"
+    BADGING="$badging"
+}
 
 step "$APK_NAME"
-unzip -q "$OUT/$APK_NAME" -d "$X/apk"
-check_natives "$APK_NAME" "$X/apk" lib
-dexes=$(ls "$X/apk"/classes*.dex 2>/dev/null | wc -l)
-[ "$dexes" -gt 0 ] && pass "$APK_NAME: $dexes dex file(s)" || fail "$APK_NAME carries no dex"
-classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --defined-only "$OUT/$APK_NAME" 2>/dev/null \
-    | awk '$1 == "C" {print $NF}')
-for class in org.sipral.telecom.TelecomBridge org.sipral.telecom.CallAudio org.sipral.idiomatic.SipralClient \
-    org.sipral.SipralEventListeners org.sipral.android.telecom.SipralConnectionService \
-    org.sipral.android.telecom.SipralCallAudio org.sipral.android.telecom.SipralCallAudios \
-    org.sipral.sample.MainActivity; do
-    printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
-        && pass "$APK_NAME: $class" || fail "$APK_NAME is missing $class"
-done
-badging=$("$BUILD_TOOLS/aapt2" dump badging "$OUT/$APK_NAME" 2>/dev/null)
-for permission in android.permission.MANAGE_OWN_CALLS android.permission.RECORD_AUDIO; do
-    printf '%s\n' "$badging" | grep "uses-permission: name='$permission'" >/dev/null \
-        && pass "$APK_NAME: $permission" || fail "$APK_NAME does not request $permission"
-done
-printf '%s\n' "$badging" | grep -x "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" >/dev/null \
-    && pass "$APK_NAME: native code for arm64-v8a, armeabi-v7a and x86_64" \
-    || fail "$APK_NAME: $(printf '%s\n' "$badging" | grep native-code)"
+check_apk "$APK_NAME" "$X/apk"
+
+# What a store asks of the release build beyond what the debug one has: not
+# debuggable, the version this build means, and natives a phone with 16 KB
+# memory pages can map -- every ELF LOAD segment aligned to 16 KB, and every
+# uncompressed library in the APK on a 16 KB boundary (zipalign -P 16).
+check_page_alignment() {
+    local label="$1" dir="$2"
+    local file align misaligned=""
+    # 16 KB pages are a 64-bit matter: Google Play asks it of arm64-v8a and
+    # x86_64, and a 32-bit process maps 4 KB pages everywhere
+    for file in $(find "$dir/arm64-v8a" "$dir/x86_64" -name '*.so' | sort); do
+        # the last column of a program header is its alignment, in hex
+        for align in $("$LLVM/llvm-readelf" -lW "$file" | awk '$1 == "LOAD" {print $NF}'); do
+            if [ $((align)) -lt 16384 ]; then
+                misaligned="$misaligned ${file#"$dir"/}"
+                break
+            fi
+        done
+    done
+    [ -z "$misaligned" ] && pass "$label: every 64-bit native's LOAD segments aligned to 16 KB or more" \
+        || fail "$label: natives with a LOAD segment aligned under 16 KB:$misaligned"
+}
+if [ "$RELEASE" -eq 1 ]; then
+    step "$RELEASE_APK"
+    check_apk "$RELEASE_APK" "$X/release-apk"
+    printf '%s\n' "$BADGING" | grep -x 'application-debuggable' >/dev/null \
+        && fail "$RELEASE_APK is debuggable" || pass "$RELEASE_APK: not debuggable"
+    printf '%s\n' "$BADGING" | sed -n "s/^package: .*versionCode='\([0-9]*\)' versionName='\([^']*\)'.*/\1 \2/p" \
+        | { read -r code name; pass "$RELEASE_APK: version $name, code $code"; }
+    check_page_alignment "$RELEASE_APK" "$X/release-apk/lib"
+    if "$BUILD_TOOLS/zipalign" -c -P 16 4 "$OUT/$RELEASE_APK" >/dev/null 2>&1; then
+        pass "$RELEASE_APK: zipalign -c -P 16, uncompressed libraries on 16 KB boundaries"
+    else
+        fail "$RELEASE_APK: zipalign -c -P 16 refuses it"
+    fi
+
+    step "$RELEASE_AAB"
+    mkdir -p "$X/aab"
+    unzip -q "$OUT/$RELEASE_AAB" -d "$X/aab"
+    for entry in BundleConfig.pb base/manifest/AndroidManifest.xml base/dex/classes.dex; do
+        [ -s "$X/aab/$entry" ] && pass "$RELEASE_AAB carries $entry" || fail "$RELEASE_AAB is missing $entry"
+    done
+    check_natives "$RELEASE_AAB" "$X/aab/base" lib
+    check_page_alignment "$RELEASE_AAB" "$X/aab/base/lib"
+    if [ -n "$(ls "$X/aab/META-INF"/*.RSA "$X/aab/META-INF"/*.EC 2>/dev/null)" ]; then
+        fail "$RELEASE_AAB is signed already, and is meant to be signed only by android-sign.sh"
+    else
+        pass "$RELEASE_AAB: unsigned, for android-sign.sh"
+    fi
+fi
 
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
     printf 'android.sh: done, %s\n' "$VARIANT_LABEL"
     printf '  %s\n' "$OUT/$AAR_NAME" "$OUT/sipral-telecom.aar" "$OUT/$APK_NAME"
+    [ "$RELEASE" -eq 1 ] && printf '  %s\n' "$OUT/$RELEASE_APK" "$OUT/$RELEASE_AAB"
     exit 0
 fi
 printf 'android.sh: failed\n'; exit 1

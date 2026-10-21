@@ -378,12 +378,15 @@ both ends:
 | Audio | a voice-communication capture from the built-in microphone and a voice-communication playback track, both at 16 kHz, in `dumpsys media.audio_flinger`; with `-no-audio` the microphone reads silence (-89 dB) |
 | A simulated push | `RINGING` through the framework with no INVITE, and the incoming-call notification (category `call`, importance high, a full-screen intent); declined, `DISCONNECTED` with `REJECTED`; left alone, `MISSED` 20 seconds later, when the announcement's window ran out |
 
-The sample shows no audio levels. The full-screen intent: from Android 14,
-`USE_FULL_SCREEN_INTENT` is not simply granted by the manifest, and the
-sideloaded sample was refused it (`adb shell appops get org.sipral.sample
-USE_FULL_SCREEN_INTENT`), so the call showed as a heads-up notification
-rather than a screen over the lock screen; the user can allow it in the
-application's settings.
+The sample shows no audio levels; since 21 October 2026 each call's card
+shows its packet counts. The full-screen intent: from Android 14,
+`USE_FULL_SCREEN_INTENT` is not simply granted by the manifest, and in this
+run the sideloaded sample was refused it (`adb shell appops get
+org.sipral.sample USE_FULL_SCREEN_INTENT`), so the call showed as a heads-up
+notification rather than a screen over the lock screen; the user can allow
+it in the application's settings. On 21 October the same system image
+granted it to a fresh install (`granted=true`, app op `default`); "The store
+build" below says how the refused case was produced and what it does.
 
 Running it again, from a checkout, with the APK built on a machine with
 Docker (`scripts/package/android.sh --out out --accept-android-sdk-licenses`)
@@ -520,6 +523,419 @@ often than its NAT forgets.
 `NatTests.swift` and `NatCheck.kt` show the `Contact` and `c=` on the wire
 under a controlled test; this is the same address, written the same way,
 under a live registrar.
+
+### The store build
+
+The sample is built for Google Play as well as for a debugger, and what a
+store asks of it is in the code rather than in a list:
+
+| | |
+|---|---|
+| Target API level | 37 (Android 17), the newest stable level in Google's SDK repository on 21 October 2026 (`platforms;android-37.2` is a minor release of it). Play has required 36 for new apps and updates since 31 August 2026 |
+| A call in the background | `SipralCallService` in the telecom helper, a foreground service of types `phoneCall` and `microphone` (`FOREGROUND_SERVICE_PHONE_CALL`, `FOREGROUND_SERVICE_MICROPHONE`), from the moment a call is placed or answered until the last one ends; "Lifecycle on Android" below says when it starts and what Android 14 refuses it. Play asks each type to be declared in the Play Console with a video of the feature (support.google.com/googleplay/android-developer/answer/13392821) |
+| Microphone | Asked at first launch (`RECORD_AUDIO`), shown again on the Readiness screen with the reason, and the system settings offered once Android stops asking |
+| Notifications | `POST_NOTIFICATIONS` asked at first launch on Android 13 and later |
+| A call over the lock screen | `USE_FULL_SCREEN_INTENT`, checked with `NotificationManager.canUseFullScreenIntent` on Android 14 and later; refused, the Readiness screen says what changes (the call is a heads-up notification and a locked screen stays dark) and opens `ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT`. Play grants it by default only to applications whose core function is calling or alarms, declared in the Play Console (support.google.com/googleplay/android-developer/answer/13392821) |
+| Battery optimisation | Shown, never asked to be lifted: the sample does not hold `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. Android's own table of acceptable exemptions lists a calling application that can use high-priority FCM messages as **not acceptable** (developer.android.com/training/monitoring-device-state/doze-standby, "Acceptable use cases for exemption"), and Play's Device and Network Abuse policy says "Don't bypass System power management unless eligible" (support.google.com/googleplay/android-developer/answer/9888379). The Readiness screen explains Doze and opens `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`, the list where the user decides |
+| Background restriction, standby bucket | `ActivityManager.isBackgroundRestricted` and `UsageStatsManager.getAppStandbyBucket`, on the Readiness screen with what each means for a call |
+| The password | Sealed with AES-256-GCM under a key the Android Keystore generates and never lets out (`SipralKeystoreBox`); the preferences file holds only ciphertext. Not `EncryptedSharedPreferences`, which AndroidX has deprecated |
+| Backups | `allowBackup="false"` and data-extraction rules excluding everything from cloud backup and device transfer: the key that opens the password stays on the device, and so does everything else |
+
+**Data safety, for the Play Console form.** What the sample collects and
+where it goes, as built:
+
+- **Stored on the device only:** the account (address of record, server,
+  user name, the password sealed by the Keystore), the registration record
+  (`SipralLifecycle`, sealed the same way), and the logs below in memory.
+- **Sent to the user's own SIP server, and only there:** the account's
+  REGISTER (user name, digest answer — never the password itself), calls
+  (SIP signalling with the numbers dialled and the caller's, RTP audio from
+  the microphone). To the STUN or TURN server the user names, if any: STUN
+  Binding requests, and, through TURN, the call's audio.
+- **Shared only when the user taps Share log:** the diagnostics bundle below,
+  through the system share sheet, to whatever the user picks. It carries IP
+  addresses and the address of record; never a password.
+- **Nothing to the developer, no analytics, no advertising identifier, no
+  crash reporter, no third-party SDK beyond AndroidX and Kotlin.**
+- In the form's terms: personal info (user IDs, the SIP address), audio
+  (voice, in calls), app activity (call logs, in the bundle only when
+  shared); all of it "processed ephemerally" or "stored on device", none of
+  it collected by the developer; encrypted in transit when the account uses
+  TLS and SRTP, which is the server's choice, not the sample's.
+
+**Diagnostics.** The Diagnostics screen keeps, in memory, the sample's own
+event log (5,000 lines) and the stack's log (20,000 lines, `DEBUG`, or
+`TRACE` with every SIP message when switched on; pseudonymised by the stack,
+or with real addresses and numbers when the diagnostic trace is switched on
+for comparing with a PBX's log). **Share log** writes one zip under the
+cache and hands it to the share sheet through a `FileProvider` limited to
+that directory: `README.txt` (application and variant, device, Android
+release, process start, every readiness fact), `events.txt`,
+`stack-log.txt`, `diagnostics.json` (the decision record of every call the
+stack holds, `docs/14-diagnostics.md`, with real addresses), `state.txt`
+(the stack's redacted state snapshot) and `logcat.txt` (this application's
+own logcat, which is all Android shows an application). Every line carries
+the phone's wall clock with its offset. There is no pcapng: the C ABI
+offers no packet capture, so a capture comes from the network or the PBX.
+Before a byte is written, `EvidenceBundle` removes every value of the
+account's two passwords (four characters or longer) and the value of every
+`Authorization` and `Proxy-Authorization` header, wherever it sits in a
+line; the stack never logs credentials in the first place
+(`docs/17-observability.md`), so this is the second line, for text from
+anywhere else. `EvidenceTest` holds it to that on the JVM.
+
+**Release build.** `scripts/package/android.sh --release` builds the
+sample's store artefacts unsigned in the build image, and
+`scripts/package/android-sign.sh` signs them on the machine that holds the
+key, so the key never enters the image or the machine the image runs on:
+
+```sh
+scripts/package/android.sh --out out --accept-android-sdk-licenses --release [--with-opus] [--version-code N]
+# on the machine with the key; the four variables come from the environment
+export SIPRAL_ANDROID_KEYSTORE=... SIPRAL_ANDROID_KEYSTORE_PASSWORD=... SIPRAL_ANDROID_KEY_ALIAS=... SIPRAL_ANDROID_KEY_PASSWORD=...
+scripts/package/android-sign.sh --in out
+```
+
+The variant is in every name: `sipral-sample-release.apk` and `.aab` carry
+natives without Opus (version name `1.2.3`), `sipral-sample-opus-release.apk`
+and `.aab` natives with it (`1.2.3-opus`); the version code is the
+workspace version times ten plus one for Opus (`102030`, `102031`), and
+`--version-code` overrides it for an upload that needs a higher one.
+`android.sh` checks the release APK and the bundle as it checks the debug
+APK, and for what a store asks besides: not debuggable, target API level
+37, every 64-bit native's LOAD segments aligned to 16 KB and the APK's
+uncompressed libraries on 16 KB boundaries (Play has asked 16 KB page
+support of apps targeting Android 15 and later since November 2025), and
+the bundle unsigned. `android-sign.sh` aligns the APK (`zipalign -P 16`),
+signs it with v2 and v3 signatures and verifies it, and signs the bundle
+with `jarsigner`, which is how Play expects an upload to be signed.
+`--new-test-keystore DIR` makes a throwaway upload key with random
+passwords (the directory 0700, the files 0600, refused inside the
+repository). A key Play has seen on a first upload stays that listing's
+upload key, so a listing meant to last is given the owner's key, not a
+test one.
+
+Run on 21 October 2026, from this tree on the lab machine's Docker:
+`android.sh --release` passed every check (`:telecom:testDebugUnitTest` 12
+tests, `:sample:testDebugUnitTest` 8; 96 artefacts on the sample's release
+classpath, every one under a licence `deny.toml` allows): the release APK
+23,634,594 bytes, the bundle 15,858,097, version 1.2.3 code 102030, not
+debuggable, 16 KB aligned. Signed on the Mac with a test key: v2 and v3
+signatures verified, the bundle `jar verified`. The signed release APK
+installed on the `android-36` emulator, launched cold in 3.1 s (host load
+600, see below), and asked for the microphone and then notifications.
+
+### Lifecycle on Android
+
+The Kotlin layer carries what `docs/16-lifecycle.md` and "C3" above
+describe, as the .NET MAUI layer does:
+
+| | |
+|---|---|
+| `SipralClient.suspending()`, `resumed()`, `interfaceLost()`, `nameResolutionLost()`, `coldStart()` | `sipral_stack_suspending`, `_resumed`, `_interface_lost`, `_name_resolution_lost`, `_cold_start` |
+| `SipralAccount.freeze()`, `thaw(snapshot, asleepMs)`, `timeToReadyMs`, `pushEcho` | `sipral_account_freeze`, `_thaw`, `_time_to_ready`, `_push_echo` |
+| `SipralLifecycle(store)` | every registration a registrar accepts for a kept account written down with the wall-clock time, so the record never trails the sequence number the registrar last saw; `enteredBackground()` writes each down once more and then calls `suspending()`; `enteredForeground()` calls `resumed()`; `restore(account, key)` thaws with how long the record sat |
+| `wakeForPush(client, account, bridge, lifecycle, key, caller)` | the cold start after a push, in order: `coldStart()`; the record thawed (`RESTORED`, the same `Call-ID`, nothing sent); `TelecomBridge.pushArrived`, so the call rings before anything crosses the network, whose announce sends the REGISTER that confirms the binding; a registration from the beginning only when there was no record |
+| `SipralKeystoreStore` (Android) | the records, each sealed by `SipralKeystoreBox` in the application's private preferences; one that cannot be opened reads as absent |
+| `SipralAppLifecycle(application, lifecycle)` (Android) | `enteredBackground()` when the application's last activity stops (not for a configuration change), `enteredForeground()` when one starts again. `suspendInBackground = false` writes the records and tells the stack nothing, for an application with no push service that wants to refresh for as long as Android lets it run |
+
+`FreezeCheck.kt` and `LifecycleCheck.kt` run all of it on a JVM over real
+stacks and a loopback registrar (`scripts/check.sh --only kotlin`): a
+registration written down on acceptance and on the way into the
+background, `suspending` reporting one binding no longer counted as live, a
+second client woken by a push ten minutes later (on the injected wall
+clock) showing the call before anything else, carrying the binding on with
+one REGISTER on the same `Call-ID`, and ready 22 ms after its cold start;
+with no record, a new binding.
+
+**The call's foreground service and a push, in order.** `SipralCallForeground.follow`
+starts `SipralCallService` when a call is placed (the framework's
+`REQUESTED`) or answered, keeps it while the call is dialling, active or
+held, starts it again as the shown call moves on (so a microphone granted
+mid-call is added to its types), and stops it with the last call. It is
+**not** started while a call only rings:
+
+1. A push arrives (high-priority FCM); the process may be cold. The handler
+   calls `wakeForPush`: the call is reported to the framework and rings, the
+   registration is carried on. No foreground service: the incoming-call
+   notification needs none, and from the background Android 14 refuses a
+   `microphone` service outright (`SecurityException`, the "while-in-use"
+   rule, developer.android.com/develop/background-work/services/fgs/restrictions-bg-start).
+   A high-priority FCM message is an exemption from the background-start
+   rule for other types, which a `phoneCall`-only service could use; the
+   sample does not need one to ring.
+2. The user answers on the full-screen activity or the notification: the
+   application is visible, or the start comes from a notification the user
+   touched, both exemptions for while-in-use permissions. The answer
+   reaches `TelecomBridge.answer`, the call goes `ACTIVE`, and
+   `SipralCallForeground` starts the service with `phoneCall` and
+   `microphone`.
+3. Answered from a headset, a car or a watch with the phone locked, the
+   application is not visible: the service starts as `phoneCall` alone if
+   the system refuses `microphone`, and says so in the log; the far end
+   then hears silence until the application is opened. That path needs a
+   phone and a headset to see.
+
+A `ForegroundServiceStartNotAllowedException` (Android 12 and later) is
+logged, not thrown: the call goes on for as long as Android lets the
+process run.
+
+### What ran on the emulator, 21 October 2026
+
+An `android-36` `google_apis` arm64-v8a AVD, headless, `-no-audio`, on the
+Apple-silicon Mac, the sample's debug APK built from this tree. The far end
+was voip-demo (FreePBX 16.0.47, Asterisk 18.9), reached from the Mac over
+the SCIT VPN: the sample registered as extension 152 over UDP with no STUN
+server, and a Sipral client on the Mac (the idiomatic Kotlin layer on the
+JVM) registered as 170, to call or be called. Each extension was left
+unregistered at the end. The account reached the debug build as a file
+written into the application's own storage with `run-as` and read once at
+start (`AccountImport`, debug builds only; the release build's reads
+nothing), so no password was typed over `adb`, where a keystroke that
+misses its field lands in whatever has the focus. The Mac was shared with other work: its load
+average is given beside each group of numbers, and the emulator itself
+reported system processes not responding above 500.
+
+**Registration and media through two NATs, with no STUN.** The REGISTER,
+its 401 and the REGISTER with credentials were answered 200 in about
+0.35 s; voip-demo kept the binding the 200 OK names as `10.0.2.16`, and
+still reached the phone: its OPTIONS (about once a minute, more often
+after a change) and INVITEs
+arrived at the phone's socket through the emulator's NAT and the VPN's,
+which is FreePBX's NAT handling for an extension (`rewrite_contact`,
+`force_rport`) answering to the address the REGISTER came from. Media
+flowed both ways from the first second, PCMU, 284 packets received in the
+first six seconds, though the phone's `c=` named 10.0.2.16: FreePBX's
+`rtp_symmetric` sends to where the phone's RTP comes from. So against a
+PBX set up the way FreePBX sets up an extension behind a NAT — which is
+what a phone on mobile data meets — nothing on the phone is needed; against
+a peer that does not latch, STUN (`SIPRAL_NAT_STUN`) or TURN with ICE is,
+as "Through the lab's Asterisk" above shows. No STUN server sits on the VPN
+path to voip-demo, so STUN was not tried against it.
+
+**Network changes, mid-call** (152 calling 170, load 595 to 630). The
+telecom helper's `SipralNetworkMonitor` follows Android's default network
+and calls `networkChanged`; every call the stack then asks to move is
+offered on the new address with a re-INVITE (`moveMedia`). Times are from
+the `adb` command; "at the far end" is the gap the Mac client measured in
+what it received.
+
+| | What happened | Audio back |
+|---|---|---|
+| Wi-Fi off, mobile data on | Android lost Wi-Fi 1.5 s after the command; 0.2 s later the stack was on the mobile network (`eth0`, 10.0.2.15), re-INVITE 0.2 s after, REGISTER on the same `Call-ID` with the new `Contact` | at the phone after a 1.0 s gap; at the far end 2.0 s after the command (gap 1.2 s) |
+| Wi-Fi on again | Android moved the default network 8 s after the command, once Wi-Fi was validated; the call moved with it | gaps of 2.7 s at the phone, 1.0 and 1.8 s at the far end (an interleaved report from Android was taken as a second move; the monitor now pairs each network's kind and address, see below) |
+| Mobile data off while on Wi-Fi | nothing: not the default network | no gap |
+| Wi-Fi off with mobile data off | no network 2.2 s after the command: `detach`, the registration `unverified`, inbound audio stopped | — |
+| Mobile data on | the network 1.3 s after the command, the call moved and the account registered 0.3 s later | at the phone 1.6 s after the command, after 12.7 s without a network; at the far end gap 12.8 s |
+| Airplane mode on | no network 3 s after | — |
+| Airplane mode off | the mobile network 9.6 s after the command (the emulated radio attaching), audio 0.3 s after that; Wi-Fi joined 3.9 s later and the call moved again without a measurable gap | at the far end after 21.3 s without audio |
+
+Idle, with no call, each move re-registered within 0.3 s of Android
+reporting the network. The first Wi-Fi-on above was reported by Android as
+Wi-Fi's capabilities with the mobile network's address, for a few
+milliseconds, and the stack moved twice; `SipralNetworkMonitor` now keeps
+the capabilities and the link properties of one network together and drops
+anything left from the previous one. Run again with that in (load 115 to
+145): Wi-Fi off moved the call to the mobile network 1.3 s after the
+command with a 0.96 s gap at the phone and 1.0 s at the far end; Wi-Fi on
+moved it back in one step, 5.6 s after the command, with no gap over
+400 ms at either end.
+
+**Process death and a push** (load 340 to 700 unless given). The sample
+writes its registration down (`SipralLifecycle`, `SipralKeystoreStore`) on
+every acceptance and when it goes to the background, and the simulated push
+is `adb shell am broadcast -a org.sipral.sample.SIMULATE_PUSH -n
+org.sipral.sample/.PushReceiver --es caller sip:170@<pbx>` (the receiver is
+protected by `android.permission.DUMP`, which the shell holds and no
+installed application can).
+
+| | Push to ringing | Ready |
+|---|---|---|
+| Killed in the background (`am kill`, after `suspending`) | the stack open 165 ms and the call ringing 1.1 s after the process started | 679 ms after the cold start, 1.82 s after the process started; the REGISTER continued `Call-ID` `4bcf…` at CSeq 16 after 14 |
+| Crashed in the foreground (`am crash`) | ringing 1.66 s after the process started | 386 ms after the cold start, 1.93 s after the process started, from the record written on the last acceptance |
+| `am force-stop` | delivered all the same, since the shell names the receiver; ringing 1.77 s after the process started | 204 ms after the cold start, 1.90 s after the process started. A real push is another matter: a force-stopped application is not started by broadcasts until the user opens it, and FCM delivers nothing to it either, which an emulator without Play services cannot show |
+| Opened by the user after the process had gone | — | 2.58 s after the cold start, 4.39 s after the process started; again at load 52, 2.02 s and 4.40 s |
+
+An `am crash` sent to a frozen process (below) takes effect when the
+process is next woken: a push then woke it into the crash, and the push
+was lost with it.
+
+**Doze, App Standby and the freezer** (load 130 to 360). What the UDP
+socket and the keep-alive do, as measured:
+
+- **In the background with no call, the process is frozen.** Android's
+  cached-apps freezer froze the sample ten seconds after it became a
+  cached process (`isFrozen=true` in `dumpsys activity processes`), before
+  any Doze. A frozen process runs no timer and reads no socket: no refresh,
+  no keep-alive, no answer to the PBX's OPTIONS. voip-demo then answered
+  calls to 152 with `503 Service Unavailable` within 0.2 s, its OPTIONS
+  having gone unanswered.
+- **A push wakes it.** The broadcast thawed the frozen process; the
+  announce's REGISTER was answered 0.36 s after the push, and an INVITE
+  sent five seconds later rang on the screen the push had raised, matched
+  to it (C2). The push has to name the caller as the INVITE's `From` will:
+  FreePBX writes its own address as the host (`sip:170@<pbx address>`), and
+  a push naming the domain instead left the INVITE unmatched, a second
+  ringing call, which Telecom refused (`MAX_RINGING_CALLS`) and the bridge
+  answered 486.
+- **Doze.** Forced (`dumpsys deviceidle force-idle`, unplugged, screen
+  off), with the process in the background and not yet frozen, an INVITE
+  never reached the application: Doze cuts an idle application's network.
+  A temporary allowlist like the one a high-priority FCM message grants
+  (`dumpsys deviceidle tempwhitelist`) let the push's REGISTER through in
+  0.17 s; a call four seconds later still had 503 from voip-demo, which
+  had marked the contact unreachable and had not yet sent the OPTIONS that
+  would clear it. With the application on screen (the full-screen intent
+  had woken the screen and opened it), calls rang in Doze within 0.8 s.
+- **App standby buckets.** `am set-standby-bucket org.sipral.sample
+  restricted` (45) did not stop a push's REGISTER (0.36 s); a call ten
+  seconds later had 503, the same unreachable contact.
+- **Idle in the foreground.** Three minutes with nothing sent but the
+  answers to voip-demo's OPTIONS, a call rang at once. Once, after the
+  application had been sent to the background, woken by a push and brought
+  back, an INVITE was lost 22 seconds after the last OPTIONS had reached the
+  phone and the next call had 503; a move to the mobile network, which
+  registers from a new mapping, made calls ring again. That was not seen
+  again and is not explained from the phone's side; the PBX's view was not
+  available. The sample now gives its account a 25-second keep-alive
+  (`keepaliveMs`, a double CRLF to the registrar, `docs/06-nat.md`
+  "Refresh") for the NATs of mobile networks, which forget a quiet flow
+  sooner than this path did; it runs while the process does and never while
+  it is frozen or dozing. Its effect was not measured here.
+
+What the documentation should promise, then: **an Android phone is
+reachable while the application is on screen or holds a call; in the
+background it is reachable only through a push.** A registration does not
+stay alive by itself in the background on Android 14 and later — the
+freezer stops it within seconds — and Doze stops it on every release since
+6.0. With a push gateway in front of the PBX (RFC 8599, "Who sends the
+push"), a woken phone is registered within half a second; a PBX that
+qualifies its contacts, as FreePBX does, can still answer 503 for the
+first seconds after, until its next OPTIONS reaches the phone, which is a
+setting of the PBX (`qualify_frequency`) and the gateway's to wait out.
+
+**Audio** (load 50 to 60).
+
+- The microphone refused at the start of a call: the foreground service ran
+  as `phoneCall` only, AAudio refused the input stream
+  (`AAUDIO_ERROR_INTERNAL`), and RTP went on both ways, silence from the
+  phone.
+- Refused while the process runs (`pm revoke`): Android killed the process
+  ("permissions revoked"), the call with it; the next launch asked again.
+- Granted mid-call (`pm grant`): nothing reopened the input by itself; after
+  Hold and Resume the engine reopened both roles and `audio_flinger` showed
+  an active `VOICE_COMMUNICATION` record client for the sample, and the
+  service's types grew to `phoneCall` and `microphone`.
+- Audio focus: during the self-managed call the focus stack held no entry
+  (the framework holds focus for the call, "C4" above). Another
+  application taking focus could not be driven from `adb` on this image;
+  it is on the phone checklist.
+- The full-screen intent: allowed, a push with the screen off woke the
+  screen (`mWakefulness=Awake`); with `appops set org.sipral.sample
+  USE_FULL_SCREEN_INTENT deny`, the same push left it asleep and the call
+  was a notification, and the Readiness screen said so.
+
+- An incoming call answered at load 170: the engine's microphone open timed
+  out (`DEVICE_TIMED_OUT`), recording stopped a second after it started,
+  and the far end heard the media clock's silence. At load 68 the same call
+  recorded throughout (an active `VOICE_COMMUNICATION` record client), and
+  the first audio reached each end 2.3 to 2.4 s after the answer, while
+  AAudio opened both streams. The audio probe's limit is what a starved
+  emulator crosses; a phone is the measure.
+
+**The diagnostics bundle.** Shared after the mid-call network run: 27,623
+bytes, six files, the stack's log pseudonymising every address (the PBX
+read as `146.182.29.189` there and as itself in `diagnostics.json`). Shared
+again with SIP messages and the diagnostic trace both on, after a
+registration and a call (38 whole SIP messages in `stack-log.txt`, real
+addresses and numbers, six `Authorization` headers each reduced to
+`Authorization: [removed]`). In every bundle, searched with `grep -F` for
+each extension's password and for any `Authorization` header with a value,
+nothing was found, in any file or in the zip itself.
+
+**With Opus.** `android.sh --release --with-opus` passed the same checks
+(the release APK 24,814,250 bytes, the bundle 16,584,235, version
+`1.2.3-opus` code 102031, 16 KB aligned), was signed the same way,
+installed on the emulator in place of the other, and called the Sipral
+client on the Mac directly, with no registrar: Opus was negotiated, and 35
+seconds carried 1,458 packets from the phone and 1,483 to it, none lost.
+voip-demo offers its extensions no Opus, so the calls through it above were
+PCMU.
+
+### On a real Android phone
+
+What only a phone can show, in the order that wastes least time, with what
+to expect and what to send back. Every step ends with **Diagnostics →
+Share log** sent to the developer, unless it says otherwise; the bundle
+holds the timings, so a step needs no stopwatch unless it says so.
+
+Before: the APK or bundle from "Release build" above (or the debug APK for
+`adb`), voip-demo test extensions, a second phone or a softphone as the far
+end, and `adb` on a computer for the steps that use it.
+
+1. **Install.** From Play internal testing (the `.aab`), or
+   `adb install sipral-sample-release.apk`. With the bundle locally:
+   `bundletool build-apks --bundle sipral-sample-release.aab --output s.apks
+   --ks <upload key> --connected-device && bundletool install-apks --apks s.apks`.
+   *Expect:* installs; the launcher shows "Sipral sample". *Send:* phone
+   model, Android version, where it was installed from.
+2. **Permissions.** Open it. *Expect:* the microphone asked, then
+   notifications (Android 13+). Allow both. Readiness tab: every line
+   "Ready", except battery optimisation, which is information. Installed
+   from Play, "Calls over the lock screen" should read Ready; sideloaded,
+   it may not: tap Open the setting and allow it. *Send:* a screenshot of
+   the Readiness tab.
+3. **Register over UDP, then TCP, then TLS.** The account (extension,
+   `host:port` of each transport, `sip:<host>` as the registrar URI),
+   Register. *Expect:* "registered" within 2 s on each; the bundle's
+   `events.txt` says "ready: N ms". Unregister between transports.
+4. **Calls both ways, screen on.** Call the far end, talk for 30 s, hang
+   up; have it call the phone, answer, 30 s, hang up from the far end.
+   *Expect:* both directions heard; the call's card shows packets rising
+   both ways; "call service in the foreground: phoneCall and microphone" in
+   the events. *Send:* the bundle, and whether each side heard the other.
+5. **Locked phone, incoming.** Lock the phone, wait one minute, call it.
+   *Expect:* the screen lights and the call shows over the lock screen
+   (full-screen intent); answer, 20 s, hang up. If it does not ring at all,
+   that is the freezer and Doze, step 11: note it and go on. *Send:*
+   whether it lit the screen, rang as a notification only, or not at all.
+6. **A cellular call over ours.** In a call, have a cellular call arrive;
+   answer it; end it; resume ours. *Expect:* ours held (the far end hears
+   hold), ours resumed with audio both ways. Then reject a cellular call
+   during ours. *Send:* the bundle.
+7. **Routes.** In one call, switch earpiece, speaker, a wired headset
+   (plug it in mid-call), a Bluetooth headset (connect it mid-call), and
+   Android Auto if there is a car. *Expect:* the card's route chips follow,
+   audio moves with each, and "audio route ..." lines in the events. Press
+   the headset's button once: *expect* mute ("audio muted"), or hang-up,
+   per the headset. *Send:* the bundle and which route had no audio.
+8. **Another application's audio.** In a call, start music in another app.
+   *Expect:* the music does not play over the call, or ducks; the call's
+   audio stays. *Send:* what was heard.
+9. **Wi-Fi to mobile data mid-call.** In a call on Wi-Fi, walk out of
+   range or switch Wi-Fi off. *Expect:* "network cellular ...: rebuild",
+   "media offered on the new network", "inbound audio back after N ms".
+   Time it by ear too: *send* the seconds until the far end was heard
+   again, and the bundle. Then back to Wi-Fi.
+10. **Battery.** Fully charged, registered, screen off, 30 minutes idle.
+    *Send:* Settings → Battery for the app (percentage and time), and
+    `adb shell dumpsys batterystats org.sipral.sample > batterystats.txt`.
+11. **Doze overnight.** Registered, unplugged, screen off overnight. In the
+    morning, before touching it, call it from the far end. *Expect,* with
+    no push service (this sample has none): no ring — the freezer and Doze
+    stop a background application, as above. Then open the app and call
+    again: *expect* a ring. To see the push path instead: `adb shell
+    dumpsys deviceidle tempwhitelist -d 10000 org.sipral.sample` and the
+    `SIMULATE_PUSH` broadcast above, then the call. *Send:* the bundle and
+    what rang.
+12. **Process death.** In the background, `adb shell am kill
+    org.sipral.sample`, then the `SIMULATE_PUSH` broadcast naming the far
+    end as the PBX writes it. *Expect:* ringing within two seconds, "ready:
+    N ms after the cold start ... carried on". *Send:* the bundle.
+13. **Android 8 (API 26 or 27), if a phone is available.** Steps 1 to 4
+    and 7. *Expect:* "audio: AudioRecord and AudioTrack" (no AAudio device
+    mode below Android 9), calls heard both ways; no notifications or
+    full-screen permission to ask. *Send:* the bundle.
 
 ## The Swift package on iOS
 

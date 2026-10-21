@@ -614,10 +614,15 @@ after it. What is left is platform work, and platform work needs the platform.
   opened (`bindings/kotlin/README.md`), and the sample's APK on an Android 16
   arm64 emulator placing a call to a Sipral agent, holding, resuming, sending
   a digit and hanging up, with the telecom framework following every state,
-  and a simulated push ringing through it (`docs/15-mobile.md`). An incoming
-  INVITE, real audio devices and routes, and push delivery wait for a phone
-  and a registrar in front of it; so does the foreground service for a
-  call's lifetime.
+  and a simulated push ringing through it (`docs/15-mobile.md`). Since
+  21 October 2026 the helper also holds the foreground service for a call's
+  lifetime and follows the network, the Kotlin layer carries the lifecycle
+  (`SipralLifecycle`, `wakeForPush`), and the sample registered with a live
+  FreePBX from an emulator, called both ways, moved calls across Wi-Fi,
+  mobile data and airplane mode, and carried its registration across a
+  killed process woken by a push. Real audio devices and routes, push
+  delivery, and a night in Doze wait for a phone; `docs/15-mobile.md` lists
+  the steps.
 - **ICE in the full role** (RFC 8445) with TURN, on top of the STUN, TURN and
   ICE-lite in `sipral-nat`: gathering, pairing, checks, nomination, role
   conflicts, restarts, consent freshness (RFC 7675). *The agent is written*,
