@@ -25,6 +25,12 @@ obj/
 # Swift package build output
 .build/
 
+# The iPhone sample: the signer's own settings, the icon
+# scripts/package/ios-app.sh draws, and what Xcode keeps per user
+bindings/swift/samples/SipralPhone/Local.xcconfig
+bindings/swift/samples/SipralPhone/SipralPhone/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+xcuserdata/
+
 # Python binding: build artefacts and virtual environments, never committed
 __pycache__/
 *.pyc

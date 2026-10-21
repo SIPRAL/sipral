@@ -832,6 +832,15 @@ launched the sample, and a firewall that asks about new programs asks about
 this one. `swift build` compiles it; `scripts/check.sh` covers the layer it
 sits on through `swift test`.
 
+`samples/SipralPhone` — the iPhone application, an Xcode project over the
+XCFramework this tree builds: CallKit for every call, PushKit with RFC
+8599's parameters, `AudioSessionObserver`, `NWPathMonitor` into
+`networkChanged(to:)`, `SipralAppLifecycle` over the Keychain, and a
+Diagnostics screen whose "Share log" hands over one timed file.
+`scripts/package/ios-app.sh` builds it, runs its tests on a simulator and
+exports it for TestFlight; `docs/15-mobile.md`, "The iPhone sample", says
+what ran and lists the steps on a real phone.
+
 ## What is not here
 
 CallKit and PushKit delivered by the system: `CallKitAdapter` and

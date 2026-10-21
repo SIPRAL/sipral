@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Sytek
+//
+// The two settings that belong to whoever signs the build. Neither is
+// committed with a team in it: scripts/package/ios-app.sh passes
+// DEVELOPMENT_TEAM (and SIPRAL_PHONE_BUNDLE_ID, when set) on its command
+// line, and a build from Xcode reads them from Local.xcconfig beside this
+// file, which git ignores:
+//
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   SIPRAL_PHONE_BUNDLE_ID = org.example.phone
+
+SIPRAL_PHONE_BUNDLE_ID = org.sipral.phone
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

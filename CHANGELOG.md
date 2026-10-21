@@ -15,6 +15,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 - The Swift package hands RFC 8599's push parameters to an account (`SipralStack.addAccount(push:)`, `SipralPush.apnsVoip`), reads the registrar's answer (`Account.pushEcho()`), and places outgoing calls through CallKit (`CallKitAdapter.startOutgoingCall(callee:dial:)`, `request(_:)`).
 - The Swift package carries a registration across a process iOS ended: `SipralStack.suspending()`, `resumed()`, `coldStart()`, `interfaceLost()`, `nameResolutionLost()`, `Account.freeze()`, `thaw(_:asleepMs:)` and `timeToReadyMs()`, and `SipralAppLifecycle`, which writes the registration into the Keychain on the way into the background, then suspends, and in a process a push started reads it back into an account that comes up restored (`docs/15-mobile.md`, "C3 in the Swift package").
+- An iPhone sample, `bindings/swift/samples/SipralPhone`: account, dial pad, CallKit for every call, PushKit with RFC 8599's parameters on the REGISTER, the system's route picker, the registration carried across an ended process, and a Diagnostics screen whose "Share log" hands over one timed file with the stack's redacted trace and decision record. `scripts/package/ios-app.sh` builds it for the simulator and a phone and exports an IPA for TestFlight; `docs/15-mobile.md` says what ran on the simulator and against a live PBX, and lists the steps for a real iPhone.
 
 ### Fixed
 
