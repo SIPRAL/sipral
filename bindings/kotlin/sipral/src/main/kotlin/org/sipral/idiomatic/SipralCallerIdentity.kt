@@ -116,6 +116,27 @@ data class SipralHistoryEntry(val uri: String, val index: String?)
 data class SipralAlertInfo(val uri: String, val name: String?)
 
 /**
+ * The numbers the ISUP IAM a carrier gateway carried beside the offer gave
+ * (SIP-T, SIP-I): `+` and the digits for an international number, the
+ * digits alone for any other. What follows from them is in the rest of
+ * [SipralCallerIdentity] already -- an international calling number from a
+ * trusted gateway as [SipralCallerIdentity.asserted], a withheld one as
+ * [SipralPrivacy.ID], the diversions -- so this is for the numbers a URI
+ * could not carry.
+ */
+data class SipralIsupCaller(
+    /** The calling party number. */
+    val calling: String?,
+    /** Every additional calling party number: what a caller with a special
+     * arrangement presents beside the network's. */
+    val additionalCalling: List<String>,
+    /** Who the call was first placed to. */
+    val originalCalled: String?,
+    /** Who it was last diverted from. */
+    val redirecting: String?,
+)
+
+/**
  * Who is calling beyond the `From`: the network's assertion (behind the
  * account's trust gate), the caller's privacy request, and diversions.
  * Read with [SipralClient.callerIdentity] from the INCOMING_CALL before
@@ -145,6 +166,9 @@ data class SipralCallerIdentity(
     val verification: SipralVerificationOutcome = SipralVerificationOutcome.NONE,
     val attestation: SipralAttestation = SipralAttestation.NONE,
     val verificationFailure: SipralVerificationFailure = SipralVerificationFailure.NONE,
+    /** What a carrier gateway's ISUP said, or null when the INVITE carried
+     * none this library reads. */
+    val isup: SipralIsupCaller? = null,
 )
 
 /** How a call asked to be answered (RFC 5373) and rung (`Alert-Info`).
@@ -250,7 +274,20 @@ internal object IdentityReader {
             attestation = SipralAttestation.of((data?.attestation ?: 0L).toInt()) ?: SipralAttestation.NONE,
             verificationFailure = SipralVerificationFailure.of((data?.verificationFailure ?: 0L).toInt())
                 ?: SipralVerificationFailure.NONE,
+            isup = isup(client, call),
         )
+    }
+
+    private fun isup(client: SipralClient, call: Long): SipralIsupCaller? {
+        val read = SipralIsupCaller(
+            calling = texts(client, call, SipralIdentityText.ISUP_CALLING).firstOrNull(),
+            additionalCalling = texts(client, call, SipralIdentityText.ISUP_ADDITIONAL_CALLING).filterNotNull(),
+            originalCalled = texts(client, call, SipralIdentityText.ISUP_ORIGINAL_CALLED).firstOrNull(),
+            redirecting = texts(client, call, SipralIdentityText.ISUP_REDIRECTING).firstOrNull(),
+        )
+        val carried = read.calling != null || read.additionalCalling.isNotEmpty() ||
+            read.originalCalled != null || read.redirecting != null
+        return read.takeIf { carried }
     }
 
     fun answering(client: SipralClient, call: Long, data: SipralCallEvent?): SipralAnswering {

@@ -208,7 +208,13 @@ and `Answering` (`SipralAnswering`: `Answer-Mode`, `Priv-Answer-Mode`,
 `AnswerAfterMs` when the call asks to be answered by itself — whether to is
 the application's policy — the ring source and the `Alert-Info` URI).
 `call.Identity(SipralIdentityText.Diversion)` or
-`stack.CallIdentity(args.Call, which)` reads a whole list. On
+`stack.CallIdentity(args.Call, which)` reads a whole list. From a carrier
+gateway (SIP-T, SIP-I) the ISUP IAM beside the offer fills in what the
+headers did not say — the calling number as the asserted identity, a
+withheld one as `Sipral.PrivacyId`, the diversions — and the lists
+`SipralIdentityText.IsupCalling`, `IsupAdditionalCalling`,
+`IsupOriginalCalled` and `IsupRedirecting` hold its numbers as text, for
+those no URI could carry (ABI 1.4). On
 `SipralEventKind.CallEnded`, `Cause` (`SipralEndCause`) is the `Reason` of
 the BYE, CANCEL or refusal: `Sip == 200` on a CANCEL is another phone
 answering, not a missed call. `call.HangupFor(q850Cause: 16, text: ...)`

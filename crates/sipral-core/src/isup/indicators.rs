@@ -109,7 +109,9 @@ impl CalledStatus {
         }
     }
 
-    const fn code(self) -> u8 {
+    /// The two-bit value.
+    #[must_use]
+    pub const fn code(self) -> u8 {
         match self {
             Self::NoIndication => 0,
             Self::SubscriberFree => 1,

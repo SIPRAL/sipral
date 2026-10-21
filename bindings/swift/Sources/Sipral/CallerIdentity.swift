@@ -111,6 +111,24 @@ public struct AlertInfo: Sendable, Equatable {
     public let name: String?
 }
 
+/// The numbers the ISUP IAM a carrier gateway carried beside the offer gave
+/// (SIP-T, SIP-I): `+` and the digits for an international number, the
+/// digits alone for any other. What follows from them is in the rest of
+/// `CallerIdentity` already -- an international calling number from a
+/// trusted gateway as `asserted`, a withheld one as `.id` in `privacy`, the
+/// diversions -- so this is for the numbers a URI could not carry.
+public struct IsupCaller: Sendable, Equatable {
+    /// The calling party number.
+    public let calling: String?
+    /// Every additional calling party number: what a caller with a special
+    /// arrangement presents beside the network's.
+    public let additionalCalling: [String]
+    /// Who the call was first placed to.
+    public let originalCalled: String?
+    /// Who it was last diverted from.
+    public let redirecting: String?
+}
+
 /// Who is calling beyond the `From`: what the network asserted, behind the
 /// account's trust gate, what the caller asked to keep private, and where
 /// the call was diverted from. Read with `SipralStack.callerIdentity(of:)`
@@ -136,6 +154,9 @@ public struct CallerIdentity: Sendable, Equatable {
     public let diversions: [Diversion]
     /// Every `History-Info` entry.
     public let history: [HistoryEntry]
+    /// What a carrier gateway's ISUP said, or `nil` when the INVITE carried
+    /// none this library reads.
+    public let isup: IsupCaller?
 }
 
 /// How a call asked to be answered (RFC 5373) and rung (`Alert-Info`). Whether
@@ -197,6 +218,14 @@ enum IdentityReader {
         let historyUris = try texts(stack: stack, call: call, .history)
         let historyIndexes = try texts(stack: stack, call: call, .historyIndex)
         let asserted = data?.assertedUri.map { Party(uri: $0, displayName: data?.assertedDisplay) }
+        let isup = IsupCaller(
+            calling: try texts(stack: stack, call: call, .isupCalling).first ?? nil,
+            additionalCalling: try texts(stack: stack, call: call, .isupAdditionalCalling).compactMap { $0 },
+            originalCalled: try texts(stack: stack, call: call, .isupOriginalCalled).first ?? nil,
+            redirecting: try texts(stack: stack, call: call, .isupRedirecting).first ?? nil
+        )
+        let carried = isup.calling != nil || !isup.additionalCalling.isEmpty
+            || isup.originalCalled != nil || isup.redirecting != nil
         return CallerIdentity(
             trusted: data?.identityTrusted ?? false,
             asserted: asserted,
@@ -215,7 +244,8 @@ enum IdentityReader {
             },
             history: historyUris.enumerated().compactMap { index, uri in
                 uri.map { HistoryEntry(uri: $0, index: index < historyIndexes.count ? historyIndexes[index] : nil) }
-            }
+            },
+            isup: carried ? isup : nil
         )
     }
 

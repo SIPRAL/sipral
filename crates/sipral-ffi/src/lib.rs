@@ -52,6 +52,7 @@ pub mod handle;
 pub mod header;
 pub mod identity;
 pub mod inband;
+pub mod isup;
 pub mod lifecycle;
 /// Two hundred calls on one stack from four threads: the locking, measured.
 #[cfg(test)]

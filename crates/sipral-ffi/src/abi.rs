@@ -569,6 +569,7 @@ pub const MIN_SIZES: &[(&str, &str, usize)] = pinned![
     crate::local_conference::SipralLocalConferenceMember,
     crate::pin::SipralPinnedCertificate,
     crate::network_test::SipralNetworkTestConfig,
+    crate::isup::SipralIsup,
 ];
 
 /// The versioned-shaped structs with no pinned length, and why.
@@ -691,6 +692,7 @@ pub const SURFACE: Surface = Surface {
         crate::network_test::SipralNatKind::ABI,
         crate::network_test::SipralServerReach::ABI,
         crate::stack::SipralHeldAudio::ABI,
+        crate::isup::SipralIsupNumber::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -763,6 +765,7 @@ pub const SURFACE: Surface = Surface {
         crate::local_conference::SipralLocalConferenceMember::ABI,
         crate::pin::SipralPinnedCertificate::ABI,
         crate::network_test::SipralNetworkTestConfig::ABI,
+        crate::isup::SipralIsup::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -969,6 +972,9 @@ pub const SURFACE: Surface = Surface {
         crate::audio::sipral_audio_call_set_muted::ABI,
         crate::audio::sipral_audio_call_muted::ABI,
         crate::audio::sipral_audio_call_level::ABI,
+        crate::isup::sipral_message_isup::ABI,
+        crate::isup::sipral_isup_read::ABI,
+        crate::isup::sipral_isup_number::ABI,
     ],
 };
 

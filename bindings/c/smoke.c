@@ -49,7 +49,7 @@
     X(sipral_recording_options) X(sipral_transport_failure)                   \
     X(sipral_local_conference_config) X(sipral_local_conference_info)         \
     X(sipral_local_conference_member) X(sipral_pinned_certificate)            \
-    X(sipral_network_test_config)
+    X(sipral_network_test_config) X(sipral_isup)
 
 static int failures;
 
@@ -1225,6 +1225,19 @@ static sipral_status_t network_test_config_at(struct fixture *fixture, size_t de
     return sipral_stack_network_test(fixture->stack, &config, 0, &test);
 }
 
+/* An ISUP REL, cause 16 at the public network serving the remote user
+ * (ITU-T Q.763 Table 33): the message type, the pointer to the cause, an
+ * empty optional part, the cause's length and its two octets. */
+static const uint8_t smoke_rel[] = { 0x0c, 0x02, 0x00, 0x02, 0x84, 0x90 };
+
+static sipral_status_t isup_at(struct fixture *fixture, size_t declared)
+{
+    (void)fixture;
+    sipral_isup_t read = { 0 };
+    read.size = declared;
+    return sipral_isup_read(smoke_rel, sizeof smoke_rel, &read);
+}
+
 static const struct {
     const char *name;
     sipral_status_t (*at)(struct fixture *fixture, size_t declared);
@@ -1265,6 +1278,7 @@ static const struct {
     { "sipral_local_conference_member_t", local_conference_member_at },
     { "sipral_pinned_certificate_t", pinned_certificate_at },
     { "sipral_network_test_config_t", network_test_config_at },
+    { "sipral_isup_t", isup_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])
@@ -2873,6 +2887,45 @@ static void the_abi_check_keeps_the_1x_rule(void)
            sipral_abi_check(0, 36) == SIPRAL_STATUS_UNSUPPORTED_VERSION);
 }
 
+/* -- the ISUP a carrier gateway carries (ABI 1.4) ----------------------------
+ *
+ * A gateway's BYE with the REL of the call as its body (RFC 3204): found in
+ * the message, read, and its cause the one the REL gave. No stack: the three
+ * entry points read bytes. */
+static void a_carriers_rel_is_found_and_read(void)
+{
+    static const char head[] = "BYE sip:alice@192.0.2.10:5060 SIP/2.0\r\n"
+                               "Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bKsmokerel\r\n"
+                               "Max-Forwards: 70\r\n"
+                               "From: <sip:gw@example.com>;tag=gw\r\n"
+                               "To: <sip:alice@example.com>;tag=alice\r\n"
+                               "Call-ID: smoke-rel@203.0.113.5\r\n"
+                               "CSeq: 2 BYE\r\n"
+                               "Content-Type: application/ISUP;version=itu-t92+\r\n"
+                               "Content-Length: 6\r\n\r\n";
+    uint8_t bye[sizeof head - 1 + sizeof smoke_rel];
+    memcpy(bye, head, sizeof head - 1);
+    memcpy(bye + sizeof head - 1, smoke_rel, sizeof smoke_rel);
+
+    size_t offset = 0;
+    size_t len = 0;
+    expect("the ISUP body of a BYE was not found",
+           sipral_message_isup(bye, sizeof bye, &offset, &len) == SIPRAL_STATUS_OK &&
+               offset == sizeof head - 1 && len == sizeof smoke_rel);
+    sipral_isup_t read = { 0 };
+    read.size = sizeof read;
+    expect("a REL did not read as one",
+           sipral_isup_read(bye + offset, len, &read) == SIPRAL_STATUS_OK &&
+               read.message_type == 12 && read.has_cause == 1 && read.cause_value == 16 &&
+               read.cause_location == 4);
+    char number[32];
+    size_t needed = 0;
+    expect("a number a REL does not carry was not just the NUL",
+           sipral_isup_number(bye + offset, len, SIPRAL_ISUP_NUMBER_CALLING, number,
+                              sizeof number, &needed) == SIPRAL_STATUS_OK &&
+               needed == 1 && number[0] == '\0');
+}
+
 static void sizes_agree(void)
 {
 #define ASK(type)                                                             \
@@ -2970,6 +3023,7 @@ int main(void)
     nothing_is_due_on_a_call_with_no_media();
     a_registration_freezes_and_thaws();
     a_next_hop_is_asked_about_and_answered();
+    a_carriers_rel_is_found_and_read();
     what_0_34_added();
     what_0_35_added();
 

@@ -446,7 +446,10 @@ fn the_body_is_found_alone_or_beside_the_session_description() {
     assert_eq!(found.handling(), crate::msg::Handling::Optional);
     assert_eq!(found.variant(), Variant::Itu);
     assert_eq!(found.parse().unwrap().cause().unwrap().value, 16);
-    assert!(raw.session_body().is_empty(), "ISUP alone describes no session");
+    assert!(
+        raw.session_body().is_empty(),
+        "ISUP alone describes no session"
+    );
 
     let mut body = b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\r\n--b\r\n\
 Content-Type: application/ISUP; version=nxv3; base=ansi00\r\n\

@@ -11,6 +11,7 @@
 //! Asserted identity is believed only from `trusted_peers` (RFC 3325 §8).
 //! `docs/04-ua.md` has the reasoning.
 
+use std::borrow::Cow;
 use std::ffi::c_char;
 use std::sync::Arc;
 
@@ -136,6 +137,21 @@ codes! {
         VerificationCertificate = 14,
         /// Why it did not verify, in words, for a log.
         VerificationDetail = 15,
+        /// The calling party number of the ISUP IAM a carrier gateway carried
+        /// beside the offer (SIP-T, SIP-I): `+` and the digits for an
+        /// international number, the digits alone for any other. One entry,
+        /// or none. Its presentation, restricted or not, is in the privacy
+        /// bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+        IsupCalling = 16,
+        /// Each additional calling party number of that IAM (a generic
+        /// number): what a caller with a special arrangement presents. ABI 1.4.
+        IsupAdditionalCalling = 17,
+        /// The IAM's original called number: who the call was first placed
+        /// to. One entry, or none. ABI 1.4.
+        IsupOriginalCalled = 18,
+        /// The IAM's redirecting number: who the call was last diverted from.
+        /// One entry, or none. ABI 1.4.
+        IsupRedirecting = 19,
     }
 }
 
@@ -303,8 +319,39 @@ fn pieces(identity: &CallIdentity, which: SipralIdentityText) -> Vec<&[u8]> {
         SipralIdentityText::VerificationDetail => {
             verified(caller, |verdict| verdict.detail.as_deref())
         }
-        SipralIdentityText::Unknown => Vec::new(),
+        // written out by `listed`, since they are made rather than borrowed
+        SipralIdentityText::IsupCalling
+        | SipralIdentityText::IsupAdditionalCalling
+        | SipralIdentityText::IsupOriginalCalled
+        | SipralIdentityText::IsupRedirecting
+        | SipralIdentityText::Unknown => Vec::new(),
     }
+}
+
+/// A list, as [`pieces`] has it, with the ISUP numbers written as text.
+fn listed(identity: &CallIdentity, which: SipralIdentityText) -> Vec<Cow<'_, [u8]>> {
+    let Some(isup) = identity.caller.isup.as_ref() else {
+        return pieces(identity, which)
+            .into_iter()
+            .map(Cow::Borrowed)
+            .collect();
+    };
+    let numbers: Vec<&sipral_ua::isup::Number> = match which {
+        SipralIdentityText::IsupCalling => isup.calling.iter().collect(),
+        SipralIdentityText::IsupAdditionalCalling => isup.additional_calling.iter().collect(),
+        SipralIdentityText::IsupOriginalCalled => isup.original_called.iter().collect(),
+        SipralIdentityText::IsupRedirecting => isup.redirecting.iter().collect(),
+        _ => {
+            return pieces(identity, which)
+                .into_iter()
+                .map(Cow::Borrowed)
+                .collect();
+        }
+    };
+    numbers
+        .into_iter()
+        .map(|number| Cow::Owned(number.text().into_bytes()))
+        .collect()
 }
 
 /// One text of this stack's own verdict on the caller, as a list of one or
@@ -339,6 +386,10 @@ fn which_of(which: u32) -> Result<SipralIdentityText, Fail> {
         13 => SipralIdentityText::VerifiedOrigid,
         14 => SipralIdentityText::VerificationCertificate,
         15 => SipralIdentityText::VerificationDetail,
+        16 => SipralIdentityText::IsupCalling,
+        17 => SipralIdentityText::IsupAdditionalCalling,
+        18 => SipralIdentityText::IsupOriginalCalled,
+        19 => SipralIdentityText::IsupRedirecting,
         other => {
             return Err(fail(
                 SipralStatus::InvalidArgument,
@@ -368,7 +419,7 @@ entry! {
         let which = which_of(which)?;
         with_stack(stack, |state| {
             let identity = identity_of(state, call)?;
-            unsafe { out_count.write(pieces(&identity, which).len()) };
+            unsafe { out_count.write(listed(&identity, which).len()) };
             Ok(())
         })
     }
@@ -399,7 +450,7 @@ entry! {
         let which = which_of(which)?;
         with_stack(stack, |state| {
             let identity = identity_of(state, call)?;
-            let listed = pieces(&identity, which);
+            let listed = listed(&identity, which);
             let Some(piece) = listed.get(index) else {
                 return Err(fail(
                     SipralStatus::InvalidArgument,

@@ -192,7 +192,13 @@ and `History-Info` entries there were) and `event.answering` (`Answering`:
 `Answer-Mode`, `Priv-Answer-Mode`, `answer_after_ms` when the call asks to
 be answered by itself — whether to is the application's policy — the ring
 source and the `Alert-Info` URI). `call.identity(IdentityText.DIVERSION)`
-or `stack.call_identity(event, which)` reads a whole list.
+or `stack.call_identity(event, which)` reads a whole list. From a carrier
+gateway (SIP-T, SIP-I) the ISUP IAM beside the offer fills in what the
+headers did not say — the calling number as the asserted identity, a
+withheld one as `Privacy.ID`, the diversions — and the lists
+`IdentityText.ISUP_CALLING`, `ISUP_ADDITIONAL_CALLING`,
+`ISUP_ORIGINAL_CALLED` and `ISUP_REDIRECTING` hold its numbers as text, for
+those no URI could carry (ABI 1.4).
 `SIPRAL_EVENT_KIND_CALL_ENDED` carries `event.cause` (`EndCause`), the
 `Reason` of the BYE, CANCEL or refusal: `sip == 200` on a CANCEL is
 another phone answering, not a missed call. `call.hangup_for(q850_cause=16,

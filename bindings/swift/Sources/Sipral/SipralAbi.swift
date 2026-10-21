@@ -1303,6 +1303,21 @@ public enum SipralIdentityText: UInt32, Sendable {
     case verificationCertificate = 14
     /// Why it did not verify, in words, for a log.
     case verificationDetail = 15
+    /// The calling party number of the ISUP IAM a carrier gateway carried
+    /// beside the offer (SIP-T, SIP-I): `+` and the digits for an
+    /// international number, the digits alone for any other. One entry,
+    /// or none. Its presentation, restricted or not, is in the privacy
+    /// bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+    case isupCalling = 16
+    /// Each additional calling party number of that IAM (a generic
+    /// number): what a caller with a special arrangement presents. ABI 1.4.
+    case isupAdditionalCalling = 17
+    /// The IAM's original called number: who the call was first placed
+    /// to. One entry, or none. ABI 1.4.
+    case isupOriginalCalled = 18
+    /// The IAM's redirecting number: who the call was last diverted from.
+    /// One entry, or none. ABI 1.4.
+    case isupRedirecting = 19
 }
 
 /// How an account's calls ask for a session timer (RFC 4028). Names for
@@ -1856,6 +1871,29 @@ public enum SipralHeldAudio: UInt32, Sendable {
     case application = 2
 }
 
+/// Which number of an ISUP message sipral_isup_number writes out.
+public enum SipralIsupNumber: UInt32, Sendable {
+    /// Never asked for.
+    case unknown = 0
+    /// The calling party number (Q.763 §3.10).
+    case calling = 1
+    /// The called party number of an IAM (§3.9).
+    case called = 2
+    /// The original called number (§3.39): who the call was first placed
+    /// to.
+    case originalCalled = 3
+    /// The redirecting number (§3.44): who it was last diverted from.
+    case redirecting = 4
+    /// The redirection number (§3.46): where an ACM, a CPG or an ANM says
+    /// it is diverted to.
+    case redirection = 5
+    /// The connected number (§3.16) of an ANM, a CON or a CPG.
+    case connected = 6
+    /// The first generic number qualified as an additional calling party
+    /// number (§3.26).
+    case additionalCalling = 7
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2298,6 +2336,16 @@ public extension sipral_network_test_config_t {
     }
 }
 
+public extension sipral_isup_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -2400,7 +2448,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 3
+    public static let abiVersionMinor: UInt32 = 4
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2777,6 +2825,7 @@ public enum Sipral {
         ("sipral_local_conference_member_t", MemoryLayout<sipral_local_conference_member_t>.size, 40, 36, 40),
         ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
         ("sipral_network_test_config_t", MemoryLayout<sipral_network_test_config_t>.size, 48, 36, 40),
+        ("sipral_isup_t", MemoryLayout<sipral_isup_t>.size, 72, 68, 68),
     ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
@@ -6676,6 +6725,80 @@ public enum Sipral {
         let status = sipral_audio_call_level(stack, call, direction, &peak)
         try check(status)
         return peak
+    }
+
+    /// Where the ISUP body of a whole SIP message is (RFC 3204), as an offset
+    /// into `message` and a length. ABI 1.4.
+    ///
+    /// The body itself when it is `application/ISUP`, else the first such part
+    /// of a multipart body. A message that carries none is a length of zero,
+    /// not a failure, as an absent header field counts zero. Hand the bytes
+    /// found to `sipral_isup_read`.
+    ///
+    /// Safety
+    ///
+    /// `message` must be readable for `message_len` bytes, and `out_offset`
+    /// and `out_len` must each point at one `size_t`.
+    public static func messageIsup(message: [UInt8]) throws -> (offset: Int, len: Int) {
+        try ensureAbi()
+        var offset = Int()
+        var len = Int()
+        let status =
+            message.withUnsafeBufferPointer { p0 in
+                sipral_message_isup(p0.baseAddress, p0.count, &offset, &len)
+            }
+        try check(status)
+        return (offset: offset, len: len)
+    }
+
+    /// Read one ISUP message, from its message type code on (ITU-T Q.763),
+    /// into `out_isup`. ABI 1.4.
+    ///
+    /// A message that does not fit what its type lays out is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, the last error saying where it ends.
+    /// A type other than the seven `sipral_isup_t::message_type` names is
+    /// read for its code alone.
+    ///
+    /// Safety
+    ///
+    /// `body` must be readable for `body_len` bytes, and `out_isup` must point
+    /// at a `sipral_isup_t` whose `size` member says how long it is.
+    public static func isupRead(body: [UInt8]) throws -> sipral_isup_t {
+        try ensureAbi()
+        var isup = sipral_isup_t.sized()
+        let status =
+            body.withUnsafeBufferPointer { p0 in
+                sipral_isup_read(p0.baseAddress, p0.count, &isup)
+            }
+        try check(status)
+        return isup
+    }
+
+    /// One number of an ISUP message as text, copied into the caller's buffer
+    /// with a trailing NUL. ABI 1.4.
+    ///
+    /// `+` and the digits for an international number, the digits alone for
+    /// any other; the operator codes 11 and 12 are `B` and `C`, the end of
+    /// pulsing signal `F`. A number the message does not carry is just the
+    /// NUL. `out_needed` always receives the bytes needed including the NUL;
+    /// too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
+    ///
+    /// Safety
+    ///
+    /// `body` must be readable for `body_len` bytes, `buffer` writable for
+    /// `capacity` bytes or null with a capacity of zero, and `out_needed`
+    /// must point at one `size_t` or be null.
+    public static func isupNumber(body: [UInt8], which: UInt32, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            body.withUnsafeBufferPointer { p0 in
+                buffer.withUnsafeMutableBufferPointer { p2 in
+                    sipral_isup_number(p0.baseAddress, p0.count, which, p2.baseAddress, p2.count, &needed)
+                }
+            }
+        try check(status)
+        return needed
     }
 
 }

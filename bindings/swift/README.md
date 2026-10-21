@@ -365,7 +365,11 @@ for await event in stack.events() where event.kind == .incomingCall {
 calling `Remote-Party-ID`, `verstat` -- read only from a peer the account
 trusts (`trustedPeers`, RFC 3325 §8; `trusted` says whether it was), the
 caller's `Privacy`, every `Diversion` (RFC 5806) and `History-Info` entry
-(RFC 7044). `Answering` is `Answer-Mode`/`Priv-Answer-Mode` (RFC 5373),
+(RFC 7044). From a carrier gateway (SIP-T, SIP-I) the ISUP IAM beside the
+offer fills in what the headers did not say -- the calling number as
+`asserted`, a withheld one as `.id`, the diversions -- and `isup`
+(`IsupCaller`) holds its numbers as text, for those no URI could carry
+(ABI 1.4). `Answering` is `Answer-Mode`/`Priv-Answer-Mode` (RFC 5373),
 `answer-after` and every `Alert-Info` with the ring source it names.
 `Call.identity()` and `Call.answering()` read the same for a call taken.
 `Call.hangup(reason:)` writes a `Reason` (RFC 3326) on the BYE or the CANCEL
