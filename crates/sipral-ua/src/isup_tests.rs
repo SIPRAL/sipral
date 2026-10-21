@@ -300,6 +300,54 @@ fn a_national_number_stays_in_the_isup_rather_than_becoming_a_uri() {
 }
 
 #[test]
+fn a_number_only_asserted_when_the_network_vouches_and_may_say_it() {
+    // Q.1912.5 Table 7-4: P-Asserted-Identity comes from a calling party
+    // number screened "user provided, verified and passed" or "network
+    // provided", presentation allowed or restricted; restricted by the
+    // network, it is not included
+    for (presentation, screening, asserted) in [
+        (Presentation::Allowed, Screening::UserVerified, true),
+        (Presentation::Allowed, Screening::UserNotVerified, false),
+        (Presentation::Reserved, Screening::Network, false),
+        (Presentation::NotAvailable, Screening::Network, false),
+    ] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        agent.add_account(account().trust(registrar().ip()));
+        let iam = IsupBuilder::initial_address(
+            NatureOfConnection::default(),
+            ForwardCall::default(),
+            0x0a,
+            3,
+            &Number::new(Nature::National, "5555550102"),
+        )
+        .calling_party(
+            &Number::new(Nature::International, "15555550100")
+                .presented(presentation)
+                .screened(screening),
+        )
+        .build()
+        .expect("an IAM");
+        let (content_type, body) = beside(OFFER, ITU, "required", &iam);
+        let (_, caller) = arriving(
+            &mut agent,
+            &gateway_invite("vouched", &content_type, "", &body),
+            t0,
+        )
+        .expect("the call rings");
+        assert_eq!(
+            !caller.asserted.is_empty(),
+            asserted,
+            "{presentation:?} {screening:?}"
+        );
+        assert!(
+            !caller.privacy.id,
+            "{presentation:?}: only restricted asks for id"
+        );
+    }
+}
+
+#[test]
 fn isup_this_agent_does_not_read_is_refused_when_required_and_ignored_when_optional() {
     // RFC 3204 §6: required and not understood, 415; optional, ignored. ANSI
     // ISUP is another format than Q.763's

@@ -21,15 +21,17 @@
 //!   3261 §8.2.3, RFC 3204 §6, RFC 5621 §8.4); marked optional, it is
 //!   ignored.
 //! - **The caller, from the IAM, where SIP says less** (RFC 3398 §8.2.1,
-//!   ITU-T Q.1912.5's mapping): [`CallerIdentity::isup`] holds what the
+//!   ITU-T Q.1912.5 Table 7-4): [`CallerIdentity::isup`] holds what the
 //!   IAM says about the call; a calling party number whose presentation is
 //!   restricted asks for `Privacy: id` whatever `From` says, so a withheld
 //!   number stays withheld; from a trusted peer, with no
 //!   `P-Asserted-Identity` and no `Remote-Party-ID`, a calling party number
-//!   the network provided or verified is the asserted identity; and with no
-//!   `Diversion` and no `History-Info`, the redirecting and original called
-//!   numbers are the diversions, most recent first, with the reasons the
-//!   redirection information gives.
+//!   the network provided or verified, its presentation allowed or
+//!   restricted, is the asserted identity — one restricted by the network,
+//!   or not available, is not; and with no `Diversion` and no
+//!   `History-Info`, the redirecting and original called numbers are the
+//!   diversions, most recent first, with the reasons the redirection
+//!   information gives.
 //! - **The release cause, from the REL**, into the Q.850 cause the call's end
 //!   is reported with, when no `Reason` header gave one: RFC 3398 §7.2.3
 //!   prefers the header when both are there.
@@ -45,7 +47,7 @@
 //! No ISUP. RFC 3372 §4.1: generating the encapsulated ISUP is "not the
 //! responsibility of an IP endpoint like a SIP phone"; the gateway at the
 //! other end writes the ISUP for the network from the SIP it receives
-//! (§4.2, RFC 3398 §10 for a BYE). [`IsupBuilder`] is there for an
+//! (§4.2, RFC 3398 §10.1 for a BYE). [`IsupBuilder`] is there for an
 //! application that is a gateway.
 //!
 //! [`CallerIdentity::isup`]: crate::CallerIdentity::isup
@@ -157,12 +159,21 @@ pub(crate) fn read_caller(identity: &mut CallerIdentity, request: &RawMessage<'_
     }
     let caller = IsupCaller::of(&message, &body);
     if let Some(calling) = &caller.calling {
-        if calling.presentation.is_some_and(Presentation::withheld) {
+        // Q.1912.5 Table 7-4: allowed or restricted, the number is asserted
+        // and a restricted one asks for `id`; restricted by the network, or
+        // not available, it is not asserted at all
+        let presentation = calling.presentation;
+        if presentation == Some(Presentation::Restricted) {
             identity.privacy.id = true;
         }
+        let presentable = matches!(
+            presentation,
+            Some(Presentation::Allowed | Presentation::Restricted)
+        );
         let vouched = calling.screening.is_some_and(Screening::vouched);
         if trusted
             && vouched
+            && presentable
             && identity.asserted.is_empty()
             && identity.remote_party.is_empty()
             && let Some(uri) = global_uri(calling)
