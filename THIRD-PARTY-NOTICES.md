@@ -436,14 +436,15 @@ ships the rest of them too.
 | Jetpack Compose (`compose-bom` 2026.09.00: `ui`, `material3` and what they bring) | the sample's user interface | sample, at run time | Apache-2.0 |
 | `androidx.activity:activity-compose` 1.13.0 | a Compose screen in an activity | sample, at run time | Apache-2.0 |
 | `androidx.lifecycle:lifecycle-runtime-compose` 2.11.0 | lifecycle-aware state for Compose | sample, at run time | Apache-2.0 |
+| `androidx.core:core` 1.19.1 | the `FileProvider` the diagnostics bundle is shared through | sample, at run time | Apache-2.0 |
 
-Those five bring in the rest of AndroidX, JetBrains' annotations and JSpecify
+Those six bring in the rest of AndroidX, JetBrains' annotations and JSpecify
 with them -- 96 artefacts on the sample's runtime classpath as of this
-writing.
+writing (`androidx.core` was among them already, brought in by the others).
 
-The helper's unit tests (`bindings/kotlin/android/telecom/src/test`) run on
-the following, which is test only: nothing built from this repository ships
-it.
+The helper's and the sample's unit tests (`bindings/kotlin/android/telecom/src/test`,
+`bindings/kotlin/android/sample/src/test`) run on the following, which is
+test only: nothing built from this repository ships it.
 
 | Component | What it is | Licence |
 |---|---|---|

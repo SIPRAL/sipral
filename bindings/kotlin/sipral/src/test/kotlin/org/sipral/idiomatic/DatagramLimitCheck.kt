@@ -72,9 +72,16 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
     @Volatile private var stopped = false
     val address = "127.0.0.1:${udp.localPort}"
     val tcpAddress: String? = listener?.let { "127.0.0.1:${it.localPort}" }
-    val overTcp: MutableList<String> = Collections.synchronizedList(ArrayList())
+    private val tcpHeads: MutableList<String> = Collections.synchronizedList(ArrayList())
+    private val udpAnswered: MutableList<Pair<String, Int>> = Collections.synchronizedList(ArrayList())
+
+    // Read as copies taken under each list's lock: the server's threads add
+    // to them while a check iterates, and iterating a synchronized list
+    // without its lock throws ConcurrentModificationException when they meet.
+    val overTcp: List<String> get() = synchronized(tcpHeads) { tcpHeads.toList() }
+
     /** Every INVITE carrying credentials that arrived over UDP, and its size. */
-    val answeredOverUdp: MutableList<Pair<String, Int>> = Collections.synchronizedList(ArrayList())
+    val answeredOverUdp: List<Pair<String, Int>> get() = synchronized(udpAnswered) { udpAnswered.toList() }
     @Volatile var connections = 0
     /** How many of those connections the client closed. */
     @Volatile var closedByTheClient = 0
@@ -104,7 +111,7 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
                 val out = response(message, "401 Unauthorized", challenge)
                 udp.send(DatagramPacket(out, out.size, packet.socketAddress))
             } else if (message.startsWith("INVITE ")) {
-                answeredOverUdp += message to packet.length
+                udpAnswered += message to packet.length
                 val out = response(message, "486 Busy Here")
                 udp.send(DatagramPacket(out, out.size, packet.socketAddress))
             }
@@ -148,7 +155,7 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
                     val length = header("Content-Length", head)?.toInt() ?: 0
                     if (held.length < end + 4 + length) break
                     held = held.substring(end + 4 + length)
-                    overTcp += head
+                    tcpHeads += head
                     if (head.startsWith("INVITE ")) {
                         it.getOutputStream().write(response(head, "486 Busy Here"))
                     }

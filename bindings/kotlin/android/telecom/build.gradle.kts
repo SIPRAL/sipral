@@ -5,8 +5,22 @@
 // plain JVM) behind android.telecom, with a self-managed PhoneAccount, a
 // ConnectionService and a Connection per call.
 
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+
 plugins {
     id("com.android.library")
+}
+
+// Compiled as Kotlin 2.2, as sipral.aar is (scripts/package/aar.sh): an
+// application on the Kotlin 2.2 the Android Gradle Plugin 9 builds with
+// reads metadata at most one version ahead of its own, so classes from the
+// 2.4 compiler that builds this would not compile against it. Nothing here
+// needs a language feature newer than 2.2.
+kotlin {
+    compilerOptions {
+        languageVersion.set(KotlinVersion.KOTLIN_2_2)
+        apiVersion.set(KotlinVersion.KOTLIN_2_2)
+    }
 }
 
 // the workspace's single version, read from where it is kept

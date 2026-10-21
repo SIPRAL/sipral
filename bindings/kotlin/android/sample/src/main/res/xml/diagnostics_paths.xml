@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Sytek
+
+The one directory the share sheet is given: the diagnostics bundles under
+the cache, and nothing else of the application's files.
+-->
+<paths>
+    <cache-path name="diagnostics" path="diagnostics/" />
+</paths>

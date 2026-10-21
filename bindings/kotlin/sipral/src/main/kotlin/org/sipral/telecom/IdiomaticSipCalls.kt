@@ -15,13 +15,16 @@ import org.sipral.idiomatic.SipralClient
  * name, by handle, on one [SipralClient].
  *
  * Each call answered or placed here is a [SipralCall] with its own media
- * socket on [mediaHost] (on a device, the signalling network's address);
+ * socket on [mediaHost], or, when that is null, on the address this device
+ * routes toward the call's account server through at the moment the call
+ * starts: on a phone, whichever network is up then, so a call placed after
+ * Wi-Fi gave way to mobile data is not offered at the address Wi-Fi had.
  * [call] hands it to whatever moves its audio.
  */
 class IdiomaticSipCalls(
     private val client: SipralClient,
     accounts: Collection<SipralAccount>,
-    private val mediaHost: String,
+    private val mediaHost: String? = null,
 ) : SipCalls {
     private val accounts = ConcurrentHashMap<Long, SipralAccount>().apply {
         for (account in accounts) {

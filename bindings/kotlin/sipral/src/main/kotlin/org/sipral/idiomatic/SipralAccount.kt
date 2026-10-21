@@ -9,8 +9,10 @@ import org.sipral.SipralChallengeRefusal
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
+import org.sipral.SipralNative
 import org.sipral.SipralPinnedCertificate
 import org.sipral.SipralPresence
+import org.sipral.SipralPushEcho
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralStatus
 import org.sipral.SipralSubscribeConfig
@@ -59,15 +61,16 @@ class SipralAccount internal constructor(
 
     /** `sipral_account_rebind` toward [remote], reached at [advertised]
      * (`host:port`), unless its `Contact` names that already. */
-    internal fun reach(advertised: String, remote: String) {
+    internal fun reach(advertised: String, remote: String): Boolean {
         val next = client.defaultContact(aor, advertised, streamProtocol)
         if (next == contact) {
-            return
+            return false
         }
         retryBusy {
             Sipral.accountRebind(client.handle, handle, /* SIPRAL_TRANSPORT_MAIN */ 0, remote, next, client.nowMs())
         }
         contact = next
+        return true
     }
 
     /**
@@ -203,6 +206,12 @@ class SipralAccount internal constructor(
     var wantsRegistration: Boolean = false
         private set
 
+    /** [unregister] asked for and [register] not since: a withdrawal a
+     * location may still have to carry. */
+    @Volatile
+    internal var withdrawing: Boolean = false
+        private set
+
     /**
      * `sipral_account_set_access_token`: the OAuth 2.0 access token the server
      * asked for (RFC 8898), replacing any previous one; null removes it. The
@@ -223,6 +232,7 @@ class SipralAccount internal constructor(
      */
     fun register() {
         wantsRegistration = true
+        withdrawing = false
         try {
             retryBusy { Sipral.accountRegister(client.handle, handle, client.nowMs()) }
         } catch (refused: SipralException) {
@@ -242,6 +252,7 @@ class SipralAccount internal constructor(
      */
     fun unregister() {
         wantsRegistration = false
+        withdrawing = true
         retryBusy { Sipral.accountUnregister(client.handle, handle, client.nowMs()) }
     }
 
@@ -300,6 +311,76 @@ class SipralAccount internal constructor(
     fun refreshBinding() {
         retryBusy { Sipral.accountRefreshBinding(client.handle, handle, client.nowMs()) }
     }
+
+    /**
+     * `sipral_account_freeze`: this account's registration written down, so
+     * that a process started later carries it on with [thaw] rather than a
+     * handshake from the beginning (`docs/15-mobile.md`, "C3"). The bytes are
+     * opaque and versioned; they name the address of record, so keeping them
+     * private is the application's. `SipralStatus.WRONG_STATE` when there is
+     * nothing worth keeping: never registered, failed, or unregistered.
+     */
+    fun freeze(): ByteArray {
+        // The generated wrapper throws on BUFFER_TOO_SMALL and loses the
+        // length that came with it, so the size is asked of the entry point
+        // itself: an empty buffer, answered with the length a snapshot needs.
+        val length = LongArray(1)
+        val asked = retryBusy {
+            SipralNative.sipral_account_freeze(client.handle, handle, ByteArray(0), length, client.nowMs())
+                .also(::throwIfPassing)
+        }
+        if (asked != SipralStatus.BUFFER_TOO_SMALL.value && asked != SipralStatus.OK.value) {
+            throw SipralException(SipralStatus.of(asked), Sipral.lastErrorMessage())
+        }
+        val snapshot = ByteArray(length[0].toInt())
+        retryBusy { Sipral.accountFreeze(client.handle, handle, snapshot, client.nowMs()) }
+        return snapshot
+    }
+
+    /**
+     * `sipral_account_thaw`: a [freeze] snapshot read back, on an account
+     * just added that has not registered. [asleepMs] is how long it sat
+     * unused, which only the application knows. The account comes up
+     * `RESTORED`, never `REGISTERED`, until the refresh this books is
+     * answered; that refresh continues the snapshot's `Call-ID` and sequence
+     * number. Refused, the account unchanged, with
+     * `SipralStatus.UNSUPPORTED_VERSION` for a newer build's bytes,
+     * `NOT_SUPPORTED` for an account that does not register, and
+     * `INVALID_ARGUMENT` for damaged bytes or another address of record's.
+     */
+    fun thaw(snapshot: ByteArray, asleepMs: Long) {
+        require(asleepMs >= 0) { "asleepMs is a duration" }
+        retryBusy { Sipral.accountThaw(client.handle, handle, snapshot, asleepMs, client.nowMs()) }
+        wantsRegistration = true
+        withdrawing = false
+    }
+
+    /**
+     * `sipral_account_time_to_ready`: milliseconds from
+     * [SipralClient.coldStart] until a registrar first accepted this
+     * account, or null with no answer yet (not registered, never registers,
+     * or no cold start declared). Zero is an answer.
+     */
+    val timeToReadyMs: Long?
+        get() {
+            val (has, ms) = retryBusy { Sipral.accountTimeToReady(client.handle, handle) }
+            return if (has != 0L) ms else null
+        }
+
+    /**
+     * `sipral_account_push_echo`: what the registrar said about push in its
+     * last 2xx to a REGISTER that asked for it ([SipralPush], RFC 8599
+     * §4.1.1). `accepted` zero means nobody promised to send pushes, so the
+     * application must not let itself be suspended relying on one. Null
+     * when the account did not ask for push or has no standing binding.
+     */
+    val pushEcho: SipralPushEcho?
+        get() = try {
+            retryBusy { Sipral.accountPushEcho(client.handle, handle) }
+        } catch (refused: SipralException) {
+            if (refused.status != SipralStatus.NOT_SUPPORTED) throw refused
+            null
+        }
 
     /** `sipral_account_remove`. Every call this account placed ends. */
     fun remove() {

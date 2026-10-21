@@ -39,7 +39,8 @@ fun main() {
         val audio = callAudioSequences()
         val engine = engineAudioSequences()
         val real = runBlocking { overLoopback() }
-        "$fakes; $audio; $engine; $real"
+        val lifecycle = runBlocking { lifecycleChecks() }
+        "$fakes; $audio; $engine; $real; $lifecycle"
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
