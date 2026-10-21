@@ -13,16 +13,19 @@ import XCTest
 @testable import Sipral
 
 /// A registrar on a loopback UDP port: every REGISTER is answered 200, and
-/// every datagram is kept as text, keep-alives included.
+/// every datagram is kept as text, keep-alives included. `featureCaps`, if
+/// given, is the 200's `Feature-Caps` value (RFC 8599 §8.2).
 final class DatagramRegistrar: @unchecked Sendable {
     private let socket: UDPSocket
     private let lock = NSLock()
     private var _received: [String] = []
     private var stopped = false
+    private let featureCaps: String?
     let address: String
     var port: UInt16 { UDPSocket.parse(address).port }
 
-    init() throws {
+    init(featureCaps: String? = nil) throws {
+        self.featureCaps = featureCaps
         socket = try UDPSocket(host: "127.0.0.1", port: 0)
         address = socket.localAddress
         Thread { [weak self] in self?.serve() }.start()
@@ -50,6 +53,9 @@ final class DatagramRegistrar: @unchecked Sendable {
                 lines.append(name == "To" ? "To: \(value);tag=registrar" : "\(name): \(value)")
             }
             lines.append("Contact: \(FakeRegistrarHeader.header("Contact", message) ?? "");expires=3600")
+            if let featureCaps {
+                lines.append("Feature-Caps: \(featureCaps)")
+            }
             lines.append("Content-Length: 0")
             socket.send(Array((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8), to: from)
         }

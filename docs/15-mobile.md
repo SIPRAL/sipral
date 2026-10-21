@@ -177,6 +177,41 @@ then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is
 registrar's answer. On iOS, `CallKitBridge` and `PushKitBridge` run this
 sequence (or `LiveCommunicationBridge`, below, in CallKit's place); on Android, `org.sipral.telecom.TelecomBridge` does.
 
+In the Swift package the push parameters are `SipralStack.addAccount(push:)`
+with a `SipralPush` (`SipralPush.apnsVoip(token:teamId:bundleId:)` writes
+the token in hex and the topic as `TEAMID.bundle.voip`, RFC 8599 §10), and
+`Account.pushEcho()` reads the answer. `PushKitAdapter` reports a call to
+CallKit for every VoIP push, which iOS requires of an application that wants
+to keep receiving them: one that names no caller, or arrives before there is
+an account, is shown and ended at once. A shown call that no INVITE fills is
+ended too, as failed when the announcement was refused and as unanswered
+when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing. The push's
+payload carries the caller under `caller`; that, and what sends the push, is
+the push gateway's side (below).
+
+**The user answers before the INVITE.** On a phone this is the usual order:
+the push raises the call screen at once, and the INVITE follows the refresh
+REGISTER a second or more later. `CallKitBridge` keeps what the user does to
+a screen that has no call yet. An Answer (`CXAnswerCallAction`, through
+`handleAnswer(uuid:completion:)`) is held, not fulfilled: when the INVITE is
+matched and the call bound to the screen (`PendingCall.resolve(with:)`), the
+call is answered on the spot and only then is the action fulfilled, so the
+system shows the call connecting until it is. If the announcement is refused
+or goes missing the action fails, with `CallKitBridgeError.callNeverArrived`,
+and the screen ends as unanswered; if CallKit gives up waiting on the action
+(`timedOutPerforming`), the screen ends and the INVITE, if it still comes, is
+declined. An End or Decline tapped before the INVITE is fulfilled at once and
+remembered: the INVITE is answered 603 when it arrives. Activating the audio
+session stays CallKit's (`didActivate`), as for any answered call. An
+application binds its own reader to the call before resolving it, since the
+answer can go out inside `resolve(with:)`. `PushTests` runs the three cases
+between two stacks on loopback: answered when the INVITE comes, failed when
+the announcement goes missing, declined with 603 after an End. They passed
+on macOS and on the iOS 26.5 simulator, over the XCFramework, with
+`CallKitAdapterTests` beside them; the real delay between a push and its
+INVITE, and CallKit's own patience with a held Answer, are the phone's to
+show (step 11 below).
+
 ## C3 — a registration that freezes and thaws
 
 ### The snapshot
@@ -292,6 +327,53 @@ of zero milliseconds, which is a real and different thing.
 It is a product number rather than a curiosity. How long a queue rings each
 agent before skipping to the next has to be longer than this, or a phone that
 was asleep is skipped every time and its owner is told the queue was quiet.
+
+### C3 in the Swift package
+
+The calls are on the objects they act on: `SipralStack.suspending()`,
+`resumed()`, `coldStart()`, `interfaceLost()` and `nameResolutionLost()`;
+`Account.freeze()`, `thaw(_:asleepMs:)` and `timeToReadyMs()`, `nil`
+until there is an answer. `SipralAppLifecycle` is the order an iPhone
+application needs them in, over a `SipralSnapshotStore` —
+`KeychainSnapshotStore`, readable after the first unlock so that a push to a
+locked phone can read it, never carried by a backup to another phone:
+
+```swift
+let lifecycle = SipralAppLifecycle(store: KeychainSnapshotStore())
+// at launch, a push's included, before didFinishLaunching returns
+let stack = try SipralStack(...)
+try lifecycle.launched(stack)                 // the cold start, zero of time-to-ready
+let account = try stack.addAccount(..., push: push)
+if !lifecycle.restore(account, key: "main") { // .restored, or nothing usable
+    try account.register()
+}
+// scene to background / back
+lifecycle.enteredBackground()                 // freeze into the Keychain, then suspending
+lifecycle.enteredForeground()                 // resumed
+```
+
+On the way into the background each kept account is written down
+**before** the stack is told it is suspending, as `SipralAppLifecycle` does
+for .NET MAUI and for the same reason: once told, a binding no longer counts
+as bound and there is nothing to write. With a call up nothing is done: iOS
+keeps a process with a call running, and a suspended stack would stop
+refreshing the registration under it. The record kept is eight bytes of
+Unix milliseconds and the opaque snapshot; how long it slept is the wall
+clock's difference, since a monotonic clock does not survive the process. A
+snapshot the stack refuses — another account's, a newer build's — is removed
+so it is not tried again, and `restore` answers `false`.
+
+In a process a push started, the account comes back `.restored` and its
+next REGISTER continues the same `Call-ID` and sequence: the push's own
+refresh (`PushKitBridge.handle`, RFC 8599 §4.1.3) is that REGISTER, and the
+registrar reads it as the binding it is already holding rather than a
+second registration of the same phone. `LifecycleTests` runs the whole of
+it on macOS against a registrar on loopback: written down on the way into
+the background, the first stack closed without unregistering, a new stack
+whose account comes up `.restored` 90 seconds of wall clock later, and the
+refresh confirming it with the first process's `Call-ID`, with a
+time-to-ready. `KeychainSnapshotStore` itself ran in the iPhone sample on
+the simulator, across a process that was ended (below).
 
 ### RFC 8599 push parameters
 
@@ -1078,6 +1160,224 @@ phone.
 The same goes for `C5`'s measurements: what runs while the application is
 backgrounded with no call is a property of the whole process, and the polled
 core is what makes it *possible* to answer, not the answer.
+
+## The iPhone sample
+
+`bindings/swift/samples/SipralPhone` is a SwiftUI iPhone application over the
+Swift package, made to be installed on a phone and to send back what it saw.
+It is an Xcode project and not a target of `bindings/Package.swift`, as the
+Mac sample is: an iOS application is a signed bundle with an `Info.plist`,
+entitlements and an icon, which SwiftPM does not build. It sits under
+`samples/` as the .NET MAUI sample does.
+
+**What it is.** An account screen (server, port, UDP, TCP or TLS, user,
+password, an optional authentication user and domain, SRTP, STUN), a dial pad
+with the registration's state, the in-call screen (mute, hold, a keypad for
+DTMF, speaker, the system's route picker, `AVRoutePickerView`, and hang up),
+an incoming screen where CallKit does not ring, and Diagnostics. The password
+is kept in the Keychain, readable after the first unlock and on this phone
+only; everything else in `UserDefaults`. One stack, one account, one call at
+a time; every call's audio is a `CallAudio` over
+`VoiceProcessingAudioDevice`, fed by `AudioSessionObserver` and, with
+CallKit, by `CallKitBridge`.
+
+- **CallKit and PushKit**, on a phone: `CallKitAdapter` shows every call,
+  incoming and outgoing (`startOutgoingCall`), and the application's own
+  mute, hold, digits and hang-up go through the system (`request(_:)`), so
+  the lock screen, a headset and CarPlay act on the same call.
+  `PushKitAdapter` is created in `didFinishLaunching`, so a launch a push
+  caused gets the push; the account is opened before that returns.
+  Every push is reported to CallKit ("Through `sipral.h`", above).
+- **Push parameters.** With a VoIP token and a team in the build
+  (`SipralTeamIdentifier`, from `DEVELOPMENT_TEAM`), the account's REGISTER
+  carries `pn-provider=apns`, the token in hex as `pn-prid` and
+  `TEAMID.org.sipral.phone.voip` as `pn-param`; a new token re-registers.
+  Diagnostics says whether the registrar promised pushes (`pushEcho`). A
+  push's payload names the caller under `caller`. What sends it is a proxy
+  or push gateway holding the APNs key for the team ("Who sends the push",
+  above): FreePBX does not, so against the live PBX the push path ends at the
+  REGISTER and the registrar's answer, "promised nothing".
+- **The network.** `NWPathMonitor`; each path that names another link,
+  address or interface goes to `SipralStack.networkChanged(to:)`, and a call
+  asked to move (`callAddressWanted`) is moved (`Call.moveMedia()`).
+- **The lifecycle.** `SipralAppLifecycle` over `KeychainSnapshotStore`
+  ("C3 in the Swift package", above): into the background with no call, the
+  registration written down and the stack suspending; back, resumed; at a
+  launch, the snapshot read back and the binding refreshed at once.
+- **Evidence.** Every line the application writes and every line of the
+  stack's log at trace level, with whole SIP messages (Diagnostics' "Whole
+  SIP messages", on by default; credentials and keys are removed by the
+  stack), go to `Library/Application Support/Logs/sipral-phone.log`, each
+  physical line starting with its UTC time to the millisecond; at 4 MB it
+  becomes `sipral-phone.1.log`, so two files at most. "Share log" writes
+  one text file, `sipral-phone-YYYYMMDD-HHMMSSZ.txt`, and hands it to the
+  share sheet: what the screen shows (account without password, network,
+  push, lifecycle, battery, counters), both log files, the decision record
+  (`sipral_stack_diagnostics_json`) and the state dump
+  (`sipral_stack_state_text`); the password is taken out of all of it once
+  more before it is written. A pcapng is not in it: the C ABI exports none
+  (`docs/14-diagnostics.md`, "Handing a call's diagnostics over redacted").
+
+The deployment target is iOS 15.0, the package's own minimum: nothing the
+application uses is newer (CallKit, PushKit, `AVRoutePickerView`,
+`NWPathMonitor` and SwiftUI's iOS 15 API), and LiveCommunicationKit, which
+would need 17.4, is not used. The first phone is on iOS 18.7.
+
+**Building it.** `scripts/package/ios-app.sh` builds the XCFramework from
+this tree (`xcframework.sh --out target/ios-app/apple --dry-run`; the project
+names `target/ios-app/apple/spm` as its package, so the application links
+this tree's library, not a release's), draws the icon from
+`assets/sipral-mark.svg` into the asset catalog (git ignores the PNG), and
+builds for the simulator and for a phone:
+
+```bash
+scripts/package/ios-app.sh                                 # simulator, and a phone unsigned
+scripts/package/ios-app.sh --reuse-xcframework --test UDID # and its tests on that simulator
+DEVELOPMENT_TEAM=ABCDE12345 scripts/package/ios-app.sh --reuse-xcframework --archive
+```
+
+With `DEVELOPMENT_TEAM` the phone build is signed for development with
+`-allowProvisioningUpdates`, and `--archive` archives it, signs it ad hoc
+with its entitlements, and exports an IPA for App Store Connect, signed for
+distribution; the upload is not run, and the script prints the commands
+that would. `SIPRAL_PHONE_BUNDLE_ID` replaces `org.sipral.phone`. Built from
+Xcode instead, the team goes in `bindings/swift/samples/SipralPhone/Local.xcconfig`
+(`DEVELOPMENT_TEAM = ...`), which git ignores; choosing it in the Signing tab
+would write it into the project.
+
+**Store readiness.** `NSMicrophoneUsageDescription`; `UIBackgroundModes`
+`voip` (PushKit's VoIP pushes) and `audio` (a call keeps its audio while
+the screen is off or another application is in front); `aps-environment` in
+the entitlements, which the export turns into `production`. The privacy
+manifest declares no tracking, no collected data, and the required-reason
+APIs the device binary actually references, read with `nm -u`:
+`NSUserDefaults` (`CA92.1`) and `fstat` (file timestamps, `C617.1`);
+`mach_absolute_time` and `systemUptime` are not referenced. The export
+compliance question App Store Connect asks about encryption (TLS, SRTP) is
+the owner's to answer; `ITSAppUsesNonExemptEncryption` is not set.
+
+**A run without the screen.** The launch environment can hold the account
+and a call, which is how the simulator ran it: `xcrun simctl launch` hands
+`SIMCTL_CHILD_SIPRAL_PHONE_<NAME>` to the application as
+`SIPRAL_PHONE_<NAME>`. `SERVER`, `PORT`, `TRANSPORT`, `USER`, `PASSWORD`,
+`AUTH_USER`, `DOMAIN`, `SRTP`, `REGISTER=0` for a peer with no registrar;
+`CALL` (dialled once registered), `CALL_AFTER`, `CALL_SECONDS`, `DTMF`;
+`ANSWER=1`; `EVIDENCE=1` and `UNREGISTER=1` when the call ends. Nothing given
+this way is saved.
+
+**What ran, on the iOS 26.5 simulator (iPhone 17) under Xcode 27.1, 21
+October 2026.** Built for the simulator and, unsigned, for a phone
+(`generic/platform=iOS`, Release); the application's 10 tests passed on the
+simulator (the account and dialling rules, the password only in the secret
+store, the real Keychain, every line of the log timed, a whole SIP message's
+included, the log's turnover, the evidence file's sections and the password
+removed from it). CallKit and PushKit are off on
+the simulator, which refuses both (above), so calls rang and were answered in
+the application's own screens.
+
+| | |
+|---|---|
+| A call to `SipralLabAgent` on the Mac (no registrar) | Confirmed 267 ms after it was placed; G.722 at 16 kHz both ways; 20 seconds, then hung up from the phone: 1,007 packets sent and 992 received, none lost; the agent counted 991 sent and 1,003 received, and read the digits `1`, `2`, `3` sent three seconds in. A second run, 10 seconds: INVITE to 200 OK 101 ms on the wire, ACK 12 ms later, 532 sent and 528 received, digits `4`, `5` read by the agent |
+| A call from the agent | Answered in the application's screen, confirmed 246 ms after it was taken; hung up by the agent after 15 seconds: 754 sent, 747 received, none lost; the agent 746 and 750 |
+| The live PBX (`docs/11-testing.md`, "A live PBX"), one of its extensions, UDP | REGISTER, 401, REGISTER, 200 OK; `*43`, the echo: INVITE, 401, ACK, INVITE, 100, 200 OK in 242 ms from the first INVITE, ACK 7 ms later; G.711 at 8 kHz; 20 seconds: 1,004 packets sent and 990 received, none lost; BYE, then the un-REGISTER answered 200 and the stack closed |
+| The same over TCP | Registered 140 ms from the stack's start; the echo's 200 OK 81 ms after the first INVITE; 8 seconds: 411 sent, 404 received |
+| The same over TLS | The server's certificate accepted by the system's trust; registered 138 ms from the stack's start; the echo's 200 OK 201 ms after the first INVITE; 8 seconds: 397 sent, 392 received |
+| Into the background and back (`simctl launch` of Settings, then of the application, 12 seconds apart) | `background: registration written down, suspending: 1 bindings no longer believed, 0 calls`, the registration `unverified`; back, `foreground: resumed`, a REGISTER, `registered` 58 ms after the resume; a call to the echo afterwards: 316 sent, 308 received |
+| The process ended in the background, started again (`simctl terminate`, then `launch`) | `registration restored from the keychain (restored), refreshing it`: the new process's REGISTER carried the first one's `Call-ID` with CSeq 3 (the first process had sent 1 and 2), and the account read `registered` 141 ms after the stack started, against 4,339 ms for the first process's cold registration |
+| "Share log" | One file each run, 26 to 35 KB for a registration and a call: every line timed, the four sections present, the extension's password in none of them (`grep -c` 0) |
+
+Two things seen on the live PBX, and neither the stack's: in two of the three
+first registrations over UDP the PBX answered nothing for 4 to 6 seconds,
+then all four 401s — one per retransmission of the first REGISTER — arrived
+within two milliseconds of each other; and the PBX sends a request of its
+own right after the registration, which the application answers 200. The
+simulator reached the PBX from the Mac through a VPN, where
+`docs/11-testing.md`'s runs were on the PBX host's own network; which of
+the two held the first answers back was not found out.
+
+**Not run on the simulator.** A network change: the simulator shares the
+Mac's network, and changing the Mac's — shared, with a tunnel up — was not
+done, so the forwarding to `networkChanged(to:)` has not run in this
+application; the Wi-Fi to cellular step below is where it is first seen
+and measured. CallKit's screens, PushKit
+and a push, the audio session's interruptions and routes, Bluetooth, CarPlay
+and the battery: a phone's (`What the simulator cannot show`, above). The
+iOS 27.1 runtime installed on this Mac offers only one device type, which
+this run did not use.
+
+**On the Apple account.** With the owner's team and no phone registered to
+it: the signed development build fails as it must ("Your team has no
+devices from which to generate a provisioning profile"); the archive and
+the export for App Store Connect succeeded, signed "Apple Distribution",
+4.4 MB, its entitlements `aps-environment` `production` and
+`beta-reports-active`, with the privacy manifest and the icon in the bundle.
+The App ID `org.sipral.phone` and the distribution certificate are what
+`-allowProvisioningUpdates` made in the account. The upload to App Store
+Connect was not run.
+
+## On a real iPhone
+
+The run on the phone is short and every step ends with the same thing: on
+Diagnostics, "Share log", and the file sent back (AirDrop, Mail, Messages).
+Write down the time of each step; the log's times are UTC.
+
+**Before.** On the Mac, with the phone plugged in and Xcode open once (it
+registers the phone with the team), then:
+
+```bash
+echo 'DEVELOPMENT_TEAM = <team>' > bindings/swift/samples/SipralPhone/Local.xcconfig
+DEVELOPMENT_TEAM=<team> scripts/package/ios-app.sh --reuse-xcframework
+open bindings/swift/samples/SipralPhone/SipralPhone.xcodeproj   # Run on the phone
+```
+
+or the TestFlight build: `--archive`, then the upload, then the invitation
+on the phone.
+
+1. **Install and open.** Expected: the Phone tab, "Not registered". On
+   Diagnostics, "Push" shows a token. Send: the log.
+2. **Permissions.** Fill in the account, "Save and register". Expected: the
+   system asks for the microphone once; allow. Send: the log ("microphone
+   granted").
+3. **Register over UDP, then TCP, then TLS** (change Transport, "Save and
+   register" each time). Expected: "Registered since ..." each time;
+   Diagnostics' "Push" says what the registrar promised. Send: the log after
+   the three.
+4. **Outgoing call** to the echo (`*43` on a FreePBX). Expected: the system's
+   call screen, your voice back; hang up after 30 seconds. Send: the log.
+5. **Incoming call** from another phone, the application in front.
+   Expected: the system's incoming screen; answer, talk, hang up from the
+   other end. Send: the log.
+6. **Incoming call, screen locked**, then **unlocked but the application in
+   the background**. Expected: the full-screen call on the lock screen, the
+   banner otherwise; both answerable. Send: the log.
+7. **A cellular call during ours.** Call the phone's number while on the
+   echo; "Hold & Accept"; end the cellular call; resume ours from the call
+   screen. Expected: ours held (far end hears silence or hold), then audio
+   both ways again. Send: the log.
+8. **Routes.** During a call: earpiece, speaker (the in-call button and the
+   route picker), wired headphones plugged and unplugged, a Bluetooth
+   headset, CarPlay if there is a car. Expected: audio follows each; the
+   in-call screen's route line changes. Send: the log, with the order
+   written down.
+9. **Mute from the headset** (the call button or the car's mute). Expected:
+   the far end hears silence, the in-call Mute shows on. Send: the log.
+10. **Wi-Fi to cellular mid-call.** On the echo, walk out of the Wi-Fi (or
+    turn Wi-Fi off in Control Center) and count until your voice comes back.
+    Expected: "network changed to cellular ..." in the log, and the echo
+    again. Send: the log and the seconds counted.
+11. **Killed, then a push.** Swipe the application away; call it from
+    another phone. Expected with a push gateway: the call screen within a
+    few seconds; tap Answer as soon as it shows. The screen says connecting
+    until the INVITE arrives, then the call is up with audio both ways; note
+    the seconds between the tap and the voice. Once more, tapping Decline at
+    once: the other phone hears a decline (603). Without a gateway (the live
+    PBX): no ring, which the log after reopening shows as "registrar promised
+    nothing". Send: the log.
+12. **Thirty minutes idle, registered.** Note the battery percentage,
+    lock the phone for 30 minutes, unlock, note it again, place one call.
+    Expected: the call works; the log shows the background, the resume and
+    the REGISTER that proved the binding. Send: the log and both
+    percentages.
 
 ## .NET MAUI
 

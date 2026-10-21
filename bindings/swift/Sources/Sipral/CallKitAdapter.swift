@@ -14,7 +14,14 @@ import Foundation
 /// `CallKitBridge`, tested against a recorder; this is a thin wrapper.
 public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendable {
     private let provider: CXProvider
+    private let controller = CXCallController()
     public weak var bridge: CallKitBridge?
+
+    private let stateQueue = DispatchQueue(label: "org.sipral.callkit.adapter")
+    /// Calls placed through `startOutgoingCall`, and those of them already
+    /// reported connected; guarded by `stateQueue`.
+    private var outgoing: Set<UUID> = []
+    private var connected: Set<UUID> = []
 
     public init(configuration: CXProviderConfiguration) {
         provider = CXProvider(configuration: configuration)
@@ -29,17 +36,26 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
         provider.reportNewIncomingCall(with: uuid, update: update, completion: completion)
     }
 
+    /// An outgoing call's progress is the system's to show
+    /// (`reportOutgoingCall(with:startedConnectingAt:)`); an incoming
+    /// call's needs no report, since fulfilling `CXAnswerCallAction` says it.
     public func reportCallConnecting(uuid: UUID) {
-        // No separate report for an incoming call: fulfilling
-        // CXAnswerCallAction tells the system.
+        guard isOutgoing(uuid) else { return }
+        provider.reportOutgoingCall(with: uuid, startedConnectingAt: nil)
     }
 
+    /// Reported once per outgoing call, on its first confirmation or media.
     public func reportCallConnected(uuid: UUID) {
-        // Likewise; reportOutgoingCall is for CXStartCallAction calls,
-        // which this bridge does not place.
+        let first = stateQueue.sync { outgoing.contains(uuid) && connected.insert(uuid).inserted }
+        guard first else { return }
+        provider.reportOutgoingCall(with: uuid, connectedAt: nil)
     }
 
     public func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason) {
+        stateQueue.sync {
+            outgoing.remove(uuid)
+            connected.remove(uuid)
+        }
         let cxReason: CXCallEndedReason
         switch reason {
         case .localHangup, .remoteHangup: cxReason = .remoteEnded
@@ -47,6 +63,49 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
         case .unanswered: cxReason = .unanswered
         }
         provider.reportCall(with: uuid, endedAt: nil, reason: cxReason)
+    }
+
+    private func isOutgoing(_ uuid: UUID) -> Bool {
+        stateQueue.sync { outgoing.contains(uuid) }
+    }
+
+    /// Asks the system for an outgoing call to `callee`
+    /// (`CXStartCallAction`), then runs `dial` (normally
+    /// `SipralStack.placeCall`) and binds the call it returns to `bridge`.
+    /// Nothing is dialled if the system refuses; a `dial` that throws is
+    /// reported failed before the error is rethrown. The call then shows in
+    /// the system's call screen and recents, and a cellular call holds it
+    /// as it would an incoming one.
+    public func startOutgoingCall(callee: String, dial: () throws -> Call) async throws -> (uuid: UUID, call: Call) {
+        guard let bridge else { throw CallKitBridgeError.notAttached }
+        let uuid = UUID()
+        stateQueue.sync { _ = outgoing.insert(uuid) }
+        let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: callee))
+        do {
+            try await controller.request(CXTransaction(action: start))
+        } catch {
+            stateQueue.sync { _ = outgoing.remove(uuid) }
+            throw error
+        }
+        let call: Call
+        do {
+            call = try dial()
+        } catch {
+            reportCallEnded(uuid: uuid, reason: .failed)
+            throw error
+        }
+        reportCallConnecting(uuid: uuid)
+        bridge.bind(uuid: uuid, to: call)
+        return (uuid, call)
+    }
+
+    /// Asks the system to perform `action` on a call it shows: a mute, a
+    /// hold, digits or the end, from the application's own buttons. The
+    /// system's screen and the application's then agree, and the action
+    /// comes back through this delegate to `bridge` like one the system
+    /// started.
+    public func request(_ action: CXCallAction) async throws {
+        try await controller.request(CXTransaction(action: action))
     }
 }
 
@@ -61,10 +120,42 @@ extension CallKitAdapter: CXProviderDelegate {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
     }
 
+    /// Fulfilled once the call is really answered: at once for a call that
+    /// has arrived, when its INVITE is matched for one a push showed first
+    /// (`CallKitBridge.handleAnswer(uuid:completion:)`).
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         do {
             try Self.configureAudioSession()
-            try bridge?.handleAnswer(uuid: action.callUUID)
+        } catch {
+            action.fail()
+            return
+        }
+        guard let bridge else {
+            action.fail()
+            return
+        }
+        bridge.handleAnswer(uuid: action.callUUID) { error in
+            if error == nil {
+                action.fulfill()
+            } else {
+                action.fail()
+            }
+        }
+    }
+
+    /// An Answer that waited too long for its INVITE: the call is ended
+    /// and its INVITE, if it comes, declined.
+    public func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+        if let answer = action as? CXAnswerCallAction {
+            bridge?.answerTimedOut(uuid: answer.callUUID)
+        }
+    }
+
+    /// The call `startOutgoingCall` asked for: the session's category set,
+    /// the dialling left to it.
+    public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
+        do {
+            try Self.configureAudioSession()
             action.fulfill()
         } catch {
             action.fail()

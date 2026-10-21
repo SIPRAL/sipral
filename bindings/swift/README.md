@@ -71,6 +71,32 @@ it, compiled in only where those frameworks actually work
 too, but every type in it is `API_UNAVAILABLE(macos)`, so `canImport` alone
 is not enough to keep this package building there).
 
+`PushKitAdapter` reports every VoIP push to CallKit, as iOS requires: one
+whose payload names the caller under `caller` runs the sequence on the
+account its closure returns, and any other, or one that meets no account,
+is shown and ended at once (`PushKitBridge.reportUnusable`). Its
+`tokenChanged` hands over the token, which `SipralPush.apnsVoip(token:teamId:bundleId:)`
+turns into RFC 8599's `pn-provider`, `pn-prid` and `pn-param` for
+`SipralStack.addAccount(push:)`; `Account.pushEcho()` reads what the
+registrar said back. `PushKitBridge.matchIncomingCall` takes every stack
+event: it returns the push shown for an `incomingCall`, to be resolved with
+the `Call` `takeIncomingCall` gives, and ends the screen of an
+`announcedCallMissing` as unanswered. `CallKitAdapter.startOutgoingCall(callee:dial:)`
+places a call through `CXStartCallAction`, so the system shows it and a
+cellular call holds it, and `request(_:)` sends the application's own mute,
+hold, digits and end through the system.
+
+The lifecycle calls are on the same objects: `SipralStack.suspending()`,
+`resumed()`, `coldStart()`, `interfaceLost()` and `nameResolutionLost()`,
+and `Account.freeze()`, `thaw(_:asleepMs:)` and `timeToReadyMs()`
+(`docs/16-lifecycle.md`). `SipralAppLifecycle` puts them in the order a
+phone needs, over a `SipralSnapshotStore` (`KeychainSnapshotStore` on Apple
+platforms): into the background with no call up, every kept account's
+registration written down, then the stack told it is suspending; back,
+resumed; and in a process a push started, the snapshot read back into the
+new account, which comes up `.restored` and is confirmed by the push's own
+refresh (`docs/15-mobile.md`, "C3 in the Swift package").
+
 `LiveCommunicationBridge` is the same for LiveCommunicationKit, Apple's
 newer system call service (iOS 17.4 and later), which an application may
 choose instead of CallKit: the bridge reports incoming calls and asks the
@@ -805,6 +831,15 @@ The first call asks the system for the microphone on behalf of whatever
 launched the sample, and a firewall that asks about new programs asks about
 this one. `swift build` compiles it; `scripts/check.sh` covers the layer it
 sits on through `swift test`.
+
+`samples/SipralPhone` — the iPhone application, an Xcode project over the
+XCFramework this tree builds: CallKit for every call, PushKit with RFC
+8599's parameters, `AudioSessionObserver`, `NWPathMonitor` into
+`networkChanged(to:)`, `SipralAppLifecycle` over the Keychain, and a
+Diagnostics screen whose "Share log" hands over one timed file.
+`scripts/package/ios-app.sh` builds it, runs its tests on a simulator and
+exports it for TestFlight; `docs/15-mobile.md`, "The iPhone sample", says
+what ran and lists the steps on a real phone.
 
 ## What is not here
 

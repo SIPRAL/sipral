@@ -35,23 +35,44 @@ public final class CallKitBridge: @unchecked Sendable {
     private var sessionActive = false
     private var engine: (any CallAudioSessionEngine)?
 
+    /// What the user asked of a call shown before it had a `Call` (a push
+    /// rings seconds before its INVITE): applied by `bind(uuid:to:)`.
+    private struct Waiting {
+        /// Answer was tapped; told how the answer went once it has.
+        var answer: (@Sendable (Error?) -> Void)?
+        /// End or Decline was tapped, or the answer timed out: the INVITE,
+        /// if it comes, is declined.
+        var ended = false
+    }
+
+    /// Shown and not yet bound; guarded by `stateQueue`.
+    private var waiting: [UUID: Waiting] = [:]
+
     public init(provider: any CallKitProviding) {
         self.provider = provider
     }
 
     /// Reports an incoming call, possibly before its INVITE. The returned
-    /// `UUID` is later tied to a `Call` with `bind(uuid:to:)`.
+    /// `UUID` is later tied to a `Call` with `bind(uuid:to:)`; until then an
+    /// Answer or End the user taps is kept for it.
     @discardableResult
     public func reportIncomingCall(callerId: String) async throws -> UUID {
         let uuid = UUID()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            provider.reportIncomingCall(uuid: uuid, callerId: callerId) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        // Kept before the report: the screen can be answered the moment it shows.
+        stateQueue.sync { waiting[uuid] = Waiting() }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                provider.reportIncomingCall(uuid: uuid, callerId: callerId) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
+        } catch {
+            stateQueue.sync { _ = waiting.removeValue(forKey: uuid) }
+            throw error
         }
         return uuid
     }
@@ -63,10 +84,16 @@ public final class CallKitBridge: @unchecked Sendable {
     /// loses nothing to it. Earlier events are not replayed, except that an
     /// already-ended call still yields `callEnded`, so it does not stay
     /// ringing on screen.
+    ///
+    /// What the user did before the call existed is done now: an Answer
+    /// answers it and is then fulfilled (or failed), an End declines it with
+    /// 603. Take the application's own `Call.events()` before binding, to
+    /// see what that answer brings.
     public func bind(uuid: UUID, to call: Call) {
-        stateQueue.sync {
+        let asked = stateQueue.sync { () -> Waiting? in
             callsByUuid[uuid] = call
             uuidsByCallHandle[call.handle] = uuid
+            return waiting.removeValue(forKey: uuid)
         }
         let events = call.events()
         let task = Task { [weak self, provider] in
@@ -99,6 +126,16 @@ public final class CallKitBridge: @unchecked Sendable {
                 watchTasks[uuid] = task
             }
         }
+        if asked?.ended == true {
+            try? call.reject(code: 603)
+        } else if let answered = asked?.answer {
+            do {
+                try call.answer()
+                answered(nil)
+            } catch {
+                answered(error)
+            }
+        }
     }
 
     public func call(for uuid: UUID) -> Call? {
@@ -107,6 +144,15 @@ public final class CallKitBridge: @unchecked Sendable {
 
     public func uuid(forCallHandle handle: SipralHandle) -> UUID? {
         stateQueue.sync { uuidsByCallHandle[handle] }
+    }
+
+    /// Ends a call shown on screen, bound or not: one a push raised that no
+    /// INVITE will fill. An Answer kept for it fails.
+    func endShown(uuid: UUID, reason: EndReason) {
+        let answer = stateQueue.sync { waiting.removeValue(forKey: uuid)?.answer }
+        answer?(CallKitBridgeError.callNeverArrived(uuid))
+        provider.reportCallEnded(uuid: uuid, reason: reason)
+        unbind(uuid: uuid)
     }
 
     private func unbind(uuid: UUID) {
@@ -137,9 +183,68 @@ public final class CallKitBridge: @unchecked Sendable {
         try call.answer()
     }
 
+    /// `CXAnswerCallAction`, for a call that may not have arrived yet.
+    ///
+    /// A bound call is answered now. A shown one still waiting for its
+    /// INVITE keeps the answer: `bind(uuid:to:)` answers it the moment the
+    /// INVITE is matched, and `completion` is told then, so the action is
+    /// fulfilled only once the call is really answered. It fails with
+    /// `.callNeverArrived` when the announcement is refused or goes missing
+    /// (`PushKitBridge`), and with `.unknownCall` for a uuid never shown.
+    /// The audio session stays CallKit's to activate.
+    public func handleAnswer(uuid: UUID, completion: @escaping @Sendable (Error?) -> Void) {
+        enum Step { case now(Call), later, unknown }
+        let step = stateQueue.sync { () -> Step in
+            if let call = callsByUuid[uuid] { return .now(call) }
+            guard waiting[uuid] != nil else { return .unknown }
+            waiting[uuid]?.answer = completion
+            return .later
+        }
+        switch step {
+        case .now(let call):
+            do {
+                try call.answer()
+                completion(nil)
+            } catch {
+                completion(error)
+            }
+        case .later:
+            break
+        case .unknown:
+            completion(CallKitBridgeError.unknownCall(uuid))
+        }
+    }
+
+    /// `CXEndCallAction`. A call shown and not yet arrived is remembered as
+    /// declined: its INVITE, if it comes, is answered 603.
     public func handleEnd(uuid: UUID) throws {
-        guard let call = call(for: uuid) else { throw CallKitBridgeError.unknownCall(uuid) }
-        try call.hangup()
+        if let call = call(for: uuid) {
+            try call.hangup()
+            return
+        }
+        let kept = stateQueue.sync { () -> (known: Bool, answer: (@Sendable (Error?) -> Void)?) in
+            guard waiting[uuid] != nil else { return (false, nil) }
+            waiting[uuid]?.ended = true
+            defer { waiting[uuid]?.answer = nil }
+            return (true, waiting[uuid]?.answer)
+        }
+        guard kept.known else { throw CallKitBridgeError.unknownCall(uuid) }
+        kept.answer?(CallKitBridgeError.callNeverArrived(uuid))
+    }
+
+    /// CallKit gave up on an Answer still waiting for its INVITE
+    /// (`provider(_:timedOutPerforming:)`): the call is ended on screen and
+    /// its INVITE, if it comes, declined.
+    public func answerTimedOut(uuid: UUID) {
+        let waited = stateQueue.sync { () -> Bool in
+            guard waiting[uuid] != nil else { return false }
+            waiting[uuid]?.answer = nil
+            waiting[uuid]?.ended = true
+            return true
+        }
+        if waited {
+            provider.reportCallEnded(uuid: uuid, reason: .failed)
+        }
     }
 
     /// Releases or retakes the device at once (the session is moving), and
@@ -227,9 +332,19 @@ public final class CallKitBridge: @unchecked Sendable {
     /// `providerDidReset(_:)`: CallKit forgot every call, so each is hung up
     /// here too rather than left running unseen.
     public func providerDidReset() {
-        let (calls, audios, engine) = stateQueue.sync { () -> ([Call], [CallAudio], (any CallAudioSessionEngine)?) in
+        let (calls, audios, engine, answers) = stateQueue.sync {
+            () -> ([Call], [CallAudio], (any CallAudioSessionEngine)?, [(UUID, @Sendable (Error?) -> Void)]) in
             sessionActive = false
-            return (Array(callsByUuid.values), Array(audiosByUuid.values), self.engine)
+            // Calls still to arrive are declined when they do.
+            var answers: [(UUID, @Sendable (Error?) -> Void)] = []
+            for uuid in Array(waiting.keys) {
+                if let answer = waiting[uuid]?.answer { answers.append((uuid, answer)) }
+                waiting[uuid] = Waiting(answer: nil, ended: true)
+            }
+            return (Array(callsByUuid.values), Array(audiosByUuid.values), self.engine, answers)
+        }
+        for (uuid, answer) in answers {
+            answer(CallKitBridgeError.callNeverArrived(uuid))
         }
         for audio in audios {
             audio.pause(.sessionInactive)
@@ -248,4 +363,9 @@ public final class CallKitBridge: @unchecked Sendable {
 
 public enum CallKitBridgeError: Error, Sendable {
     case unknownCall(UUID)
+    /// `CallKitAdapter.startOutgoingCall` with no `bridge` set.
+    case notAttached
+    /// A call shown for a push whose INVITE never came: the announcement
+    /// was refused or went missing, or the user ended it first.
+    case callNeverArrived(UUID)
 }

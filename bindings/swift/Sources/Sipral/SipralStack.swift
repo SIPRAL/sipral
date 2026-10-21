@@ -1206,6 +1206,9 @@ public final class SipralStack: @unchecked Sendable {
     /// with; an SBC challenging calls under another realm needs both named.
     /// Other challenges go unanswered and raise
     /// `SipralEventKind.challengeDeclined`.
+    ///
+    /// `push` puts RFC 8599's `pn-*` parameters on every REGISTER's
+    /// `Contact` (`SipralPush`); `Account.pushEcho()` reads the answer.
     public func addAccount(
         aor: String,
         registrarAddress: String? = nil,
@@ -1226,7 +1229,8 @@ public final class SipralStack: @unchecked Sendable {
         privacy: Privacy = [],
         trustedPeers: [String] = [],
         realms: [String] = [],
-        security: AccountSecurity = AccountSecurity()
+        security: AccountSecurity = AccountSecurity(),
+        push: SipralPush? = nil
     ) throws -> Account {
         guard (registrarAddress == nil) != (serverUri == nil) else {
             throw SipralError(
@@ -1268,7 +1272,8 @@ public final class SipralStack: @unchecked Sendable {
             privacy: privacy,
             trustedPeers: trustedPeers,
             realms: realms,
-            security: security
+            security: security,
+            push: push
         )
         movingQueue.sync { accounts[account.handle] = account }
         return account
@@ -1664,6 +1669,11 @@ public final class SipralStack: @unchecked Sendable {
 
     func forgetCall(_ handle: SipralHandle) {
         callsQueue.sync { _ = calls.removeValue(forKey: handle) }
+    }
+
+    /// Calls placed or taken here that have not ended, ringing ones too.
+    var callsUp: Int {
+        callsQueue.sync { Array(calls.values) }.filter { !$0.ended }.count
     }
 
     // MARK: - media sockets behind a NAT
