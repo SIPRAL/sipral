@@ -10,6 +10,8 @@
 //! [`sipral_account_announce`] refreshes the binding (a MUST for a woken agent,
 //! §4.1.3) and matches the following INVITE to the announcement. The INVITE may
 //! win the race, so it writes back both values and exactly one names something.
+//! [`sipral_account_announce_call`] is the same with the `Call-ID` a push
+//! from the proxy holding the INVITE can carry, matched before the caller.
 //! [`sipral_account_refresh_binding`] is the refresh alone (§5.5);
 //! [`sipral_account_push_echo`] reads the registrar's `Feature-Caps` (§8.2).
 //!
@@ -28,7 +30,7 @@ use crate::error::{Fail, entry, fail};
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::stack::{handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
-use crate::text::required_text;
+use crate::text::{required_text, text};
 use crate::versioned::{Versioned, declared_size, write_versioned};
 
 record! {
@@ -95,47 +97,109 @@ entry! {
         out_call: *mut SipralHandle,
         now_ms: u64,
     ) {
-        if out_announcement.is_null() || out_call.is_null() {
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                "out_announcement and out_call are both written and neither may be null",
-            ));
-        }
-        let text = unsafe { required_text(caller, caller_len, "caller") }?;
-        let Ok(uri) = Uri::parse(text.as_bytes()) else {
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                format!("caller is {text:?}, which is not a URI"),
-            ));
-        };
-        with_stack_at(stack, now_ms, |state, now| {
-            let named = state.accounts.get(account).map_err(handle_failed)?;
-            let found = state
-                .agent
-                .announce(named, uri, now)
-                .map_err(|error| ua_failed(&error))?;
-            let (announcement, call) = match found {
-                Announced::Waiting(id) => {
-                    let handle = state.announcements.insert(id).map_err(|status| {
-                        fail(
-                            status,
-                            "this stack has handed out every announcement handle it has room for",
-                        )
-                    })?;
-                    (handle, SIPRAL_HANDLE_NONE)
-                }
-                Announced::Arrived(call) => {
-                    let handle = state.calls.name_of(call).map_err(|status| {
-                        fail(status, "this stack has no room left to name the call")
-                    })?;
-                    (SIPRAL_HANDLE_NONE, handle)
-                }
-            };
-            unsafe { out_announcement.write(announcement) };
-            unsafe { out_call.write(call) };
-            Ok(())
-        })
+        let caller = unsafe { required_text(caller, caller_len, "caller") }?;
+        unsafe { announced(stack, account, caller, None, out_announcement, out_call, now_ms) }
     }
+}
+
+entry! {
+    /// `sipral_account_announce`, with the `Call-ID` the push carried (ABI
+    /// 1.3).
+    ///
+    /// A proxy that holds the INVITE while it pushes (RFC 8599 §5.6.2) can
+    /// put the INVITE's `Call-ID` in the push. Given here, the INVITE with
+    /// that `Call-ID` on this account is the announced call, whoever its
+    /// `From` names; when none carries it, the caller decides, as in
+    /// `sipral_account_announce`. Compared as written, case and all. A
+    /// `call_id_len` of zero is `sipral_account_announce` exactly, whatever
+    /// the pointer.
+    ///
+    /// # Safety
+    ///
+    /// `caller` must be readable for `caller_len` bytes, `call_id` for
+    /// `call_id_len` bytes or be null with a length of zero, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    fn sipral_account_announce_call(
+        stack: SipralHandle,
+        account: SipralHandle,
+        caller: *const c_char,
+        caller_len: usize,
+        call_id: *const c_char,
+        call_id_len: usize,
+        out_announcement: *mut SipralHandle,
+        out_call: *mut SipralHandle,
+        now_ms: u64,
+    ) {
+        let caller = unsafe { required_text(caller, caller_len, "caller") }?;
+        let call_id = unsafe { text(call_id, call_id_len, "call_id") }?;
+        unsafe {
+            announced(
+                stack,
+                account,
+                caller,
+                call_id,
+                out_announcement,
+                out_call,
+                now_ms,
+            )
+        }
+    }
+}
+
+/// What both announcing entry points do once their text is read.
+///
+/// # Safety
+///
+/// `out_announcement` and `out_call` must each point at one `SipralHandle`
+/// or be null.
+unsafe fn announced(
+    stack: SipralHandle,
+    account: SipralHandle,
+    caller: &str,
+    call_id: Option<&str>,
+    out_announcement: *mut SipralHandle,
+    out_call: *mut SipralHandle,
+    now_ms: u64,
+) -> Result<(), Fail> {
+    if out_announcement.is_null() || out_call.is_null() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "out_announcement and out_call are both written and neither may be null",
+        ));
+    }
+    let Ok(uri) = Uri::parse(caller.as_bytes()) else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!("caller is {caller:?}, which is not a URI"),
+        ));
+    };
+    with_stack_at(stack, now_ms, |state, now| {
+        let named = state.accounts.get(account).map_err(handle_failed)?;
+        let found = state
+            .agent
+            .announce_call(named, uri, call_id, now)
+            .map_err(|error| ua_failed(&error))?;
+        let (announcement, call) = match found {
+            Announced::Waiting(id) => {
+                let handle = state.announcements.insert(id).map_err(|status| {
+                    fail(
+                        status,
+                        "this stack has handed out every announcement handle it has room for",
+                    )
+                })?;
+                (handle, SIPRAL_HANDLE_NONE)
+            }
+            Announced::Arrived(call) => {
+                let handle = state.calls.name_of(call).map_err(|status| {
+                    fail(status, "this stack has no room left to name the call")
+                })?;
+                (SIPRAL_HANDLE_NONE, handle)
+            }
+        };
+        unsafe { out_announcement.write(announcement) };
+        unsafe { out_call.write(call) };
+        Ok(())
+    })
 }
 
 entry! {
@@ -227,8 +291,8 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SipralPushEcho, sipral_account_announce, sipral_account_push_echo,
-        sipral_account_refresh_binding, sipral_announcement_forget,
+        SipralPushEcho, sipral_account_announce, sipral_account_announce_call,
+        sipral_account_push_echo, sipral_account_refresh_binding, sipral_announcement_forget,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
     use crate::call::tests::{deliver, sent};
@@ -411,6 +475,69 @@ mod tests {
         assert!(
             announced < incoming,
             "the call was reported before the screen it belongs to was named: {kinds:?}"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_call_id_in_the_push_finds_its_invite_whoever_it_names() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = woken(handle, true);
+        bound(handle, account);
+
+        let mut announcement = SIPRAL_HANDLE_NONE;
+        let mut call = SIPRAL_HANDLE_NONE;
+        // a caller the INVITE does not name: only the Call-ID can match it
+        let (caller, caller_len) = as_text("sip:switchboard@example.com");
+        let (bad, bad_len) = as_text("announced@203.0.113.5\r\nX: y");
+        assert_eq!(
+            unsafe {
+                sipral_account_announce_call(
+                    handle,
+                    account,
+                    caller,
+                    caller_len,
+                    bad,
+                    bad_len,
+                    &raw mut announcement,
+                    &raw mut call,
+                    31_000,
+                )
+            },
+            SipralStatus::InvalidArgument,
+            "a Call-ID that would end a header field was taken"
+        );
+        let (call_id, call_id_len) = as_text("announced@203.0.113.5");
+        assert_eq!(
+            unsafe {
+                sipral_account_announce_call(
+                    handle,
+                    account,
+                    caller,
+                    caller_len,
+                    call_id,
+                    call_id_len,
+                    &raw mut announcement,
+                    &raw mut call,
+                    31_000,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_ne!(announcement, SIPRAL_HANDLE_NONE, "nothing was announced");
+
+        deliver(handle, &invitation("sip:bob@example.com"), 31_100);
+        poll(handle, 31_100);
+        assert!(
+            observed.kinds().contains(&SipralEventKind::CallAnnounced),
+            "the INVITE with the Call-ID the push named was not matched: {:?}",
+            observed.kinds()
         );
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(handle) },

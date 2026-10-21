@@ -3904,3 +3904,27 @@ value other than 0 or 1 is `SIPRAL_STATUS_INVALID_ARGUMENT`. The layers place
 calls with it as `followRedirects` (Swift, Kotlin, Dart, Node.js, React
 Native), `follow_redirects` (Python) and `SipralCallOptions.FollowRedirects`
 (.NET); the voice-agent bridge and the lab's identity flows turn it on.
+
+## What ABI 1.3 added
+
+One entry point, nothing else in the header moved, and
+`bindings/c/abi-sizes.txt` is what 1.2 left. A binding printed at 1.2 loads
+against a 1.3 library and works as it did; one printed at 1.3 is refused by a
+1.2 library, with both versions named.
+
+**The `Call-ID` a push carries.**
+`sipral_account_announce_call(stack, account, caller, caller_len, call_id,
+call_id_len, out_announcement, out_call, now_ms)` is
+`sipral_account_announce` with the `Call-ID` of the INVITE the push was sent
+for. A proxy that holds the INVITE while it pushes (RFC 8599 §5.6.2) has it
+in hand, and `interop/push-gateway` puts it in every push it sends as
+`call-id`. Given, the INVITE with that `Call-ID` on the account is the
+announced call whoever its `From` names, and two calls from one caller are
+told apart; when no INVITE carries it, the caller decides as before, so a
+`Call-ID` changed on the way costs the exact match and not a second call
+screen. Compared as written, case and all. A `call_id_len` of zero is
+`sipral_account_announce` exactly; a `Call-ID` with a control byte in it is
+`SIPRAL_STATUS_INVALID_ARGUMENT`. `docs/15-mobile.md`, "The matching rule",
+has the reasoning. The facade carries it as `UserAgent::announce_call` and
+`Announcement::call_id`; the layers reach it through their printed bindings,
+and their push bridges still announce by caller alone.

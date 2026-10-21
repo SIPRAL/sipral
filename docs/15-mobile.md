@@ -85,14 +85,27 @@ event means reading two sets of logs that nobody has.
 
 ### The matching rule
 
-**Same account, and the same user and host in the `From` URI. Time is only a
-tie-break.**
+**The `Call-ID`, when the push carries one. Otherwise, and always as the
+fallback, the same account and the same user and host in the `From` URI. Time
+is only a tie-break.**
 
-A push carries no SIP identifier and cannot be made to. RFC 8599 §13 says the
-mechanism "does not require a proxy to insert any payload", and §5.6.2 has the
-proxy hold the request rather than describe it. There is no `Call-ID` to match
-on, and there never will be. What a push does carry is who is calling and which
-account, so that is what is compared.
+RFC 8599 §13 says the mechanism "does not require a proxy to insert any
+payload", and §5.6.2 has the proxy hold the request rather than describe it,
+so a push need not carry any SIP identifier, and from many senders it does
+not. What a push from any sender does carry is who is calling and which
+account, so that is the rule that always applies.
+
+A proxy that holds the INVITE while it pushes has the INVITE in hand, and
+nothing stops it putting the `Call-ID` in the push; `interop/push-gateway`
+does (below). `announce_call` (`sipral_account_announce_call` through
+`sipral.h`, ABI 1.3) takes it: the INVITE with that `Call-ID` on the same
+account is the announced call, whoever its `From` names, which tells two
+calls from one caller apart where the caller rule can only take the oldest.
+The `Call-ID` is compared as written, case and all (RFC 3261 §20.8). When no
+INVITE carries it, the caller rule decides, over every announcement: an
+intermediary that changed the `Call-ID` after the push was sent costs the
+exact match, not a second call screen. `announce` is `announce_call` with no
+`Call-ID`.
 
 Nothing else about the URI is compared, and that is the deliberate part. RFC
 3261 §19.1.4 equivalence insists that a parameter present in one URI be present
@@ -153,7 +166,8 @@ harmlessly.
 ### Through `sipral.h`
 
 `sipral_account_announce` is `announce`: it fills `out_call` when the INVITE
-came first and `out_announcement` otherwise. `sipral_account_refresh_binding`
+came first and `out_announcement` otherwise; `sipral_account_announce_call`
+is `announce_call`, the same with the push's `Call-ID`. `sipral_account_refresh_binding`
 is `refresh_binding`, and `sipral_announcement_forget` is
 `forget_announcement`. The events are `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` (31),
 then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is

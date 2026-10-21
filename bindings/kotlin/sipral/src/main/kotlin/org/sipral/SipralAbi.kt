@@ -8404,7 +8404,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 2)
+        agree(1, 3)
     }
 
     /**
@@ -8444,6 +8444,7 @@ internal object SipralNative {
     external fun sipral_subscription_dialog_text(stack: Long, subscription: Long, index: Long, which: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_account_message(stack: Long, account: Long, target: ByteArray, contentType: ByteArray, body: ByteArray, message: LongArray, nowMs: Long): Int
     external fun sipral_account_announce(stack: Long, account: Long, caller: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
+    external fun sipral_account_announce_call(stack: Long, account: Long, caller: ByteArray, callId: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
@@ -8634,7 +8635,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 2
+    const val ABI_VERSION_MINOR: Long = 3
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9529,6 +9530,33 @@ object Sipral {
         val announcementSlot = LongArray(1)
         val callSlot = LongArray(1)
         check(SipralNative.sipral_account_announce(stack, account, callerBytes, announcementSlot, callSlot, nowMs))
+        return Pair(announcementSlot[0], callSlot[0])
+    }
+
+    /**
+     * `sipral_account_announce`, with the `Call-ID` the push carried (ABI
+     * 1.3).
+     *
+     * A proxy that holds the INVITE while it pushes (RFC 8599 §5.6.2) can
+     * put the INVITE's `Call-ID` in the push. Given here, the INVITE with
+     * that `Call-ID` on this account is the announced call, whoever its
+     * `From` names; when none carries it, the caller decides, as in
+     * `sipral_account_announce`. Compared as written, case and all. A
+     * `call_id_len` of zero is `sipral_account_announce` exactly, whatever
+     * the pointer.
+     *
+     * Safety
+     *
+     * `caller` must be readable for `caller_len` bytes, `call_id` for
+     * `call_id_len` bytes or be null with a length of zero, and each of
+     * `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+     */
+    fun accountAnnounceCall(stack: Long, account: Long, caller: String, callId: String, nowMs: Long): Pair<Long, Long> {
+        val callerBytes = caller.toByteArray(Charsets.UTF_8)
+        val callIdBytes = callId.toByteArray(Charsets.UTF_8)
+        val announcementSlot = LongArray(1)
+        val callSlot = LongArray(1)
+        check(SipralNative.sipral_account_announce_call(stack, account, callerBytes, callIdBytes, announcementSlot, callSlot, nowMs))
         return Pair(announcementSlot[0], callSlot[0])
     }
 

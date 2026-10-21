@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **A call announced by a push is matched on the push's `Call-ID` when it carries one (C ABI 1.3).** `UserAgent::announce_call` and `sipral_account_announce_call` take the `Call-ID` a proxy holding the INVITE can put in the push: the INVITE with that `Call-ID` is the announced call whoever it says is calling, so two calls from one caller are told apart; with none carrying it, the account and the caller decide as before (`docs/15-mobile.md`, "The matching rule"; `docs/08-ffi.md`, "What ABI 1.3 added"). A binding printed at 1.2 loads unchanged.
+
 ### Changed
 
 - The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").

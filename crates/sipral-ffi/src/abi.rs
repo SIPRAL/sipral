@@ -798,6 +798,7 @@ pub const SURFACE: Surface = Surface {
         crate::subscription::sipral_subscription_dialog_text::ABI,
         crate::message::sipral_account_message::ABI,
         crate::announce::sipral_account_announce::ABI,
+        crate::announce::sipral_account_announce_call::ABI,
         crate::announce::sipral_account_refresh_binding::ABI,
         crate::announce::sipral_announcement_forget::ABI,
         crate::announce::sipral_account_push_echo::ABI,
