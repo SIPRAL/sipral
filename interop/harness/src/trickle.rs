@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Account, CallHandle, CallMedia, Credentials, Event, IcePolicy, IceTrickle, Keep, MappingEvent,
-    Mappings, MediaConfig, MediaEvent, OutgoingCall, UaEvent,
+    Mappings, MediaConfig, MediaError, MediaEvent, OutgoingCall, UaEvent,
 };
 
 use crate::audio::Media;
@@ -488,11 +488,32 @@ pub(crate) fn call(proxy: SocketAddr) -> Result<String, String> {
         end.endpoint.transport,
         proxy,
     ));
+    let target = uri(&format!("sip:{TRICKLE_USER}@kamailio"))?;
+    dial(&mut end, account, &target, proxy, |_, _, _| Ok(()))?;
+    end.verdict(peer_nat)
+}
+
+/// Place `end`'s call at `target` through `toward` once its stance lets it
+/// describe the call, and drive it until it ends: hung up [`DWELL`] after a
+/// path was chosen, or when its media fails or [`PATIENCE`] runs out.
+/// `answered` runs once, the moment the call is answered, for what can only
+/// be asked of a call still up.
+///
+/// # Errors
+/// A call that could not be placed, or what `answered` refused.
+fn dial(
+    end: &mut End,
+    account: sipral::AccountId,
+    target: &sipral::Uri,
+    toward: SocketAddr,
+    mut answered: impl FnMut(&mut End, CallHandle, Instant) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut asked = false;
     loop {
         let now = Instant::now();
         if end.call.is_none() && end.may_describe() {
-            let outgoing = OutgoingCall::new(uri(&format!("sip:{TRICKLE_USER}@kamailio"))?)
-                .to_address(end.endpoint.transport, proxy);
+            let outgoing =
+                OutgoingCall::new(target.clone()).to_address(end.endpoint.transport, toward);
             let media = end.media();
             let local = end.local;
             let placed = end
@@ -511,6 +532,13 @@ pub(crate) fn call(proxy: SocketAddr) -> Result<String, String> {
             end.described_at = Some(end.since(now));
         }
         end.turn(now, true);
+        if !asked
+            && end.seen.confirmed.is_some()
+            && let Some(call) = end.call
+        {
+            asked = true;
+            answered(end, call, now)?;
+        }
         if end.seen.ended || end.seen.failed.is_some() || now > end.gathering.started + PATIENCE {
             if !end.seen.ended
                 && let Some(call) = end.call
@@ -518,13 +546,12 @@ pub(crate) fn call(proxy: SocketAddr) -> Result<String, String> {
                 let _ = end.endpoint.agent.hangup(call, now);
                 end.endpoint.flush();
             }
-            break;
+            return Ok(());
         }
         if !end.endpoint.read_sip(Instant::now()) {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
-    end.verdict(peer_nat)
 }
 
 /// The answering side: register as the trickle user at the proxy through
@@ -651,40 +678,36 @@ pub(crate) fn asterisk(remote: SocketAddr, pass: &str) -> Result<String, String>
         now,
     )?;
     let account = endpoint.account(ASTERISK_USER, pass, "asterisk", remote)?;
-    let half = catalog()
-        .with_ice(IcePolicy::Required)
-        .with_ice_trickle(IceTrickle::Half);
-    let outgoing = OutgoingCall::new(uri(&format!("sip:{ECHO}@asterisk"))?)
-        .to_address(endpoint.transport, remote);
-    let offered = Instant::now();
-    let call = crate::place_call(
-        &mut endpoint,
-        account,
-        outgoing,
-        CallMedia::new(half, MediaConfig::default()),
+    // on the lab network the host candidate is all there is, so gathering
+    // is over at once and the offer is whole
+    let mut end = End::new(
+        endpoint,
+        IceTrickle::Half,
+        &[],
+        run_folded([ASTERISK_SEED ^ 0x5a; 32]),
         remote,
-        offered,
+        now,
     )?;
-    let seen = crate::ice_lite::drive(&mut endpoint, call, offered, true);
-    let heard = endpoint
-        .media
-        .get(&call)
-        .map(Media::heard)
-        .unwrap_or_default();
-    let said = verdict(&seen, heard)?;
-    if endpoint.agent.takes_trickle_ice(call) {
-        return Err("Asterisk listed the trickle-ice package it does not implement".to_owned());
-    }
-    if endpoint
-        .engine
-        .trickle_public_address(&mut endpoint.agent, call, remote, Instant::now())
-        != Err(sipral::MediaError::NotTrickling)
-    {
-        return Err(
-            "the call took a trickled candidate although Asterisk answered without trickle"
-                .to_owned(),
-        );
-    }
+    let target = uri(&format!("sip:{ECHO}@asterisk"))?;
+    // asked while the call is up: Asterisk lists no package of trickle, and
+    // a candidate for it is refused rather than sent somewhere it would 469
+    dial(&mut end, account, &target, remote, |end, call, now| {
+        if end.endpoint.agent.takes_trickle_ice(call) {
+            return Err("Asterisk listed the trickle-ice package".to_owned());
+        }
+        let late: SocketAddr = "203.0.113.9:40000".parse().unwrap_or(remote);
+        match end
+            .endpoint
+            .engine
+            .trickle_public_address(&mut end.endpoint.agent, call, late, now)
+        {
+            Err(MediaError::NotTrickling) => Ok(()),
+            other => Err(format!(
+                "a candidate for a call Asterisk answered without trickle came to {other:?}"
+            )),
+        }
+    })?;
+    let said = end.verdict(None)?;
     Ok(format!(
         "{said}; half trickle offered, regular ICE answered, nothing trickled"
     ))

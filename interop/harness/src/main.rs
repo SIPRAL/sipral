@@ -536,7 +536,7 @@ fn extra_flows(
     if wanted.split(',').any(|name| name.trim() == "trickle") {
         match trickle::call(remote) {
             Ok(said) => {
-                println!("  pass  trickle ICE through the proxy and two NATs, calling{said}")
+                println!("  pass  trickle ICE through the proxy and two NATs, calling{said}");
             }
             Err(why) => {
                 println!("  FAIL  trickle ICE through the proxy and two NATs, calling — {why}");
