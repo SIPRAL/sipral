@@ -86,6 +86,17 @@ places a call through `CXStartCallAction`, so the system shows it and a
 cellular call holds it, and `request(_:)` sends the application's own mute,
 hold, digits and end through the system.
 
+The lifecycle calls are on the same objects: `SipralStack.suspending()`,
+`resumed()`, `coldStart()`, `interfaceLost()` and `nameResolutionLost()`,
+and `Account.freeze()`, `thaw(_:asleepMs:)` and `timeToReadyMs()`
+(`docs/16-lifecycle.md`). `SipralAppLifecycle` puts them in the order a
+phone needs, over a `SipralSnapshotStore` (`KeychainSnapshotStore` on Apple
+platforms): into the background with no call up, every kept account's
+registration written down, then the stack told it is suspending; back,
+resumed; and in a process a push started, the snapshot read back into the
+new account, which comes up `.restored` and is confirmed by the push's own
+refresh (`docs/15-mobile.md`, "C3 in the Swift package").
+
 `LiveCommunicationBridge` is the same for LiveCommunicationKit, Apple's
 newer system call service (iOS 17.4 and later), which an application may
 choose instead of CallKit: the bridge reports incoming calls and asks the

@@ -1671,6 +1671,11 @@ public final class SipralStack: @unchecked Sendable {
         callsQueue.sync { _ = calls.removeValue(forKey: handle) }
     }
 
+    /// Calls placed or taken here that have not ended, ringing ones too.
+    var callsUp: Int {
+        callsQueue.sync { Array(calls.values) }.filter { !$0.ended }.count
+    }
+
     // MARK: - media sockets behind a NAT
 
     /// STUN gives up after 5.5 s, an unanswered TURN Allocate after 39.5 s.

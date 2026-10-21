@@ -315,6 +315,12 @@ public final class Account: @unchecked Sendable {
     /// re-register when a TCP/TLS connection is remade.
     public var wantsRegistration: Bool { stateQueue.sync { _wantsRegistration } }
 
+    /// A thawed binding is one the application asked for in an earlier
+    /// process: kept like one `register()` asked for.
+    func wantsRegistrationAgain() {
+        stateQueue.sync { _wantsRegistration = true }
+    }
+
     /// `sipral_account_register`. Refused for an account with no registrar.
     /// While a TCP/TLS connection is down the request is kept and sent once
     /// it is back.

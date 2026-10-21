@@ -291,6 +291,53 @@ It is a product number rather than a curiosity. How long a queue rings each
 agent before skipping to the next has to be longer than this, or a phone that
 was asleep is skipped every time and its owner is told the queue was quiet.
 
+### C3 in the Swift package
+
+The calls are on the objects they act on: `SipralStack.suspending()`,
+`resumed()`, `coldStart()`, `interfaceLost()` and `nameResolutionLost()`;
+`Account.freeze()`, `thaw(_:asleepMs:)` and `timeToReadyMs()`, `nil`
+until there is an answer. `SipralAppLifecycle` is the order an iPhone
+application needs them in, over a `SipralSnapshotStore` —
+`KeychainSnapshotStore`, readable after the first unlock so that a push to a
+locked phone can read it, never carried by a backup to another phone:
+
+```swift
+let lifecycle = SipralAppLifecycle(store: KeychainSnapshotStore())
+// at launch, a push's included, before didFinishLaunching returns
+let stack = try SipralStack(...)
+try lifecycle.launched(stack)                 // the cold start, zero of time-to-ready
+let account = try stack.addAccount(..., push: push)
+if !lifecycle.restore(account, key: "main") { // .restored, or nothing usable
+    try account.register()
+}
+// scene to background / back
+lifecycle.enteredBackground()                 // freeze into the Keychain, then suspending
+lifecycle.enteredForeground()                 // resumed
+```
+
+On the way into the background each kept account is written down
+**before** the stack is told it is suspending, as `SipralAppLifecycle` does
+for .NET MAUI and for the same reason: once told, a binding no longer counts
+as bound and there is nothing to write. With a call up nothing is done: iOS
+keeps a process with a call running, and a suspended stack would stop
+refreshing the registration under it. The record kept is eight bytes of
+Unix milliseconds and the opaque snapshot; how long it slept is the wall
+clock's difference, since a monotonic clock does not survive the process. A
+snapshot the stack refuses — another account's, a newer build's — is removed
+so it is not tried again, and `restore` answers `false`.
+
+In a process a push started, the account comes back `.restored` and its
+next REGISTER continues the same `Call-ID` and sequence: the push's own
+refresh (`PushKitBridge.handle`, RFC 8599 §4.1.3) is that REGISTER, and the
+registrar reads it as the binding it is already holding rather than a
+second registration of the same phone. `LifecycleTests` runs the whole of
+it on macOS against a registrar on loopback: written down on the way into
+the background, the first stack closed without unregistering, a new stack
+whose account comes up `.restored` 90 seconds of wall clock later, and the
+refresh confirming it with the first process's `Call-ID`, with a
+time-to-ready. The Keychain itself is exercised by the iPhone sample's own
+tests on the simulator (below).
+
 ### RFC 8599 push parameters
 
 `Account::push(Push::new(provider, prid).param(…))` puts `pn-provider`,
