@@ -500,6 +500,17 @@ through the RTCP feedback readers, compound and reduced-size, and the same
 bytes as an `a=rtcp-fb` value; a Generic NACK that parses is written back and
 must come out the same.
 
+And one for the ISUP a carrier gateway carries beside the session
+description (SIP-T, SIP-I). `isup` takes any bytes through the ITU-T Q.763
+reader, asks every typed accessor — the numbers, the cause, the redirection
+information, the indicators — and writes a message of a type whose parts are
+read again from those parts with the builder, which has to read back to the
+same parts. Its seeds are one message of each type the reader takes apart,
+written by the builder, and a carrier's `multipart/mixed` of SDP beside a
+REL joins the `multipart` seeds. Its first run was five minutes on 22
+October 2026, 2.56 million executions, nothing found; its 24 hours are not
+recorded yet.
+
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes
 ./scripts/fuzz.sh 600              # every target, ten minutes each
@@ -519,7 +530,7 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than thirty-six runs beginning at
+targets with something to start from rather than thirty-seven runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
@@ -574,7 +585,7 @@ added on 29 September 2026 — `stir_identity`, `multipart`, `rtt` and
 recorded here yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all thirty-six, under the nightly that `fuzz/` pins, so
+do on every run is **build** all thirty-seven, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -1557,7 +1568,7 @@ warnings as errors for `aarch64-apple-ios` over every crate that builds for it
 — `sipral-ffi`'s graph, read from `cargo tree` so a crate that joins it is
 covered, and `sipral-io-coreaudio` — for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all thirty-six fuzz targets under their own nightly — which nothing else
+over all thirty-seven fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, `osv-scanner` for known vulnerabilities in every dependency the tree

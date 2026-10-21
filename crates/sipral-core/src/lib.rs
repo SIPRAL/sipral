@@ -32,6 +32,7 @@ pub mod auth;
 pub mod diag;
 pub mod dialog;
 pub mod endpoint;
+pub mod isup;
 pub mod msg;
 pub mod pin;
 pub mod replay;

@@ -5,7 +5,7 @@
 
 One directory per fuzz target, holding the inputs a run starts from. They are
 committed, which the rest of a fuzzing corpus is not, for one reason: a clone
-that gets thirty-six targets and no corpus gets thirty-six that begin from
+that gets thirty-seven targets and no corpus gets thirty-seven that begin from
 the empty input, and a coverage-guided fuzzer then spends its first hours
 rediscovering that a SIP message starts with a method name.
 
@@ -32,7 +32,9 @@ traffic, and nothing came from another codebase.
   answers one, each required to end with an allocation, the
   protected runs through an unprotector
   holding the target's own key, the DTLS runs through ends built as the
-  target builds them, and the `dtmf_info` seeds through
+  target builds them, the `isup` messages — written by
+  `sipral_core::isup::IsupBuilder`, numbers from the 555-01xx range set
+  aside for fiction — through the ISUP reader, and the `dtmf_info` seeds through
   `sipral_ua::dtmf::parse_info` itself.
 - **One family is not read that way, and it is `builder`.** Its target does
   not parse its input at all: it cuts it into the five field values a caller

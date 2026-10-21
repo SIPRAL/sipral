@@ -50,6 +50,11 @@ use sipral_core::msg::{
     BuiltMultipart, HeaderName, MediaTypeRef, Method, Multipart, MultipartBuilder, ParseMode,
     ParseScratch, Part, RequestBuilder, ResponseBuilder, StatusCode, StreamFramer, parse,
 };
+use sipral_core::isup::{
+    BackwardCall, CallEvent, CalledStatus, Cause, EventKind, ForwardCall, GenericNumber,
+    IsupBuilder, Location, MessageType, Nature, NatureOfConnection, Number as IsupNumber,
+    NumberQualifier, Presentation, RedirectReason, Redirection, Screening,
+};
 use sipral_core::replay::Recording;
 use sipral_core::sdp::{self, Crypto};
 use sipral_dtls::handshake::{
@@ -1075,8 +1080,9 @@ fn stir_identity_seeds() -> Result<Vec<Seed>, Wrong> {
 /// The `multipart` target reads its input's first line as the
 /// `Content-Type` and the rest as the body. A seed is a body the builder
 /// writes: a recording session's INVITE body (RFC 7866 §6.1, the SDP and the
-/// metadata), a body with a nested `multipart/alternative`, and one whose
-/// parts carry a disposition with `handling` and a `Content-ID`.
+/// metadata), a body with a nested `multipart/alternative`, one whose
+/// parts carry a disposition with `handling` and a `Content-ID`, and a
+/// carrier gateway's: the SDP beside an ISUP REL (RFC 3204 §4.1).
 fn multipart_seeds() -> Result<Vec<Seed>, Wrong> {
     let mut alice = RecordedParty::new(
         "srfBElmCRp2QB23b7Mpk0w==",
@@ -1114,11 +1120,23 @@ fn multipart_seeds() -> Result<Vec<Seed>, Wrong> {
         )
         .build()
         .map_err(|why| wrong("handling-optional", &why))?;
+    let isup = IsupBuilder::release(Cause::new(16, Location::PublicRemote))
+        .build()
+        .map_err(|why| wrong("isup-beside-sdp", &why))?;
+    let carrier = MultipartBuilder::mixed()
+        .part(Part::new("application/sdp", &offer()))
+        .part(
+            Part::new("application/ISUP;version=itu-t92+", &isup)
+                .disposition("signal;handling=required"),
+        )
+        .build()
+        .map_err(|why| wrong("isup-beside-sdp", &why))?;
     let mut out = Vec::new();
     for (name, built, parts) in [
         ("recording-session", &recording, 2),
         ("nested", &nested, 2),
         ("handling-optional", &handling, 2),
+        ("isup-beside-sdp", &carrier, 2),
     ] {
         read_multipart(name, built, parts)?;
         let mut seed = built.content_type().as_bytes().to_vec();
@@ -1147,6 +1165,84 @@ fn read_multipart(name: &str, built: &BuiltMultipart, parts: usize) -> Result<()
             .map_err(|why| Wrong(format!("the {name} seed's metadata does not read: {why}")))?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- ISUP
+
+/// The `isup` target reads its input as one ISUP message (ITU-T Q.763). A
+/// seed is a message the builder writes, one of each type the reader takes
+/// apart, with the parameters an endpoint reads: an IAM for a diverted call
+/// with the caller's number withheld, an ACM, a CPG, an ANM with a connected
+/// number, a REL, an RLC. The numbers are from the North American 555-01xx
+/// range, which is set aside for fiction.
+fn isup_seeds() -> Result<Vec<Seed>, Wrong> {
+    let backward = BackwardCall {
+        charge: 2,
+        called_status: CalledStatus::SubscriberFree,
+        called_category: 1,
+        isup_all_the_way: true,
+        ..BackwardCall::default()
+    };
+    let caller = IsupNumber::new(Nature::International, "15555550100")
+        .presented(Presentation::Restricted)
+        .screened(Screening::Network);
+    let diverted_from = IsupNumber::new(Nature::International, "15555550101");
+    let built = [
+        (
+            "iam-diverted-withheld",
+            IsupBuilder::initial_address(
+                NatureOfConnection::default(),
+                ForwardCall {
+                    isup_all_the_way: true,
+                    isdn_access: true,
+                    ..ForwardCall::default()
+                },
+                0x0a,
+                3,
+                &IsupNumber::new(Nature::National, "5555550102"),
+            )
+            .calling_party(&caller)
+            .redirecting(&diverted_from)
+            .original_called(&diverted_from)
+            .redirection(Redirection::diverted(
+                RedirectReason::NoReply,
+                RedirectReason::NoReply,
+                1,
+            ))
+            .generic_number(&GenericNumber::new(
+                NumberQualifier::AdditionalCalling,
+                IsupNumber::new(Nature::International, "15555550103")
+                    .screened(Screening::UserNotVerified),
+            )),
+        ),
+        ("acm", IsupBuilder::address_complete(backward)),
+        (
+            "cpg-alerting",
+            IsupBuilder::call_progress(CallEvent::new(EventKind::Alerting)).backward_call(backward),
+        ),
+        (
+            "anm-connected",
+            IsupBuilder::answer().connected(&IsupNumber::new(Nature::International, "15555550102")),
+        ),
+        (
+            "rel-busy",
+            IsupBuilder::release(Cause::new(17, Location::PublicRemote)),
+        ),
+        ("rlc", IsupBuilder::release_complete()),
+    ];
+    let mut out = Vec::new();
+    for (name, builder) in built {
+        let seed = builder
+            .build()
+            .map_err(|why| Wrong(format!("the {name} seed does not write: {why}")))?;
+        let read = sipral_core::isup::parse(&seed)
+            .map_err(|why| Wrong(format!("the {name} seed does not read back: {why}")))?;
+        if read.message_type() == MessageType::InitialAddress && read.calling_party().is_none() {
+            return Err(Wrong(format!("the {name} seed lost its calling party number")));
+        }
+        out.push((name, seed));
+    }
+    Ok(out)
 }
 
 // -------------------------------------------------------- message-summary (MWI)
@@ -3530,6 +3626,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("media_plc", media_plc_seeds()?),
         ("media_resample", media_resample_seeds()?),
         ("media_vad", media_vad_seeds()?),
+        ("isup", isup_seeds()?),
         ("multipart", multipart_seeds()?),
         ("mwi", mwi_seeds()?),
         ("parse", sip_seeds()?),

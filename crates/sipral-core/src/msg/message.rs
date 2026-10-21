@@ -365,6 +365,39 @@ impl<'a> RawMessage<'a> {
         MediaTypeRef::parse(self.single(HeaderName::ContentType)?)
     }
 
+    /// The session description the body carries, empty when it carries
+    /// none.
+    ///
+    /// An `application/sdp` body is one. A multipart body carries the first
+    /// `application/sdp` part, depth first (RFC 5621 §3: the
+    /// `multipart/mixed` of SDP beside ISUP in RFC 3204 §4.1, or beside
+    /// recording metadata in RFC 7866 §9.1), and none when it has no such
+    /// part or does not read. A body of any other type, an ISUP message
+    /// alone among them, is no session description. A body whose
+    /// `Content-Type` is missing or does not read is returned whole, for the
+    /// session layer to read or refuse.
+    #[must_use]
+    pub fn session_body(&self) -> &'a [u8] {
+        let body = self.body();
+        let Ok(media) = self.content_type() else {
+            return body;
+        };
+        if media.is("application", "sdp") {
+            return body;
+        }
+        if !media.kind().eq_ignore_ascii_case(b"multipart") {
+            return &[];
+        }
+        super::Multipart::parse(&media, body)
+            .ok()
+            .and_then(|multipart| {
+                multipart
+                    .find("application", "sdp")
+                    .map(super::BodyPart::body)
+            })
+            .unwrap_or_default()
+    }
+
     /// `Route` (RFC 3261 §20.34), in the order the request has to follow.
     #[must_use]
     pub fn route(&self) -> RouteIter<'a> {
