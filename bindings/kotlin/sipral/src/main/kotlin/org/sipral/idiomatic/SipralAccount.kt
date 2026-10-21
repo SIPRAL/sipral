@@ -298,10 +298,18 @@ class SipralAccount internal constructor(
      * [SipralAnnounced.Waiting] when the INVITE is still to come;
      * [SipralAnnounced.Arrived] when it beat the push, and the call screen
      * just raised belongs to that handle.
+     *
+     * With the INVITE's [callId], when the push carries it,
+     * `sipral_account_announce_call` (ABI 1.3): the INVITE with that
+     * `Call-ID` is the announced call, the caller when none carries it.
      */
-    fun announce(caller: String): SipralAnnounced {
+    fun announce(caller: String, callId: String? = null): SipralAnnounced {
         val (announcement, call) = retryBusy {
-            Sipral.accountAnnounce(client.handle, handle, caller, client.nowMs())
+            if (callId.isNullOrEmpty()) {
+                Sipral.accountAnnounce(client.handle, handle, caller, client.nowMs())
+            } else {
+                Sipral.accountAnnounceCall(client.handle, handle, caller, callId, client.nowMs())
+            }
         }
         return if (call != 0L) SipralAnnounced.Arrived(call) else SipralAnnounced.Waiting(announcement)
     }

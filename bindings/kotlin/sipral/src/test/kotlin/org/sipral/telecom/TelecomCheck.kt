@@ -137,8 +137,8 @@ internal class FakeSip(val log: Log) : SipCalls {
     var nextCall = 500L
     var hold: Pair<Boolean, Boolean> = false to false
 
-    override fun announce(account: Long, caller: String): SipralAnnounced {
-        log.add("announce $account $caller")
+    override fun announce(account: Long, caller: String, callId: String?): SipralAnnounced {
+        log.add(if (callId == null) "announce $account $caller" else "announce $account $caller $callId")
         if (announceFails) {
             throw SipralException(SipralStatus.STALE_HANDLE, "no such account")
         }
@@ -286,6 +286,14 @@ private fun fakeSequences(): String {
         assertEquals(0, log.count("answer"))
         announcedInvite(bridge, 901, "<sip:alice@example.invalid>")
         assertEquals(1, log.count("answer 901"))
+        ran++
+    }
+
+    // A push that carries the held INVITE's Call-ID hands it to the
+    // announcement, so the library matches on it before the caller.
+    Rig().run {
+        bridge.pushArrived(ACCOUNT, "sip:alice@example.invalid", callId = "a84b4c76e66710@pc33.example.invalid")
+        assertEquals(1, log.count("announce $ACCOUNT sip:alice@example.invalid a84b4c76e66710@pc33.example.invalid"), log.snapshot().toString())
         ran++
     }
 

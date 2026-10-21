@@ -82,8 +82,9 @@ enum class TelecomDisconnect {
  * recorder.
  */
 interface SipCalls {
-    /** `sipral_account_announce`. */
-    fun announce(account: Long, caller: String): SipralAnnounced
+    /** `sipral_account_announce`, or `sipral_account_announce_call` with the
+     * push's [callId]. */
+    fun announce(account: Long, caller: String, callId: String? = null): SipralAnnounced
 
     /** `sipral_announcement_forget`. Throws `SipralException` with
      * `WRONG_STATE` when the announcement was already fulfilled or had

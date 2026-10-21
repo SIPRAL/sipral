@@ -158,9 +158,10 @@ class TelecomBridge(
      * presented before the network session exists. Then the call is announced,
      * which refreshes the binding. A call from the same caller already ringing
      * on this account (its INVITE beat the push) is not reported again; its id
-     * is returned.
+     * is returned. [callId] is the held INVITE's `Call-ID` when the push
+     * carries one, matched before the caller.
      */
-    fun pushArrived(account: Long, caller: String, displayName: String? = null): String = settle {
+    fun pushArrived(account: Long, caller: String, displayName: String? = null, callId: String? = null): String = settle {
         val existing = entries.values.firstOrNull {
             it.direction == TelecomDirection.INCOMING && it.account == account && it.call != 0L &&
                 !it.announced && !it.closedForTelecom && it.phase == TelecomPhase.RINGING &&
@@ -170,7 +171,7 @@ class TelecomBridge(
             existing.announced = true
             // announced anyway, so the library's pairing record is complete; it
             // answers Arrived with this same call
-            quietly { sip.announce(account, caller) }
+            quietly { sip.announce(account, caller, callId) }
             return@settle existing.id
         }
 
@@ -189,7 +190,7 @@ class TelecomBridge(
         }
 
         val answer = try {
-            sip.announce(account, caller)
+            sip.announce(account, caller, callId)
         } catch (_: Exception) {
             end(entry, TelecomDisconnect.ERROR)
             return@settle entry.id

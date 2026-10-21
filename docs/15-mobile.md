@@ -485,7 +485,9 @@ What a push carries is `kind` (`call`, `message`, `dialog`, `refresh`),
 `name` when the `From` has one, and `call-id` (the held request's, for
 `announce_call`). `PushKitAdapter` reads `call-id` beside `caller`, and the
 Swift push bridge announces with it whenever the push has one
-(`Account.announce(caller:callId:)`).
+(`Account.announce(caller:callId:)`); on Android, `TelecomBridge.pushArrived`
+and `wakeForPush` take it as `callId` (`SipralAccount.announce(caller,
+callId)`).
 
 **On APNs only an INVITE is pushed.** A VoIP push is the only kind that
 reaches a VoIP application, and since iOS 13 one that reports no call to
@@ -993,7 +995,9 @@ every acceptance and when it goes to the background, and the simulated push
 is `adb shell am broadcast -a org.sipral.sample.SIMULATE_PUSH -n
 org.sipral.sample/.PushReceiver --es caller sip:170@<pbx>` (the receiver is
 protected by `android.permission.DUMP`, which the shell holds and no
-installed application can).
+installed application can); `--es call-id <Call-ID>` beside it passes the
+held INVITE's `Call-ID` as a push gateway's payload does, and the sample
+announces with it (`TelecomBridge.pushArrived(..., callId)`).
 
 | | Push to ringing | Ready |
 |---|---|---|

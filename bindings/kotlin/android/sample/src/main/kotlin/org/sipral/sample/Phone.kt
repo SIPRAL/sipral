@@ -124,6 +124,8 @@ class Phone(private val app: Application) {
     private var audio: SipralCallAudios? = null
     private var monitor: SipralNetworkMonitor? = null
     private var starting: Job? = null
+    /** The last push's `Call-ID`, until its call is announced. */
+    private var pushCallId: String? = null
     private var watching: Job? = null
 
     private var foreground: Job? = null
@@ -484,10 +486,12 @@ class Phone(private val app: Application) {
      * the following INVITE to the screen already up. The stack is opened
      * first when the process was not running it. [done] runs once the
      * registration is settled, or after nine seconds, whichever is first:
-     * the time a receiver may keep its broadcast.
+     * the time a receiver may keep its broadcast. [callId] is the held
+     * INVITE's `Call-ID` when the push carries one (`call-id`).
      */
-    fun pushArrived(caller: String, done: () -> Unit = {}) {
-        note("push: $caller is calling")
+    fun pushArrived(caller: String, callId: String? = null, done: () -> Unit = {}) {
+        note("push: $caller is calling" + (callId?.let { ", Call-ID $it" } ?: ""))
+        pushCallId = callId
         val job = start("woken by a push", caller)
         scope.launch {
             withTimeoutOrNull(9_000) { job.join() }
@@ -497,7 +501,9 @@ class Phone(private val app: Application) {
 
     private fun announce(caller: String) {
         val added = account ?: return
-        bridge?.pushArrived(added.handle, caller)
+        val callId = pushCallId
+        pushCallId = null
+        bridge?.pushArrived(added.handle, caller, callId = callId)
         note("announced $caller: ringing before the INVITE")
     }
 

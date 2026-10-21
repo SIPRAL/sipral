@@ -42,10 +42,11 @@ fun wakeForPush(
     key: String,
     caller: String,
     displayName: String? = null,
+    callId: String? = null,
 ): PushWake {
     client.coldStart()
     val restored = lifecycle.restore(account, key)
-    val id = bridge.pushArrived(account.handle, caller, displayName)
+    val id = bridge.pushArrived(account.handle, caller, displayName, callId)
     if (!restored && account.registrationState !in UNDER_WAY) {
         account.register()
     }

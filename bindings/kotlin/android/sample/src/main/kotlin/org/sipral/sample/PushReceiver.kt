@@ -30,7 +30,8 @@ class PushReceiver : BroadcastReceiver() {
             phone.note("push with no caller, ignored")
             return
         }
+        val callId = intent.getStringExtra("call-id")?.trim()?.takeIf { it.isNotEmpty() }
         val pending = goAsync()
-        phone.pushArrived(caller) { pending.finish() }
+        phone.pushArrived(caller, callId) { pending.finish() }
     }
 }
