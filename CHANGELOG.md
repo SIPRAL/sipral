@@ -13,7 +13,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Changed
 
-- The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").
+- The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I), then 1.5 for March 2027 (a client certificate on SIP over TLS, its key held by the platform); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").
 
 ## [1.2.3] - 2026-10-21
 

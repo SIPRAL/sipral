@@ -115,6 +115,8 @@ November 2026, planned.
 - Wi-Fi to mobile data on a phone, the time until audio returns measured and published
 - A registered phone with no call: battery and background behaviour measured on both platforms
 - Test builds accepted through TestFlight and Google Play internal testing
+- A cold start after a push in Swift and Kotlin, as in .NET MAUI: the woken app resumes its account rather than registering from scratch
+- Android transactional Telecom API (API 34 and later) beside the self-managed ConnectionService
 - Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH
 
 ### 1.4 — Browsers and the telephone network
@@ -126,6 +128,14 @@ December 2026, planned.
 - SIP-T and SIP-I: the ISUP a carrier gateway carries inside SIP (RFC 3204, RFC 3372) read and written
 - Calling number, redirection and release cause taken from the ISUP when a gateway sends them
 - SIP-T and SIP-I calls proven against a carrier-style gateway in the lab
+
+### 1.5 — Keys that never leave the device
+
+March 2027, planned.
+
+- A client certificate on SIP over TLS, signed by the platform: Secure Enclave on iOS, Android Keystore, the Keychain on macOS, CNG on Windows
+- The same certificate in the C ABI and in the Swift, Kotlin and .NET bindings
+- Proven against PBXs and proxies that require a client certificate, in the lab
 
 ### 2.0 — Beyond audio
 
