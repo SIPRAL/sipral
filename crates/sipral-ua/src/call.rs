@@ -193,6 +193,8 @@ pub struct OutgoingCall {
     /// Written recording metadata ([`OutgoingCall::recording_session`]).
     pub(crate) metadata: Option<Arc<str>>,
     pub(crate) follow_redirects: bool,
+    /// `Require: trickle-ice` ([`OutgoingCall::require_trickle_ice`]).
+    pub(crate) trickle_required: bool,
 }
 
 impl OutgoingCall {
@@ -213,7 +215,24 @@ impl OutgoingCall {
             focus: false,
             metadata: None,
             follow_redirects: false,
+            trickle_required: false,
         }
+    }
+
+    /// Place it assuming the far end takes trickle ICE: the INVITE carries
+    /// `Require: trickle-ice` (RFC 8840 §5.1), as an offer that holds back
+    /// candidates to trickle later must, so that a far end that cannot
+    /// trickle refuses it 420 rather than answering an offer it cannot use.
+    ///
+    /// Without it, an offer that declares `a=ice-options:trickle` still
+    /// carries `Supported: trickle-ice` and `Recv-Info: trickle-ice`, which
+    /// is half trickle (RFC 8840 §5.3): the offer is whole, and a far end
+    /// that trickles may send its own candidates later. See
+    /// [`crate::trickle`].
+    #[must_use]
+    pub const fn require_trickle_ice(mut self) -> Self {
+        self.trickle_required = true;
+        self
     }
 
     /// Place it as a conference's focus: every `Contact` of the call carries
@@ -410,6 +429,8 @@ pub(crate) struct Call {
     /// Recording metadata (RFC 7866 §9.1) sent with every offer of a
     /// recording session.
     pub(crate) recording: Option<Arc<str>>,
+    /// The `trickle-ice` Info Package on this call ([`crate::trickle`]).
+    pub(crate) trickle: crate::trickle::Trickle,
 }
 
 /// `Identity` (RFC 8224 §4), or `y` in its compact form (§13.1).
@@ -596,6 +617,7 @@ impl Call {
             signed: None,
             remote_focus: None,
             recording: None,
+            trickle: crate::trickle::Trickle::default(),
         }
     }
 
@@ -654,6 +676,7 @@ impl Call {
             signed: None,
             remote_focus: None,
             recording: None,
+            trickle: crate::trickle::Trickle::default(),
         }
     }
 
@@ -704,6 +727,13 @@ impl Call {
             signed: None,
             remote_focus: None,
             recording: None,
+            // the INVITE announced the package to every branch, and the body
+            // waiting for the first dialog waits for this one too
+            trickle: crate::trickle::Trickle {
+                receiving: other.trickle.receiving,
+                next: other.trickle.next.clone(),
+                ..crate::trickle::Trickle::default()
+            },
         }
     }
 }

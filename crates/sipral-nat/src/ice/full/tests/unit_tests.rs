@@ -2183,7 +2183,11 @@ fn trickled_candidates_are_tied_to_a_generation_and_stop_at_the_peers_last() {
 fn a_peer_that_does_not_trickle_has_sent_its_last_candidate() {
     let (mut agent, stream, _, now) = trickling(Role::Controlled, config(false, false));
     agent
-        .set_remote(stream, &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]), now)
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
         .expect("a regular ICE answer");
     assert!(agent.remote_ended(stream));
 }
@@ -2195,7 +2199,11 @@ fn a_candidate_the_caller_learns_late_is_taken_only_while_the_session_trickles()
 
     let (mut regular, stream, _, now) = gathered(Role::Controlling, config(false, false));
     regular
-        .set_remote(stream, &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]), now)
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
         .expect("the answer");
     assert_eq!(
         regular.add_server_reflexive(stream, ComponentId::RTP, address(LOCAL), learned, server),
@@ -2205,7 +2213,11 @@ fn a_candidate_the_caller_learns_late_is_taken_only_while_the_session_trickles()
 
     let (mut agent, stream, _, now) = trickling(Role::Controlling, config(false, false));
     agent
-        .set_remote(stream, &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]), now)
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
         .expect("the answer");
     assert!(agent.may_trickle(stream));
     let pairs = agent.pairs.len();
@@ -2246,7 +2258,11 @@ fn pairs_formed_late_start_waiting_or_frozen_by_their_foundation() {
     let (mut agent, stream, mut ids, mut now) = trickling(Role::Controlled, config(false, false));
     let (ufrag, pwd) = peer_generation();
     agent
-        .set_remote(stream, &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]), now)
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
         .expect("the answer");
     let state_of = |agent: &IceAgent, remote: &str| {
         agent
@@ -2334,7 +2350,9 @@ fn a_signalled_candidate_takes_over_the_peer_reflexive_one_a_check_taught() {
         agent
             .remotes
             .iter()
-            .find(|remote| remote.stream == stream.index() && remote.candidate.address == address(PEER))
+            .find(|remote| {
+                remote.stream == stream.index() && remote.candidate.address == address(PEER)
+            })
             .map(|remote| remote.candidate.kind)
     };
     assert_eq!(kind(&agent), Some(CandidateType::PeerReflexive));
@@ -2366,8 +2384,9 @@ fn a_controlling_agent_waits_for_both_ends_to_finish_before_settling_early() {
             })
             .map(|(at, _)| *at)
     };
-    let selected =
-        |stream: StreamId| move |agent: &IceAgent| agent.selected_pair(stream, ComponentId::RTP).is_some();
+    let selected = |stream: StreamId| {
+        move |agent: &IceAgent| agent.selected_pair(stream, ComponentId::RTP).is_some()
+    };
 
     // one pair, which succeeds at once: with both ends done there is nothing
     // to wait for, as without trickle
@@ -2384,7 +2403,13 @@ fn a_controlling_agent_waits_for_both_ends_to_finish_before_settling_early() {
         )
         .expect("the answer");
     agent.end_of_candidates();
-    let sent = checks_answered(&mut agent, &mut ids, &mut now, &[address(PEER)], selected(stream));
+    let sent = checks_answered(
+        &mut agent,
+        &mut ids,
+        &mut now,
+        &[address(PEER)],
+        selected(stream),
+    );
     let early = nominated_at(&sent).expect("a nomination");
     assert!(
         early.duration_since(start) < Duration::from_millis(500),
@@ -2397,10 +2422,20 @@ fn a_controlling_agent_waits_for_both_ends_to_finish_before_settling_early() {
     let (mut agent, stream, mut ids, mut now) = trickling(Role::Controlling, config(false, false));
     let start = now;
     agent
-        .set_remote(stream, &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]), now)
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
         .expect("the answer");
     agent.end_of_candidates();
-    let sent = checks_answered(&mut agent, &mut ids, &mut now, &[address(PEER)], selected(stream));
+    let sent = checks_answered(
+        &mut agent,
+        &mut ids,
+        &mut now,
+        &[address(PEER)],
+        selected(stream),
+    );
     let late = nominated_at(&sent).expect("a nomination");
     assert!(
         late.duration_since(start) >= IceConfig::default().nomination_wait,

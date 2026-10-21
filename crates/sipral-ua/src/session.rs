@@ -82,6 +82,11 @@ impl Session {
         self.remote.is_some()
     }
 
+    /// The description the far end last sent.
+    pub(crate) const fn remote(&self) -> Option<&SessionDescription> {
+        self.remote.as_ref()
+    }
+
     pub(crate) fn set_local(&mut self, description: SessionDescription) {
         if self.base.is_empty() {
             self.base = description

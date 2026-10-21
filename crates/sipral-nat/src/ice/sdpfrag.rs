@@ -41,10 +41,11 @@ use super::sdp::END_OF_CANDIDATES;
 /// The media type of the body (RFC 8840 §12.2).
 pub const MEDIA_TYPE: &str = "application/trickle-ice-sdpfrag";
 
-/// The longest body read. A full generation of 32 candidates on each of
-/// sixteen streams, the most an agent keeps, is under 48 KiB; anything past
-/// this is not a body an honest peer sends.
-pub const MAX_BODY: usize = 64 * 1024;
+/// The longest body read. A call's stream carries a few candidates, and the
+/// 32 an agent keeps of one are under 4 KiB; anything past this is not a
+/// body an honest peer sends, and it still fits one UDP datagram with the
+/// INFO around it.
+pub const MAX_BODY: usize = 48 * 1024;
 
 /// The most stream sections read, the most streams an agent has.
 pub(crate) const MAX_SECTIONS: usize = 16;
@@ -234,7 +235,10 @@ impl SdpFrag {
     /// in the stream's section, or for the whole session.
     #[must_use]
     pub fn ended(&self, mid: Option<&str>) -> bool {
-        self.end_of_candidates || self.section(mid).is_some_and(|section| section.end_of_candidates)
+        self.end_of_candidates
+            || self
+                .section(mid)
+                .is_some_and(|section| section.end_of_candidates)
     }
 
     /// The candidates of the section for `mid` that `known` does not already
@@ -507,15 +511,9 @@ a=candidate:1 1 UDP 2130706431 192.0.2.1 5000 typ host\r\n";
                 5000 + port
             );
         }
-        assert_eq!(
-            SdpFrag::parse(crowded.as_bytes()),
-            Err(FragError::TooMany)
-        );
+        assert_eq!(SdpFrag::parse(crowded.as_bytes()), Err(FragError::TooMany));
         let sections = "m=audio 9 RTP/AVP 0\r\n".repeat(super::MAX_SECTIONS + 1);
-        assert_eq!(
-            SdpFrag::parse(sections.as_bytes()),
-            Err(FragError::TooMany)
-        );
+        assert_eq!(SdpFrag::parse(sections.as_bytes()), Err(FragError::TooMany));
     }
 
     #[test]

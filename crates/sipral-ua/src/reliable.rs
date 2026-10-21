@@ -56,20 +56,34 @@ pub(crate) struct Unacknowledged {
     pub(crate) held: Option<Arc<[u8]>>,
 }
 
-/// The option tags a request demands that this agent does not implement.
-///
-/// `gruu` is accepted when the addressed account asked its registrar for one
-/// (RFC 5627 §4.4), `siprec` when the application takes recording sessions
-/// ([`UserAgent::accept_recording_sessions`]).
-pub(crate) fn unsupported(request: &RawMessage<'_>, gruu: bool, siprec: bool) -> Vec<Vec<u8>> {
+/// The extensions this agent takes only when told to.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Optional {
+    /// `gruu`, when the addressed account asked its registrar for one (RFC
+    /// 5627 §4.4).
+    pub(crate) gruu: bool,
+    /// `siprec`, when the application takes recording sessions
+    /// ([`UserAgent::accept_recording_sessions`]).
+    pub(crate) siprec: bool,
+    /// `trickle-ice`, when the application takes trickle ICE
+    /// ([`UserAgent::accept_trickle_ice`]).
+    pub(crate) trickle: bool,
+}
+
+/// The option tags a request demands that this agent does not implement:
+/// any outside [`UNDERSTOOD`] and the [`Optional`] ones it was told to take.
+pub(crate) fn unsupported(request: &RawMessage<'_>, optional: Optional) -> Vec<Vec<u8>> {
     request
         .require()
         .filter(|token| {
             let known = UNDERSTOOD
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(token))
-                || (gruu && token.eq_ignore_ascii_case(b"gruu"))
-                || (siprec && token.eq_ignore_ascii_case(crate::siprec::OPTION_TAG.as_bytes()));
+                || (optional.gruu && token.eq_ignore_ascii_case(b"gruu"))
+                || (optional.siprec
+                    && token.eq_ignore_ascii_case(crate::siprec::OPTION_TAG.as_bytes()))
+                || (optional.trickle
+                    && token.eq_ignore_ascii_case(crate::trickle::OPTION_TAG.as_bytes()));
             !known
         })
         .map(<[u8]>::to_vec)
@@ -282,8 +296,21 @@ impl UserAgent {
         self.acknowledged(call, now);
     }
 
-    /// The awaited PRACK arrived: send the 2xx §5 was holding.
+    /// The optional extensions this agent takes, with `gruu` as the request's
+    /// account decides it.
+    pub(crate) const fn optional(&self, gruu: bool) -> Optional {
+        Optional {
+            gruu,
+            siprec: self.recording_server,
+            trickle: self.trickle_ice,
+        }
+    }
+
+    /// The awaited PRACK arrived: send the 2xx §5 was holding. The far end
+    /// holds the early dialog it PRACKed in, so trickled candidates may go
+    /// (RFC 8840 §4.3.1).
     pub(crate) fn acknowledged(&mut self, call: CallHandle, now: Instant) {
+        self.trickle_confirmed(call, now);
         let waiting = self
             .calls
             .get_mut(&call)
@@ -326,11 +353,11 @@ impl UserAgent {
                 ..
             } => {
                 let gruu = self.account_wants_gruu(&request.as_raw(), Some(dialog));
-                unsupported(&request.as_raw(), gruu, self.recording_server)
+                unsupported(&request.as_raw(), self.optional(gruu))
             }
             Event::IncomingOutOfDialog { ref request, .. } => {
                 let gruu = self.account_wants_gruu(&request.as_raw(), None);
-                unsupported(&request.as_raw(), gruu, self.recording_server)
+                unsupported(&request.as_raw(), self.optional(gruu))
             }
             // RFC 3262 §3 runs RFC 3261 §8.2 on a PRACK too
             Event::IncomingPrack {
@@ -339,7 +366,7 @@ impl UserAgent {
                 ..
             } => {
                 let gruu = self.account_wants_gruu(&request.as_raw(), Some(provisional.dialog()));
-                unsupported(&request.as_raw(), gruu, self.recording_server)
+                unsupported(&request.as_raw(), self.optional(gruu))
             }
             _ => return Some(event),
         };

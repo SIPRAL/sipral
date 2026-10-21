@@ -196,8 +196,25 @@ impl UserAgent {
         }
         let mut asked_for = self.asking_for(call, asked);
         self.fold_gruu(call, &mut asked_for);
+        // RFC 8840 §4, items 1 and 4: an offer that trickles says so in
+        // `Supported` and lists the package it takes the candidates in
+        let offered = outgoing
+            .offer
+            .as_deref()
+            .and_then(|sdp| sdp::parse_with_limits(sdp, self.sdp_limits).ok());
+        let (trickle_fields, trickles) =
+            Self::trickle_for_invite(offered.as_ref(), outgoing.trickle_required);
+        if trickles {
+            crate::trickle::fold_option(&mut asked_for, crate::trickle::OPTION_TAG.as_bytes());
+        }
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.trickle.receiving = trickles;
+        }
         for (name, value) in &asked_for {
             request = request.header(*name, value);
+        }
+        for (name, value) in trickle_fields {
+            request = request.header(name, value);
         }
         match (outgoing.offer.as_ref(), outgoing.metadata.as_deref()) {
             (Some(offer), Some(metadata)) => {
@@ -273,19 +290,39 @@ impl UserAgent {
                 .header(HeaderName::Allow, ALLOW),
             &self.application_headers(call),
         );
-        if self.wants_gruu(call) {
-            // RFC 5627 §4.4: 18x and 2xx with a To tag carry it
-            response = response.header(HeaderName::Supported, b"gruu");
-        }
         let described = early
             .as_deref()
             .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
+        let reliable = self.reliably(call);
+        let trickle_fields = self.trickle_for_response(call, described.as_ref(), reliable);
+        let trickles = self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.trickle.receiving);
+        let mut supported: Vec<u8> = Vec::new();
+        if self.wants_gruu(call) {
+            // RFC 5627 §4.4: 18x and 2xx with a To tag carry it
+            supported.extend_from_slice(b"gruu");
+        }
+        if trickles {
+            // RFC 8840 §10.6: in every response to the INVITE
+            if !supported.is_empty() {
+                supported.extend_from_slice(b", ");
+            }
+            supported.extend_from_slice(crate::trickle::OPTION_TAG.as_bytes());
+        }
+        if !supported.is_empty() {
+            response = response.header(HeaderName::Supported, &supported);
+        }
+        for (name, value) in trickle_fields {
+            response = response.header(name, value);
+        }
         if let Some(sdp) = early {
             response = response.body(b"application/sdp", sdp);
         }
         // RFC 3262 §3: reliably when the INVITE said so, and never otherwise
         let carries_sdp = described.is_some();
-        let dialog = if self.reliably(call) {
+        let dialog = if reliable {
             let provisional = self
                 .endpoint
                 .respond_reliable(transaction, &response, now)?;
@@ -345,16 +382,32 @@ impl UserAgent {
         let limits = self.sdp_limits;
         let contact = self.current_contact(call, now);
         self.check_advertised(call, &contact, sdp.as_deref())?;
+        let described = sdp
+            .as_deref()
+            .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
+        let trickle_fields = self.trickle_for_response(call, described.as_ref(), true);
         let mut supported: Vec<u8> = b"timer".to_vec();
         // RFC 5627 §4.4
         if self.wants_gruu(call) {
             supported.extend_from_slice(b", gruu");
+        }
+        // RFC 8840 §10.6
+        if self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.trickle.receiving)
+        {
+            supported.extend_from_slice(b", ");
+            supported.extend_from_slice(crate::trickle::OPTION_TAG.as_bytes());
         }
         // RFC 3311 §4: a 2xx SHOULD list UPDATE in Allow
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW)
             .header(HeaderName::Supported, &supported);
+        for (name, value) in trickle_fields {
+            response = response.header(name, value);
+        }
         let invited = self.calls.get(&call).and_then(|held| held.invited.clone());
         if let Some(ref invited) = invited
             && let Some((value, demand)) = self.timer_for_answer(call, &invited.as_raw(), now)
@@ -366,9 +419,6 @@ impl UserAgent {
             }
         }
         response = onto_response(response, &self.application_headers(call));
-        let described = sdp
-            .as_deref()
-            .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
         if let Some(sdp) = sdp {
             response = response.body(b"application/sdp", sdp);
         }
@@ -1415,7 +1465,7 @@ impl UserAgent {
                 self.release_refer(id, false);
                 // no response: §8.1.3.1 says what stands for one
                 if let Some(status) = unanswered(reason) {
-                    self.dtmf_info_over(id, call, status, now);
+                    self.info_over(id, call, status, now);
                 }
                 None
             }
@@ -1523,8 +1573,7 @@ impl UserAgent {
         account_wants_gruu: bool,
         now: Instant,
     ) -> bool {
-        let missing =
-            crate::reliable::unsupported(request, account_wants_gruu, self.recording_server);
+        let missing = crate::reliable::unsupported(request, self.optional(account_wants_gruu));
         if !missing.is_empty() {
             self.refuse_extension(transaction, &missing, now);
             return true;
@@ -1619,6 +1668,7 @@ impl UserAgent {
                     held.replaces = replaced;
                     (held.peer, held.identity) = (source, identity.clone());
                 }
+                self.trickle_invited(call, &request.as_raw());
                 self.by_server.insert(transaction, call);
                 self.note_far_end(call, &request.as_raw());
                 if let Some(offer) = self.offer_in(&request.as_raw())
@@ -1657,6 +1707,8 @@ impl UserAgent {
                         response: None,
                         answer_wanted: false,
                     });
+                    // RFC 8840 §4.3: the far end holds the dialog it acknowledged
+                    self.trickle_confirmed(call, now);
                 }
                 // the answer to an offer this end put in a 2xx travels here
                 let request = request.clone();
@@ -1881,7 +1933,7 @@ impl UserAgent {
             if refusal.method == Method::Info
                 && let Some(status) = refusal.status
             {
-                self.dtmf_info_over(id, refusal.call, status, now);
+                self.info_over(id, refusal.call, status, now);
             }
             self.by_dtmf_info.remove(&id);
         }
@@ -1943,6 +1995,7 @@ impl UserAgent {
             answer_wanted,
         });
         self.report_transfer(call, status, now);
+        self.trickle_heard(call, response, now);
     }
 
     /// A 2xx for one of our INVITEs. One on a branch other than the kept one
@@ -2021,6 +2074,9 @@ impl UserAgent {
             answer_wanted: !acknowledged,
         });
         self.report_transfer(call, StatusCode::OK, now);
+        if !giving_up {
+            self.trickle_heard(call, response, now);
+        }
         // after `CallConfirmed`, so the facade can move state to the kept
         // branch before the others end
         if let Some(invite) = kept {
@@ -2209,6 +2265,7 @@ impl UserAgent {
         if let Some(digit) = self.by_dtmf_info.remove(&transaction) {
             self.by_dtmf_info.insert(retried, digit);
         }
+        self.trickle_retried(call, transaction, retried);
         self.by_request.insert(retried, (call, method));
         if let Some(account) = account {
             self.account_of.insert(retried, account);
@@ -2280,6 +2337,19 @@ impl UserAgent {
 
     /// Report a DTMF INFO's outcome once, whichever path gets here first, and
     /// move the [`UserAgent::send_dtmf_info`] queue on.
+    /// An INFO this end sent was answered, or never will be: a DTMF key's or
+    /// a trickled candidate list's.
+    fn info_over(
+        &mut self,
+        id: AnyTransactionId,
+        call: CallHandle,
+        status: StatusCode,
+        now: Instant,
+    ) {
+        self.trickle_info_over(id, call, status, now);
+        self.dtmf_info_over(id, call, status, now);
+    }
+
     fn dtmf_info_over(
         &mut self,
         id: AnyTransactionId,
@@ -2478,7 +2548,7 @@ impl UserAgent {
             self.release_refer(id, status.is_success());
             // the one answer here the application is owed
             if method == Method::Info {
-                self.dtmf_info_over(id, call, status, now);
+                self.info_over(id, call, status, now);
             }
         }
         None
@@ -2510,7 +2580,7 @@ impl UserAgent {
         let call = self.by_request.remove(&transaction).map(|(call, _)| call);
         self.account_of.remove(&transaction);
         match (call, failed) {
-            (Some(call), Some(status)) => self.dtmf_info_over(transaction, call, status, now),
+            (Some(call), Some(status)) => self.info_over(transaction, call, status, now),
             // still parked: `settle_request_challenges` reports it (Timer K
             // is zero on reliable transports)
             _ if self.challenged_requests.contains_key(&transaction) => {}

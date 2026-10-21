@@ -796,7 +796,9 @@ mod tests {
         description
             .attributes
             .push(Attribute::with_value("ice-options", "trickle"));
-        description.attributes.push(Attribute::flag("end-of-candidates"));
+        description
+            .attributes
+            .push(Attribute::flag("end-of-candidates"));
         description.media.push(audio_media());
         let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
         assert!(remote.trickle && remote.end_of_candidates);

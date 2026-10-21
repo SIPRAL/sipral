@@ -41,7 +41,13 @@ impl UserAgent {
         if request.as_raw().method() != Some(Method::Options) {
             return Some(event);
         }
-        let supported = UNDERSTOOD.join(&b", "[..]);
+        let mut supported = UNDERSTOOD.join(&b", "[..]);
+        // RFC 8840 §10.6: "When responding to [...] a SIP OPTIONS request, a
+        // SIP entity MUST also include the 'trickle-ice' option-tag"
+        if self.trickle_ice {
+            supported.extend_from_slice(b", ");
+            supported.extend_from_slice(crate::trickle::OPTION_TAG.as_bytes());
+        }
         let response = OutgoingResponse::new(StatusCode::OK)
             .header(HeaderName::Allow, ALLOW)
             .header(HeaderName::Accept, ACCEPT)

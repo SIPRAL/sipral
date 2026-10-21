@@ -1450,7 +1450,10 @@ fn trickled_through_two_nats(trickle: bool, seed: u64) -> (Duration, Duration, D
         Filtering::AddressDependent,
     );
     let slow = IceConfig {
-        stun_servers: vec![address(super::sim_tests::STUN_SERVER), address(DEAD_STUN_SERVER)],
+        stun_servers: vec![
+            address(super::sim_tests::STUN_SERVER),
+            address(DEAD_STUN_SERVER),
+        ],
         trickle,
         ..IceConfig::default()
     };
@@ -1498,7 +1501,8 @@ fn trickled_through_two_nats(trickle: bool, seed: u64) -> (Duration, Duration, D
             }
         }
     } else {
-        assert!(net.run_until(Duration::from_secs(10), |n| gathered(n, a) && gathered(n, b)));
+        assert!(net.run_until(Duration::from_secs(10), |n| gathered(n, a)
+            && gathered(n, b)));
         exchange(&mut net, a, b);
         assert!(net.run_until(Duration::from_secs(20), |n| picked(n, a) && picked(n, b)));
     }

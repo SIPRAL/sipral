@@ -728,9 +728,11 @@ impl IceAgent {
         // connection's segments come from, a mapping the NAT made for that
         // connection alone: nothing sent to it reaches the host socket's
         // datagrams, so it is no server-reflexive candidate of the socket's
-        let reflexive = mapped.filter(|_| !transport.is_stream()).is_some_and(|mapped| {
-            self.add_reflexive(base, mapped, Some(server.ip()), reflexive_preference)
-        });
+        let reflexive = mapped
+            .filter(|_| !transport.is_stream())
+            .is_some_and(|mapped| {
+                self.add_reflexive(base, mapped, Some(server.ip()), reflexive_preference)
+            });
         !duplicate || reflexive
     }
 

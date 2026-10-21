@@ -12,9 +12,7 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::{
-    Awaiting, ChecklistState, Early, IceAgent, MAX_EARLY, Remote, priority_in_range,
-};
+use super::{Awaiting, ChecklistState, Early, IceAgent, MAX_EARLY, Remote, priority_in_range};
 use crate::ice::agent::Role;
 use crate::ice::candidate::{Candidate, CandidateType, Foundation};
 use crate::ice::checklist::PairState;

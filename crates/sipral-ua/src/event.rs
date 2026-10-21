@@ -728,6 +728,20 @@ pub enum UaEvent {
         /// `application/dtmf-relay`'s `Duration=`, when the body carried one.
         held_ms: Option<u32>,
     },
+    /// The far end trickled ICE candidates: an INFO of the `trickle-ice`
+    /// Info Package (RFC 8840 §4.4) arrived on a call that announced it, and
+    /// was answered 200.
+    ///
+    /// `body` is the `application/trickle-ice-sdpfrag` as it came. Every one
+    /// repeats the candidates of the ones before it, so a media layer keeps
+    /// what it has seen and takes only what is new; one that arrived late
+    /// holds nothing a newer one did not.
+    TrickleIce {
+        /// The call.
+        call: CallHandle,
+        /// The body.
+        body: Arc<[u8]>,
+    },
     /// The lifecycle machine moved: sleep, wake, or a different network.
     ///
     /// `rung` is what was just done and `next_in` when the next step goes. A
