@@ -14,6 +14,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 ### Added
 
 - **A call announced by a push is matched on the push's `Call-ID` when it carries one (C ABI 1.3).** `UserAgent::announce_call` and `sipral_account_announce_call` take the `Call-ID` a proxy holding the INVITE can put in the push: the INVITE with that `Call-ID` is the announced call whoever it says is calling, so two calls from one caller are told apart; with none carrying it, the account and the caller decide as before (`docs/15-mobile.md`, "The matching rule"; `docs/08-ffi.md`, "What ABI 1.3 added"). A binding printed at 1.2 loads unchanged.
+- **A push gateway for the lab, so a call wakes a phone that sleeps end to end but for Apple's and Google's last hop.** `interop/push-gateway` is the proxy half of RFC 8599 in front of a PBX that has none: it answers `+sip.pns`, holds an INVITE or a MESSAGE in the bucket while it pushes, and forwards it once the woken phone's refresh is accepted, with senders for APNs (ES256 provider token, VoIP push over HTTP/2) and FCM (service account, HTTP v1) not yet run with real keys; `scripts/lab.sh push` runs the C ABI asleep and woken through it against Asterisk (`docs/15-mobile.md`, "The lab's push gateway").
 
 ### Changed
 

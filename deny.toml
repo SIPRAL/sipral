@@ -84,6 +84,11 @@ allow = ["AGPL-3.0-only"]
 name = "sipral-interop"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+# the lab's push gateway under interop/, the RFC 8599 proxy the lab puts in
+# front of Asterisk; never shipped either
+name = "sipral-push-gateway"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 # the generator under tools/, which prints the header and the bindings and is
 # never shipped either
 name = "sipral-abi-gen"

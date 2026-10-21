@@ -3142,7 +3142,7 @@ route() {
             fi ;;
         bindings/fixtures/*)
             route_to "rust $LAYERS" "fixtures the crates' tests and the layers' tests read" ;;
-        tools/*|fixtures/*|fuzz/*|interop/harness/*)
+        tools/*|fixtures/*|fuzz/*|interop/harness/*|interop/push-gateway/*)
             route_to rust "built, linted or tested by the rust area" ;;
         bindings/c/sipral.c)
             route_to "abi swift" "C compiled by the abi area and by the Swift package" ;;
