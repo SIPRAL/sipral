@@ -77,6 +77,18 @@
 #                               full ICE on what coturn told them, then the
 #                               same two with the path between them blocked,
 #                               through a relay on coturn as a TURN server
+#   scripts/lab.sh trickle      only trickle ICE (RFC 8838, RFC 8840): the
+#                               NAT pair of the full-ICE step, Kamailio
+#                               between the two stacks, every end asking
+#                               coturn and a STUN server that never answers;
+#                               three calls -- regular ICE both ways, half
+#                               trickle to a callee that trickles in full,
+#                               full trickle both ways, the path chosen
+#                               before gathering is over -- each timed from
+#                               the dial; then half trickle to Asterisk's
+#                               ICE endpoint, which answers regular ICE, the
+#                               echo heard and nothing trickled (part of the
+#                               ice run too)
 #   scripts/lab.sh turn         only that last, relayed, step: the call placed
 #                               from the Rust harness, then forked by
 #                               Kamailio to two phones behind the second NAT,
@@ -2892,6 +2904,143 @@ nat_pair_call() {
     [ "$callee_status" = 0 ] || { printf '  the callee did not pass\n'; return 1; }
 }
 
+# Trickle ICE (interop/harness/src/trickle.rs) across the NAT pair above,
+# with Kamailio between the two stacks: the callee behind natbox2 registers
+# as `trickle` (interop/kamailio/kamailio.cfg), its SIP port forwarded, and
+# the caller behind natbox dials it through the proxy, so every INFO that
+# trickles a candidate crosses a record-routing proxy inside the dialog.
+# Both ends ask coturn and, at the same time, an address on the lab network
+# nothing holds, which never answers: gathering is over only once that one
+# is given up on, five and a half seconds in. Three calls, the stances at
+# each end the caller:callee pairs below -- regular ICE, which waits for
+# gathering on both sides; half trickle from the caller, whose offer waits,
+# to a callee that answers at once and trickles; and full trickle both ways,
+# whose path has to be chosen before either end's gathering is over. Each
+# end prints its own timings from the moment it was dialled or rang.
+TRICKLE_CALLEE_NAME=sipral-lab-trickle-callee
+trickle_flow() {
+    local status=0 stances
+    nat_pair_up -f compose.yaml || return 1
+    # the user the callee registers as is this checkout's kamailio.cfg's
+    ( cd interop && docker compose up -d kamailio ) >/dev/null 2>&1
+    printf '  caller behind %s, callee behind %s (%s outside), STUN at %s:3478\n' \
+        "$NAT_PAIR_GATEWAY" "$NAT_PAIR_GATEWAY2" "$NAT_PAIR_OUTSIDE2" "$NAT_PAIR_COTURN"
+    for stances in off:off half:full full:full; do
+        printf '  -- the caller %s, the callee %s\n' "${stances%%:*}" "${stances##*:}"
+        trickle_call "${stances%%:*}" "${stances##*:}" || status=1
+    done
+    nat_pair_down -f compose.yaml
+    return "$status"
+}
+
+# One call of trickle_flow: the caller's stance $1, the callee's $2.
+trickle_call() {
+    local caller="$1" callee="$2" project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    local proxy address silent placed callee_status status=0 tries=0
+    proxy=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$(cd interop && docker compose ps -q kamailio)" 2>/dev/null)
+    [ -n "$proxy" ] || { printf '  could not read the proxy'"'"'s address\n'; return 1; }
+    # the lab network's last address, which no container takes
+    silent="${NAT_PAIR_COTURN%.*}.254:3478"
+    docker rm -f "$TRICKLE_CALLEE_NAME" >/dev/null 2>&1
+    docker run -d --name "$TRICKLE_CALLEE_NAME" --network "${project}_inside2" \
+        --cap-add NET_ADMIN \
+        --add-host "kamailio:$proxy" \
+        -e SIPRAL_FLOWS=trickleanswer \
+        -e "SIPRAL_TRICKLE=$callee" \
+        -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+        -e "SIPRAL_STUN_SILENT=$silent" \
+        -e "SIPRAL_CONTACT=$NAT_PAIR_OUTSIDE2" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $NAT_PAIR_GATEWAY2 || exit 1
+            exec /harness $proxy 5060" >/dev/null \
+        || { printf '  could not start the callee\n'; return 1; }
+    address=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_inside2\"}}{{.IPAddress}}{{end}}" \
+        "$TRICKLE_CALLEE_NAME" 2>/dev/null)
+    docker exec "$NAT_PAIR_BOX2" sh -c "
+        lab=\$(ip -o route get $NAT_PAIR_COTURN | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p')
+        iptables -t nat -F PREROUTING
+        iptables -t nat -I PREROUTING -i \"\$lab\" -p udp --dport 5060 \
+            -j DNAT --to-destination $address:5060" \
+        || { printf '  could not forward SIP to the callee\n'; status=1; }
+    until [ "$status" -ne 0 ] \
+        || docker logs "$TRICKLE_CALLEE_NAME" 2>&1 | found '^waiting for the call'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$TRICKLE_CALLEE_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            printf '  the callee never registered\n'
+            status=1
+            break
+        fi
+        sleep 1
+    done
+    placed=1
+    if [ "$status" -eq 0 ]; then
+        lab_run "the trickle call's caller" $((LAB_START_S + LAB_CALL_S)) \
+            --network "${project}_inside" \
+            --cap-add NET_ADMIN \
+            --add-host "kamailio:$proxy" \
+            -e SIPRAL_FLOWS=trickle \
+            -e "SIPRAL_TRICKLE=$caller" \
+            -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+            -e "SIPRAL_STUN_SILENT=$silent" \
+            -e "SIPRAL_PEER_NAT=$NAT_PAIR_OUTSIDE2" \
+            ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+            -v "$HARNESS:/harness:ro" \
+            sipral-lab-nat sh -c "
+                ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                exec /harness $proxy 5060"
+        placed=$?
+    fi
+    callee_status=$(timeout $((LAB_CALL_S * 2)) docker wait "$TRICKLE_CALLEE_NAME" 2>/dev/null || echo 1)
+    docker logs "$TRICKLE_CALLEE_NAME" 2>&1 | sed 's/^/    callee  /'
+    docker rm -f "$TRICKLE_CALLEE_NAME" >/dev/null 2>&1
+    [ "$placed" -eq 0 ] || return 1
+    [ "$callee_status" = 0 ] || { printf '  the callee did not pass\n'; return 1; }
+}
+
+# Half trickle against a peer that does not trickle: the account
+# interop/ice/pjsip_local.conf gives ICE, mounted over Asterisk for this step
+# as for the ICE-lite one, calling the echo (9008) with an offer that says
+# `trickle` and is whole. The harness judges its own half (regular ICE in
+# the answer, no INFO, the echo heard on the chosen pair); Asterisk's RTP
+# debug judges the other, as in ice_lite_asterisk: its audio has to go out
+# through its completed ICE session.
+trickle_asterisk() {
+    local rtp_log since via_ice status=0
+    ( cd interop && docker compose -f compose.yaml -f ice/compose.override.yaml up -d asterisk ) \
+        >/dev/null 2>&1 || { printf '  could not restart Asterisk with the ICE endpoint\n'; return 1; }
+    wait_for asterisk "Asterisk Ready" || status=1
+    if [ "$status" -eq 0 ]; then
+        ( cd interop && docker compose exec -T asterisk asterisk -rx "rtp set debug on" ) \
+            >/dev/null 2>&1
+        since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        lab_run "half trickle to Asterisk" $((LAB_START_S + LAB_CALL_S)) \
+            --network "$LAB_NETWORK" \
+            -e SIPRAL_FLOWS=trickleasterisk \
+            ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+            -v "$HARNESS:/harness:ro" \
+            debian:trixie-slim sh -c "/harness asterisk 5060"
+        status=$?
+        rtp_log=$( cd interop && docker compose logs --no-color --since "$since" asterisk \
+            2>/dev/null )
+        ( cd interop && docker compose exec -T asterisk asterisk -rx "rtp set debug off" ) \
+            >/dev/null 2>&1
+    fi
+    ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+    wait_for asterisk "Asterisk Ready" >/dev/null || true
+    [ "$status" -eq 0 ] || return 1
+    via_ice=$(printf '%s\n' "$rtp_log" | grep -c 'Sent RTP packet to .*(via ICE)')
+    [ "$via_ice" -ge 10 ] \
+        || { printf '  Asterisk sent %s packet(s) through ICE: its checks never succeeded\n' \
+            "$via_ice"; return 1; }
+    printf '  Asterisk sent %s packets through its ICE session\n' "$via_ice"
+}
+
 # 8.5.5's relay step: the same two stacks behind the same two NATs, told
 # this time to drop every datagram between them but SIP -- natbox and natbox2
 # forward nothing addressed to the other's outside address, or from it,
@@ -4028,6 +4177,15 @@ if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
     step "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them"
     ice_nat_flow && pass "the call found its path through both NATs, and the tone crossed it both ways" \
         || fail "full ICE through two NATs"
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = ice ] || [ "$WANT" = trickle ]; then
+    step "trickle ICE -- two stacks behind two NATs through the proxy, a STUN server that never answers"
+    trickle_flow && pass "regular, half and full trickle each set up a call, full trickle before gathering was over" \
+        || fail "trickle ICE through the proxy and two NATs"
+    step "half trickle -- an offer that says trickle, to Asterisk's ICE, which does not"
+    trickle_asterisk && pass "Asterisk answered regular ICE, its echo came back on the pair, and nothing was trickled" \
+        || fail "half trickle to Asterisk"
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = ice ] || [ "$WANT" = turn ]; then
