@@ -233,6 +233,12 @@ pub struct AccountSrtp {
     /// Whether the account's SDES keys may travel in unencrypted signalling ([`SdesSignalling`]);
     /// `None` keeps the engine's. Applies to its recording sessions too.
     pub sdes_signalling: Option<SdesSignalling>,
+    /// Whether the account is a WebRTC line
+    /// ([`CodecCatalog::with_webrtc`](crate::CodecCatalog::with_webrtc)): its calls
+    /// offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE and BUNDLE, whatever
+    /// `policy` says. `None` keeps the engine's. A build without the `dtls` feature
+    /// refuses `Some(true)` with [`MediaError::NoDtlsSrtp`].
+    pub webrtc: Option<bool>,
 }
 
 impl AccountSrtp {
@@ -240,7 +246,7 @@ impl AccountSrtp {
     ///
     /// # Errors
     /// What [`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites)
-    /// refuses.
+    /// refuses, and [`MediaError::NoDtlsSrtp`] for a WebRTC line in a build without DTLS.
     pub(crate) fn over(
         &self,
         mut catalog: crate::CodecCatalog,
@@ -253,6 +259,14 @@ impl AccountSrtp {
         }
         if let Some(sdes) = self.sdes_signalling {
             catalog = catalog.with_sdes_signalling(sdes);
+        }
+        #[cfg(feature = "dtls")]
+        if let Some(webrtc) = self.webrtc {
+            catalog = catalog.with_webrtc(webrtc);
+        }
+        #[cfg(not(feature = "dtls"))]
+        if self.webrtc == Some(true) {
+            return Err(MediaError::NoDtlsSrtp);
         }
         Ok(catalog)
     }

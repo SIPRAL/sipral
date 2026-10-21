@@ -176,6 +176,9 @@ mod stir_tests;
 #[cfg(test)]
 mod tests;
 mod text;
+mod webrtc;
+#[cfg(all(test, feature = "dtls", feature = "ice"))]
+mod webrtc_tests;
 
 pub use app_rate::APPLICATION_RATES;
 pub use capabilities::{Capabilities, SrtpKeying};

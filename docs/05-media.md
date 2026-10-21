@@ -1409,6 +1409,74 @@ client and never sent a ClientHello, and the plan later certificates are
 compared against was left with nothing in it, so a certificate that went away
 in one re-offer came back as another in the next without being refused.
 
+### A WebRTC line
+
+A PBX hands out a WebRTC line in the shape a browser describes its audio:
+Asterisk's `webrtc=yes` endpoint, FreeSWITCH's WebRTC profile, a gateway in
+front of a WebRTC service. The media underneath is what this stack already
+runs — DTLS-SRTP, ICE in either role, RTP and RTCP on one port, Opus — so what
+such a line asks for is a description, and `CodecCatalog::with_webrtc` (off by
+default) is that description for one audio stream:
+
+| Line | What it says | Where it comes from |
+|---|---|---|
+| `m=audio ... UDP/TLS/RTP/SAVPF` | DTLS-SRTP with RTCP feedback | RFC 5764 §8, RFC 5124 |
+| `a=fingerprint`, `a=setup:actpass` | the certificate and the role left to the answer | RFC 8122, RFC 8842 |
+| `a=ice-ufrag`, `a=ice-pwd`, `a=candidate` | ICE, as `IcePolicy::Offered` | RFC 8839 |
+| `a=rtcp-mux`, `a=rtcp-mux-only` | RTCP on the RTP port and on no other | RFC 5761, RFC 8858 §4.2 |
+| `a=rtcp-fb:* nack`, `a=rtcp-rsize` | the feedback this stack does | RFC 4585, RFC 5506 |
+| `a=group:BUNDLE 0`, `a=mid:0` | the stream, alone in a BUNDLE group | RFC 8843 §7.2, RFC 5888 |
+| `a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid` | the header extension that carries the tag | RFC 8843 §9.1, RFC 8285 |
+| `a=msid:<id> audio`, `a=ssrc:<ssrc> cname:<cname>` | the source the stream sends from | RFC 8830 §2, RFC 5576 §4.1 |
+
+On, `CodecCatalog::srtp` is `DtlsRequired` whatever was set, so a plain offer
+is refused 488 and an answer keyed any other way ends the call;
+`CodecCatalog::ice` is `Offered` where it was `Off`, and `CodecCatalog::feedback`
+is on. The `a=ssrc` line names the SSRC and CNAME the stream will send, and the
+`a=msid` identifier is drawn from the `o=` line's session id, so neither says
+anything the description did not already. A hold, a resume or an ICE restart
+offers the same lines again. Per account it is `AccountSrtp::webrtc`
+(`MediaEngine::set_account_srtp`), and through the C ABI
+`sipral_account_config_t::webrtc` (`docs/08-ffi.md`, ABI 1.4). A build without
+the `dtls` feature has no `with_webrtc` and refuses the account setting with
+`MediaError::NoDtlsSrtp`.
+
+**An offer that bundles is answered as RFC 8843 asks, by any catalogue.** The
+setting decides what this end offers and requires; answering is the offer's
+to shape (`sipral::webrtc`). Each accepted stream gets its `a=mid` back; the
+BUNDLE group in the answer holds the tags of the streams the offer bundled and
+this end accepted, in the offer's order, so the first is the one the offerer
+suggested (§7.3.1), and a refused stream is left out of it (§7.3.3). In a
+bundled stream the MID extension is answered under the offer's own number
+(§9.1), `a=rtcp-mux` is answered whatever the catalogue says about mux, since
+a bundled stream has no other choice (§9.3.1.2), and `a=rtcp-mux-only` is said
+back where the offer said it. Outside a group, an offer with
+`a=rtcp-mux-only` is answered with `a=rtcp-mux` and never with
+`a=rtcp-mux-only` (RFC 8858 §4.3). A bundled audio stream also names its
+source. The rest of a browser-shaped offer is read past: `a=rtcp-fb` values
+this stack does not do (`transport-cc`, `goog-remb`), other header extensions,
+`a=msid-semantic` and the far end's own `a=ssrc` lines are not answered and
+change nothing. The profile stays the offer's, as it always has, so
+`UDP/TLS/RTP/SAVPF` is answered on `UDP/TLS/RTP/SAVPF` by a catalogue that
+answers DTLS at all.
+
+**One stream, so one transport already.** BUNDLE exists to put several `m=`
+sections on one 5-tuple. With one audio section the stream already has its
+own, and RFC 7983's first-octet rule already tells STUN, DTLS and RTP or RTCP
+apart on it (`sipral_nat::demux`), so nothing in the media path changes.
+What the far end may still need is the tag inside the packets: when both
+descriptions map the MID extension to the same number, the first
+`sipral_rtp::MID_PACKETS` (fifty, a second of 20 ms packets) RTP packets carry
+it in a one-byte header extension (RFC 8285 §4.2; the two-byte form for a
+number above 14 or a tag above 16 octets), and every RTCP report carries it as
+the `MID` SDES item (RFC 8843 §15.1), beside the CNAME
+(`RtpSession::announce_mid`). Incoming header extensions are skipped, as RFC
+3550 §5.3.1 has a receiver that does not know them do.
+
+**What it is not.** Video, data channels, several streams in one group and
+SFU or simulcast lines are out: this is a SIP stack carrying audio. Trickled
+candidates are the 1.4 item beside this one (`docs/10-roadmap.md`, Phase 7).
+
 ## Ringing with media
 
 `MediaEngine::ring` and `MediaEngine::ring_with` are `MediaEngine::place` and

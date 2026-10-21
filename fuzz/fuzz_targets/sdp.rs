@@ -16,8 +16,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use sipral_core::sdp::{
-    AcceptedStream, Connection, Limits, Origin, SessionDescription, StreamAnswer, parse,
-    parse_with_limits,
+    AcceptedStream, Connection, Limits, MID_EXTENSION, Origin, SessionDescription, StreamAnswer,
+    parse, parse_with_limits,
 };
 
 /// `to_bytes` always closes a line with CRLF, the ending RFC 4566 itself
@@ -102,12 +102,16 @@ fuzz_target!(|data: &[u8]| {
 
 fn walk(sdp: &SessionDescription) {
     let _ = sdp.direction();
+    let _ = sdp.bundle_group();
     for media in &sdp.media {
         let _ = sdp.direction_of(media);
         let _ = sdp.connection_of(media);
         let _ = media.is_rejected();
         let _ = media.ptime();
         let _ = media.has_rtcp_mux();
+        let _ = media.has_rtcp_mux_only();
+        let _ = media.mid();
+        let _ = media.extmap_id(MID_EXTENSION);
         for payload in media.payload_types() {
             let _ = media.rtpmap(payload);
             let _ = media.fmtp(payload);

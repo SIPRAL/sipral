@@ -728,6 +728,12 @@ impl MediaSession {
         self.rtp.use_feedback(agreed, elapsed, draw);
     }
 
+    /// Carry the stream's identification-tag in its first RTP packets and its reports, under the
+    /// header extension number both descriptions gave it (RFC 8843 §15, `crate::webrtc`).
+    pub(crate) fn announce_mid(&mut self, id: u8, mid: &str) {
+        self.rtp.announce_mid(id, mid);
+    }
+
     /// The RFC 6035 quality report for `sipral_ua::UserAgent::send_quality_report`. `None` before
     /// the first RTP packet identified a source ([`sipral_rtp::RtpSession::voip_metrics`]).
     #[must_use]
@@ -2880,6 +2886,15 @@ impl MediaSession {
     }
 }
 
+/// The CNAME a stream received at `local` sends (RFC 3550 §6.5.1): the configured one, else one
+/// built from the address. A WebRTC line's `a=ssrc` names the same text before the stream opens.
+pub(crate) fn cname(config: &MediaConfig, local: core::net::IpAddr) -> String {
+    config
+        .cname
+        .clone()
+        .unwrap_or_else(|| format!("sipral@{local}"))
+}
+
 /// The RTP stream config for `plan`. `discontinuous` is Annex B DTX, which marks talk spurts like
 /// suppression does.
 fn stream_config(
@@ -2900,10 +2915,7 @@ fn stream_config(
         // any stream that pauses marks the first packet of each talk spurt
         silence_suppression: config.silence_suppression || discontinuous,
         playout: BufferConfig::new(frame_ticks),
-        cname: config
-            .cname
-            .clone()
-            .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
+        cname: cname(config, plan.local.ip()),
         rtcp_bandwidth: config.rtcp_bandwidth,
         voip_metrics_xr: plan.voip_metrics_xr,
     }
