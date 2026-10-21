@@ -499,6 +499,13 @@ grep -q 'android.permission.BIND_TELECOM_CONNECTION_SERVICE' "$manifest" \
     || fail "sipral-telecom.aar: the manifest does not declare the ConnectionService as it should"
 grep -q 'android.permission.MANAGE_OWN_CALLS' "$manifest" \
     && pass "sipral-telecom.aar: MANAGE_OWN_CALLS" || fail "sipral-telecom.aar: MANAGE_OWN_CALLS is not requested"
+# Kotlin metadata 2.2, as sipral.aar's: newer would not compile in an
+# application on AGP 9's built-in Kotlin 2.2 (telecom/build.gradle.kts)
+unzip -q -o "$X/telecom/classes.jar" org/sipral/android/telecom/SipralTelecom.class -d "$X/telecom-classes"
+telecom_mv=$(javap -v -cp "$X/telecom-classes" org.sipral.android.telecom.SipralTelecom 2>/dev/null \
+    | sed -n 's/^ *mv=\[\([0-9]*\),\([0-9]*\),.*/\1.\2/p' | head -1)
+[ "$telecom_mv" = "2.2" ] && pass "sipral-telecom.aar: Kotlin metadata 2.2" \
+    || fail "sipral-telecom.aar: Kotlin metadata '$telecom_mv', not 2.2"
 
 step "$APK_NAME"
 unzip -q "$OUT/$APK_NAME" -d "$X/apk"
