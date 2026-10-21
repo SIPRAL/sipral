@@ -6,7 +6,8 @@
 //!
 //! Everything here is a thin reading or writing of `a=` lines. The lines
 //! themselves — `ice-lite`, `ice-ufrag`, `ice-pwd`, `ice-options`,
-//! `candidate` — go into or come out of a real
+//! `candidate`, and trickle ICE's `end-of-candidates` (RFC 8840 §8) — go into
+//! or come out of a real
 //! [`sipral_core::sdp::SessionDescription`], so a caller never sees them as
 //! strings assembled by hand.
 
@@ -64,6 +65,43 @@ fn write_lines(media: &mut MediaDescription, ufrag: &str, pwd: &str, candidates:
     }
 }
 
+/// Declare trickle ICE on a stream already written by [`write_stream`] or
+/// [`write_media`]: `a=ice-options:trickle ice2` (RFC 8838 §3, RFC 8840 §4,
+/// item 2) and, when `end_of_candidates`, `a=end-of-candidates` after the
+/// candidates (RFC 8840 §8.1).
+///
+/// Every stream of a description gets it or none does: "an agent MUST NOT
+/// specify Trickle ICE support for some data streams but not others" (RFC
+/// 8838 §3). `trickle` comes first because that is where an agent that reads
+/// only the first token, as some browsers' parsers did, looks for it.
+///
+/// A half-trickle offer — every candidate already in it — carries
+/// `end_of_candidates` unless the agent means to trickle more if the peer
+/// turns out to support it (RFC 8838 §13).
+pub fn declare_trickle(media: &mut MediaDescription, end_of_candidates: bool) {
+    media
+        .attributes
+        .retain(|attribute| !attribute.name.eq_ignore_ascii_case("ice-options"));
+    let after = media
+        .attributes
+        .iter()
+        .position(|attribute| attribute.name.eq_ignore_ascii_case("ice-pwd"))
+        .map_or(media.attributes.len(), |at| at + 1);
+    media.attributes.insert(
+        after,
+        Attribute::with_value("ice-options", &format!("{TRICKLE} ice2")),
+    );
+    if end_of_candidates {
+        media.attributes.push(Attribute::flag(END_OF_CANDIDATES));
+    }
+}
+
+/// The `ice-options` token of trickle ICE (RFC 8838 §19).
+pub const TRICKLE: &str = "trickle";
+
+/// The attribute that says no candidate follows (RFC 8840 §8.1).
+pub const END_OF_CANDIDATES: &str = "end-of-candidates";
+
 /// Write a full agent's pacing, in milliseconds (RFC 8839 §5.5). Session-level
 /// only; "If the offerer is a full ICE implementation, it SHOULD include an
 /// 'ice-pacing' attribute", and a lite one "MUST NOT" (§4.3.1), which is why
@@ -87,6 +125,11 @@ pub fn write_pacing(session: &mut SessionDescription, ta: Duration) {
 /// to appear as a component-2 candidate. The two exceptions §4.2.5 lists are
 /// honoured: `0.0.0.0` or `::` with port 9, and a `c=` address that is a
 /// name rather than an address.
+///
+/// A peer that trickles and has not said `a=end-of-candidates` is never in
+/// mismatch: the candidate its default destination names may be one it has
+/// not sent yet, and RFC 8840 §4.1.2 says a default that no trickled
+/// candidate matches "MUST NOT cause an ICE mismatch".
 #[must_use]
 pub fn ice_mismatch(
     session: &SessionDescription,
@@ -94,6 +137,9 @@ pub fn ice_mismatch(
     remote: &RemoteIce,
     rtcp_muxed: bool,
 ) -> bool {
+    if remote.trickle && !remote.end_of_candidates {
+        return false;
+    }
     let Some(ip) = session.connection_of(media).and_then(Connection::ip) else {
         return false;
     };
@@ -160,6 +206,10 @@ fn rtcp_destination(media: &MediaDescription, rtp: SocketAddr) -> Option<SocketA
 ///
 /// [`Debug`] omits the password, as for [`Credentials`]: with it anyone can
 /// sign checks the peer believes and redirect the media.
+///
+/// Five flags, each one attribute of the description read as it stands:
+/// folding them into a state would invent combinations SDP does not have.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, PartialEq, Eq)]
 pub struct RemoteIce {
     /// The username fragment this stream's checks must be signed against.
@@ -183,6 +233,15 @@ pub struct RemoteIce {
     /// Whether the stream carries `a=ice-mismatch` (RFC 8839 §5.3): the peer
     /// does ICE, just not on this stream.
     pub mismatch: bool,
+    /// Whether the peer declared `trickle` in `a=ice-options`, at the session
+    /// level or on the stream (RFC 8838 §3): it may send more candidates
+    /// later, and takes candidates sent to it later.
+    pub trickle: bool,
+    /// Whether the peer wrote `a=end-of-candidates`, at the session level or
+    /// on the stream (RFC 8840 §8.2): no candidate of this generation follows
+    /// the ones listed. A peer that does not trickle never sends more, so
+    /// for it this is implied whatever it wrote.
+    pub end_of_candidates: bool,
 }
 
 impl fmt::Debug for RemoteIce {
@@ -194,6 +253,8 @@ impl fmt::Debug for RemoteIce {
             .field("candidates", &self.candidates)
             .field("pacing", &self.pacing)
             .field("mismatch", &self.mismatch)
+            .field("trickle", &self.trickle)
+            .field("end_of_candidates", &self.end_of_candidates)
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +273,9 @@ pub fn parse_remote(session: &SessionDescription, media: &MediaDescription) -> O
     let lite = session.attribute("ice-lite").is_some();
     let ice2 = declares_option(media.attribute("ice-options"), "ice2")
         || declares_option(session.attribute("ice-options"), "ice2");
+    let trickle = declares_option(media.attribute("ice-options"), TRICKLE)
+        || declares_option(session.attribute("ice-options"), TRICKLE);
+    let ended = media.has_flag(END_OF_CANDIDATES) || session.attribute(END_OF_CANDIDATES).is_some();
     let candidates = media
         .attributes
         .iter()
@@ -231,6 +295,8 @@ pub fn parse_remote(session: &SessionDescription, media: &MediaDescription) -> O
         candidates,
         pacing,
         mismatch: media.has_flag("ice-mismatch"),
+        trickle,
+        end_of_candidates: ended || !trickle,
     })
 }
 
@@ -262,8 +328,8 @@ fn declares_option(attribute: Option<&Attribute>, option: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        RemoteIce, ice_mismatch, parse_remote, write_media, write_pacing, write_session,
-        write_stream,
+        RemoteIce, declare_trickle, ice_mismatch, parse_remote, write_media, write_pacing,
+        write_session, write_stream,
     };
     use crate::ice::agent::{LiteAgent, Role};
     use crate::ice::candidate::{ComponentId, HostAddresses, gather};
@@ -682,6 +748,65 @@ mod tests {
         assert!(remote.ice2);
         assert!(!remote.lite);
         assert_eq!(remote.candidates, candidates);
+    }
+
+    #[test]
+    fn a_trickle_declaration_round_trips_and_says_whether_more_follow() {
+        let credentials = Credentials::new("8hhY", "asd88fgpdd777uzjYhagZg").expect("shape");
+        let mut description = session();
+        let mut media = audio_media();
+        write_stream(&mut media, &credentials, &[]);
+        declare_trickle(&mut media, false);
+        assert_eq!(
+            media
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.name == "ice-options")
+                .filter_map(|attribute| attribute.value.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["trickle ice2"],
+            "one ice-options line, trickle first"
+        );
+        description.media.push(media);
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert!(remote.trickle && remote.ice2);
+        assert!(!remote.end_of_candidates);
+        // with no candidate and the default address, nothing is a mismatch
+        // (RFC 8840 §4.1.2)
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            true
+        ));
+
+        let mut ended = audio_media();
+        write_stream(&mut ended, &credentials, &[]);
+        declare_trickle(&mut ended, true);
+        let mut description = session();
+        description.media.push(ended);
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert!(remote.trickle && remote.end_of_candidates);
+    }
+
+    #[test]
+    fn a_session_level_trickle_and_end_count_for_every_stream() {
+        let mut description = session();
+        with_credentials(&mut description);
+        description
+            .attributes
+            .push(Attribute::with_value("ice-options", "trickle"));
+        description.attributes.push(Attribute::flag("end-of-candidates"));
+        description.media.push(audio_media());
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert!(remote.trickle && remote.end_of_candidates);
+    }
+
+    #[test]
+    fn a_peer_that_does_not_trickle_has_sent_every_candidate_it_will() {
+        let (_, remote) = described(&[RTP_LINE], |_| {});
+        assert!(!remote.trickle);
+        assert!(remote.end_of_candidates);
     }
 
     /// The peer's password is the peer's half of the same secret, and a

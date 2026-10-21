@@ -1095,9 +1095,12 @@ impl Ice {
                     IceEvent::ConsentLost { .. }
                     | IceEvent::Failed
                     | IceEvent::StreamFailed { .. } => return Some(PathNews::Lost),
+                    // the agent gathers nothing here, so it finds nothing to
+                    // trickle: what this end trickles, the engine hands it
                     IceEvent::GatheringComplete
                     | IceEvent::Completed
-                    | IceEvent::RoleChanged(_) => {}
+                    | IceEvent::RoleChanged(_)
+                    | IceEvent::NewCandidates { .. } => {}
                 }
             },
             Running::Lite(lite) => lite.news.take().map(PathNews::Selected),

@@ -16,14 +16,26 @@
 //! tiebreaker and one set of local credentials for all of them (RFC 8839
 //! §5.4 lets those be session-level). A restart restarts every stream.
 //!
-//! Two scope decisions are deliberate, and written down here so that they are
-//! not mistaken for gaps:
+//! Trickle ICE (RFC 8838) is a mode, [`IceConfig::trickle`]:
 //!
-//! - **No trickle.** Candidates are gathered to completion before the caller
-//!   writes its description, and [`IceEvent::GatheringComplete`] says when.
-//!   Trickle ICE for SIP (RFC 8840) needs INFO packages that the PBXs this
-//!   stack is aimed at do not carry, and gathering to completion costs a
-//!   bounded, configurable wait ([`IceConfig::gathering_timeout`]).
+//! - **Off**, candidates are gathered to completion before the caller writes
+//!   its description, and [`IceEvent::GatheringComplete`] says when. A peer
+//!   that writes no ICE option of `trickle` gets exactly that, which is what
+//!   the PBXs this stack is aimed at expect; the cost is a bounded,
+//!   configurable wait ([`IceConfig::gathering_timeout`]).
+//! - **On**, the description can go out at once. Checks start as soon as
+//!   the peer's side arrives, while gathering goes on; every candidate found
+//!   later is paired as it comes ([`IceEvent::NewCandidates`] tells the
+//!   caller to send it), and the peer's later candidates come in through
+//!   [`IceAgent::trickle_remote`]. A checklist with nothing left to check is
+//!   given the RFC 8863 wait from the last candidate either end added, and
+//!   a controlling agent does not settle for a pair early while either end
+//!   may still send a better one (RFC 8838 §8, §14). Nothing is trickled
+//!   after a nomination or after [`IceAgent::end_of_candidates`] (§13).
+//!
+//! One scope decision is deliberate, and written down here so that it is not
+//! mistaken for a gap:
+//!
 //! - **RTP and RTCP multiplexed.** A stream normally has one component. The
 //!   agent is written over component ids and works with two, but the SDP side
 //!   pairs only what both ends offered, which with `a=rtcp-mux` on both is
@@ -184,6 +196,10 @@ pub struct IceConfig {
     /// Default [`crate::turn::DEFAULT_TI`], one full STUN transaction: enough
     /// for every retransmission of a lost first check.
     pub patience: Duration,
+    /// Trickle ICE (RFC 8838): check while gathering, pair what either end
+    /// finds later, and keep a checklist alive while candidates may still
+    /// come. Off by default, which is regular ICE.
+    pub trickle: bool,
 }
 
 impl Default for IceConfig {
@@ -199,6 +215,7 @@ impl Default for IceConfig {
             keepalive: DEFAULT_KEEPALIVE,
             consent_interval: DEFAULT_CONSENT_INTERVAL,
             patience: crate::turn::DEFAULT_TI,
+            trickle: false,
         }
     }
 }
@@ -409,6 +426,16 @@ pub enum IceEvent {
     /// A role conflict switched this agent's role (RFC 8445 §7.2.5.1,
     /// §7.3.1.1).
     RoleChanged(Role),
+    /// Gathering found a candidate for a stream after the description could
+    /// have gone out, and paired it: trickle it to the peer
+    /// ([`IceConfig::trickle`]). [`IceAgent::local_candidates`] lists every
+    /// candidate of the stream, the new ones last, which is the order RFC
+    /// 8840 §4.4 sends them in. Only for what the agent gathered itself; a
+    /// candidate the caller hands in, it already knows about.
+    NewCandidates {
+        /// The stream.
+        stream: StreamId,
+    },
 }
 
 /// The state of the session (RFC 8445 §6.1.3), with the two phases before
@@ -488,6 +515,18 @@ pub enum IceError {
     /// A TURN client handed to [`IceAgent::add_relayed`] holds no allocation
     /// of the base's address family.
     NotAllocated,
+    /// A candidate for a session that has stopped trickling: this end said
+    /// it had no more ([`IceAgent::end_of_candidates`]), or a pair has been
+    /// nominated, after which "an agent MUST NOT trickle any new candidates
+    /// within an ICE session" (RFC 8838 §13).
+    TrickleOver,
+    /// Trickled candidates for a stream whose peer has not described it yet:
+    /// there are no credentials to tell their generation by.
+    NotDescribed,
+    /// Trickled candidates under credentials that are not the stream's
+    /// current ones: a delayed update from before a restart, which "can be
+    /// recognized as such and ignored" (RFC 8838 §9).
+    OtherGeneration,
 }
 
 impl fmt::Display for IceError {
@@ -503,6 +542,9 @@ impl fmt::Display for IceError {
             Self::UnknownBase => "not a host candidate of that stream and component",
             Self::AlreadyPaired => "the stream's candidates have already been paired",
             Self::NotAllocated => "the TURN client holds no allocation for that base",
+            Self::TrickleOver => "this session has stopped trickling candidates",
+            Self::NotDescribed => "the peer has not described that stream yet",
+            Self::OtherGeneration => "candidates of another ICE generation",
         })
     }
 }
@@ -606,6 +648,11 @@ struct Stream {
     /// moment this agent has done everything it can and the rest is the
     /// peer's — and cleared by a restart, which starts the wait again.
     patience_until: Option<Instant>,
+    /// The peer declared trickle ICE for this stream.
+    remote_trickles: bool,
+    /// The peer has said no more candidates of this generation follow, or
+    /// does not trickle and so sent them all at once.
+    remote_ended: bool,
 }
 
 struct Component {
@@ -756,6 +803,9 @@ pub struct IceAgent {
     /// Datagrams [`TRANSMIT_CEILING`] kept out of `outbox`.
     dropped: u64,
     events: VecDeque<IceEvent>,
+    /// This end has said it has no more candidates
+    /// ([`IceAgent::end_of_candidates`]).
+    local_ended: bool,
 }
 
 impl IceAgent {
@@ -812,6 +862,7 @@ impl IceAgent {
             outbox: VecDeque::new(),
             dropped: 0,
             events: VecDeque::new(),
+            local_ended: false,
         })
     }
 
@@ -862,6 +913,8 @@ impl IceAgent {
             state: ChecklistState::Running,
             triggered: VecDeque::new(),
             patience_until: None,
+            remote_trickles: false,
+            remote_ended: false,
             components: components.iter().map(|id| Component::new(*id)).collect(),
         });
         let block = self.preference_block();
@@ -952,10 +1005,17 @@ impl IceAgent {
         let Some(entry) = self.streams.get_mut(index) else {
             return Err(IceError::UnknownStream);
         };
+        // "After an agent has received an end-of-candidates indication, it
+        // MUST ignore any newly received candidates" (RFC 8838 §14) -- which
+        // a repeated answer carrying fewer or more of them than trickling did
+        // is (RFC 8840 §4.3.2)
+        let closed = entry.remote.is_some() && entry.remote_trickles && entry.remote_ended;
         match &entry.remote {
             Some(existing) if *existing != credentials => return Err(IceError::RestartRequired),
             Some(_) => {}
             None => {
+                entry.remote_trickles = remote.trickle;
+                entry.remote_ended = remote.end_of_candidates || !remote.trickle;
                 entry.remote = Some(credentials);
                 if let Some(highest) = remote.candidates.iter().map(|c| c.component).max()
                     && entry.components.iter().any(|c| c.id <= highest)
@@ -975,14 +1035,117 @@ impl IceAgent {
                 self.switch_role(Role::Controlling);
             }
         }
-        self.add_remote_candidates(index, &remote.candidates);
+        if !closed {
+            if let Some(entry) = self.streams.get_mut(index) {
+                entry.remote_ended |= remote.end_of_candidates;
+            }
+            self.add_remote_candidates(index, &remote.candidates);
+        }
         self.permit_remotes(index, now);
-        if self.phase == Phase::Gathered {
+        if self.checking() {
             self.form_checklist(index, now);
             self.replay_early(index, now);
         }
         self.replay_restarted(now);
         Ok(())
+    }
+
+    /// Take candidates the peer trickled for a stream after its description
+    /// (RFC 8838 §11), with the credentials they were sent under and whether
+    /// the peer said they are its last (§14).
+    ///
+    /// Each is paired with this end's candidates as it arrives, the new pairs
+    /// unfrozen by §12's rules, and the checklist's wait extended. One the
+    /// stream already holds -- learned from a check as peer-reflexive, which
+    /// the peer's own trickle often follows -- takes the signalled type and
+    /// priority in place, so that both ends rank the pair the same (§11,
+    /// item 4.A). After the peer's end of candidates, more are ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`IceError::UnknownStream`], [`IceError::NotDescribed`] before
+    /// [`Self::set_remote`], and [`IceError::OtherGeneration`] for
+    /// credentials that are not the stream's: the caller drops those.
+    pub fn trickle_remote(
+        &mut self,
+        stream: StreamId,
+        (ufrag, pwd): (&str, &str),
+        candidates: &[Candidate],
+        ended: bool,
+        now: Instant,
+    ) -> Result<(), IceError> {
+        let index = stream.0;
+        let entry = self.streams.get_mut(index).ok_or(IceError::UnknownStream)?;
+        let Some(remote) = entry.remote.as_ref() else {
+            return Err(IceError::NotDescribed);
+        };
+        if remote.ufrag != ufrag || remote.pwd != pwd {
+            return Err(IceError::OtherGeneration);
+        }
+        if entry.remote_ended {
+            return Ok(());
+        }
+        entry.remote_ended = ended;
+        self.add_remote_candidates(index, candidates);
+        self.permit_remotes(index, now);
+        if self.checking() {
+            self.form_checklist(index, now);
+        }
+        Ok(())
+    }
+
+    /// Say this end has no more candidates for the session: what RFC 8838
+    /// §13 calls generating an end-of-candidates indication. Under
+    /// [`IceConfig::trickle`] a candidate added after it is refused with
+    /// [`IceError::TrickleOver`]; the caller sends the indication itself.
+    ///
+    /// The agent's own gathering ending ([`IceEvent::GatheringComplete`])
+    /// does not say it, because the caller may still have candidates of its
+    /// own to add ([`Self::add_server_reflexive`]).
+    pub fn end_of_candidates(&mut self) {
+        self.local_ended = true;
+    }
+
+    /// Whether a candidate added now for `stream` may still be trickled: the
+    /// agent trickles, this end has not ended its candidates, and nothing on
+    /// the stream has been nominated (RFC 8838 §13).
+    #[must_use]
+    pub fn may_trickle(&self, stream: StreamId) -> bool {
+        self.config.trickle
+            && !self.local_ended
+            && self.streams.get(stream.0).is_some_and(|entry| {
+                entry
+                    .components
+                    .iter()
+                    .all(|slot| slot.nominating.is_none() && slot.selected.is_none())
+            })
+    }
+
+    /// Whether the peer has said it sends no more candidates for `stream`,
+    /// or does not trickle and so sent them all in its description.
+    #[must_use]
+    pub fn remote_ended(&self, stream: StreamId) -> bool {
+        self.streams
+            .get(stream.0)
+            .is_some_and(|entry| entry.remote.is_some() && entry.remote_ended)
+    }
+
+    /// Whether checks may run: once gathering has finished, or at once under
+    /// trickle ICE, where "Trickle ICE implementations do not need to gather
+    /// candidates in a blocking manner" (RFC 8838 §4).
+    pub(super) fn checking(&self) -> bool {
+        self.phase == Phase::Gathered || (self.config.trickle && self.phase == Phase::Gathering)
+    }
+
+    /// Whether either end may still add a candidate to `stream`, which keeps
+    /// a controlling agent from settling early for a pair a later candidate
+    /// could beat (RFC 8838 §14).
+    pub(super) fn candidates_may_come(&self, stream: usize) -> bool {
+        self.config.trickle
+            && self
+                .streams
+                .get(stream)
+                .is_some_and(|entry| !entry.remote_ended || !self.local_ended)
     }
 
     /// Say which credentials a restart this agent's side has offered carries,
@@ -1049,6 +1212,8 @@ impl IceAgent {
             // a restart is a fresh session on the same sockets, so the wait
             // starts again rather than carrying the old one's remainder
             stream.patience_until = None;
+            stream.remote_trickles = false;
+            stream.remote_ended = false;
             let mut ids: Vec<ComponentId> = self
                 .bases
                 .iter()

@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use super::{
-    Awaiting, ChecklistState, Early, IceAgent, MAX_EARLY, Phase, Remote, priority_in_range,
+    Awaiting, ChecklistState, Early, IceAgent, MAX_EARLY, Remote, priority_in_range,
 };
 use crate::ice::agent::Role;
 use crate::ice::candidate::{Candidate, CandidateType, Foundation};
@@ -229,7 +229,7 @@ impl IceAgent {
         let Some(entry) = self.streams.get(stream) else {
             return;
         };
-        let ready = self.phase == Phase::Gathered && entry.formed;
+        let ready = self.checking() && entry.formed;
         match &entry.remote {
             Some(remote) if remote.ufrag.as_bytes() != early.remote_ufrag.as_slice() => {
                 // signed with this session's password but naming another
@@ -268,7 +268,7 @@ impl IceAgent {
         {
             return false;
         }
-        if !(self.phase == Phase::Gathered && entry.formed) {
+        if !(self.checking() && entry.formed) {
             return self.early.len() < MAX_EARLY;
         }
         let known = self.remote_at(stream, component, from);
