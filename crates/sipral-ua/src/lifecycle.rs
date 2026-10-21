@@ -597,9 +597,10 @@ impl UserAgent {
     /// `Contact` is first removed with `expires=0` (RFC 3261 §10.2.2) in a
     /// REGISTER of its own, including a private address registered before
     /// the first STUN answer, and the new one is added once that is answered:
-    /// a registrar that rewrites every `Contact` to the source address
-    /// (Asterisk's `rewrite_contact`) reads the old one as the new binding,
-    /// and in the same request would remove what it had just added. The old
+    /// a registrar that rewrites a `Contact` to the source address (Asterisk's
+    /// `rewrite_contact`) can read the old one as the new binding, and what
+    /// that removal takes the add after it puts back. An old `Contact` the
+    /// last 2xx showed held under another address is not removed at all. The old
     /// `Contact` goes without `+sip.instance`: a registrar that matches
     /// removals by instance (Kamailio does) would otherwise remove the new
     /// binding too. Accounts not registering are only rewritten.

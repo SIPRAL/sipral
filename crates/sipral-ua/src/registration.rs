@@ -115,9 +115,9 @@ pub(crate) struct Registration {
     /// next one adds the current `Contact`.
     pub(crate) retired: Vec<Box<[u8]>>,
     /// The REGISTER in flight only removes `retired`. A registrar that
-    /// rewrites every `Contact` to the source address (Asterisk's
-    /// `rewrite_contact`) reads an old one sent from the new socket as the
-    /// new binding, so a removal in the same request as the add takes both.
+    /// rewrites a `Contact` to the source address (Asterisk's
+    /// `rewrite_contact`) can read an old one sent from the new socket as the
+    /// new binding; sent first and alone, what it takes the add puts back.
     pub(crate) withdrawing: bool,
     /// A 2xx listed no `Contact` and was asked again once (§10.2.4: the
     /// answer lists what is bound). Cleared by a 2xx that lists one, so a

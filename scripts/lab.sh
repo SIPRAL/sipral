@@ -20,7 +20,7 @@
 #   scripts/lab.sh nat          only the calls from and to behind a NAT, with
 #                               STUN against coturn, through the C ABI
 #   scripts/lab.sh natmove      only the move behind the NAT: registered at an
-#                               account Asterisk rewrites every Contact for,
+#                               account Asterisk rewrites the Contact for,
 #                               watching a mailbox and a lamp, then moved to
 #                               another socket, registered, watched and
 #                               called there (part of the nat run too)
@@ -1989,7 +1989,7 @@ nat_called_flow() {
 
 # 8.12.24's step: the C harness behind the same NAT, at `labuser-rewrite`
 # (interop/asterisk/pjsip.conf), which Asterisk keeps one binding of and
-# rewrites every Contact for, the way FreePBX sets up an extension behind a
+# rewrites the Contact for, the way FreePBX sets up an extension behind a
 # NAT. The harness's own `natmove` flow registers, watches the mailbox and the
 # lamp on 9120, moves to another socket the NAT shows at another port, and
 # says it is waiting once it is registered, watched and refreshed there.
@@ -3815,7 +3815,7 @@ if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = nat ] || [ "$WANT" = natmove ]; then
-    step "moved behind a NAT, at a registrar that rewrites every Contact, in C"
+    step "moved behind a NAT, at a registrar that rewrites the Contact, in C"
     if [ -n "$HARNESS_C" ]; then
         nat_move_flow \
             && pass "moved behind the NAT: registered, watched, refreshed and called at the new binding" \

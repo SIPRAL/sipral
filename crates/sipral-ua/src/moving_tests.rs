@@ -2,14 +2,15 @@
 // Copyright (c) 2026 Sytek
 
 //! A laptop moving between two networks behind one NAT, against a registrar
-//! that writes the source address into every `Contact` it is sent.
+//! that writes the source address into the `Contact`s it is sent.
 //!
 //! Asterisk's `rewrite_contact`, on by default for FreePBX extensions behind
-//! a NAT, does that to removals too: an old `Contact` sent with `expires=0`
-//! from the new socket names the new binding by the time the registrar reads
-//! it. With `remove_existing` and one contact allowed, a REGISTER that both
-//! adds the new address and removes the old one in the same request leaves
-//! nothing bound, and the 200 that says so lists no `Contact` at all.
+//! a NAT, rewrites a REGISTER's `Contact` (18.9 and 22.10 the first one), and
+//! a removal is rewritten like any other: an old `Contact` sent with
+//! `expires=0` from the new socket can name the new binding. The registrar
+//! here rewrites them all, the worst case: with `remove_existing` and one
+//! contact allowed, a REGISTER that both adds the new address and removes the
+//! old one leaves nothing bound, and the 200 that says so lists no `Contact`.
 //!
 //! The application's part is what a platform notification sets off: the SIP
 //! socket bound at the new address, the change reported, the account pointed
@@ -114,7 +115,8 @@ fn rewritten(uri: &str, source: SocketAddr) -> String {
 /// NAT: `rewrite_contact=yes`, `remove_existing=yes`, `max_contacts=1`.
 ///
 /// Every `Contact` is rewritten to the request's source before anything else
-/// is done with it, then each is applied in the order written.
+/// is done with it, then each is applied in the order written: harsher than
+/// Asterisk 18.9 and 22.10, which rewrite the first.
 struct Rewriting {
     bindings: Vec<String>,
     /// Whether the 200 lists what is bound, as RFC 3261 §10.3 step 8 says.

@@ -2073,7 +2073,7 @@ enum flow {
     FLOW_TWO_REALMS,
     FLOW_REALM_UNNAMED,
     /* 8.12.24: registered behind the NAT at an account Asterisk rewrites
-     * every Contact for, then moved to another socket the way a laptop moves
+     * the Contact for, then moved to another socket the way a laptop moves
      * from a cable to Wi-Fi behind the same NAT -- what the application does
      * on the platform's notification, through this ABI. Run only when
      * SIPRAL_FLOWS names it, with a STUN server: scripts/lab.sh's own
@@ -3644,7 +3644,7 @@ static int move_reached(const struct endpoint *end)
            && end->seen.lamp_notifications >= move_wants_lamp;
 }
 
-/* Registered behind the NAT, at an account Asterisk rewrites every Contact
+/* Registered behind the NAT, at an account Asterisk rewrites the Contact
  * for, keeps one binding of, and drops the old binding from when a new one
  * comes (the lab Asterisk's own `labuser-rewrite`: what FreePBX does
  * for an extension behind a NAT). Watching the account's own mailbox and one

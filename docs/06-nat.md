@@ -360,9 +360,13 @@ The decisions, and why each one is what it is:
   answered, whatever the answer. That includes the private address a REGISTER
   sent before the first answer arrived. The two never share a request:
   Asterisk's `rewrite_contact`, on by default for FreePBX extensions behind a
-  NAT, rewrites every `Contact` in a REGISTER to the source address, removals
-  too, so an old one sent from the new socket names the new binding and a
-  single request would add it and remove it again. For the same reason an old
+  NAT, rewrites a REGISTER's `Contact` to the source address (18.9 and 22.10
+  rewrite the first one; a removal that comes first is rewritten too), so an
+  old one sent from the new socket can name the new binding. Sent on its own
+  and first, whatever it removes is added back by the REGISTER after it; in
+  the same request as the add it could leave nothing bound. On 21 October
+  2026 a phone on Asterisk 18.9 lost its new binding to a REGISTER sent right
+  after a move and read a 200 listing no `Contact` as registered. For the same reason an old
   `Contact` the registrar's last 2xx did not list as it was sent, while it
   listed others, is not removed at all: the registrar holds it under another
   address, and a removal rewritten the same way would name the binding it is
