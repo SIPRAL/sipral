@@ -16,7 +16,7 @@ categories.workspace = true
 publish = true
 
 [dependencies]
-sipral-core = { path = "../sipral-core", version = "=1.2.2" }
+sipral-core = { path = "../sipral-core", version = "=1.2.3" }
 # same pin and feature set sipral-dtls already carries these at; nothing new
 # enters the dependency graph, only a second consumer of what is already in it
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
@@ -28,7 +28,7 @@ zeroize = "=1.9.1"
 [dev-dependencies]
 # the layer a registration is decided in, for the test that replays the
 # recording in the tree into it and exports both directions of the session
-sipral-ua = { path = "../sipral-ua", version = "=1.2.2" }
+sipral-ua = { path = "../sipral-ua", version = "=1.2.3" }
 
 [lints]
 workspace = true

@@ -6,5 +6,5 @@ namespace Sipral;
 public static class SipralInfo
 {
     /// <summary>Package version.</summary>
-    public const string Version = "1.2.2";
+    public const string Version = "1.2.3";
 }
