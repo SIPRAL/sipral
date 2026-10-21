@@ -38,6 +38,7 @@ import org.sipral.SipralCounters
 import org.sipral.SipralDnsRecordType
 import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
+import org.sipral.SipralRegistrationState
 import org.sipral.SipralSuspending
 import org.sipral.SipralEventKind
 import org.sipral.SipralEventListener
@@ -664,7 +665,19 @@ class SipralClient private constructor(
                 continue
             }
             try {
-                account.reach(advertiseToward(target), target)
+                // The REGISTER the location released left before this ran,
+                // naming the address the account had while it had no server; a
+                // loopback one is refused at once toward a server elsewhere, and
+                // nothing would send another: sent again, a registration or a
+                // withdrawal, from the address just chosen.
+                if (account.reach(advertiseToward(target), target) &&
+                    account.registrationState == SipralRegistrationState.FAILED
+                ) {
+                    when {
+                        account.wantsRegistration -> account.register()
+                        account.withdrawing -> account.unregister()
+                    }
+                }
             } catch (_: SipralException) {
                 // the account was removed meanwhile
             }

@@ -41,11 +41,11 @@ private fun header(name: String, message: String): String? =
 
 /** A registrar on a loopback UDP port: every REGISTER answered 200, every
  * datagram kept as text. */
-internal class DatagramRegistrar : AutoCloseable {
-    private val udp = DatagramSocket(0, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 50 }
+internal class DatagramRegistrar(host: String = "127.0.0.1") : AutoCloseable {
+    private val udp = DatagramSocket(0, InetAddress.getByName(host)).apply { soTimeout = 50 }
     @Volatile private var stopped = false
     val port = udp.localPort
-    val address = "127.0.0.1:$port"
+    val address = "$host:$port"
     val received: MutableList<String> = Collections.synchronizedList(ArrayList())
     val registers: List<String>
         get() = synchronized(received) { received.filter { it.startsWith("REGISTER ") } }
@@ -297,9 +297,49 @@ private suspend fun theClientsNewOptionsReachTheLibrary(): String {
     return "the client's suites, salt and trace reach the library, and best effort keys plain RTP"
 }
 
+/**
+ * A server named by a URI that resolves to an address off loopback: the
+ * REGISTER the location releases leaves with the loopback address the
+ * account had while it had no server, which the stack refuses toward a
+ * server elsewhere; once the account is pointed at its route, the
+ * registration is sent again from there, and arrives naming that route.
+ * Needs an IPv4 address of this machine other than loopback to stand in for
+ * "elsewhere", and says so when there is none.
+ */
+private suspend fun aServerOffLoopbackIsRegisteredAtOnceLocated(): String {
+    val here = java.net.NetworkInterface.getNetworkInterfaces().toList()
+        .filter { it.isUp && !it.isLoopback }
+        .flatMap { it.inetAddresses.toList() }
+        .firstOrNull { it is java.net.Inet4Address && !it.isLinkLocalAddress }
+        ?.hostAddress
+        ?: return "no address off loopback on this machine, so a located server elsewhere was not tried"
+    DatagramRegistrar(here).use { registrar ->
+        val resolver: SipralResolver = { name, record ->
+            when {
+                record == SipralDnsRecordType.SRV && name == "_sip._udp.pbx.sipral.test" ->
+                    SipralLookup(SipralDnsAnswer.RECORDS, listOf("300 10 60 ${registrar.port} host.sipral.test"))
+                record == SipralDnsRecordType.A && name == "host.sipral.test" ->
+                    SipralLookup(SipralDnsAnswer.RECORDS, listOf("300 $here"))
+                else -> SipralLookup.NOTHING
+            }
+        }
+        application(resolver).use { client ->
+            val account = client.addAccount(
+                "sip:alice@pbx.sipral.test", registrar = "sip:pbx.sipral.test", serverUri = "sip:pbx.sipral.test",
+            )
+            account.register()
+            registered(account)
+            val contact = header("Contact", registrar.registers.last()) ?: ""
+            assertTrue(contact.contains("@$here:"), contact)
+        }
+    }
+    return "a server located off loopback ($here) registered at once, the REGISTER naming the route toward it"
+}
+
 internal suspend fun reachabilityChecks(): String = listOf(
     theAddressAClientAdvertisesIsTheRouteTowardItsServer(),
     aServerNamedByAUriIsLocated(),
+    aServerOffLoopbackIsRegisteredAtOnceLocated(),
     anAccountKeepsItsFlowOpen(),
     theAccountsPinDecidesOnACertificate(),
     theClientsNewOptionsReachTheLibrary(),
