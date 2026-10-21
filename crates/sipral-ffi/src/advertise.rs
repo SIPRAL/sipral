@@ -96,7 +96,7 @@ mod tests {
         assert_eq!(buffer.last(), Some(&0), "a NUL, counted");
         let bytes: Vec<u8> = buffer[..needed - 1]
             .iter()
-            .map(|byte| byte.cast_unsigned())
+            .flat_map(|byte| byte.to_ne_bytes())
             .collect();
         Ok(String::from_utf8(bytes).expect("UTF-8"))
     }

@@ -575,7 +575,23 @@ public sealed partial class SipralStack
             }
             try
             {
-                account.Reach(AdvertiseToward(found.Target), found.Target);
+                // The REGISTER the location released left before this ran,
+                // with the address the account had while it had no server;
+                // a loopback one is refused at once, toward a server
+                // elsewhere, and nothing would send another: sent again, a
+                // registration or a withdrawal, from the address just chosen.
+                if (account.Reach(AdvertiseToward(found.Target), found.Target)
+                    && account.RegistrationState() == SipralRegistrationState.Failed)
+                {
+                    if (account.WantsRegistration)
+                    {
+                        account.Register();
+                    }
+                    else if (account.Withdrawing)
+                    {
+                        account.Unregister();
+                    }
+                }
             }
             catch (SipralException)
             {

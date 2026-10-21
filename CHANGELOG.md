@@ -28,6 +28,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 - The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I), then 1.5 for March 2027 (a client certificate on SIP over TLS, its key held by the platform); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").
 
+### Fixed
+
+- **.NET and .NET MAUI: an iOS application no longer ends on its first move to the background, and an account named by `serverUri` registers with a server off the machine.** `SipralStack.Suspending` and `Resumed` threw `Busy` when the poll thread held the stack, which ended the process from iOS's background callback; an account located through RFC 3263 kept the stack's placeholder address in its `Contact` and every REGISTER was refused as `UnreachableContact`. `SipralAppLifecycle` raises `Frozen` and `Resumed` beside `Suspended`; a stack asked for device mode where the build has no audio backend answers `SIPRAL_STATUS_NOT_SUPPORTED` before checking its transmit callback. Run from the packed `Sipral.Maui` on the iOS simulator and an Android emulator, registered and calling through a live FreePBX (`docs/15-mobile.md`, ".NET MAUI", "Consuming the packages", "32-bit ARM, under emulation").
+
 ## [1.2.3] - 2026-10-21
 
 A move behind a NAT keeps the account registered at an Asterisk that rewrites the `Contact`: the old address is withdrawn on its own before the new one is added, and a 200 that lists no binding is asked again.

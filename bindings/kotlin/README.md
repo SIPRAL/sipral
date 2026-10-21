@@ -770,6 +770,14 @@ DTMF keypad and the audio routes, with every call's microphone and speaker
 run by `SipralCallAudios` and every audio transition in its log -- it has no
 audio code of its own.
 
+`org.sipral:sipral` and `org.sipral:sipral-opus`, the AAR without and with
+Opus, are on Maven Central up to 1.2.0; a later version is taken from the
+local Maven repository `android.sh` writes. `sipral-telecom.aar` is published
+nowhere: an application takes it as a file, `implementation(files(...))`,
+with `kotlinx-coroutines-android` beside it, and on Kotlin 2.4, which its
+classes are compiled with. `docs/15-mobile.md`, "Consuming the packages",
+has the Gradle lines and what ran from them.
+
 `scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
 three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the
 image `android/Dockerfile` describes (the Android SDK, the NDK, cargo-ndk,

@@ -196,6 +196,14 @@ given as `<NAME>`. `docs/15-mobile.md`, "The Swift package on iOS", has what
 ran on the iOS 26.5 simulator, against a peer on the same Mac and through
 the lab's Asterisk.
 
+That package carries the library without Opus. The variant with it,
+`CSipral-opus.xcframework.zip`, is an asset of the releases from v1.2.1
+and named by no `Package.swift`: an application that wants it keeps the
+`Sipral` module's sources from the same tag in a package of its own, over a
+`binaryTarget` with that zip's URL and checksum. `docs/15-mobile.md`,
+"Consuming the packages", has both manifests, what is published where, and
+what ran from them.
+
 ## Use
 
 ```swift

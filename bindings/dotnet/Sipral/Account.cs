@@ -85,14 +85,16 @@ public sealed class Account
 
     internal void Located(string target) => RegistrarAddress = target;
 
-    internal void Reach(string advertised, string remote)
+    // Whether the account was pointed somewhere new.
+    internal bool Reach(string advertised, string remote)
     {
-        if (advertised == (Advertised ?? _stack.BindAddress))
+        if (advertised == Advertised)
         {
-            return;
+            return false;
         }
         Rebind(remote, DefaultContact(Aor, advertised, ContactParametersOf(_stack, StreamProtocol)));
         Advertised = advertised;
+        return true;
     }
 
     // Always rebinds: the stack moved even if the route did not.
@@ -272,9 +274,11 @@ public sealed class Account
             SipralErrors.Call(() => NativeMethods.sipral_account_add(stack.Handle, config, out accountHandle), "sipral_account_add");
         }
 
+        // the address the default Contact names, the stack's own when no
+        // server was known: what a later route is compared with
         return new Account(
             stack, accountHandle, aor, registrarAddress ?? string.Empty, contact is not null, location.ServerUri,
-            location.Advertised, location.StreamProtocol, location.TlsPin);
+            contact is null ? location.Advertised ?? stack.BindAddress : null, location.StreamProtocol, location.TlsPin);
     }
 
     /// <summary><c>sipral_account_rebind</c> after a network change: point
@@ -313,12 +317,17 @@ public sealed class Account
     /// accounts register again when a TCP/TLS stack reconnects.</summary>
     public bool WantsRegistration { get; private set; }
 
+    // Unregister asked for and Register not since: a withdrawal a location
+    // still has to carry.
+    internal bool Withdrawing { get; private set; }
+
     /// <summary><c>sipral_account_register</c>. Refused by an account with
     /// no registrar. While a TCP/TLS connection is down, the request is kept
     /// and sent on reconnect.</summary>
     public void Register()
     {
         WantsRegistration = true;
+        Withdrawing = false;
         try
         {
             SipralErrors.Call(() => NativeMethods.sipral_account_register(_stack.Handle, Handle, _stack.NowMs), "sipral_account_register");
@@ -367,6 +376,7 @@ public sealed class Account
             () => NativeMethods.sipral_account_thaw(_stack.Handle, Handle, snapshot, (nuint)snapshot.Length, asleepMs, _stack.NowMs),
             "sipral_account_thaw");
         WantsRegistration = true;
+        Withdrawing = false;
     }
 
     /// <summary><c>sipral_account_set_access_token</c>: set or replace the
@@ -413,6 +423,7 @@ public sealed class Account
     public void Unregister()
     {
         WantsRegistration = false;
+        Withdrawing = true;
         SipralErrors.Call(() => NativeMethods.sipral_account_unregister(_stack.Handle, Handle, _stack.NowMs), "sipral_account_unregister");
     }
 

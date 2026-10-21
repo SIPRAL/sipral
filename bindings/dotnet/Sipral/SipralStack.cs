@@ -511,12 +511,22 @@ public sealed partial class SipralStack : IDisposable
     /// this process stops shortly (an app moving to the background). Nothing
     /// is sent and nothing stays scheduled; calls are left as they are. The
     /// report counts what was standing (<c>docs/16-lifecycle.md</c>).</summary>
-    public SipralSuspending Suspending() => global::Sipral.Sipral.StackSuspending(Handle, NowMs);
+    public SipralSuspending Suspending()
+    {
+        // the poll thread may hold the stack at that moment: waited for, as
+        // every other entry point here does, rather than thrown out of the
+        // platform's background callback
+        var report = SipralSuspending.Sized();
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_suspending(Handle, NowMs, ref report), "sipral_stack_suspending");
+        return report;
+    }
 
     /// <summary><c>sipral_stack_resumed</c>: the process is awake again, after
     /// an unknown time. Registrations and transports are proved again. Safe
     /// without a matching <see cref="Suspending"/>.</summary>
-    public void Resumed() => global::Sipral.Sipral.StackResumed(Handle, NowMs);
+    public void Resumed() =>
+        SipralErrors.Call(() => NativeMethods.sipral_stack_resumed(Handle, NowMs), "sipral_stack_resumed");
 
     /// <summary>The RTP port range media sockets are bound in, or
     /// <see langword="null"/> when the operating system picks.</summary>

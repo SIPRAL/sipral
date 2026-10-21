@@ -32,6 +32,15 @@ public sealed class SipralAppLifecycle
     /// standing when the stack was told.</summary>
     public event Action<SipralSuspending>? Suspended;
 
+    /// <summary>Raised on the way into the background for each kept account
+    /// whose registration was written down, with its key, before
+    /// <see cref="Suspended"/>.</summary>
+    public event Action<string>? Frozen;
+
+    /// <summary>Raised on the way back, once the stack has been told with
+    /// <see cref="SipralStack.Resumed"/>.</summary>
+    public event Action? Resumed;
+
     /// <summary>Raised when a registration could not be written down or
     /// read back; the stack itself carries on either way.</summary>
     public event Action<Exception>? StorageFailed;
@@ -130,7 +139,14 @@ public sealed class SipralAppLifecycle
         Suspended?.Invoke(stack.Suspending());
     }
 
-    internal void EnteredForeground() => Stack?.Resumed();
+    internal void EnteredForeground()
+    {
+        if (Stack is { } stack)
+        {
+            stack.Resumed();
+            Resumed?.Invoke();
+        }
+    }
 
     private void Write(string key, Account account, long nowMs)
     {
@@ -156,6 +172,7 @@ public sealed class SipralAppLifecycle
             .ContinueWith(
                 written => StorageFailed?.Invoke(written.Exception!.GetBaseException()),
                 TaskContinuationOptions.OnlyOnFaulted);
+        Frozen?.Invoke(key);
     }
 }
 

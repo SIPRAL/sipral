@@ -1407,8 +1407,214 @@ first screen showing the feature bits read through the native library, so
 the static link and `__Internal` on iOS and the `.so` lookup on Android are
 proven at start. The suspend, freeze and thaw sequence is tested on the
 desktop binding against a simulated registrar
-(`bindings/dotnet/Sipral.Tests/LifecycleTests.cs`). Not yet run: an
-application built from the packed `.nupkg` rather than the project, a
-physical iPhone or Android phone, armeabi-v7a and x86_64, the background
-and foreground events delivered by the system to `SipralAppLifecycle`, the
-microphone prompt, and any registration or call through this layer.
+(`bindings/dotnet/Sipral.Tests/LifecycleTests.cs`).
+
+**Run from the package, on 21 October 2026.** The same sample, copied out
+of the repository and built with `-p:SipralMauiVersion=1.2.3`, which swaps
+its project reference for a `PackageReference` to `Sipral.Maui`, restored
+from a folder feed holding the `.nupkg` `scripts/package/maui.sh` packed
+(and a package folder of its own, so that no other copy of 1.2.3 was
+read). The iOS build needs `-p:ValidateXcodeVersion=false` under Xcode 27.1:
+the .NET for iOS 27.0.10722 workload asks for Xcode 27.0 exactly. The sample
+takes its fields from `SIPRAL_SAMPLE_*` at launch and presses its own
+buttons in the order `SIPRAL_SAMPLE_STEPS` gives, and writes every line it
+shows to standard output, so one command runs it and its log is the
+evidence (the comment at the top of `App.cs` says how):
+
+```sh
+# iOS simulator
+SIMCTL_CHILD_SIPRAL_SAMPLE_AOR=sip:152@pbx.example.com \
+SIMCTL_CHILD_SIPRAL_SAMPLE_SERVER=pbx.example.com:5060 \
+SIMCTL_CHILD_SIPRAL_SAMPLE_PASSWORD=... SIMCTL_CHILD_SIPRAL_SAMPLE_TARGET='sip:*43@pbx.example.com' \
+SIMCTL_CHILD_SIPRAL_SAMPLE_STEPS='register call' \
+xcrun simctl launch --console-pty "$UDID" org.sipral.sample.maui | grep sipral-sample
+# Android
+adb shell am start -n org.sipral.sample.maui/crc643105ea7c209f525f.MainActivity \
+    -e SIPRAL_SAMPLE_AOR sip:152@192.0.2.30 -e SIPRAL_SAMPLE_SERVER 192.0.2.30:5060 \
+    -e SIPRAL_SAMPLE_PASSWORD ... -e SIPRAL_SAMPLE_TARGET "'sip:*43@192.0.2.30'" \
+    -e SIPRAL_SAMPLE_STEPS "'register call unregister'"
+adb logcat -s DOTNET | grep sipral-sample
+```
+
+What it showed, on the iOS 26.5 simulator (iPhone 17) and the Android 16
+emulator (API 36, arm64-v8a, `-no-audio`), with the stack in device mode:
+
+| | iOS simulator | Android emulator |
+|---|---|---|
+| The microphone prompt | shown at the first Register ("Sipral would like to access the Microphone", with the `Info.plist` text), screenshot taken; answered with `xcrun simctl privacy grant microphone`, which iOS applies by ending the process, so the run after it started granted | shown ("Allow Sipral to record audio?"), answered by tapping "While using the app" (`adb shell input tap` on the button `uiautomator dump` located); `SipralMicrophone.RequestAsync` returned granted and the step went on |
+| A call to `SipralLabAgent` on the Mac, no registrar | G.722 both ways; 645 packets sent and 470 received by the sample when it hung up after 20 s, 0 lost; the agent counted 478 sent and 644 received | G.722; 994 sent and 994 received at the sample's hang-up after 20 s, 0 lost; the agent 997 sent, 992 received |
+| A live FreePBX (Asterisk 18.9), extension 152 | registered (named by host name, located through RFC 3263); its echo test `*43` in G.711 µ-law, 764 packets sent and 755 received in 15 s, 0 lost | the same by address (the emulator had no DNS of its own here); registered, `*43` 747 sent and 737 received, 0 lost |
+| Into the background (iOS: another application launched; Android: Home) | `registration written down as sample`, then `suspending, 1 binding(s) unverified`, in that order | the same |
+| Back (the sample launched again) | `resumed`, the registration proved again: Registering, Registered | the same |
+| Background again, the process ended (`simctl terminate`, `am force-stop`), started again | `registration restored from the last run: Restored`, no REGISTER handshake, then Unregister answered: Unregistered | the same |
+
+Both extensions were left with no binding: the last step of each run was
+the unregister. Three things in the binding failed on the way, and were
+fixed before the runs above:
+
+- `SipralStack.Suspending` and `Resumed` called the library once and threw
+  `Busy` when the poll thread held the stack at that moment, which it does
+  while a registration is up. Thrown from iOS's `DidEnterBackground`, that
+  ended the process on its first move to the background. They now wait for
+  the stack as every other entry point of the binding does.
+- An account named by `serverUri` was added with the stack's placeholder
+  address in its `Contact`, and once located its route was compared with
+  an address the location itself had just moved, so the `Contact` was never
+  rewritten: the first REGISTER, and every one after it, was refused as
+  `UnreachableContact` toward a server off the machine. The account is now
+  pointed at the route its server is reached by, and the REGISTER (or the
+  unregister) the location released before that is sent again from there.
+  The first `RegistrationChanged` still reads `Failed` with
+  `UnreachableContact`, about 70 ms before `Registering`.
+- The sample itself named no registrar URI and no authentication user, so
+  its Register never registered with anything, and read its launch values
+  before Android's activity existed.
+
+Still not run: a physical iPhone or Android phone (audio routes, a real
+microphone, the system ending a process on its own rather than on a
+command, push), the prompt answered by a person's tap on iOS, and the
+`armeabi-v7a` and `x86_64` libraries inside a running MAUI application (the
+Android 16 arm64 image runs no 32-bit code, and no x86_64 image runs on an
+Apple-silicon Mac). A .NET for Android Release build packs only arm64-v8a
+and x86_64 unless the application lists `android-arm` among its
+`RuntimeIdentifiers`; with
+`-p:RuntimeIdentifiers="android-arm64;android-arm;android-x64"` the APK
+carried `lib/armeabi-v7a/libsipral_ffi.so` from the package beside the
+other two.
+
+## Consuming the packages
+
+What is published, read from the registries on 21 October 2026, and what
+was built and launched from them that day, each in a project outside the
+repository.
+
+| Artefact | Where | Versions there |
+|---|---|---|
+| Swift package, default (no Opus) | this repository, root `Package.swift`, over `CSipral.xcframework.zip` among the release's assets | 1.2.0 on, by tag |
+| `CSipral-opus.xcframework.zip` | an asset of the releases v1.2.1 and v1.2.3 only; no `Package.swift` names it | - |
+| `org.sipral:sipral`, `org.sipral:sipral-opus` (AAR) | Maven Central | 1.1.0, 1.2.0 |
+| `org.sipral:sipral-jvm`, `org.sipral:sipral-jvm-opus` | Maven Central | 1.1.0, 1.2.0 |
+| `sipral-telecom.aar` (the `ConnectionService` helper) | not published anywhere; `scripts/package/android.sh` builds it, with no POM | - |
+| `Sipral.Maui` | NuGet | 1.2.0 |
+
+Opus stays out of the default artefacts on purpose (`docs/05-media.md`,
+THIRD-PARTY-NOTICES.md); an application that wants it names the variant.
+
+**SwiftPM, default.** An application adds the repository:
+
+```swift
+.package(url: "https://github.com/SIPRAL/sipral", exact: "1.2.3"),
+// target: .product(name: "Sipral", package: "sipral")
+```
+
+**SwiftPM, with Opus.** The root package cannot be pointed at the other
+zip, so an application that wants Opus carries the `Sipral` module's
+sources from the same tag (`bindings/swift/Sources/Sipral`) in a package of
+its own, over the Opus zip, whose checksum is the SHA-256 GitHub shows for
+the asset:
+
+```swift
+targets: [
+    .binaryTarget(
+        name: "CSipral",
+        url: "https://github.com/SIPRAL/sipral/releases/download/v1.2.3/CSipral-opus.xcframework.zip",
+        checksum: "ced22863aadb4b73bd49183aec3cab2c659c2354dc734236fc7a9945f36376fb"),
+    .target(name: "Sipral", dependencies: ["CSipral"], path: "Sources/Sipral"),
+]
+```
+
+**Gradle.** From Maven Central, 1.2.0 being the newest there:
+
+```kotlin
+dependencies {
+    implementation("org.sipral:sipral:1.2.0")        // or org.sipral:sipral-opus:1.2.0
+}
+```
+
+For a version Central does not have, `scripts/package/android.sh --out DIR`
+writes `DIR/maven`, a local Maven repository with `org.sipral:sipral` and
+its POM (kotlinx-coroutines as its dependency), named in
+`dependencyResolutionManagement` as `maven { url = uri("DIR/maven") }`. The
+telecom helper is taken as a file, with the dependency its POM would have
+named:
+
+```kotlin
+implementation(files("libs/sipral-telecom.aar"))
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+```
+
+Its classes are compiled by Kotlin 2.4, unlike `sipral.aar`'s, which
+`aar.sh` compiles for 2.2: an application on Android Gradle Plugin 9.4's
+built-in Kotlin (2.2) fails to compile against it ("compiled with an
+incompatible version of Kotlin") until it adds
+`id("org.jetbrains.kotlin.android") version "2.4.21" apply false` to its
+root `plugins`.
+
+What ran from them:
+
+| Consumer | Built from | Launched on | It printed |
+|---|---|---|---|
+| A UIKit application, `swift build` for `arm64-apple-ios15.0-simulator` and wrapped as an `.app` | the repository at 1.2.3 by URL (SwiftPM fetched the release's zip and checked its checksum) | the iOS 26.5 simulator | 6 codecs, features `0x1ffffbf`, a stack opened on 127.0.0.1 |
+| the same | the XCFramework `scripts/package/xcframework.sh --dry-run` built from this tree, through the `spm/Package.swift` it prints | the same | the same |
+| the same | the Opus package above | the same | 7 codecs, features `0x1ffffff` |
+| An Android application, AGP 9.4.1 | `org.sipral:sipral:1.2.3` from the local repository `android.sh` wrote, its POM pulling in kotlinx-coroutines; then `sipral-telecom.aar` as a file | the Android 16 emulator, arm64-v8a | ABI 1.2.0, 6 codecs, features `0x1ffffbf`; with the helper, `SipralConnectionService` resolved and `MANAGE_OWN_CALLS` merged and granted |
+| `samples/Sipral.Sample.Maui` | `Sipral.Maui.1.2.3.nupkg` from a folder feed | both | the calls and registrations above |
+
+## 32-bit ARM, under emulation
+
+The Android packages carry `armeabi-v7a`, which no available emulator runs:
+the arm64 Android 16 image has no 32-bit userspace. The library's own test
+suites were run instead for `armv7-unknown-linux-gnueabihf` (the same
+32-bit ARMv7 with hardware floating point, on glibc rather than Bionic) on
+the Linux lab machine, cross-compiled with Debian's `gcc-arm-linux-gnueabihf`
+and run by `qemu-arm` from `qemu-user` 10.0, named as cargo's `runner` in a
+`.cargo/config.toml` beside the checkout (`binfmt` was not registered):
+
+```toml
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+runner = ["qemu-arm", "-L", "/usr/arm-linux-gnueabihf"]
+
+[env]
+CC_armv7_unknown_linux_gnueabihf = "arm-linux-gnueabihf-gcc"
+AR_armv7_unknown_linux_gnueabihf = "arm-linux-gnueabihf-ar"
+# armeabi-v7a, as the NDK builds it, has NEON; Debian's armhf leaves it off
+CFLAGS_armv7_unknown_linux_gnueabihf = "-mfpu=neon"
+```
+
+then `cargo test --target armv7-unknown-linux-gnueabihf --no-fail-fast`
+over `sipral-core`, `sipral-ua`, `sipral-rtp`, `sipral-media`, `sipral`,
+`sipral-ffi`, `sipral-dtls`, `sipral-nat`, `sipral-audio`, `sipral-stir`,
+`sipral-headless`, `sipral-io-common` and `sipral-diag`, with Opus. On 21
+October 2026: `sipral-core` 1,030 and its RFC corpora 42, `sipral-ua` 937,
+`sipral-rtp` 466, `sipral-media` 490 (33 ignored, as on 64-bit) and its
+allocation test, `sipral` 574 and its bridges 12, `sipral-ffi` 751 of 752 (the
+one below) and its memory endurance test, `sipral-dtls` 190, `sipral-nat` 348, `sipral-stir`
+137, `sipral-audio` 58, `sipral-headless` 103, `sipral-io-common` 34,
+`sipral-diag` 45 passed. What failed, and why:
+
+- `sipral-ffi`'s tests did not compile: three read a C string through
+  `i8`, which `c_char` is on x86_64 and on Apple's arm64, and is not on ARM
+  Linux or Android, where it is `u8`. Test code only; the library itself
+  built. They now read it whatever its sign.
+- `robust::every_feature_this_build_lacks_is_refused_where_it_is_asked_for_never_ignored`
+  failed on any Linux, x86_64 as much as ARM: it asked for device mode with
+  the value 2, which names nothing, and was answered `InvalidArgument`; and
+  device mode without its transmit callback was refused for the callback
+  before the missing backend. It asks with `SIPRAL_AUDIO_DEVICE` now, and a
+  build with no audio backend answers `NOT_SUPPORTED` first, as the header
+  says.
+- Two timing budgets, under emulation and a debug build:
+  `a_slow_device_does_not_hold_the_poll_that_starts_the_call` (the call came
+  up in 0.94 to 1.04 s against a budget of 0.8 s, with the device's open
+  held for 1.5 s, so it did not wait for the device; alone, it passed three
+  times out of three) and `signalling_load`'s hundred calls (3.6 s per call
+  to set up, against the budget for native code). That load test measured a
+  live call at 47,285 bytes here, signalling 13,346 and media 33,963.
+
+Nothing showed a `usize` or `u64` truncation, an atomic the target lacks or
+a misaligned read. What this does not cover: Bionic, Android's dynamic
+linker, AAudio and JNI on a 32-bit phone, and timing on real hardware.
+`x86_64` Android is covered no further than the gate's own x86_64 Linux
+runs of the same tests, which say nothing of Bionic or an x86_64 Android
+device; no x86_64 Android image runs on an Apple-silicon Mac.

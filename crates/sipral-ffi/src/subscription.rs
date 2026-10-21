@@ -1217,7 +1217,7 @@ pub(crate) mod tests {
             "asking with no room did not say how much was needed"
         );
         assert_eq!(needed, 3, "`d1` and a NUL");
-        let mut room = [0_i8; 8];
+        let mut room = [0 as c_char; 8];
         assert_eq!(
             unsafe {
                 sipral_subscription_dialog_text(
@@ -1232,7 +1232,13 @@ pub(crate) mod tests {
             },
             SipralStatus::Ok
         );
-        assert_eq!(&room[..3], &[b'd'.cast_signed(), b'1'.cast_signed(), 0]);
+        assert_eq!(
+            room[..3]
+                .iter()
+                .flat_map(|c| c.to_ne_bytes())
+                .collect::<Vec<u8>>(),
+            b"d1\0"
+        );
 
         // a piece not sent is just the NUL, not a failure
         assert_eq!(
