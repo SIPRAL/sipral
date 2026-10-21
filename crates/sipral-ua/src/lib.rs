@@ -66,6 +66,8 @@ pub mod keepalive;
 mod lifecycle;
 pub mod locate;
 mod message;
+#[cfg(test)]
+mod moving_tests;
 mod mwi;
 #[cfg(test)]
 mod oauth_tests;

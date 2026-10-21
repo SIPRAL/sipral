@@ -593,13 +593,16 @@ impl UserAgent {
     /// name or another address is left alone.
     ///
     /// An account holding or seeking a binding sends a REGISTER at once,
-    /// superseding anything in flight as [`UserAgent::retarget`] does. Until a
-    /// 2xx, every REGISTER also carries the old `Contact` with `expires=0`
-    /// (RFC 3261 §10.2.2), including a private address registered before the
-    /// first STUN answer. The old `Contact` goes without `+sip.instance`:
-    /// a registrar that matches removals by instance (Kamailio does) would
-    /// otherwise remove the new binding too. Accounts not registering are
-    /// only rewritten.
+    /// superseding anything in flight as [`UserAgent::retarget`] does. The old
+    /// `Contact` is first removed with `expires=0` (RFC 3261 §10.2.2) in a
+    /// REGISTER of its own, including a private address registered before
+    /// the first STUN answer, and the new one is added once that is answered:
+    /// a registrar that rewrites every `Contact` to the source address
+    /// (Asterisk's `rewrite_contact`) reads the old one as the new binding,
+    /// and in the same request would remove what it had just added. The old
+    /// `Contact` goes without `+sip.instance`: a registrar that matches
+    /// removals by instance (Kamailio does) would otherwise remove the new
+    /// binding too. Accounts not registering are only rewritten.
     ///
     /// A REGISTER that cannot leave gives
     /// [`UaEvent::RegistrationFailed`](crate::UaEvent::RegistrationFailed)
@@ -647,7 +650,11 @@ impl UserAgent {
             if reg.unregistering || (reg.transaction.is_none() && reg.due.is_none()) {
                 continue;
             }
-            reg.retire(old, &new);
+            // held under another address, the old one has nothing to remove
+            // that is not the binding being kept
+            if reg.unheld.as_deref() != Some(&*old) {
+                reg.retire(old, &new);
+            }
             if self.send_register(id, false, now).is_err() {
                 self.retry_later(id, None, None, None, now);
             }
@@ -1990,15 +1997,16 @@ mod tests {
         assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:41000");
         let out = transmits(&mut agent);
         assert_eq!(registering(&out).len(), 1, "one REGISTER, at once");
+        // the old address is withdrawn on its own first
         let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
         assert_eq!(
             String::from_utf8_lossy(&contact),
-            "<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.1>;expires=0"
+            "<sip:alice@192.0.2.1>;expires=0"
         );
 
         // and a later move starts from where the last one left it, asking
-        // for both addresses it left to be dropped while neither REGISTER
-        // has been answered
+        // for both addresses it left to be dropped while the withdrawal has
+        // not been answered
         let again: SocketAddr = "203.0.113.7:52000".parse().expect("an address");
         assert_eq!(agent.readdress(UDP, local(), again, t0), 0);
         assert_eq!(agent.readdress(UDP, public, again, t0), 1);
@@ -2007,18 +2015,25 @@ mod tests {
         let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
         assert_eq!(
             String::from_utf8_lossy(&contact),
-            "<sip:alice@203.0.113.7:52000>, <sip:alice@192.0.2.1>;expires=0, \
-             <sip:alice@203.0.113.7:41000>;expires=0"
+            "<sip:alice@192.0.2.1>;expires=0, <sip:alice@203.0.113.7:41000>;expires=0"
         );
 
         // a mapping that moves back never asks for the address it is on to go
         assert_eq!(agent.readdress(UDP, again, public, t0), 1);
         let out = transmits(&mut agent);
-        let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
+        let withdrawal = out.last().expect("the REGISTER").clone();
+        assert_eq!(
+            String::from_utf8_lossy(&header(&withdrawal, HeaderName::Contact)),
+            "<sip:alice@192.0.2.1>;expires=0, <sip:alice@203.0.113.7:52000>;expires=0"
+        );
+
+        // answered, the add follows with the address it is on and nothing else
+        deliver(&mut agent, &granted(&withdrawal, 0), t0);
+        let out = transmits(&mut agent);
+        let contact = header(out.last().expect("the add"), HeaderName::Contact);
         assert_eq!(
             String::from_utf8_lossy(&contact),
-            "<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.1>;expires=0, \
-             <sip:alice@203.0.113.7:52000>;expires=0"
+            "<sip:alice@203.0.113.7:41000>"
         );
     }
 
@@ -2411,6 +2426,13 @@ mod tests {
         let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
         assert_eq!(agent.readdress(UDP, local(), public, t0), 1);
         let out = transmits(&mut agent);
+        let withdrawal = out.last().expect("the REGISTER that withdraws it");
+        assert_eq!(
+            String::from_utf8_lossy(&header(withdrawal, HeaderName::Contact)),
+            "<sip:alice@192.0.2.1>;expires=0"
+        );
+        deliver(&mut agent, &granted(withdrawal, 0), t0);
+        let out = transmits(&mut agent);
         let request = out.last().expect("the REGISTER that moves it");
         let contacts = with(request, |message| match message.contact() {
             Ok(Contacts::Addrs(addrs)) => addrs
@@ -2429,10 +2451,7 @@ mod tests {
         });
         assert_eq!(
             contacts,
-            vec![
-                ("sip:alice@203.0.113.7:41000".to_owned(), None),
-                ("sip:alice@192.0.2.1".to_owned(), Some(0)),
-            ]
+            vec![("sip:alice@203.0.113.7:41000".to_owned(), None)]
         );
 
         // once the registrar has said yes, the private binding is gone and
@@ -2468,12 +2487,18 @@ mod tests {
         let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
         assert_eq!(agent.readdress(UDP, local(), public, t0), 1);
         let out = transmits(&mut agent);
-        let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
+        let withdrawal = out.last().expect("the REGISTER").clone();
+        assert_eq!(
+            String::from_utf8_lossy(&header(&withdrawal, HeaderName::Contact)),
+            "<sip:alice@192.0.2.1>;expires=0"
+        );
+        deliver(&mut agent, &granted(&withdrawal, 0), t0);
+        let out = transmits(&mut agent);
+        let contact = header(out.last().expect("the add"), HeaderName::Contact);
         assert_eq!(
             String::from_utf8_lossy(&contact),
             "<sip:alice@203.0.113.7:41000>;\
-             +sip.instance=\"<urn:uuid:0c4a8f5e-2b1d-4e6a-9f00-5d3e2a1b7c90>\", \
-             <sip:alice@192.0.2.1>;expires=0"
+             +sip.instance=\"<urn:uuid:0c4a8f5e-2b1d-4e6a-9f00-5d3e2a1b7c90>\""
         );
     }
 

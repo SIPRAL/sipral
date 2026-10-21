@@ -977,7 +977,8 @@ fn an_associated_uri_with_a_control_byte_in_it_is_not_reported() {
         &request,
         200,
         "OK",
-        "P-Associated-URI: <sip:ali\u{1}ce@example.com>\r\n",
+        "Contact: <sip:alice@192.0.2.1>;expires=3600\r\n\
+         P-Associated-URI: <sip:ali\u{1}ce@example.com>\r\n",
     );
     deliver(&mut agent, &hostile, t0);
     let info = registered_info(&mut agent).expect("the binding stands");

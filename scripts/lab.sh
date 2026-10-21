@@ -19,6 +19,11 @@
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh nat          only the calls from and to behind a NAT, with
 #                               STUN against coturn, through the C ABI
+#   scripts/lab.sh natmove      only the move behind the NAT: registered at an
+#                               account Asterisk rewrites every Contact for,
+#                               watching a mailbox and a lamp, then moved to
+#                               another socket, registered, watched and
+#                               called there (part of the nat run too)
 #   scripts/lab.sh nat-idle     only the call placed 330 seconds after the
 #                               REGISTER, behind the NAT, with the registrar
 #                               keep-alive on (part of a run that names
@@ -1982,6 +1987,64 @@ nat_called_flow() {
     [ "$status" = 0 ]
 }
 
+# 8.12.24's step: the C harness behind the same NAT, at `labuser-rewrite`
+# (interop/asterisk/pjsip.conf), which Asterisk keeps one binding of and
+# rewrites every Contact for, the way FreePBX sets up an extension behind a
+# NAT. The harness's own `natmove` flow registers, watches the mailbox and the
+# lamp on 9120, moves to another socket the NAT shows at another port, and
+# says it is waiting once it is registered, watched and refreshed there.
+# Asterisk then calls the account as a whole -- whatever binding it holds --
+# and the harness refuses the call it gets: arriving is what proves the move
+# left Asterisk holding the new binding. The AOR is printed before the call,
+# so a failure shows what Asterisk was holding.
+NAT_MOVE_NAME=sipral-lab-nat-move
+nat_move_flow() {
+    local beside status tries=0
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    nat_up || return 1
+    printf '  behind %s, STUN at %s:3478, Asterisk at %s\n' "$NAT_GATEWAY" "$NAT_STUN" "$NAT_ASTERISK"
+    docker rm -f "$NAT_MOVE_NAME" >/dev/null 2>&1
+    docker run -d --name "$NAT_MOVE_NAME" --network "${project}_inside" \
+        --cap-add NET_ADMIN \
+        --add-host "asterisk:$NAT_ASTERISK" \
+        -e SIPRAL_FLOWS=natmove \
+        -e "SIPRAL_STUN_SERVER=$NAT_STUN:3478" \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $NAT_GATEWAY || exit 1
+            exec /harness-c asterisk 5060 9000" >/dev/null \
+        || { printf '  could not start the harness\n'; nat_down; return 1; }
+    # registering, two subscriptions, the move and one refresh of each: the
+    # harness's own MOVE_REFRESH_PATIENCE_MS is 140 s of it
+    until docker logs "$NAT_MOVE_NAME" 2>&1 | grep -q '^  move  waiting for a call to the account$'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$NAT_MOVE_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 240 ]; then
+            printf '  the harness never said it was waiting for the call\n'
+            docker logs "$NAT_MOVE_NAME" 2>&1
+            ( cd interop && docker compose exec -T asterisk asterisk -rx \
+                "pjsip show aor labuser-rewrite" ) 2>&1 | sed 's/^/  asterisk  /'
+            docker rm -f "$NAT_MOVE_NAME" >/dev/null 2>&1
+            nat_down
+            return 1
+        fi
+        sleep 1
+    done
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "pjsip show aor labuser-rewrite" ) 2>&1 | sed -n 's/^ *Contact: */  asterisk  holds /p'
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-rewrite extension 9010@lab" ) >/dev/null 2>&1
+    status=$(timeout 60 docker wait "$NAT_MOVE_NAME" 2>/dev/null || echo 1)
+    docker logs "$NAT_MOVE_NAME" 2>&1
+    docker rm -f "$NAT_MOVE_NAME" >/dev/null 2>&1
+    nat_down
+    [ "$status" = 0 ]
+}
+
 # The same called flow, with the call placed 330 seconds after the REGISTER
 # rather than at once: long past the NAT's UDP timeout (interop/nat is Linux
 # masquerading, whose conntrack forgets a UDP flow minutes after its last
@@ -3748,6 +3811,19 @@ if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
         fail "behind a NAT: there is no C harness to run it with"
     else
         printf '  note  no C harness, so the flow behind a NAT is skipped with the other C flows\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = nat ] || [ "$WANT" = natmove ]; then
+    step "moved behind a NAT, at a registrar that rewrites every Contact, in C"
+    if [ -n "$HARNESS_C" ]; then
+        nat_move_flow \
+            && pass "moved behind the NAT: registered, watched, refreshed and called at the new binding" \
+            || fail "moved behind a NAT"
+    elif [ "$WANT" = natmove ]; then
+        fail "moved behind a NAT: there is no C harness to run it with"
+    else
+        printf '  note  no C harness, so the move behind a NAT is skipped with the other C flows\n'
     fi
 fi
 

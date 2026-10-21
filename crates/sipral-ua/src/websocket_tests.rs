@@ -348,7 +348,12 @@ fn an_account_on_a_websocket_of_its_own_asks_for_the_connection_again() {
     let out = written(&mut agent);
     let (_, register) = unmasked(&out[0]);
     assert!(register.starts_with(b"REGISTER "));
-    let ok = reply(&register, 200, "OK", "");
+    let ok = reply(
+        &register,
+        200,
+        "OK",
+        "Contact: <sip:alice@192.0.2.1:40000>;expires=3600\r\n",
+    );
     feed(&mut agent, &server_frame(1, &ok), t0);
     events(&mut agent);
 

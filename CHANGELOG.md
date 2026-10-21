@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- **A move behind a NAT no longer leaves the account unregistered at Asterisk with `rewrite_contact`.** When a STUN answer moved an account onto a new public address, the REGISTER that added it also removed the old address with `expires=0`. Asterisk's `rewrite_contact`, on by default for FreePBX extensions behind a NAT, rewrites every `Contact` in a REGISTER to the request's source address, so the old address sent from the new socket named the new binding: Asterisk added it and removed it in the same request, answered 200 with no `Contact`, and the account read as registered while calls to it went nowhere until the next refresh, up to an hour later. The old address is now removed in a REGISTER of its own, and the new one added once that is answered (`docs/06-nat.md`, "When the mapping changes"); an old address the registrar's last 2xx showed it holds under another one is not removed at all, since that removal would be rewritten too. A 2xx that lists no `Contact` at all is asked once more before the account reads as registered; a registrar that never lists any is believed the second time. The lab runs the move against an account set up the way FreePBX sets one up (`scripts/lab.sh natmove`). At C ABI 1.2, unchanged.
+
 ## [1.2.2] - 2026-10-20
 
 The start of a call heard in device mode: the devices open as the call is placed, the far end's first words are held until the loudspeaker runs, and on macOS the voice unit is built ahead of the call on the chosen devices.

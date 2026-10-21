@@ -67,6 +67,9 @@ const MAX_ASSOCIATED: usize = 32;
 const MAX_LEARNED_BYTES: usize = 512;
 
 /// Everything one account's registration is doing.
+// independent facts about one binding (a 423 chased, a removal, a push owed,
+// a withdrawal, a re-ask), not one state machine
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub(crate) struct Registration {
     pub(crate) state: RegistrationState,
@@ -107,9 +110,24 @@ pub(crate) struct Registration {
     /// [`Registration::learned`], which stops answering once the binding
     /// lapses.
     pub(crate) learned: Option<RegistrarInfo>,
-    /// Old `Contact`s left by `UserAgent::readdress`, sent again with
-    /// `expires=0` until a 2xx confirms (RFC 3261 §10.2.2).
+    /// Old `Contact`s left by `UserAgent::readdress`, removed with
+    /// `expires=0` (RFC 3261 §10.2.2) in a REGISTER of their own before the
+    /// next one adds the current `Contact`.
     pub(crate) retired: Vec<Box<[u8]>>,
+    /// The REGISTER in flight only removes `retired`. A registrar that
+    /// rewrites every `Contact` to the source address (Asterisk's
+    /// `rewrite_contact`) reads an old one sent from the new socket as the
+    /// new binding, so a removal in the same request as the add takes both.
+    pub(crate) withdrawing: bool,
+    /// A 2xx listed no `Contact` and was asked again once (§10.2.4: the
+    /// answer lists what is bound). Cleared by a 2xx that lists one, so a
+    /// registrar that never lists any is asked twice only the first time.
+    pub(crate) relisted: bool,
+    /// The `Contact` (as `retired` holds one) the last 2xx listed bindings
+    /// beside but not itself: the registrar keeps it under another address,
+    /// so it is never retired. A removal of it, rewritten the same way, would
+    /// name the binding the registrar does hold.
+    pub(crate) unheld: Option<Box<[u8]>>,
 }
 
 /// Cap on retired `Contact`s, so a NAT that moves on every refresh does not
@@ -136,6 +154,9 @@ impl Registration {
             waiting_for_stream: None,
             learned: None,
             retired: Vec::new(),
+            withdrawing: false,
+            relisted: false,
+            unheld: None,
         }
     }
 
@@ -675,6 +696,18 @@ pub(crate) fn granted_expiry(
         Err(HeaderError::Missing) => Some(asked),
         Err(_) => None,
     }
+}
+
+/// Whether the registrar's 2xx lists `ours` as it was sent (§10.2.4). One that
+/// lists others and not it holds it under another address: Asterisk's
+/// `rewrite_contact` keeps the source address instead.
+pub(crate) fn holds_as_sent(response: &RawMessage<'_>, ours: &Uri) -> bool {
+    let Ok(Contacts::Addrs(addrs)) = response.contact() else {
+        return false;
+    };
+    addrs
+        .flatten()
+        .any(|addr| Uri::parse(addr.uri_bytes()).is_ok_and(|uri| ours.equivalent(&uri)))
 }
 
 /// The `expires` parameter on the contact the registrar echoed back for us.

@@ -41,8 +41,8 @@ use crate::message::{MessageHandle, SentMessage};
 use crate::parked::Parked;
 use crate::referral::Referrals;
 use crate::registration::{
-    Registration, backoff_delay, echoed, granted_expiry, min_expires, read_registrar_info,
-    retry_after,
+    Registration, backoff_delay, echoed, granted_expiry, holds_as_sent, min_expires,
+    read_registrar_info, retry_after,
 };
 use crate::renegotiate::ParkedOffer;
 use crate::screening::Guard;
@@ -782,13 +782,17 @@ impl UserAgent {
             .get(&account)
             .ok_or(UaError::NoSuchAccount)?;
         let refreshing = reg.is_bound() && !unregistering;
-        let expires = if unregistering {
+        // old contacts go first, on their own; the add follows their answer
+        let withdrawing = !unregistering && !reg.retired.is_empty();
+        // the add after a withdrawal is the same attempt, already announced
+        let continuing = reg.withdrawing && reg.transaction.is_some();
+        let expires = if unregistering || withdrawing {
             Duration::ZERO
         } else {
             reg.asking
         };
 
-        let request = build_register(config, registrar, reg, expires);
+        let request = build_register(config, registrar, reg, expires, withdrawing);
         // §22.2: once challenged, send credentials up front and save the 401
         // round trip on every refresh
         let id = match config.credentials.clone() {
@@ -805,6 +809,7 @@ impl UserAgent {
         reg.cseq = reg.cseq.saturating_add(1);
         reg.transaction = Some(id);
         reg.unregistering = unregistering;
+        reg.withdrawing = withdrawing;
         reg.unanswered = None;
         reg.due = None;
         reg.owed = false;
@@ -822,7 +827,7 @@ impl UserAgent {
             .insert(AnyTransactionId::NonInviteClient(id), account);
 
         // a de-registration is reported only when answered
-        if !unregistering {
+        if !unregistering && !continuing {
             let event = if refreshing {
                 UaEvent::Refreshing { account }
             } else {
@@ -880,17 +885,27 @@ impl UserAgent {
 }
 
 /// The REGISTER for one account (§10.2.1), addressed to `registrar`.
+///
+/// `withdrawing` sends only the retired contacts, for removal; otherwise
+/// they ride along only with a de-registration, which removes everything.
 fn build_register(
     account: &Account,
     registrar: &Uri,
     reg: &Registration,
     expires: Duration,
+    withdrawing: bool,
 ) -> OutgoingRequest {
     let seconds = expires.as_secs().to_string();
-    // §10.2.2: old addresses go in the same field with expires=0
-    let mut contact = account.register_contact_value(expires.is_zero()).into_vec();
+    // §10.2.2: old addresses with expires=0
+    let mut contact = if withdrawing {
+        Vec::new()
+    } else {
+        account.register_contact_value(expires.is_zero()).into_vec()
+    };
     for old in &reg.retired {
-        contact.extend_from_slice(b", ");
+        if !contact.is_empty() {
+            contact.extend_from_slice(b", ");
+        }
         contact.extend_from_slice(old);
         contact.extend_from_slice(b";expires=0");
     }
@@ -1093,6 +1108,22 @@ impl UserAgent {
         if status.is_provisional() {
             return;
         }
+        // Whatever a withdrawal is answered, the add goes next: an old binding
+        // left standing lapses on its own, a missing new one loses calls. A
+        // challenge is answered first, as for any REGISTER.
+        let withdrew = self
+            .registrations
+            .get(&account)
+            .is_some_and(|reg| reg.withdrawing);
+        if withdrew && !matches!(status.get(), 401 | 407) {
+            if let Some(reg) = self.registrations.get_mut(&account) {
+                reg.retired.clear();
+            }
+            if let Err(error) = self.send_register(account, false, now) {
+                self.register_unsent(account, &error, now);
+            }
+            return;
+        }
         if status.is_success() {
             // the retired contacts were removed with it
             if let Some(reg) = self.registrations.get_mut(&account) {
@@ -1156,7 +1187,21 @@ impl UserAgent {
         }
 
         let raw = response.as_raw();
+        // §10.2.4: a 2xx lists the bindings; none at all after an add may be a
+        // binding the registrar dropped while reading this very request
+        let unlisted = raw.header(HeaderName::Contact).is_none();
+        if unlisted && !reg.relisted {
+            if let Some(reg) = self.registrations.get_mut(&account) {
+                reg.relisted = true;
+            }
+            if let Err(error) = self.send_register(account, false, now) {
+                self.register_unsent(account, &error, now);
+            }
+            return;
+        }
         let granted = granted_expiry(&raw, &config.contact, reg.asking).unwrap_or(reg.asking);
+        let unheld = (!unlisted && !holds_as_sent(&raw, &config.contact))
+            .then(|| config.removal_contact_value());
         let echo = echoed(&raw, config);
         // a granted zero is a binding the registrar did not keep
         if granted.is_zero() {
@@ -1181,6 +1226,8 @@ impl UserAgent {
             return;
         };
         reg.echo = echo;
+        reg.relisted &= unlisted;
+        reg.unheld = unheld;
         let refresh_in = reg.bound(granted, cold, now);
         // replaced whole, never merged: RFC 3608 §6.1 (a 2xx without
         // Service-Route clears it), RFC 5627 §4.2 (new temporary GRUU each 2xx)

@@ -353,15 +353,26 @@ The decisions, and why each one is what it is:
 - **When the mapping changes.** A refresh that answers with a different
   address is `SIPRAL_NAT_MAPPING_MOVED`. For the signalling socket every
   account is moved onto the new address and each one holding a binding, or on
-  its way to one, registers it at once, superseding the one in flight — and
-  that REGISTER also carries the `Contact` it replaces with `expires=0`, so
-  the registrar drops the old binding instead of forking calls to it until it
-  expires (RFC 3261 §10.2.2). That includes the private address a REGISTER
-  sent before the first answer arrived. The old `Contact` goes as its URI
-  alone, without `+sip.instance`: RFC 3261 §10.3 matches a removal to a
-  binding by URI, but Kamailio matches by instance, and given the new
-  `Contact` and the old one with `expires=0` under the same tag it keeps
-  neither. For a media socket still waiting, the call is
+  its way to one, registers it at once, superseding the one in flight. The
+  `Contact` it replaces is first removed with `expires=0` in a REGISTER of its
+  own, so the registrar drops the old binding instead of forking calls to it
+  until it expires (RFC 3261 §10.2.2), and the new one is added once that is
+  answered, whatever the answer. That includes the private address a REGISTER
+  sent before the first answer arrived. The two never share a request:
+  Asterisk's `rewrite_contact`, on by default for FreePBX extensions behind a
+  NAT, rewrites every `Contact` in a REGISTER to the source address, removals
+  too, so an old one sent from the new socket names the new binding and a
+  single request would add it and remove it again. For the same reason an old
+  `Contact` the registrar's last 2xx did not list as it was sent, while it
+  listed others, is not removed at all: the registrar holds it under another
+  address, and a removal rewritten the same way would name the binding it is
+  keeping; `remove_existing`, or the binding's own expiry, takes the old one
+  away. The old `Contact` goes as
+  its URI alone, without `+sip.instance`: RFC 3261 §10.3 matches a removal to
+  a binding by URI, but Kamailio matches by instance. A 2xx that lists no
+  `Contact` at all (§10.2.4 says it lists what is bound) is asked once more
+  before the account reads as registered; a registrar that never lists any is
+  believed the second time. For a media socket still waiting, the call is
   described by the new address. A call already up is not re-INVITEd just for this. Its next
   re-INVITE or UPDATE — a hold, a resume, the session timer's own refresh —
   carries the account's `Contact` as it is then, which is the target refresh

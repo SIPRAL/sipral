@@ -391,6 +391,15 @@ struct seen {
      * again, after the voicemail call, for the claim that it climbed */
     int mailbox_notified;
     uint32_t mailbox_new_count;
+    /* `FLOW_NAT_MOVE`: every subscription granted, every one no longer live,
+     * and every notification of either package, counted so the flow can
+     * tell what happened after the move from what happened before it */
+    unsigned granted;
+    unsigned lost;
+    unsigned mailbox_notifications;
+    /* and the busy lamp's own: notifications for `lamp` alone */
+    sipral_handle_t lamp;
+    unsigned lamp_notifications;
     /* `FLOW_NAT`: what the STUN server said about the signalling socket and
      * about the media one, as `SIPRAL_EVENT_KIND_NAT_MAPPING` carried it */
     int sip_mapped;
@@ -694,14 +703,23 @@ static void on_event(const sipral_event_t *event, void *user_data)
         if (event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_ACTIVE
             || event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_PENDING) {
             seen->subscribed = 1;
+            seen->granted++;
         } else if (event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_RETRYING
                    || event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_ENDED) {
             seen->subscription_ended = 1;
+            seen->lost++;
+        }
+        break;
+    case SIPRAL_EVENT_KIND_NOTIFIED:
+        if (seen->lamp != SIPRAL_HANDLE_NONE
+            && event->payload.subscription.subscription == seen->lamp) {
+            seen->lamp_notifications++;
         }
         break;
     case SIPRAL_EVENT_KIND_MESSAGES_WAITING:
         seen->mailbox_notified = 1;
         seen->mailbox_new_count = event->payload.message.new_messages;
+        seen->mailbox_notifications++;
         break;
     case SIPRAL_EVENT_KIND_REFERRAL:
         /* one kind for both: asked, with the status zero, and lapsed, with
@@ -2054,6 +2072,13 @@ enum flow {
      * Through Kamailio alone. */
     FLOW_TWO_REALMS,
     FLOW_REALM_UNNAMED,
+    /* 8.12.24: registered behind the NAT at an account Asterisk rewrites
+     * every Contact for, then moved to another socket the way a laptop moves
+     * from a cable to Wi-Fi behind the same NAT -- what the application does
+     * on the platform's notification, through this ABI. Run only when
+     * SIPRAL_FLOWS names it, with a STUN server: scripts/lab.sh's own
+     * `natmove` step, which calls the account once the move is done. */
+    FLOW_NAT_MOVE,
     FLOW_COUNT
 };
 
@@ -2134,6 +2159,8 @@ static const char *flow_name(enum flow which)
         return "a server under two realms, both named";
     case FLOW_REALM_UNNAMED:
         return "a server under two realms, one unnamed, declined";
+    case FLOW_NAT_MOVE:
+        return "moved behind a NAT, at a registrar that rewrites Contacts";
     case FLOW_COUNT:
     default:
         return "?";
@@ -2195,6 +2222,8 @@ static const char *flow_key(enum flow which)
         return "tworealms";
     case FLOW_REALM_UNNAMED:
         return "realmunnamed";
+    case FLOW_NAT_MOVE:
+        return "natmove";
     case FLOW_COUNT:
     default:
         return "?";
@@ -2273,6 +2302,12 @@ static void account_for(enum flow which, const char *server, const char **user,
         named = getenv("SIPRAL_USER_G729");
         secret = getenv("SIPRAL_PASS_G729");
         fallback = "labuser-g729";
+    } else if (which == FLOW_NAT_MOVE) {
+        /* the one account set up the way FreePBX sets up an extension behind
+         * a NAT: rewrite_contact, one binding, the old one removed */
+        named = getenv("SIPRAL_USER_REWRITE");
+        secret = getenv("SIPRAL_PASS_REWRITE");
+        fallback = "labuser-rewrite";
     } else {
         return;
     }
@@ -2447,6 +2482,14 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
         const char *wanted = getenv("SIPRAL_FLOWS");
         const char *stun = getenv("SIPRAL_STUN_SERVER");
         return wanted != NULL && selected(wanted, "natin") && stun != NULL
+               && stun[0] != '\0';
+    }
+    case FLOW_NAT_MOVE: {
+        /* the same, for scripts/lab.sh's own `natmove` step, and for a live
+         * PBX behind a real NAT, whose extension SIPRAL_USER names */
+        const char *wanted = getenv("SIPRAL_FLOWS");
+        const char *stun = getenv("SIPRAL_STUN_SERVER");
+        return wanted != NULL && selected(wanted, "natmove") && stun != NULL
                && stun[0] != '\0';
     }
     case FLOW_ACCOUNT_SDES:
@@ -3548,9 +3591,282 @@ static int hold_watched(struct endpoint *end, int loud)
     return 0;
 }
 
+/* `FLOW_NAT_MOVE`'s socket after the move: a port interop/nat/route.sh leaves
+ * to MASQUERADE, which keeps it, so the NAT shows the moved socket at the same
+ * host and another port -- what a laptop's second interface behind the same
+ * router looks like to the registrar. */
+#define NAT_SIP_MOVED_PORT 5064u
+
+/* What `FLOW_NAT_MOVE` asks its subscriptions to last, and how long it waits
+ * for both to be refreshed: Asterisk grants what is asked from 60 seconds up,
+ * and the stack refreshes at 85 % of what was granted. */
+#define MOVE_SUBSCRIPTION_S 120u
+#define MOVE_REFRESH_PATIENCE_MS 140000u
+
+/* The counts `FLOW_NAT_MOVE` waits for between steps, since the flow started:
+ * subscriptions granted, and notifications from the mailbox and from the lamp,
+ * one of each wanted after every step; and how many subscriptions had been
+ * lost when the wait began. */
+static unsigned move_wants_granted;
+static unsigned move_wants_mailbox;
+static unsigned move_wants_lamp;
+static unsigned move_lost_mark;
+
+/* Whether the mailbox is watched: SIPRAL_MOVE_MAILBOX=off leaves it out, for
+ * a live PBX whose test extension has none. */
+static int move_mailbox;
+
+/* The next step's counts: one more grant and one more notification from each
+ * subscription watched, or no more grants when `granting` is zero. */
+static void move_mark(const struct endpoint *end, int granting)
+{
+    unsigned watched = move_mailbox ? 2u : 1u;
+    move_wants_granted = end->seen.granted + (granting ? watched : 0u);
+    move_wants_mailbox = end->seen.mailbox_notifications + (move_mailbox ? 1u : 0u);
+    move_wants_lamp = end->seen.lamp_notifications + 1u;
+    move_lost_mark = end->seen.lost;
+}
+
+/* Every count reached, or a subscription lost on the way. */
+static int move_settled(const struct endpoint *end)
+{
+    return (end->seen.granted >= move_wants_granted
+            && end->seen.mailbox_notifications >= move_wants_mailbox
+            && end->seen.lamp_notifications >= move_wants_lamp)
+           || end->seen.lost > move_lost_mark;
+}
+
+/* What `move_settled` waited for, all of it, and nothing lost. */
+static int move_reached(const struct endpoint *end)
+{
+    return end->seen.lost == move_lost_mark && end->seen.granted >= move_wants_granted
+           && end->seen.mailbox_notifications >= move_wants_mailbox
+           && end->seen.lamp_notifications >= move_wants_lamp;
+}
+
+/* Registered behind the NAT, at an account Asterisk rewrites every Contact
+ * for, keeps one binding of, and drops the old binding from when a new one
+ * comes (the lab Asterisk's own `labuser-rewrite`: what FreePBX does
+ * for an extension behind a NAT). Watching the account's own mailbox and one
+ * busy lamp. Then moved: a second socket on another port, which the NAT shows
+ * at another port, handed over the way the platform's notification makes an
+ * application do it -- the socket bound as the main transport, the change
+ * reported, the account rebound -- and the old socket closed.
+ *
+ * What fails it is what a phone that moved this way lost before 8.12.24: the
+ * REGISTER that withdrew the address being left, sent from the new socket in
+ * the same request as the new one, was rewritten by Asterisk to the new
+ * binding and removed it, and the 200 listed nothing. So the registrar's own
+ * 200 has to list the new public address and not the old one; both
+ * subscriptions have to be granted again from the new address, notified
+ * there, and refreshed there; and scripts/lab.sh then calls the account as a
+ * whole, which reaches this end only if the binding the move left is the one
+ * Asterisk holds. The call is refused with a 486: its arrival is the proof. */
+static int flow_nat_move(struct endpoint *end, const char *server)
+{
+    char before[SIPRAL_ADDRESS_BYTES];
+    char moved[SIPRAL_ADDRESS_BYTES];
+    /* room for the port after it in `moved` */
+    char host[SIPRAL_ADDRESS_BYTES - 8];
+    char binding[SIPRAL_ADDRESS_BYTES + 2];
+    char lamp[128];
+    char contact[sizeof end->aor + SIPRAL_ADDRESS_BYTES];
+    char registrar_address[SIPRAL_ADDRESS_BYTES];
+    const char *user_at;
+    const char *user_end;
+    struct sockaddr_in moved_local;
+    sipral_subscribe_config_t watch;
+    sipral_handle_t watched_lamp = SIPRAL_HANDLE_NONE;
+    sipral_recovery_t recovery = SIPRAL_RECOVERY_UNKNOWN;
+    sipral_status_t status;
+    int fresh;
+    int old;
+
+    /* the STUN answer straight in: this flow is about the move, not about the
+     * private address registered before it, which `FLOW_NAT` proves */
+    end->withhold_stun = 0;
+    if (end->withheld_len > 0) {
+        (void)sipral_stack_receive_datagram(
+            end->stack, SIPRAL_TRANSPORT_MAIN, end->withheld, end->withheld_len,
+            end->withheld_from, strlen(end->withheld_from), end->sip_address,
+            strlen(end->sip_address), now_ms());
+    }
+    status = sipral_account_register(end->stack, end->account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        return -1;
+    }
+    if (!wait_until(end, registered_at_public, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered at the public address before the move");
+        return -1;
+    }
+    keep(before, sizeof before, end->seen.sip_public, strlen(end->seen.sip_public));
+    printf("  move  registered as %s behind the NAT\n", before);
+
+    {
+        const char *mailbox = getenv("SIPRAL_MOVE_MAILBOX");
+        move_mailbox = mailbox == NULL || strcmp(mailbox, "off") != 0;
+    }
+    memset(&watch, 0, sizeof watch);
+    watch.size = sizeof watch;
+    watch.expires_seconds = MOVE_SUBSCRIPTION_S;
+    if (move_mailbox) {
+        watch.target = end->aor;
+        watch.target_len = strlen(end->aor);
+        watch.package = "message-summary";
+        watch.package_len = strlen("message-summary");
+        status = sipral_account_subscribe(end->stack, end->account, &watch, &end->subscription,
+                                          now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_account_subscribe", status);
+            return -1;
+        }
+    }
+    /* interop/asterisk's own hint, or on a live PBX an extension it keeps
+     * one for, named by SIPRAL_MOVE_LAMP */
+    {
+        const char *named = getenv("SIPRAL_MOVE_LAMP");
+        (void)snprintf(lamp, sizeof lamp, "sip:%s@%s",
+                       named != NULL && named[0] != '\0' ? named : "9120", server);
+    }
+    watch.target = lamp;
+    watch.target_len = strlen(lamp);
+    watch.package = "dialog";
+    watch.package_len = strlen("dialog");
+    status = sipral_account_subscribe(end->stack, end->account, &watch, &watched_lamp, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_subscribe", status);
+        return -1;
+    }
+    /* before any poll, so its first notification is counted as the lamp's */
+    end->seen.lamp = watched_lamp;
+    move_mark(end, 1);
+    if (!wait_until(end, move_settled, FLOW_PATIENCE_MS) || !move_reached(end)) {
+        wrong_text("what is watched was not all granted and notified before the move");
+        return -1;
+    }
+    printf("  move  watching %s%s\n", move_mailbox ? "the mailbox and " : "", lamp);
+
+    /* the move: the new socket first, bound as the main transport, then the
+     * change said, then the account pointed at it -- the order
+     * bindings/swift's own `networkChanged(to:)` keeps -- and the old socket
+     * closed, so nothing can arrive on it any more */
+    fresh = bind_udp_at(&moved_local, NAT_SIP_MOVED_PORT);
+    if (fresh < 0 || split_address(end->sip_address, host, sizeof host) == NULL) {
+        wrong_text("cannot bind the socket to move to");
+        if (fresh >= 0) {
+            (void)close(fresh);
+        }
+        return -1;
+    }
+    (void)snprintf(moved, sizeof moved, "%s:%u", host, (unsigned)ntohs(moved_local.sin_port));
+    status = sipral_stack_transport_bind(end->stack, SIPRAL_TRANSPORT_MAIN, 0u, moved,
+                                         strlen(moved), NULL, 0, now_ms(), NULL);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_transport_bind", status);
+        (void)close(fresh);
+        return -1;
+    }
+    old = end->sip_fd;
+    end->sip_fd = fresh;
+    (void)close(old);
+    keep(end->sip_address, sizeof end->sip_address, moved, strlen(moved));
+    end->seen.sip_mapped = 0;
+    end->seen.registration = 0;
+    end->seen.registered_with[0] = '\0';
+    move_mark(end, 1);
+
+    status = sipral_stack_network_changed(end->stack, SIPRAL_LINK_WIRED, host, strlen(host),
+                                          "cable", strlen("cable"), 1u, SIPRAL_LINK_WIFI, host,
+                                          strlen(host), "wifi", strlen("wifi"), 1u, now_ms(),
+                                          &recovery);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_network_changed", status);
+        return -1;
+    }
+    if (recovery != SIPRAL_RECOVERY_REBUILD) {
+        wrong_text("another interface was not read as a rebuild");
+        return -1;
+    }
+    user_at = strstr(end->aor, ":");
+    user_end = strchr(end->aor, '@');
+    if (user_at == NULL || user_end == NULL || user_end <= user_at
+        || address_text(&end->server, registrar_address, sizeof registrar_address) != 0) {
+        wrong_text("the account's own AOR and registrar are not readable");
+        return -1;
+    }
+    (void)snprintf(contact, sizeof contact, "sip:%.*s@%s", (int)(user_end - user_at - 1),
+                   user_at + 1, moved);
+    status = sipral_account_rebind(end->stack, end->account, SIPRAL_TRANSPORT_MAIN,
+                                   registrar_address, strlen(registrar_address), contact,
+                                   strlen(contact), now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_rebind", status);
+        return -1;
+    }
+
+    if (!wait_until(end, registered_at_public, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered at the public address after the move");
+        printf("%s\n", end->seen.registered_with);
+        return -1;
+    }
+    if (strcmp(before, end->seen.sip_public) == 0) {
+        wrong_text("the NAT showed the new socket where it showed the old one, and the run "
+                   "proves nothing about a move");
+        return -1;
+    }
+    (void)snprintf(binding, sizeof binding, "@%s>", before);
+    if (strstr(end->seen.registered_with, binding) != NULL) {
+        wrong_text("the registrar still lists the address the move left");
+        printf("%s\n", end->seen.registered_with);
+        return -1;
+    }
+    printf("  move  moved to %s, appearing as %s, and registered there\n", moved,
+           end->seen.sip_public);
+
+    /* nothing lost on the way: a move is the stack's to recover from, and a
+     * subscription it reports as given up is a lamp the user sees go dark */
+    if (!wait_until(end, move_settled, FLOW_PATIENCE_MS) || !move_reached(end)) {
+        wrong_text("what is watched was not all granted and notified again from the new "
+                   "address, with nothing lost");
+        return -1;
+    }
+    move_mark(end, 0);
+    printf("  move  watched again from the new address\n");
+    (void)fflush(stdout);
+    if (!wait_until(end, move_settled, MOVE_REFRESH_PATIENCE_MS) || !move_reached(end)) {
+        wrong_text("what is watched was not all refreshed and notified at the new address");
+        return -1;
+    }
+    printf("  move  refreshed there\n");
+
+    printf("  move  waiting for a call to the account\n");
+    (void)fflush(stdout);
+    if (!wait_until(end, called, CALLED_PATIENCE_MS)) {
+        wrong_text("a call to the account never reached the binding the move left");
+        return -1;
+    }
+    status = sipral_call_reject(end->stack, end->seen.incoming, 486u, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_reject", status);
+        return -1;
+    }
+    (void)wait_until(end, NULL, 1000u);
+    printf("  move  the call reached the binding the move left\n");
+
+    (void)sipral_subscription_end(end->stack, watched_lamp, now_ms());
+    (void)wait_until(end, NULL, 400u);
+    return 0;
+}
+
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
                     const char *extension, const char *other)
 {
+    if (which == FLOW_NAT_MOVE) {
+        return flow_nat_move(end, server);
+    }
     if (which == FLOW_REGISTER) {
         return flow_register(end);
     }
@@ -5748,6 +6064,7 @@ int main(int argc, char **argv)
         }
         account_for(flow, server, &flow_user, &flow_pass);
         stun_for_this_flow = flow == FLOW_NAT || flow == FLOW_NAT_INCOMING || flow == FLOW_ICE_NAT
+                                     || flow == FLOW_NAT_MOVE
                                  ? getenv("SIPRAL_STUN_SERVER")
                                  : NULL;
         calling_a_peer = flow == FLOW_ICE_NAT;

@@ -2404,15 +2404,18 @@ mod tests {
                 previous: String::new(),
             }]
         );
-        // the registrar is told at once and the private binding dropped
-        let out = signalling_out(stack);
-        let register = out
-            .iter()
-            .find(|(message, _)| message.starts_with(b"REGISTER "))
-            .expect("a REGISTER went out with the new Contact");
+        // the registrar is told at once: the private binding dropped on its
+        // own, then the public one added
+        let (withdrawal, registrar) = last_register(stack);
         assert_eq!(
-            header(&register.0, "Contact").as_deref(),
-            Some("<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.10:5060>;expires=0")
+            header(&withdrawal, "Contact").as_deref(),
+            Some("<sip:alice@192.0.2.10:5060>;expires=0")
+        );
+        grant(stack, &withdrawal, &registrar, 25);
+        let (register, _) = last_register(stack);
+        assert_eq!(
+            header(&register, "Contact").as_deref(),
+            Some("<sip:alice@203.0.113.7:41000>")
         );
     }
 
@@ -2618,15 +2621,18 @@ mod tests {
         assert_eq!(said.len(), 1, "{said:?}");
         assert_eq!(said[0].mapping, SipralNatMapping::Moved as u32);
         assert_eq!(said[0].public, "203.0.113.7:52000");
-        let register = signalling_out(stack)
-            .into_iter()
-            .find(|(message, _)| message.starts_with(b"REGISTER "))
-            .expect("the account registered where the new server says it is");
+        let (withdrawal, registrar) = last_register(stack);
+        assert_eq!(
+            header(&withdrawal, "Contact").as_deref(),
+            Some("<sip:alice@203.0.113.7:41000>;expires=0")
+        );
+        grant(stack, &withdrawal, &registrar, 125);
+        let (register, _) = last_register(stack);
         assert!(
-            header(&register.0, "Contact")
+            header(&register, "Contact")
                 .is_some_and(|contact| contact.starts_with("<sip:alice@203.0.113.7:52000>")),
-            "{:?}",
-            header(&register.0, "Contact")
+            "the account registered where the new server says it is: {:?}",
+            header(&register, "Contact")
         );
         assert_eq!(
             set_servers(stack, "not-an-address", 130),
@@ -2692,15 +2698,18 @@ mod tests {
             "{}",
             last_error_text()
         );
-        let register = signalling_out(stack)
-            .into_iter()
-            .find(|(message, _)| message.starts_with(b"REGISTER "))
-            .expect("the account registered its own address again");
+        let (withdrawal, registrar) = last_register(stack);
+        assert_eq!(
+            header(&withdrawal, "Contact").as_deref(),
+            Some("<sip:alice@203.0.113.7:41000>;expires=0")
+        );
+        grant(stack, &withdrawal, &registrar, 105);
+        let (register, _) = last_register(stack);
         assert!(
-            header(&register.0, "Contact")
+            header(&register, "Contact")
                 .is_some_and(|contact| contact.starts_with("<sip:alice@192.0.2.10:5060>")),
-            "{:?}",
-            header(&register.0, "Contact")
+            "the account registered its own address again: {:?}",
+            header(&register, "Contact")
         );
         assert_eq!(map_media(stack, 110), SipralStatus::WrongState);
         let out = run_signalling(stack, 120, 60_000);
@@ -2733,14 +2742,27 @@ mod tests {
             SipralStatus::Ok
         );
         let _ = poll(stack, 20);
-        let (register, registrar) = signalling_out(stack)
+        let (withdrawal, registrar) = signalling_out(stack)
+            .into_iter()
+            .rev()
+            .find(|(message, _)| message.starts_with(b"REGISTER "))
+            .expect("the REGISTER withdrawing the private address");
+        grant(stack, &withdrawal, &registrar, 25);
+        let (register, _) = signalling_out(stack)
             .into_iter()
             .rev()
             .find(|(message, _)| message.starts_with(b"REGISTER "))
             .expect("the REGISTER naming the public address");
+        grant(stack, &register, &registrar, 30);
+        let _ = signalling_out(stack);
+        (stack, registrar)
+    }
+
+    /// The registrar's 200 to `register`, holding the public binding, delivered and polled.
+    fn grant(stack: SipralHandle, register: &[u8], registrar: &str, now_ms: u64) {
         let mut granted = b"SIP/2.0 200 OK\r\n".to_vec();
         for name in ["Via", "From", "To", "Call-ID", "CSeq"] {
-            let value = header(&register, name).expect("a field to copy");
+            let value = header(register, name).expect("a field to copy");
             granted.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
         }
         granted.extend_from_slice(
@@ -2756,13 +2778,20 @@ mod tests {
                 registrar.len(),
                 ptr::null(),
                 0,
-                30,
+                now_ms,
             )
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        let _ = poll(stack, 30);
-        let _ = signalling_out(stack);
-        (stack, registrar)
+        let _ = poll(stack, now_ms);
+    }
+
+    /// The last REGISTER the stack sent, and where.
+    fn last_register(stack: SipralHandle) -> (Vec<u8>, String) {
+        signalling_out(stack)
+            .into_iter()
+            .rev()
+            .find(|(message, _)| message.starts_with(b"REGISTER "))
+            .expect("a REGISTER went out")
     }
 
     /// Keep-alives sent to `registrar` between `from_ms` and `until_ms`, polling once a second.
