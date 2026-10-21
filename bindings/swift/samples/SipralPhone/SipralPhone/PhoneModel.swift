@@ -470,9 +470,12 @@ final class PhoneModel: ObservableObject {
         do {
             let call = try stack.takeIncomingCall(event)
             if let pending {
-                pending.resolve(with: call)
+                // The session takes its events first: an Answer tapped on
+                // the push's screen is carried out the moment the call is
+                // bound, and its confirmation must be seen.
                 attach(CallSession(call: call, uuid: pending.uuid, remote: caller, outgoing: false))
                 note("the INVITE matched the push shown as \(pending.uuid)")
+                pending.resolve(with: call)
             } else {
                 Task {
                     do {

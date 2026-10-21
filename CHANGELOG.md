@@ -20,6 +20,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 ### Fixed
 
 - **Every VoIP push reaches CallKit, and no pushed screen is left ringing.** `PushKitAdapter` returned without reporting a call for a push whose payload named no caller, which iOS answers by ending the application and, repeated, by no longer delivering its pushes; such a push, and one that arrives with no account, is now shown and ended at once. A screen whose announcement the stack refused, or whose INVITE never came within the announcement's twenty seconds, is ended instead of ringing until the user dismisses it, and `PushKitBridge.matchIncomingCall` returns the pushed call an INVITE belongs to, by the stack's own match, so the application can bind it.
+- **Answer tapped on a pushed call before its INVITE arrives answers it.** CallKit offers Answer the moment a push raises the call screen, usually a second or more before the INVITE; the answer used to fail there because no call was bound yet, and the call ended. `CallKitBridge` now keeps the answer and carries it out when the INVITE is matched, fulfilling `CXAnswerCallAction` only then and failing it if the announcement is refused or goes missing; an End tapped first declines the INVITE with 603 (`docs/15-mobile.md`, "The user answers before the INVITE").
 
 ### Changed
 

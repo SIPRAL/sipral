@@ -175,6 +175,29 @@ when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing. The push's
 payload carries the caller under `caller`; that, and what sends the push, is
 the push gateway's side (below).
 
+**The user answers before the INVITE.** On a phone this is the usual order:
+the push raises the call screen at once, and the INVITE follows the refresh
+REGISTER a second or more later. `CallKitBridge` keeps what the user does to
+a screen that has no call yet. An Answer (`CXAnswerCallAction`, through
+`handleAnswer(uuid:completion:)`) is held, not fulfilled: when the INVITE is
+matched and the call bound to the screen (`PendingCall.resolve(with:)`), the
+call is answered on the spot and only then is the action fulfilled, so the
+system shows the call connecting until it is. If the announcement is refused
+or goes missing the action fails, with `CallKitBridgeError.callNeverArrived`,
+and the screen ends as unanswered; if CallKit gives up waiting on the action
+(`timedOutPerforming`), the screen ends and the INVITE, if it still comes, is
+declined. An End or Decline tapped before the INVITE is fulfilled at once and
+remembered: the INVITE is answered 603 when it arrives. Activating the audio
+session stays CallKit's (`didActivate`), as for any answered call. An
+application binds its own reader to the call before resolving it, since the
+answer can go out inside `resolve(with:)`. `PushTests` runs the three cases
+between two stacks on loopback: answered when the INVITE comes, failed when
+the announcement goes missing, declined with 603 after an End. They passed
+on macOS and on the iOS 26.5 simulator, over the XCFramework, with
+`CallKitAdapterTests` beside them; the real delay between a push and its
+INVITE, and CallKit's own patience with a held Answer, are the phone's to
+show (step 11 below).
+
 ## C3 — a registration that freezes and thaws
 
 ### The snapshot
@@ -1181,8 +1204,12 @@ on the phone.
     again. Send: the log and the seconds counted.
 11. **Killed, then a push.** Swipe the application away; call it from
     another phone. Expected with a push gateway: the call screen within a
-    few seconds, answerable. Without one (the live PBX): no ring, which the log
-    after reopening shows as "registrar promised nothing". Send: the log.
+    few seconds; tap Answer as soon as it shows. The screen says connecting
+    until the INVITE arrives, then the call is up with audio both ways; note
+    the seconds between the tap and the voice. Once more, tapping Decline at
+    once: the other phone hears a decline (603). Without a gateway (the live
+    PBX): no ring, which the log after reopening shows as "registrar promised
+    nothing". Send: the log.
 12. **Thirty minutes idle, registered.** Note the battery percentage,
     lock the phone for 30 minutes, unlock, note it again, place one call.
     Expected: the call works; the log shows the background, the resume and

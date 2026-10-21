@@ -120,13 +120,34 @@ extension CallKitAdapter: CXProviderDelegate {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
     }
 
+    /// Fulfilled once the call is really answered: at once for a call that
+    /// has arrived, when its INVITE is matched for one a push showed first
+    /// (`CallKitBridge.handleAnswer(uuid:completion:)`).
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         do {
             try Self.configureAudioSession()
-            try bridge?.handleAnswer(uuid: action.callUUID)
-            action.fulfill()
         } catch {
             action.fail()
+            return
+        }
+        guard let bridge else {
+            action.fail()
+            return
+        }
+        bridge.handleAnswer(uuid: action.callUUID) { error in
+            if error == nil {
+                action.fulfill()
+            } else {
+                action.fail()
+            }
+        }
+    }
+
+    /// An Answer that waited too long for its INVITE: the call is ended
+    /// and its INVITE, if it comes, declined.
+    public func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+        if let answer = action as? CXAnswerCallAction {
+            bridge?.answerTimedOut(uuid: answer.callUUID)
         }
     }
 

@@ -176,5 +176,123 @@ final class PushTests: XCTestCase {
         let reason = await provider.ended.first?.reason
         XCTAssertEqual(reason, .failed)
     }
+
+    // MARK: - the user acts before the INVITE arrives
+
+    /// What `CXAnswerCallAction` was told, from whichever thread.
+    final class Outcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var results: [String] = []
+
+        func record(_ error: Error?) {
+            lock.withLock { results.append(error.map { "\($0)" } ?? "answered") }
+        }
+
+        var all: [String] { lock.withLock { results } }
+    }
+
+    /// Bob's phone, woken by a push naming Alice, and Alice's stack, ready
+    /// to call it.
+    private struct Woken {
+        let alice: SipralStack
+        let aliceAccount: Account
+        let bob: SipralStack
+        let provider: RecordingProvider
+        let callKit: CallKitBridge
+        let pushKit: PushKitBridge
+        let pending: PendingCall
+        let bobEvents: Recorder<SipralEvent>
+    }
+
+    private func woken() async throws -> Woken {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        let bobAccount = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let provider = RecordingProvider()
+        let callKit = CallKitBridge(provider: provider)
+        let pushKit = PushKitBridge(callKit: callKit)
+        let bobEvents = Recorder(bob.events())
+        let pending = try await pushKit.handle(push: VoipPush(callerId: "sip:alice@sipral.invalid"), account: bobAccount)
+        return Woken(
+            alice: alice, aliceAccount: aliceAccount, bob: bob, provider: provider, callKit: callKit,
+            pushKit: pushKit, pending: pending, bobEvents: bobEvents
+        )
+    }
+
+    /// Alice calls; Bob's side matches the INVITE to the push, as the
+    /// application does, and binds the call to the screen shown for it.
+    private func inviteArrives(_ phone: Woken) async throws -> (aliceCall: Call, bobCall: Call, aliceEvents: Recorder<SipralEvent>) {
+        let aliceCall = try phone.alice.placeCall(account: phone.aliceAccount, target: "sip:bob@\(phone.bob.bindAddress)")
+        let aliceEvents = Recorder(aliceCall.events())
+        let announced = await phone.bobEvents.first(within: 5) { $0.kind == .callAnnounced }
+        XCTAssertNotNil(announced, "the stack did not match the INVITE to the push")
+        if let announced { phone.pushKit.matchIncomingCall(announced, on: phone.bob) }
+        let arrived = await phone.bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let incoming = try XCTUnwrap(arrived, "no INVITE reached the phone")
+        let pending = try XCTUnwrap(phone.pushKit.matchIncomingCall(incoming, on: phone.bob))
+        XCTAssertEqual(pending.uuid, phone.pending.uuid)
+        let bobCall = try phone.bob.takeIncomingCall(incoming)
+        pending.resolve(with: bobCall)
+        return (aliceCall, bobCall, aliceEvents)
+    }
+
+    /// Answer tapped on the push's screen before the INVITE: kept, then the
+    /// call answered the moment the INVITE is matched, and only then is the
+    /// action told it succeeded.
+    func testAnAnswerBeforeTheInviteAnswersTheCallWhenItArrives() async throws {
+        let phone = try await woken()
+        defer { phone.alice.close(); phone.bob.close() }
+        let outcome = Outcome()
+        phone.callKit.handleAnswer(uuid: phone.pending.uuid) { outcome.record($0) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(outcome.all, [], "the answer was settled before there was a call to answer")
+
+        let (aliceCall, bobCall, aliceEvents) = try await inviteArrives(phone)
+        defer { aliceCall.close(); bobCall.close() }
+        let confirmed = await aliceEvents.first(within: 5) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(confirmed, "the caller never saw the answer")
+        XCTAssertEqual(outcome.all, ["answered"])
+    }
+
+    /// Answer tapped, and the INVITE never comes: the action fails and the
+    /// screen is ended as unanswered.
+    func testAnAnswerWhoseAnnouncementGoesMissingFails() async throws {
+        let phone = try await woken()
+        defer { phone.alice.close(); phone.bob.close() }
+        let outcome = Outcome()
+        phone.callKit.handleAnswer(uuid: phone.pending.uuid) { outcome.record($0) }
+        let missing = SipralEvent(
+            kindRaw: SipralEventKind.announcedCallMissing.rawValue, kind: .announcedCallMissing,
+            kindName: "announced call missing", stack: phone.bob.handle, account: Sipral.handleNone,
+            call: Sipral.handleNone, message: nil, callData: nil, mediaData: nil, registrationData: nil,
+            announceData: AnnounceEventData(announcement: try XCTUnwrap(phone.pending.announcement), waitedMs: 20_000),
+            natData: nil, relayData: nil, referralData: nil, turnStreamData: nil, audioData: nil,
+            stunServerData: nil, verificationData: nil
+        )
+        phone.pushKit.matchIncomingCall(missing, on: phone.bob)
+        XCTAssertEqual(outcome.all.count, 1)
+        XCTAssertNotEqual(outcome.all.first, "answered")
+        let ended = await eventually(within: 5) { await phone.provider.ended.contains { $0.uuid == phone.pending.uuid } }
+        XCTAssertTrue(ended, "the screen was left up")
+        let reason = await phone.provider.ended.first { $0.uuid == phone.pending.uuid }?.reason
+        XCTAssertEqual(reason, .unanswered)
+    }
+
+    /// Declined on the push's screen before the INVITE: the INVITE, when it
+    /// comes, is answered 603 and the caller's call ends.
+    func testAnEndBeforeTheInviteDeclinesIt() async throws {
+        let phone = try await woken()
+        defer { phone.alice.close(); phone.bob.close() }
+        try phone.callKit.handleEnd(uuid: phone.pending.uuid)
+
+        let (aliceCall, bobCall, aliceEvents) = try await inviteArrives(phone)
+        defer { aliceCall.close(); bobCall.close() }
+        let endedEvent = await aliceEvents.first(within: 5) { $0.kind == .callEnded }
+        let ended = try XCTUnwrap(endedEvent, "the caller's call stayed up")
+        XCTAssertEqual(ended.callData?.statusCode, 603)
+        let confirmed = aliceEvents.elements.contains { $0.kind == .callConfirmed }
+        XCTAssertFalse(confirmed, "a declined call was answered")
+    }
 }
 #endif
