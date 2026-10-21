@@ -6618,7 +6618,7 @@ impl Pair {
     /// drain again. A driver that skips the clock is a driver whose calls
     /// never pace a second check, which is what this reproduces if it is got
     /// wrong.
-    fn check_paths(&mut self, call: CallHandle, remote: CallHandle) -> usize {
+    pub(crate) fn check_paths(&mut self, call: CallHandle, remote: CallHandle) -> usize {
         let mut crossed = 0;
         for _ in 0..64 {
             let mut pending = Vec::new();

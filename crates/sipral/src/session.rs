@@ -2096,6 +2096,79 @@ impl MediaSession {
         self.ice.as_ref().and_then(crate::ice::Ice::gathered)
     }
 
+    /// Whether a candidate added now may still be trickled: the session runs a full agent that
+    /// trickles and has nominated nothing ([`crate::ice::Ice::may_trickle`]).
+    #[cfg(feature = "ice")]
+    pub(crate) fn ice_may_trickle(&self) -> bool {
+        self.ice.as_ref().is_some_and(crate::ice::Ice::may_trickle)
+    }
+
+    /// Give the agent the socket's public address, learned after the description went out
+    /// ([`crate::ice::Ice::add_public`]).
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::NotTrickling`] without an agent, and as the agent refuses it.
+    #[cfg(feature = "ice")]
+    pub(crate) fn add_ice_public(&mut self, public: SocketAddr) -> Result<(), MediaError> {
+        self.ice
+            .as_mut()
+            .ok_or(MediaError::NotTrickling)?
+            .add_public(public)
+    }
+
+    /// Give the agent a relay allocated after the description went out
+    /// ([`crate::ice::Ice::add_relay`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::ice::Ice::add_relay`], the relay back when it was not taken.
+    #[cfg(feature = "ice")]
+    pub(crate) fn add_ice_relay(
+        &mut self,
+        relay: crate::relay::Relay,
+        now: Instant,
+    ) -> Result<(), crate::ice::RelayRefusal> {
+        let Some(ice) = self.ice.as_mut() else {
+            return Err(crate::ice::RelayRefusal::back(
+                MediaError::NotTrickling,
+                relay,
+            ));
+        };
+        let added = ice.add_relay(relay, now);
+        self.drain_ice(now);
+        added
+    }
+
+    /// Say this end has no more candidates ([`crate::ice::Ice::end_of_candidates`]).
+    #[cfg(feature = "ice")]
+    pub(crate) fn end_ice_candidates(&mut self) {
+        if let Some(ice) = self.ice.as_mut() {
+            ice.end_of_candidates();
+        }
+    }
+
+    /// Give the agent candidates the far end trickled ([`crate::ice::Ice::trickle_remote`]).
+    ///
+    /// # Errors
+    ///
+    /// As the agent refuses them.
+    #[cfg(feature = "ice")]
+    pub(crate) fn trickle_ice_remote(
+        &mut self,
+        generation: (&str, &str),
+        candidates: &[sipral_nat::ice::Candidate],
+        ended: bool,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let Some(ice) = self.ice.as_mut() else {
+            return Ok(());
+        };
+        let taken = ice.trickle_remote(generation, candidates, ended, now);
+        self.drain_ice(now);
+        taken
+    }
+
     /// Whether inbound audio is currently considered stopped.
     #[must_use]
     pub const fn is_stalled(&self) -> bool {

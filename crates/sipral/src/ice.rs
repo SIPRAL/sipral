@@ -157,6 +157,62 @@ impl IcePolicy {
     }
 }
 
+/// Whether a call trickles its ICE candidates: sends the ones it learns after its description in
+/// INFO requests, and takes the far end's the same way (RFC 8838, carried in SIP by RFC 8840).
+///
+/// Lives on [`CodecCatalog`](crate::CodecCatalog) beside [`IcePolicy`], which it qualifies: it
+/// does nothing unless the policy offers full ICE, and nothing for [`IcePolicy::Lite`]. The value
+/// is a stance towards the far end, as the policy's is: how much this end assumes it trickles.
+///
+/// A far end that answers without `trickle` gets regular ICE whatever this says (RFC 8838 §5), and
+/// one that offers it is taken at its word under either of the two values that are not
+/// [`IceTrickle::Off`]. The user agent also has to take the package
+/// ([`UserAgent::accept_trickle_ice`](crate::UserAgent::accept_trickle_ice)) for an INVITE that
+/// requires it; the C ABI's stack configuration does both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IceTrickle {
+    /// Regular ICE: no `a=ice-options:trickle`, no INFO, and a far end's trickled candidates are
+    /// refused with the 469 every unknown Info Package gets. The default.
+    #[default]
+    Off,
+    /// Half trickle (RFC 8838 §16, RFC 8840 §5.3): the offer carries every candidate the call has,
+    /// as regular ICE's does, and says `trickle` and `end-of-candidates`, so a far end that does
+    /// not trickle uses it as it stands. A far end that does trickle may send its own later, which
+    /// are taken, and checks start on them as they come. For a peer whose support is unknown,
+    /// which on a SIP trunk or a PBX line is every peer.
+    #[cfg(feature = "ice")]
+    Half,
+    /// Full trickle: the offer goes as soon as the call is placed, with the candidates known then,
+    /// and `Require: trickle-ice` (RFC 8840 §5.1); the rest follow with
+    /// [`MediaEngine::trickle_public_address`](crate::MediaEngine::trickle_public_address),
+    /// [`MediaEngine::trickle_relay`](crate::MediaEngine::trickle_relay) and
+    /// [`MediaEngine::end_of_candidates`](crate::MediaEngine::end_of_candidates). The call is up
+    /// before the slowest server answers; a far end that cannot trickle refuses it 420, so it is
+    /// for a far end known to trickle: a browser, a WebRTC gateway, another stack configured so.
+    #[cfg(feature = "ice")]
+    Full,
+}
+
+#[cfg(feature = "ice")]
+impl IceTrickle {
+    /// Whether a call under this stance trickles at all.
+    #[must_use]
+    pub(crate) const fn trickles(self) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Half | Self::Full => true,
+        }
+    }
+
+    /// Whether the offer goes before every candidate is known, and so requires the far end to
+    /// trickle.
+    #[must_use]
+    pub(crate) const fn full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// One path a call's ICE agent tried (a checked pair or a held relay) and its outcome: the
 /// transport half of D5, beside [`CodecCandidate`](crate::CodecCandidate).
 ///
@@ -323,6 +379,12 @@ pub(crate) struct LocalIce {
     candidates: Vec<Candidate>,
     /// Whether this end is the lite implementation ([`IcePolicy::Lite`]).
     lite: bool,
+    /// How this call trickles ([`IceTrickle`]); [`IceTrickle::Off`] for a lite end.
+    trickle: IceTrickle,
+    /// This end has said it has no more candidates: at once for half trickle, whose offer is
+    /// whole, and on [`MediaEngine::end_of_candidates`](crate::MediaEngine::end_of_candidates) for
+    /// full trickle.
+    ended: bool,
 }
 
 #[cfg(feature = "ice")]
@@ -358,8 +420,8 @@ impl LocalIce {
                 &credentials,
                 Role::Controlled,
                 tiebreaker,
-                advertised,
-                None,
+                (advertised, None),
+                false,
                 now,
             )?;
             let candidates = agent.local_candidates(stream);
@@ -370,11 +432,20 @@ impl LocalIce {
                 public,
                 candidates,
                 lite: true,
+                trickle: IceTrickle::Off,
+                ended: true,
             });
         }
         // a lite peer is only known from its description; the agent adjusts the role then
         let role = Role::initial_full(we_are_offerer, false);
-        let (agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
+        let (agent, stream) = new_agent(
+            &credentials,
+            role,
+            tiebreaker,
+            (address, public),
+            false,
+            now,
+        )?;
         let candidates = agent.local_candidates(stream);
         Ok(Self {
             credentials,
@@ -383,7 +454,116 @@ impl LocalIce {
             public,
             candidates,
             lite: false,
+            trickle: IceTrickle::Off,
+            ended: true,
         })
+    }
+
+    /// The same call trickling as `trickle` says. A lite end does not trickle: it has one
+    /// candidate, written in its first description.
+    #[must_use]
+    pub(crate) const fn trickling(mut self, trickle: IceTrickle) -> Self {
+        if !self.lite {
+            self.trickle = trickle;
+            // a half-trickle offer is whole, and says so (RFC 8838 §13)
+            self.ended = !trickle.full();
+        }
+        self
+    }
+
+    /// Whether this call trickles.
+    pub(crate) const fn trickles(&self) -> bool {
+        self.trickle.trickles()
+    }
+
+    /// How this call trickles.
+    pub(crate) const fn trickle(&self) -> IceTrickle {
+        self.trickle
+    }
+
+    /// Whether this end has said it has no more candidates.
+    pub(crate) const fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Say this end has no more candidates (RFC 8838 §13). Later descriptions carry
+    /// `a=end-of-candidates`.
+    pub(crate) const fn end(&mut self) {
+        self.ended = true;
+    }
+
+    /// Take the socket's public address, learned after the description went out, as the
+    /// server-reflexive candidate [`LocalIce::draw`] would have made of it: `true` when it is a
+    /// candidate the far end has not been told about.
+    ///
+    /// One public address per call, as [`CallMedia::public_address`] gives one; a second, other
+    /// address is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Ice`] with [`sipral_nat::ice::IceError::TooMany`] for a second public address,
+    /// and as [`LocalIce::draw`].
+    ///
+    /// [`CallMedia::public_address`]: crate::CallMedia::public_address
+    pub(crate) fn learn_public(
+        &mut self,
+        address: SocketAddr,
+        public: SocketAddr,
+        now: Instant,
+    ) -> Result<bool, MediaError> {
+        match self.public {
+            Some(known) if known == public => return Ok(false),
+            Some(_) => {
+                return Err(MediaError::Ice(sipral_nat::ice::IceError::TooMany));
+            }
+            None => {}
+        }
+        let (agent, stream) = new_agent(
+            &self.credentials,
+            self.role,
+            self.tiebreaker,
+            (address, Some(public)),
+            false,
+            now,
+        )?;
+        self.public = Some(public);
+        Ok(self.merge(agent.local_candidates(stream)))
+    }
+
+    /// The socket's public address, when the call has one.
+    pub(crate) const fn public(&self) -> Option<SocketAddr> {
+        self.public
+    }
+
+    /// Record the public address a running agent took as its reflexive candidate, so an agent
+    /// rebuilt from this ([`LocalIce::agent`]) has it too.
+    pub(crate) const fn note_public(&mut self, public: SocketAddr) {
+        self.public = Some(public);
+    }
+
+    /// Add whichever of `held` this call has not listed yet, after the ones it has, and say
+    /// whether there were any. The order is the order the far end was told them in, which RFC
+    /// 8840 §4.4 keeps from one INFO to the next.
+    pub(crate) fn merge(&mut self, held: Vec<Candidate>) -> bool {
+        let mut added = false;
+        for candidate in held {
+            let listed = self.candidates.iter().any(|known| {
+                known.address == candidate.address && known.component == candidate.component
+            });
+            if !listed {
+                self.candidates.push(candidate);
+                added = true;
+            }
+        }
+        added
+    }
+
+    /// The `application/trickle-ice-sdpfrag` body (RFC 8840 §9) for this call's stream: its
+    /// credentials, every candidate it has listed, and whether it has finished.
+    pub(crate) fn frag(&self, mid: Option<&str>) -> Vec<u8> {
+        sipral_nat::ice::SdpFrag::for_stream(&self.credentials, mid, &self.candidates, self.ended)
+            .write()
+            .into_bytes()
     }
 
     /// Like [`LocalIce::draw`] in the full role, adding the relayed candidate from `relay`.
@@ -398,16 +578,26 @@ impl LocalIce {
     /// when the slot was empty.
     pub(crate) fn draw_relayed(
         keys: &mut KeySource,
-        address: SocketAddr,
-        public: Option<SocketAddr>,
+        (address, public): (SocketAddr, Option<SocketAddr>),
         relay: &mut Option<crate::relay::Relay>,
         we_are_offerer: bool,
+        trickle: IceTrickle,
         now: Instant,
     ) -> Result<Option<(Self, Ice)>, MediaError> {
         let credentials = draw_credentials(keys)?;
         let tiebreaker = u64::from_be_bytes(keys.block()[..8].try_into().unwrap_or([0; 8]));
         let role = Role::initial_full(we_are_offerer, false);
-        let (agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
+        let (mut agent, stream) = new_agent(
+            &credentials,
+            role,
+            tiebreaker,
+            (address, public),
+            trickle.trickles(),
+            now,
+        )?;
+        if !trickle.full() {
+            agent.end_of_candidates();
+        }
         let Some(ice) = with_relay(agent, stream, address, relay, keys, now)? else {
             return Ok(None);
         };
@@ -420,6 +610,8 @@ impl LocalIce {
                 public,
                 candidates,
                 lite: false,
+                trickle,
+                ended: !trickle.full(),
             },
             ice,
         )))
@@ -453,8 +645,8 @@ impl LocalIce {
             &self.credentials,
             self.role,
             self.tiebreaker,
-            address,
-            self.public,
+            (address, self.public),
+            self.trickles(),
             now,
         )?;
         if agent
@@ -462,6 +654,9 @@ impl LocalIce {
             .is_err()
         {
             return Ok(None);
+        }
+        if self.ended {
+            agent.end_of_candidates();
         }
         let mut ice = Ice {
             local: address,
@@ -496,6 +691,9 @@ impl LocalIce {
         Ok(Self {
             credentials: draw_credentials(keys)?,
             candidates: running.unwrap_or_else(|| self.candidates.clone()),
+            // the restart's description carries every candidate the call holds, and nothing is
+            // trickled after it
+            ended: true,
             ..self.clone()
         })
     }
@@ -515,6 +713,94 @@ impl LocalIce {
             .is_some_and(|written| {
                 written.ufrag == self.credentials.ufrag() && written.pwd == self.credentials.pwd()
             })
+    }
+}
+
+/// A relay a call's agent did not take ([`Ice::add_relay`]), and why: the relay back, boxed for
+/// its size, unless the refusal came after the agent had taken the allocation apart.
+#[cfg(feature = "ice")]
+pub(crate) struct RelayRefusal {
+    /// Why.
+    pub(crate) why: MediaError,
+    /// The relay, still live.
+    pub(crate) relay: Option<Box<crate::relay::Relay>>,
+}
+
+#[cfg(feature = "ice")]
+impl RelayRefusal {
+    /// Refused with the relay untouched.
+    pub(crate) fn back(why: MediaError, relay: crate::relay::Relay) -> Self {
+        Self {
+            why,
+            relay: Some(Box::new(relay)),
+        }
+    }
+}
+
+/// What the far end has trickled on one call (RFC 8840 §4.4): every candidate taken, in the order
+/// it came, the generation they were sent under, and whether it has finished.
+///
+/// Kept for the whole call: the agent takes them when it exists, and each INFO repeats the ones
+/// before it, so only what this does not hold yet is new.
+#[cfg(feature = "ice")]
+#[derive(Clone, Default)]
+pub(crate) struct Heard {
+    /// The `ice-ufrag` and `ice-pwd` the candidates were sent under.
+    pub(crate) generation: Option<(String, String)>,
+    /// Every candidate taken, in order.
+    pub(crate) candidates: Vec<Candidate>,
+    /// The far end said it has no more.
+    pub(crate) ended: bool,
+}
+
+#[cfg(feature = "ice")]
+impl core::fmt::Debug for Heard {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Heard")
+            .field(
+                "ufrag",
+                &self.generation.as_ref().map(|(ufrag, _)| ufrag.as_str()),
+            )
+            .field("candidates", &self.candidates)
+            .field("ended", &self.ended)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "ice")]
+impl Heard {
+    /// Take what a body says for the stream tagged `mid`: the candidates neither the far end's
+    /// description nor an earlier body named, in the order sent. `None` when the body is for
+    /// another generation than the one taken so far, or comes after the far end's end of
+    /// candidates — both of which are dropped (RFC 8838 §9, §14) — or does not name its own.
+    pub(crate) fn take(
+        &mut self,
+        frag: &sipral_nat::ice::SdpFrag,
+        mid: Option<&str>,
+        described: &[Candidate],
+    ) -> Option<Vec<Candidate>> {
+        let (ufrag, pwd) = frag.credentials_for(mid)?;
+        match &self.generation {
+            Some((known, password)) if known != ufrag || password != pwd => return None,
+            Some(_) => {}
+            None => self.generation = Some((ufrag.to_owned(), pwd.to_owned())),
+        }
+        if self.ended {
+            return None;
+        }
+        let mut known = described.to_vec();
+        known.extend(self.candidates.iter().cloned());
+        let fresh = frag.new_candidates(mid, &known);
+        self.candidates.extend(fresh.iter().cloned());
+        self.ended = frag.ended(mid);
+        Some(fresh)
+    }
+
+    /// The generation as the agent compares it.
+    pub(crate) fn generation(&self) -> Option<(&str, &str)> {
+        self.generation
+            .as_ref()
+            .map(|(ufrag, pwd)| (ufrag.as_str(), pwd.as_str()))
     }
 }
 
@@ -604,14 +890,17 @@ impl LocalIce {
                 })),
             });
         }
-        let (agent, stream) = new_agent(
+        let (mut agent, stream) = new_agent(
             &self.credentials,
             self.role,
             self.tiebreaker,
-            address,
-            self.public,
+            (address, self.public),
+            self.trickles(),
             now,
         )?;
+        if self.ended {
+            agent.end_of_candidates();
+        }
         let mut ice = Ice {
             local: address,
             stream: None,
@@ -628,19 +917,24 @@ impl LocalIce {
     }
 }
 
-/// One gathered agent with one stream and one component, plus the reflexive candidate `public`.
+/// One gathered agent with one stream and one component on `address`, plus the reflexive
+/// candidate `public`, trickling ([`IceConfig::trickle`]) when the call does.
 #[cfg(feature = "ice")]
 fn new_agent(
     credentials: &Credentials,
     role: Role,
     tiebreaker: u64,
-    address: SocketAddr,
-    public: Option<SocketAddr>,
+    (address, public): (SocketAddr, Option<SocketAddr>),
+    trickle: bool,
     now: Instant,
 ) -> Result<(IceAgent, StreamId), MediaError> {
     // no STUN or TURN server, so `gather` finishes immediately
-    let mut agent = IceAgent::new(IceConfig::default(), credentials.clone(), role, tiebreaker)
-        .map_err(MediaError::Ice)?;
+    let config = IceConfig {
+        trickle,
+        ..IceConfig::default()
+    };
+    let mut agent =
+        IceAgent::new(config, credentials.clone(), role, tiebreaker).map_err(MediaError::Ice)?;
     // one component: `IcePolicy::offers` forces rtcp-mux
     let stream = agent
         .add_stream(&[(ComponentId::RTP, address)])
@@ -979,6 +1273,115 @@ fn signed_for(data: &[u8], credentials: &Credentials) -> bool {
 
 #[cfg(feature = "ice")]
 impl Ice {
+    /// Whether a candidate added now may still be trickled ([`IceAgent::may_trickle`]): never for
+    /// a lite end.
+    pub(crate) fn may_trickle(&self) -> bool {
+        match &self.running {
+            Running::Full(full) => full.agent.may_trickle(full.stream),
+            Running::Lite(_) => false,
+        }
+    }
+
+    /// Add the socket's public address as a server-reflexive candidate, learned after the
+    /// description went out ([`IceAgent::add_server_reflexive`]).
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Ice`] as the agent refuses it.
+    pub(crate) fn add_public(&mut self, public: SocketAddr) -> Result<(), MediaError> {
+        let Running::Full(full) = &mut self.running else {
+            return Err(MediaError::NotTrickling);
+        };
+        full.agent
+            .add_server_reflexive(full.stream, ComponentId::RTP, self.local, public, None)
+            .map_err(MediaError::Ice)
+    }
+
+    /// Add a relay allocated after the description went out as the relayed candidate
+    /// ([`IceAgent::add_relayed`]), the agent then owning the allocation as it owns one handed in
+    /// with the description.
+    ///
+    /// # Errors
+    ///
+    /// The relay back, with [`MediaError::NotTrickling`] when nothing may be trickled any more or
+    /// this is a lite end, and [`MediaError::Ice`] for one of the other address family. Past those
+    /// checks only an agent already holding eight relays refuses it, and then the allocation is
+    /// gone with the refusal and lapses at its server.
+    pub(crate) fn add_relay(
+        &mut self,
+        relay: crate::relay::Relay,
+        now: Instant,
+    ) -> Result<(), RelayRefusal> {
+        let usable = relay
+            .relayed()
+            .is_some_and(|relayed| relayed.is_ipv4() == self.local.is_ipv4());
+        if !usable {
+            return Err(RelayRefusal::back(
+                MediaError::Ice(sipral_nat::ice::IceError::NotAllocated),
+                relay,
+            ));
+        }
+        if !self.may_trickle() {
+            return Err(RelayRefusal::back(MediaError::NotTrickling, relay));
+        }
+        let Running::Full(full) = &mut self.running else {
+            return Err(RelayRefusal::back(MediaError::NotTrickling, relay));
+        };
+        let (server, client) = relay.into_parts();
+        let over = client.transport().is_stream().then_some(server);
+        full.agent
+            .add_relayed(
+                full.stream,
+                ComponentId::RTP,
+                self.local,
+                server,
+                client,
+                now,
+            )
+            .map_err(|error| RelayRefusal {
+                why: MediaError::Ice(error),
+                relay: None,
+            })?;
+        if self.stream.is_none() {
+            self.stream = over;
+        }
+        self.top_up();
+        Ok(())
+    }
+
+    /// Say this end has no more candidates ([`IceAgent::end_of_candidates`]).
+    pub(crate) fn end_of_candidates(&mut self) {
+        if let Running::Full(full) = &mut self.running {
+            full.agent.end_of_candidates();
+        }
+    }
+
+    /// Take candidates the far end trickled, under the credentials they were sent with
+    /// ([`IceAgent::trickle_remote`]). A lite end takes none: it never checks.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Ice`] as the agent refuses them; for
+    /// [`IceError::OtherGeneration`](sipral_nat::ice::IceError::OtherGeneration) the caller
+    /// drops them.
+    pub(crate) fn trickle_remote(
+        &mut self,
+        generation: (&str, &str),
+        candidates: &[Candidate],
+        ended: bool,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let Running::Full(full) = &mut self.running else {
+            return Ok(());
+        };
+        let taken = full
+            .agent
+            .trickle_remote(full.stream, generation, candidates, ended, now)
+            .map_err(MediaError::Ice);
+        self.top_up();
+        taken
+    }
+
     /// The TURN server the relay reaches over TCP or TLS, if any.
     pub(crate) const fn stream_server(&self) -> Option<SocketAddr> {
         self.stream

@@ -176,6 +176,8 @@ mod stir_tests;
 #[cfg(test)]
 mod tests;
 mod text;
+#[cfg(all(test, feature = "ice"))]
+mod trickle_tests;
 
 pub use app_rate::APPLICATION_RATES;
 pub use capabilities::{Capabilities, SrtpKeying};
@@ -198,9 +200,9 @@ pub use event::{DigitSource, Event, MediaEvent};
 pub use headless::{
     HeadlessMediaError, HeadlessSession, call_state_of, dtmf_received_of, send_digit,
 };
-pub use ice::IcePolicy;
 #[cfg(feature = "ice")]
 pub use ice::{CandidateKind, PathCandidate, PathKind, PathOutcome};
+pub use ice::{IcePolicy, IceTrickle};
 pub use inband::{AmdConfig, AmdReason, AmdVerdict, BeepConfig, CallProgress, ConsentTone};
 pub use inband::{DtmfDetection, IN_BAND_DIGIT_HOLD, ProgressConfig, ProgressDetection};
 pub use inband::{ProgressTone, ToneRegion};
