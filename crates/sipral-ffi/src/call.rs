@@ -4585,7 +4585,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let bytes: Vec<u8> = buffer[..needed - 1]
             .iter()
-            .map(|byte| byte.cast_unsigned())
+            .flat_map(|byte| byte.to_ne_bytes())
             .collect();
         String::from_utf8(bytes).expect("UTF-8")
     }

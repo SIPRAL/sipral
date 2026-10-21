@@ -402,18 +402,19 @@ pub(crate) unsafe fn configured(
             ));
         }
     };
-    let Some(callback) = config.audio_transmit_callback else {
-        return Err(fail(
-            SipralStatus::InvalidArgument,
-            "a stack in device mode needs an audio_transmit_callback: the packets the engine \
-             encodes have to leave from the application's socket",
-        ));
-    };
+    // a platform without device mode says so first: no callback would help
     let Some(platform) = backend() else {
         return Err(fail(
             SipralStatus::NotSupported,
             "this build has no audio backend for this platform: pump the frames from the \
              application, as SIPRAL_FEATURE_AUDIO_DEVICE says",
+        ));
+    };
+    let Some(callback) = config.audio_transmit_callback else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "a stack in device mode needs an audio_transmit_callback: the packets the engine \
+             encodes have to leave from the application's socket",
         ));
     };
     let mut settings = Config {
@@ -1725,8 +1726,10 @@ pub(crate) mod tests {
     fn device_mode_needs_a_transmit_callback() {
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(a_desk()));
         config.audio = SipralAudio::Device as u32;
         let (status, _) = create(&config);
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert!(last_error_text().contains("audio_transmit_callback"));
         config.audio = 7;

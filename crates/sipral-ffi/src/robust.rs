@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::abi::SURFACE;
 use crate::account::{sipral_account_add, sipral_account_register, sipral_account_remove};
+use crate::audio::SipralAudio;
 use crate::call::tests::{
     account_on, answered_with, as_text, call_config, deliver, invitation, place, ringing, sent,
 };
@@ -437,7 +438,7 @@ fn every_feature_this_build_lacks_is_refused_where_it_is_asked_for_never_ignored
             SIPRAL_FEATURE_AUDIO_DEVICE,
             "SIPRAL_AUDIO_DEVICE",
             |settings| {
-                settings.audio = 2;
+                settings.audio = SipralAudio::Device as u32;
             },
         ),
     ];
