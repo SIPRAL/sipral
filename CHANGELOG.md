@@ -11,6 +11,14 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- The Swift package hands RFC 8599's push parameters to an account (`SipralStack.addAccount(push:)`, `SipralPush.apnsVoip`), reads the registrar's answer (`Account.pushEcho()`), and places outgoing calls through CallKit (`CallKitAdapter.startOutgoingCall(callee:dial:)`, `request(_:)`).
+
+### Fixed
+
+- **Every VoIP push reaches CallKit, and no pushed screen is left ringing.** `PushKitAdapter` returned without reporting a call for a push whose payload named no caller, which iOS answers by ending the application and, repeated, by no longer delivering its pushes; such a push, and one that arrives with no account, is now shown and ended at once. A screen whose announcement the stack refused, or whose INVITE never came within the announcement's twenty seconds, is ended instead of ringing until the user dismisses it, and `PushKitBridge.matchIncomingCall` returns the pushed call an INVITE belongs to, by the stack's own match, so the application can bind it.
+
 ### Changed
 
 - The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").

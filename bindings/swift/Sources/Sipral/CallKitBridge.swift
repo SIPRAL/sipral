@@ -109,6 +109,13 @@ public final class CallKitBridge: @unchecked Sendable {
         stateQueue.sync { uuidsByCallHandle[handle] }
     }
 
+    /// Ends a call shown on screen, bound or not: one a push raised that no
+    /// INVITE will fill.
+    func endShown(uuid: UUID, reason: EndReason) {
+        provider.reportCallEnded(uuid: uuid, reason: reason)
+        unbind(uuid: uuid)
+    }
+
     private func unbind(uuid: UUID) {
         stateQueue.sync {
             if let call = callsByUuid.removeValue(forKey: uuid) {
@@ -248,4 +255,6 @@ public final class CallKitBridge: @unchecked Sendable {
 
 public enum CallKitBridgeError: Error, Sendable {
     case unknownCall(UUID)
+    /// `CallKitAdapter.startOutgoingCall` with no `bridge` set.
+    case notAttached
 }

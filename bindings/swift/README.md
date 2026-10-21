@@ -71,6 +71,21 @@ it, compiled in only where those frameworks actually work
 too, but every type in it is `API_UNAVAILABLE(macos)`, so `canImport` alone
 is not enough to keep this package building there).
 
+`PushKitAdapter` reports every VoIP push to CallKit, as iOS requires: one
+whose payload names the caller under `caller` runs the sequence on the
+account its closure returns, and any other, or one that meets no account,
+is shown and ended at once (`PushKitBridge.reportUnusable`). Its
+`tokenChanged` hands over the token, which `SipralPush.apnsVoip(token:teamId:bundleId:)`
+turns into RFC 8599's `pn-provider`, `pn-prid` and `pn-param` for
+`SipralStack.addAccount(push:)`; `Account.pushEcho()` reads what the
+registrar said back. `PushKitBridge.matchIncomingCall` takes every stack
+event: it returns the push shown for an `incomingCall`, to be resolved with
+the `Call` `takeIncomingCall` gives, and ends the screen of an
+`announcedCallMissing` as unanswered. `CallKitAdapter.startOutgoingCall(callee:dial:)`
+places a call through `CXStartCallAction`, so the system shows it and a
+cellular call holds it, and `request(_:)` sends the application's own mute,
+hold, digits and end through the system.
+
 `LiveCommunicationBridge` is the same for LiveCommunicationKit, Apple's
 newer system call service (iOS 17.4 and later), which an application may
 choose instead of CallKit: the bridge reports incoming calls and asks the

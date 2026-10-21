@@ -163,6 +163,18 @@ then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is
 registrar's answer. On iOS, `CallKitBridge` and `PushKitBridge` run this
 sequence (or `LiveCommunicationBridge`, below, in CallKit's place); on Android, `org.sipral.telecom.TelecomBridge` does.
 
+In the Swift package the push parameters are `SipralStack.addAccount(push:)`
+with a `SipralPush` (`SipralPush.apnsVoip(token:teamId:bundleId:)` writes
+the token in hex and the topic as `TEAMID.bundle.voip`, RFC 8599 §10), and
+`Account.pushEcho()` reads the answer. `PushKitAdapter` reports a call to
+CallKit for every VoIP push, which iOS requires of an application that wants
+to keep receiving them: one that names no caller, or arrives before there is
+an account, is shown and ended at once. A shown call that no INVITE fills is
+ended too, as failed when the announcement was refused and as unanswered
+when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing. The push's
+payload carries the caller under `caller`; that, and what sends the push, is
+the push gateway's side (below).
+
 ## C3 — a registration that freezes and thaws
 
 ### The snapshot

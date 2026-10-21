@@ -186,7 +186,8 @@ public final class Account: @unchecked Sendable {
         privacy: Privacy,
         trustedPeers: [String],
         realms: [String],
-        security: AccountSecurity
+        security: AccountSecurity,
+        push: SipralPush? = nil
     ) throws -> Account {
         let given = contact
         let contact = contact ?? defaultContact(
@@ -200,7 +201,7 @@ public final class Account: @unchecked Sendable {
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
              suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin,
-             named, websocketHost, websocketResource]
+             named, websocketHost, websocketResource, push?.provider, push?.prid, push?.param]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -251,6 +252,19 @@ public final class Account: @unchecked Sendable {
                 config.auth_password_len = parts[6].count
             }
             config.expires_seconds = expiresSeconds
+            if let providerPointer = parts[17].pointer {
+                config.push_provider = providerPointer
+                config.push_provider_len = parts[17].count
+            }
+            if let pridPointer = parts[18].pointer {
+                config.push_prid = pridPointer
+                config.push_prid_len = parts[18].count
+            }
+            if let paramPointer = parts[19].pointer {
+                config.push_param = paramPointer
+                config.push_param_len = parts[19].count
+            }
+            config.push_wakes_itself = push?.wakesItself == true ? SipralToggle.on.rawValue : 0
             let (timer, seconds) = sessionTimer.raw
             config.session_timer = timer
             config.session_interval_seconds = seconds
