@@ -19,8 +19,9 @@ import org.sipral.telecom.TelecomBridge
  * Process-wide wiring between an application and the telecom framework.
  *
  * The framework creates [SipralConnectionService] itself and cannot pass
- * it anything, so the application installs the [TelecomBridge] and its
- * incoming-call UI here once, before the first call:
+ * it anything, so an application on the `ConnectionService` adapter
+ * installs the [TelecomBridge] and its incoming-call UI here once, before
+ * the first call:
  *
  * ```kotlin
  * val handle = SipralTelecom.registerAccount(context, "Acme Phone")
@@ -30,7 +31,8 @@ import org.sipral.telecom.TelecomBridge
  * ```
  *
  * Before closing the client, call `bridge.endAll()` so no connection
- * outlives its call.
+ * outlives its call. An application on Core-Telecom installs its bridge in
+ * [CoreTelecomPlatform.install] instead, which also tells this object.
  */
 object SipralTelecom {
     /** The key a call's id travels under in the framework's extras. */
@@ -48,10 +50,16 @@ object SipralTelecom {
 
     private val connectionsFlow = MutableStateFlow<Map<String, SipralConnection>>(emptyMap())
     private val live = ConcurrentHashMap<String, SipralConnection>()
+    private val routesFlow = MutableStateFlow<Map<String, SipralCallRoutes>>(emptyMap())
+    private val routed = ConcurrentHashMap<String, SipralCallRoutes>()
 
     /** Every connection the framework has created and not yet destroyed,
-     * by call id: what an application reads audio routes from. */
+     * by call id, under the `ConnectionService` adapter. */
     val connections: StateFlow<Map<String, SipralConnection>> = connectionsFlow
+
+    /** Every live call's routes and mute, by call id, under either adapter:
+     * what an application reads audio routes from. */
+    val callRoutes: StateFlow<Map<String, SipralCallRoutes>> = routesFlow
 
     /** Install the bridge the service hands each connection to, and the
      * callback for when the framework lets the app show its incoming-call UI
@@ -59,6 +67,12 @@ object SipralTelecom {
     fun install(bridge: TelecomBridge, incomingUi: IncomingCallUi) {
         this.bridge = bridge
         this.incomingUi = incomingUi
+    }
+
+    /** The bridge [SipralCallService]'s Hang up reaches, under Core-Telecom,
+     * which creates no connection here. */
+    internal fun adopt(bridge: TelecomBridge) {
+        this.bridge = bridge
     }
 
     /** This application's own `PhoneAccountHandle`, naming the service
@@ -74,7 +88,8 @@ object SipralTelecom {
     // CAPABILITY_SELF_MANAGED is deprecated from API 37 in favour of the
     // transactional API (API 34), but it is still what a self-managed
     // ConnectionService needs on every release this library supports (8.0 to
-    // 17); a transactional adapter would sit over the same TelecomBridge.
+    // 17); CoreTelecomPlatform is the transactional adapter, over the same
+    // TelecomBridge.
     @Suppress("DEPRECATION")
     fun registerAccount(context: Context, label: CharSequence): PhoneAccountHandle {
         val handle = accountHandle(context)
@@ -120,14 +135,38 @@ object SipralTelecom {
         }
     }
 
+    /** The framework took the audio of the call [id] (Core-Telecom's
+     * `onSetInactive`, which wants the microphone and playback stopped when
+     * it returns): its device is let go now rather than when the bridge's
+     * phase reaches the call's audio. */
+    internal fun callHeld(id: String) {
+        for (audio in audios) {
+            if (audio.callId == id) {
+                audio.pause(AudioPause.HELD)
+            }
+        }
+    }
+
     internal fun created(id: String, connection: SipralConnection) {
         live[id] = connection
         connectionsFlow.value = live.toMap()
+        routesCreated(id, connection)
     }
 
     internal fun destroyed(id: String) {
         live.remove(id)
         connectionsFlow.value = live.toMap()
+        routesDestroyed(id)
+    }
+
+    internal fun routesCreated(id: String, routes: SipralCallRoutes) {
+        routed[id] = routes
+        routesFlow.value = routed.toMap()
+    }
+
+    internal fun routesDestroyed(id: String) {
+        routed.remove(id)
+        routesFlow.value = routed.toMap()
     }
 }
 

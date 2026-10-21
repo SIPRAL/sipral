@@ -50,6 +50,10 @@ import org.sipral.telecom.TelecomBridge
  * - **Audio server death.** `read`/`write` answer `ERROR_DEAD_OBJECT`;
  *   both streams are rebuilt until they open, with silence meanwhile.
  *
+ * Under Core-Telecom ([CoreTelecomPlatform]) the framework's hold is
+ * `onSetInactive`, which releases the device before it returns; there is no
+ * call focus, and routes and mute come from the call's `CallControlScope`.
+ *
  * When the engine carries the calls (device mode, Android 9+) nothing here
  * opens streams: the device is the engine's shared activation, released
  * when no call holds it; mute is the engine's; and audio server death is
@@ -89,7 +93,7 @@ class SipralCallAudio(
     init {
         SipralTelecom.register(audio)
         jobs += scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            val connection = SipralTelecom.connections.map { it[id] }.filterNotNull().first()
+            val connection = SipralTelecom.callRoutes.map { it[id] }.filterNotNull().first()
             launch { connection.route.filterNotNull().collect { audio.routeChanged(it) } }
             launch {
                 connection.muted.collect { muted ->

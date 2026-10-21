@@ -9,7 +9,8 @@
 #                         libsipral_ffi.so and libsipral_jni.so for
 #                         arm64-v8a, armeabi-v7a and x86_64, and the
 #                         binding's classes
-#   sipral-telecom.aar    the ConnectionService helper, by Gradle
+#   sipral-telecom.aar    the telecom helper (ConnectionService and Core-Telecom
+#                         adapters), by Gradle
 #   sipral-sample.apk     the Compose sample, by Gradle (debug-signed)
 #
 # and then each of the three opened and checked: both natives in every ABI
@@ -528,6 +529,9 @@ unzip -q "$OUT/sipral-telecom.aar" -d "$X/telecom"
 for class in org/sipral/android/telecom/SipralConnectionService.class \
     org/sipral/android/telecom/SipralConnection.class \
     org/sipral/android/telecom/AndroidTelecomPlatform.class \
+    org/sipral/android/telecom/CoreTelecomPlatform.class \
+    org/sipral/android/telecom/SipralCoreCall.class \
+    org/sipral/android/telecom/SipralCallRoutes.class \
     org/sipral/android/telecom/SipralCallAudio.class \
     org/sipral/android/telecom/SipralCallAudios.class \
     org/sipral/android/telecom/SipralNetworkMonitor.class \
@@ -579,7 +583,8 @@ check_apk() {
         org.sipral.android.telecom.SipralCallAudio org.sipral.android.telecom.SipralCallAudios \
         org.sipral.android.telecom.SipralNetworkMonitor org.sipral.sample.MainActivity \
         org.sipral.android.telecom.SipralCallService org.sipral.idiomatic.SipralLifecycle \
-        org.sipral.sample.PushReceiver; do
+        org.sipral.sample.PushReceiver org.sipral.android.telecom.CoreTelecomPlatform \
+        androidx.core.telecom.CallsManager org.sipral.sample.CallActionReceiver; do
         printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
             && pass "$name: $class" || fail "$name is missing $class"
     done

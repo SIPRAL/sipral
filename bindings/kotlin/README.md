@@ -674,7 +674,7 @@ it hears. `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`, read with
 talking. `LocalConferenceCheck.kt` bridges two calls between three clients
 on loopback.
 
-## The ConnectionService helper
+## The telecom helper
 
 Split in two, so that the part worth testing needs no Android:
 
@@ -706,16 +706,26 @@ Split in two, so that the part worth testing needs no Android:
   later, `CallAudioState` before) and passes a choice back, and never touches
   `AudioManager`. API 37 marks `PhoneAccount.CAPABILITY_SELF_MANAGED`
   deprecated, and the platform's newer route for a calling application is
-  the transactional telecom API (API 34); the capability is still what a
-  self-managed `ConnectionService` needs on Android 8.0 to 17, and an adapter
-  over the transactional API would sit over the same `TelecomBridge`.
+  the transactional telecom API (API 34), wrapped by Jetpack Core-Telecom;
+  the capability is still what a self-managed `ConnectionService` needs on
+  Android 8.0 to 17. `CoreTelecomPlatform` is the second adapter, over the
+  same `TelecomBridge`: each call added with `CallsManager.addCall`, a
+  `SipralCoreCall` over its `CallControlScope` carrying answer, set active,
+  set inactive and disconnect both ways, and its endpoints and mute. Routes
+  and mute of either adapter's calls are in `SipralTelecom.callRoutes`;
+  `SipralTelecomAdapter.preferred` picks Core-Telecom from Android 14 and the
+  `ConnectionService` below (`docs/15-mobile.md`, "Two telecom adapters").
   `android/telecom/src/test` runs the connection's callbacks on the JVM
   against the platform's stub jar, with TestNG: every one the framework may
   answer, turn away (`onReject` with no argument, with a reason, or with a
   message), hang up, abort, hold, resume or send a digit through reaches the
   bridge, a hold says held at once, the framework's mute is reported, and
   losing the call focus lets every call's device go before the service
-  tells the framework it has. What the connection tells the framework
+  tells the framework it has. `CoreTelecomPlatformTest` does the same for
+  the Core-Telecom adapter with a recorder in place of `addCall` and of the
+  call's scope: the transaction each bridge state asks for, none asked back
+  of the framework for what it asked itself, and each refusal leaving the
+  SIP call agreeing with the framework. What the connection tells the framework
   cannot be seen there; it was on an emulator, through `dumpsys telecom`
   (`docs/15-mobile.md`).
 
