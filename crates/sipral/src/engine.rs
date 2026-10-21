@@ -4980,11 +4980,12 @@ fn keepable(catalog: &CodecCatalog, offered: &MediaDescription) -> (Vec<String>,
     (formats, any_codec)
 }
 
-/// The session description in a message body, if readable.
+/// The session description in a message body, if readable: the body, or the
+/// SDP part of a multipart one (a carrier gateway's, beside ISUP).
 fn body_description(message: Option<&OwnedMessage>) -> Option<SessionDescription> {
     let message = message?;
     let raw = message.as_raw();
-    let body = raw.body();
+    let body = raw.session_body();
     if body.is_empty() {
         return None;
     }

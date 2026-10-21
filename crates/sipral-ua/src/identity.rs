@@ -7,7 +7,8 @@
 //! `P-Asserted-Identity` (RFC 3325 §9.1), `Remote-Party-ID`
 //! (draft-ietf-sip-privacy-04), `verstat` (3GPP TS 24.229 §7.2A.20),
 //! `Diversion` (RFC 5806), `History-Info` (RFC 7044) and `Privacy`
-//! (RFC 3323 §4.2).
+//! (RFC 3323 §4.2), and, from a carrier gateway, in the ISUP IAM beside the
+//! offer ([`crate::isup`]).
 //!
 //! # The trust gate
 //!
@@ -298,6 +299,11 @@ pub struct CallerIdentity {
     /// `None` when nothing was verified. Not behind the trust gate: a
     /// signature is its own proof.
     pub verification: Option<crate::CallerVerification>,
+    /// What the ISUP IAM a carrier gateway carried beside the offer said
+    /// about the call (SIP-T, SIP-I; [`crate::isup`]). `None` when the
+    /// INVITE carried none this crate reads. Not behind the trust gate, as
+    /// `Diversion` is not; what it adds to `asserted` is.
+    pub isup: Option<crate::isup::IsupCaller>,
 }
 
 impl CallerIdentity {
@@ -335,7 +341,7 @@ impl CallerIdentity {
                     })
             })
             .flatten();
-        Self {
+        let mut out = Self {
             trusted,
             asserted,
             remote_party,
@@ -350,7 +356,10 @@ impl CallerIdentity {
                 .filter_map(history_of)
                 .collect(),
             verification: None,
-        }
+            isup: None,
+        };
+        crate::isup::read_caller(&mut out, request, trusted);
+        out
     }
 
     /// The identity to show for the caller: the first asserted one, then a

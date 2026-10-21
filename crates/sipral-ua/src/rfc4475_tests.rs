@@ -330,7 +330,10 @@ fn invut_is_refused_415_with_the_types_this_agent_reads() {
         .find(|message| message.starts_with(b"SIP/2.0 4"))
         .expect("a refusal");
     assert_eq!(status(refusal), 415);
-    assert_eq!(header(refusal, HeaderName::Accept), "application/sdp");
+    assert_eq!(
+        header(refusal, HeaderName::Accept),
+        "application/sdp, application/isup, multipart/mixed"
+    );
     assert!(
         !reported
             .iter()
@@ -419,7 +422,10 @@ fn zeromf_is_answered_as_though_max_forwards_were_still_positive() {
         assert!(methods.contains(&method), "{method} is not in `{allow}`");
     }
     assert!(!methods.contains(&"REGISTER"), "{allow}");
-    assert_eq!(header(&answer, HeaderName::Accept), "application/sdp");
+    assert_eq!(
+        header(&answer, HeaderName::Accept),
+        "application/sdp, application/isup, multipart/mixed"
+    );
     let supported = header(&answer, HeaderName::Supported);
     assert!(
         supported

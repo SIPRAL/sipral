@@ -164,16 +164,15 @@ impl UserAgent {
                 .ok();
             return None;
         }
-        // an optional non-SDP body is ignored, as in an ACK (§3)
-        let described = !raw.body().is_empty()
-            && raw
-                .content_type()
-                .is_ok_and(|kind| kind.is("application", "sdp"));
+        // a body without a session description is ignored once §8.2.3 let it
+        // through, as in an ACK (§3): optional, or ISUP alone
+        let session = raw.session_body();
+        let described = !session.is_empty() && raw.content_type().is_ok();
         if !described {
             self.confirm_prack(call, transaction, None, now);
             return None;
         }
-        let parsed = sipral_core::sdp::parse_with_limits(raw.body(), self.sdp_limits);
+        let parsed = sipral_core::sdp::parse_with_limits(session, self.sdp_limits);
         let answers_ours = self
             .calls
             .get(&call)

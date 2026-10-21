@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use sipral_core::endpoint::{Event, OutgoingResponse};
 use sipral_core::msg::{
-    HeaderName, MediaTypeRef, Method, Params, RawMessage, StatusCode, UriScheme,
+    HeaderName, MediaTypeRef, Method, Multipart, Params, RawMessage, StatusCode, UriScheme,
 };
 
 use crate::agent::UserAgent;
@@ -51,9 +51,10 @@ const UNSUPPORTED_URI_SCHEME: StatusCode = match StatusCode::new(416) {
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// The only body read in an INVITE, re-INVITE, UPDATE or PRACK; a 415 lists
-/// it in `Accept` (§8.2.3).
-const ACCEPT: &[u8] = b"application/sdp";
+/// The bodies read in an INVITE, re-INVITE, UPDATE or PRACK, which a 415
+/// lists in `Accept` (§8.2.3): SDP, the ISUP a carrier gateway carries
+/// (RFC 3204, [`crate::isup`]), and the two side by side (RFC 5621 §8.4).
+pub(crate) const ACCEPT: &[u8] = b"application/sdp, application/isup, multipart/mixed";
 
 const ACCEPT_ENCODING: &[u8] = b"identity";
 
@@ -75,8 +76,9 @@ const INFO_PACKAGE_FIELD: HeaderName<'static> = HeaderName::Extension("Info-Pack
 /// RFC 6086 §7.3. Sent empty in a 469: this agent takes no package.
 const RECV_INFO_FIELD: HeaderName<'static> = HeaderName::Extension("Recv-Info");
 
-/// The INFO bodies [`crate::dtmf`] reads; a 415 to an INFO lists them.
-const INFO_ACCEPT: &[u8] = b"application/dtmf-relay, application/dtmf";
+/// The INFO bodies [`crate::dtmf`] reads, and the ISUP a carrier gateway
+/// sends in one mid-call (RFC 3372 §5.4); a 415 to an INFO lists them.
+const INFO_ACCEPT: &[u8] = b"application/dtmf-relay, application/dtmf, application/isup";
 
 impl UserAgent {
     /// §8.2.1 and §8.2.2.1 for an initial INVITE or a request outside a
@@ -193,7 +195,10 @@ fn legacy_info_answer(request: &RawMessage<'_>) -> OutgoingResponse {
     if request.header(INFO_PACKAGE_FIELD).is_some() {
         return OutgoingResponse::new(BAD_INFO_PACKAGE).header(RECV_INFO_FIELD, b"");
     }
-    if !request.body().is_empty() && !optional_body(request) {
+    let isup = request
+        .content_type()
+        .is_ok_and(|kind| crate::isup::readable_type(&kind));
+    if !request.body().is_empty() && !optional_body(request) && !isup {
         return OutgoingResponse::new(StatusCode::UNSUPPORTED_MEDIA_TYPE)
             .header(HeaderName::Accept, INFO_ACCEPT);
     }
@@ -249,10 +254,12 @@ pub(crate) fn content_refusal(request: &RawMessage<'_>) -> Option<OutgoingRespon
 }
 
 /// §8.2.3 for any request whose body this agent reads (INVITE, re-INVITE,
-/// UPDATE, PRACK). `None` for SDP, no body, or an optional body.
+/// UPDATE, PRACK). `None` for SDP, ISUP of a variant read here, a multipart
+/// body whose every required part is one of those (RFC 5621 §8.2), no
+/// body, or an optional body.
 ///
-/// A non-SDP re-INVITE must get a 415 here; passed on, it would end up as a
-/// 488, which claims the session was read.
+/// A body of another type in a re-INVITE must get a 415 here; passed on, it
+/// would end up as a 488, which claims the session was read.
 pub(crate) fn body_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     // an empty body has nothing to understand, whatever its Content-Type
     let refusable = !request.body().is_empty() && !optional_body(request);
@@ -268,10 +275,22 @@ pub(crate) fn body_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse>
     let unreadable = refusable
         && !request
             .content_type()
-            .is_ok_and(|kind| kind.is("application", "sdp"));
+            .is_ok_and(|kind| understood(&kind, request.body()));
     unreadable.then(|| {
         OutgoingResponse::new(StatusCode::UNSUPPORTED_MEDIA_TYPE).header(HeaderName::Accept, ACCEPT)
     })
+}
+
+/// Whether a body of this type is one this agent reads in a request that
+/// carries a session: SDP, ISUP of a variant read here, or multipart whose
+/// every required part is one of the two (RFC 5621 §8.2, §8.3).
+fn understood(kind: &MediaTypeRef<'_>, body: &[u8]) -> bool {
+    if kind.is("application", "sdp") || crate::isup::readable_type(kind) {
+        return true;
+    }
+    kind.kind().eq_ignore_ascii_case(b"multipart")
+        && Multipart::parse(kind, body)
+            .is_ok_and(|multipart| multipart.check(crate::isup::understood_part).is_ok())
 }
 
 /// `handling=optional` in `Content-Disposition` (§20.11, §8.2.3).
