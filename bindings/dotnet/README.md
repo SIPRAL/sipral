@@ -619,7 +619,7 @@ the Android NDK and the `maui-ios` and `maui-android` workloads (.NET MAUI
 
 ```sh
 dotnet workload install maui-ios maui-android
-scripts/package/maui.sh            # target/maui/Sipral.Maui.1.2.1.nupkg
+scripts/package/maui.sh            # target/maui/Sipral.Maui.1.2.3.nupkg
 scripts/package/maui.sh --natives-only   # only target/maui/natives
 ```
 
@@ -653,7 +653,9 @@ the runtime looks already. Beside the binding, the package adds:
   `Account.Freeze()` into `SecureStorage` (the Keychain, the Android
   Keystore), then calls `SipralStack.Suspending()`, in that order: once
   suspending, no registration counts as bound and there is nothing to
-  write. On the way back it calls `SipralStack.Resumed()`. After the system
+  write. On the way back it calls `SipralStack.Resumed()`. `Frozen` (with the
+  key of each account written down), `Suspended` (with the stack's report)
+  and `Resumed` are raised in that order, for an application's own log. After the system
   ended the process, `await lifecycle.RestoreAsync(account, key)` on a new
   account thaws what was written (`Account.Thaw`, with the time it sat
   unused) and returns `false` when there was nothing, for the application to
@@ -663,14 +665,18 @@ the runtime looks already. Beside the binding, the package adds:
 desktop package too, for an application that wires its own lifecycle.
 
 What has been run, and what has not: the package and
-`samples/Sipral.Sample.Maui` build for the iOS simulator and Android on a Mac,
-and the sample starts and calls into the native library on the iOS 26.5
-simulator (iPhone 17, arm64) and an Android 16 emulator (API 36, arm64-v8a)
-(`docs/15-mobile.md`, ".NET MAUI"). The sample takes the library through a
-project reference; an application built against the packed `.nupkg` has not
-been run. Nothing has run on a physical iPhone or Android phone, on
-armeabi-v7a or x86_64, and no registration or call through the MAUI layer has
-been made.
+`samples/Sipral.Sample.Maui` build for the iOS simulator and Android on a Mac.
+The sample built from the packed `.nupkg` (restored from a folder feed, not
+the project) registered, called and hung up on the iOS 26.5 simulator and an
+Android 16 emulator (API 36, arm64-v8a) on 21 October 2026, to a peer on the
+Mac and through a live FreePBX, with the microphone prompt shown and
+answered, `SipralAppLifecycle` writing the registration down and suspending
+on the way into the background, resuming on the way back, and the
+registration restored without a handshake after the process was ended
+(`docs/15-mobile.md`, ".NET MAUI", with the numbers). Nothing has run on a
+physical iPhone or Android phone, and the armeabi-v7a and x86_64 libraries
+have not run inside a MAUI application. A Release build for Android packs
+armeabi-v7a only when `RuntimeIdentifiers` names `android-arm`.
 
 ## Samples
 
@@ -687,7 +693,13 @@ the iOS audio session set up, the registration carried across the
 background with `SipralAppLifecycle`. `net10.0-ios` and `net10.0-android`,
 after `scripts/package/maui.sh --natives-only`:
 `dotnet build -f net10.0-ios -p:RuntimeIdentifier=iossimulator-arm64` or
-`dotnet build -c Release -f net10.0-android`.
+`dotnet build -c Release -f net10.0-android`; with
+`-p:SipralMauiVersion=1.2.3` it takes the `Sipral.Maui` package of that
+version, from whatever feed restore is given, instead of the project. Its
+fields can be filled at launch and its buttons pressed in order from
+`SIPRAL_SAMPLE_*` (the environment on iOS, the intent's extras on Android),
+and every line it shows goes to standard output prefixed `sipral-sample:`;
+the comment at the top of `App.cs` says how.
 
 `samples/Sipral.Sample.Wpf` — a softphone window with no audio code of its
 own: the stack runs in device mode, the microphone, speaker and ringer lists
