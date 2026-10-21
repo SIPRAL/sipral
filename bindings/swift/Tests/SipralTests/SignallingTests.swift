@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-#if canImport(Network)
+// macOS only: the registrar's certificate is made by running `openssl`,
+// and iOS has no `Process` to run it with.
+#if os(macOS) && canImport(Network)
 import Dispatch
 import Foundation
 import Network

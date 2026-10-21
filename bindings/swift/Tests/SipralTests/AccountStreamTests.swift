@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-#if canImport(Network) && canImport(CryptoKit)
+// macOS only, as `SignallingTests`, whose registrars and certificate it uses.
+#if os(macOS) && canImport(Network) && canImport(CryptoKit)
 import CryptoKit
 import Foundation
 import XCTest
