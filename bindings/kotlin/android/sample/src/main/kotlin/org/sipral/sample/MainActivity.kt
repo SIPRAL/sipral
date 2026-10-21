@@ -57,6 +57,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.sipral.android.telecom.SipralTelecom
+import org.sipral.android.telecom.SipralTelecomAdapter
 import org.sipral.telecom.AudioRoute
 import org.sipral.telecom.TelecomCall
 import org.sipral.telecom.TelecomDirection
@@ -83,6 +84,9 @@ class MainActivity : ComponentActivity() {
         if (phone.store.keepRegistered && !phone.running) {
             phone.start("opened by the user after the process had gone")
         }
+        if (savedInstanceState == null) {
+            answerFrom(intent)
+        }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -90,6 +94,18 @@ class MainActivity : ComponentActivity() {
                     Screens(phone)
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        answerFrom(intent)
+    }
+
+    /** The incoming-call notification's Answer, which opened this screen. */
+    private fun answerFrom(intent: Intent?) {
+        if (intent?.action == Phone.ACTION_ANSWER) {
+            intent.getStringExtra(Phone.EXTRA_CALL)?.let { phone.answer(it) }
         }
     }
 }
@@ -106,6 +122,13 @@ private fun FirstLaunchPermissions() {
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ -> }
     LaunchedEffect(Unit) { ask.launch(wanted.toTypedArray()) }
 }
+
+/** The telecom adapters the account screen offers, as stored and as shown. */
+private val TELECOM_CHOICES = listOf(
+    "auto" to "Automatic",
+    "connection-service" to "ConnectionService",
+    "core-telecom" to "Core-Telecom",
+)
 
 private enum class Screen(val title: String) { PHONE("Phone"), READINESS("Readiness"), DIAGNOSTICS("Diagnostics") }
 
@@ -152,6 +175,23 @@ private fun PhoneScreen(phone: Phone) {
             )
         }
     }
+    Text("Telecom")
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for ((setting, label) in TELECOM_CHOICES) {
+            FilterChip(
+                selected = s.telecom == setting,
+                onClick = { phone.edit { it.copy(telecom = setting) } },
+                label = { Text(label) },
+            )
+        }
+    }
+    Text(
+        "Automatic is " + when (telecomAdapterOf("auto", Build.VERSION.SDK_INT)) {
+            SipralTelecomAdapter.CORE_TELECOM -> "Core-Telecom"
+            SipralTelecomAdapter.CONNECTION_SERVICE -> "ConnectionService"
+        } + " on this phone. A change applies at the next Register.",
+        style = MaterialTheme.typography.bodySmall,
+    )
     Field("Auth user", s.authUser) { v -> phone.edit { it.copy(authUser = v) } }
     Secret("Auth password", s.authPassword) { v -> phone.edit { it.copy(authPassword = v) } }
     Field("STUN server (host:port, empty: none)", s.stunServer) { v -> phone.edit { it.copy(stunServer = v) } }
@@ -361,8 +401,8 @@ private fun CallCard(phone: Phone, call: TelecomCall) {
  * using; choosing one asks the platform for it. */
 @Composable
 private fun Routes(phone: Phone, id: String) {
-    val connections by SipralTelecom.connections.collectAsStateWithLifecycle()
-    val connection = connections[id] ?: return
+    val calls by SipralTelecom.callRoutes.collectAsStateWithLifecycle()
+    val connection = calls[id] ?: return
     val routes by connection.routes.collectAsStateWithLifecycle()
     val current by connection.route.collectAsStateWithLifecycle()
     if (routes.isEmpty()) {

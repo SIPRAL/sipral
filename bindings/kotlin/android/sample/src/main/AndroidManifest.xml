@@ -49,6 +49,11 @@ Copyright (c) 2026 Sytek
             </intent-filter>
         </receiver>
 
+        <!-- The incoming-call notification's Decline. -->
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false" />
+
         <!-- The diagnostics bundle, handed to the share sheet. -->
         <provider
             android:name="androidx.core.content.FileProvider"

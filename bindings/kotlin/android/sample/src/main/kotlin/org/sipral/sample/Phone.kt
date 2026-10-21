@@ -40,11 +40,13 @@ import org.sipral.SipralLogLevel
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralTransport
 import org.sipral.android.telecom.AndroidTelecomPlatform
+import org.sipral.android.telecom.CoreTelecomPlatform
 import org.sipral.android.telecom.SipralCallAudios
 import org.sipral.android.telecom.SipralCallForeground
 import org.sipral.android.telecom.SipralKeystoreStore
 import org.sipral.android.telecom.SipralNetworkMonitor
 import org.sipral.android.telecom.SipralTelecom
+import org.sipral.android.telecom.SipralTelecomAdapter
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAudioDeviceInfo
 import org.sipral.idiomatic.SipralAudioMode
@@ -243,7 +245,7 @@ class Phone(private val app: Application) {
             }
             client = opened
             account = added
-            wire(opened, added, network)
+            wire(opened, added, network, telecomAdapterOf(s.telecom, Build.VERSION.SDK_INT))
             note(
                 "opened on ${opened.bindAddress} (${s.transport}), $trigger, " +
                     "${SystemClock.elapsedRealtime() - began} ms, " +
@@ -343,13 +345,26 @@ class Phone(private val app: Application) {
         note(if (on) "diagnostic trace on: real addresses and numbers" else "diagnostic trace off")
     }
 
-    private fun wire(opened: SipralClient, added: SipralAccount, network: SipralNetwork) {
+    private fun wire(opened: SipralClient, added: SipralAccount, network: SipralNetwork, adapter: SipralTelecomAdapter) {
         val sip = IdiomaticSipCalls(opened, listOf(added))
         sipCalls = sip
-        val handle = SipralTelecom.registerAccount(app, "Sipral sample")
-        val wired = TelecomBridge(AndroidTelecomPlatform(app, handle), sip)
+        val wired = when (adapter) {
+            SipralTelecomAdapter.CONNECTION_SERVICE -> {
+                val handle = SipralTelecom.registerAccount(app, "Sipral sample")
+                TelecomBridge(AndroidTelecomPlatform(app, handle), sip).also { made ->
+                    SipralTelecom.install(made) { id, _ -> notifyIncoming(id, made) }
+                }
+            }
+            SipralTelecomAdapter.CORE_TELECOM -> {
+                // calls added, and the framework's callbacks run, off the main thread
+                val platform = CoreTelecomPlatform(app, CoroutineScope(scope.coroutineContext + Dispatchers.Default)) { note(it) }
+                TelecomBridge(platform, sip).also { made ->
+                    platform.install(made) { id, _ -> notifyIncoming(id, made) }
+                }
+            }
+        }
         bridge = wired
-        SipralTelecom.install(wired) { id, _ -> notifyIncoming(id) }
+        note("telecom: ${describe(adapter)}, API ${Build.VERSION.SDK_INT}")
         wired.collect(scope, opened.events)
         monitor = SipralNetworkMonitor(app, opened, sip, scope, network) { note(it) }
         foreground = SipralCallForeground.follow(app, wired, scope, ::ongoing) { note(it) }
@@ -548,7 +563,7 @@ class Phone(private val app: Application) {
     }
 
     fun selectRoute(id: String, route: AudioRoute) {
-        SipralTelecom.connections.value[id]?.requestRoute(route)
+        SipralTelecom.callRoutes.value[id]?.requestRoute(route)
     }
 
     /** Show the calls the framework has; take the incoming-call
@@ -602,14 +617,17 @@ class Phone(private val app: Application) {
     }
 
     /**
-     * The incoming-call UI a self-managed call owes the user
-     * (`Connection.onShowIncomingCallUi`): a notification whose full-screen
-     * intent opens the call screen over the lock screen. Where the user has
-     * not allowed full-screen intents (Android 14 and later, see
-     * [ReadinessFacts.fullScreenIntent]) the system shows the same
-     * notification as a heads-up one instead.
+     * The incoming-call UI a call owes the user (`Connection.onShowIncomingCallUi`
+     * under the `ConnectionService`; as soon as the call is added under
+     * Core-Telecom, which wants a call-style notification within five
+     * seconds): a notification whose full-screen intent opens the call
+     * screen over the lock screen, with Answer, which opens it too (the
+     * microphone is an application's only while it is visible), and
+     * Decline. Where the user has not allowed full-screen intents (Android 14
+     * and later, see [ReadinessFacts.fullScreenIntent]) the system shows the
+     * same notification as a heads-up one instead.
      */
-    private fun notifyIncoming(id: String) {
+    private fun notifyIncoming(id: String, from: TelecomBridge) {
         val manager = app.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH),
@@ -620,8 +638,21 @@ class Phone(private val app: Application) {
             Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val caller = calls.firstOrNull { it.id == id }?.let { it.displayName ?: it.caller } ?: "Incoming call"
-        val notification = Notification.Builder(app, CHANNEL)
+        val answer = PendingIntent.getActivity(
+            app,
+            1,
+            Intent(app, MainActivity::class.java).setAction(ACTION_ANSWER).putExtra(EXTRA_CALL, id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val decline = PendingIntent.getBroadcast(
+            app,
+            2,
+            Intent(app, CallActionReceiver::class.java).setAction(ACTION_DECLINE).putExtra(EXTRA_CALL, id),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val caller = from.calls.value.firstOrNull { it.id == id }?.let { it.displayName ?: it.caller } ?: "Incoming call"
+        val builder = Notification.Builder(app, CHANNEL)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle(caller)
             .setContentText("Sipral sample")
@@ -629,8 +660,13 @@ class Phone(private val app: Application) {
             .setContentIntent(open)
             .setFullScreenIntent(open, true)
             .setOngoing(true)
-            .build()
-        manager.notify(INCOMING_NOTIFICATION, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setStyle(Notification.CallStyle.forIncomingCall(Person.Builder().setName(caller).build(), decline, answer))
+        } else {
+            builder.addAction(Notification.Action.Builder(null, "Decline", decline).build())
+            builder.addAction(Notification.Action.Builder(null, "Answer", answer).build())
+        }
+        manager.notify(INCOMING_NOTIFICATION, builder.build())
         note("incoming call shown: $caller")
     }
 
@@ -657,6 +693,11 @@ class Phone(private val app: Application) {
             builder.addAction(Notification.Action.Builder(null, "Hang up", hangUp).build())
         }
         return builder.build()
+    }
+
+    private fun describe(adapter: SipralTelecomAdapter): String = when (adapter) {
+        SipralTelecomAdapter.CONNECTION_SERVICE -> "self-managed ConnectionService"
+        SipralTelecomAdapter.CORE_TELECOM -> "Core-Telecom CallsManager"
     }
 
     private fun describe(device: SipralAudioDeviceInfo): String = buildString {
@@ -694,7 +735,13 @@ class Phone(private val app: Application) {
         lastDiagnostics
     }
 
-    private companion object {
+    internal companion object {
+        /** The incoming-call notification's Answer, to [MainActivity]. */
+        const val ACTION_ANSWER = "org.sipral.sample.ANSWER"
+
+        /** Its Decline, to [CallActionReceiver]. */
+        const val ACTION_DECLINE = "org.sipral.sample.DECLINE"
+        const val EXTRA_CALL = "org.sipral.sample.CALL"
         const val TAG = "SipralSample"
         const val CHANNEL = "calls"
         const val INCOMING_NOTIFICATION = 1

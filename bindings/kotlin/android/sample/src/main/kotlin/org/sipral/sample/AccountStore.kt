@@ -5,6 +5,7 @@ package org.sipral.sample
 
 import android.content.Context
 import org.sipral.android.telecom.SipralKeystoreBox
+import org.sipral.android.telecom.SipralTelecomAdapter
 
 /** What the account screen holds, as typed. */
 data class AccountSettings(
@@ -18,9 +19,21 @@ data class AccountSettings(
     val turnServer: String = "",
     val turnUser: String = "",
     val turnPassword: String = "",
+    /** Which telecom adapter carries the calls: `auto` (the library's choice
+     * for this release), `connection-service` or `core-telecom`; read when
+     * the stack opens. */
+    val telecom: String = "auto",
 ) {
     /** The two passwords, for whatever must never carry them. */
     val secrets: List<String> get() = listOf(authPassword, turnPassword).filter { it.isNotEmpty() }
+}
+
+/** The adapter [AccountSettings.telecom] names on API level [sdk]; `auto`,
+ * or anything else, is the library's choice for that release. */
+fun telecomAdapterOf(setting: String, sdk: Int): SipralTelecomAdapter = when (setting) {
+    "connection-service" -> SipralTelecomAdapter.CONNECTION_SERVICE
+    "core-telecom" -> SipralTelecomAdapter.CORE_TELECOM
+    else -> SipralTelecomAdapter.preferred(sdk)
 }
 
 /**
@@ -47,6 +60,7 @@ class AccountStore(context: Context) {
         turnServer = prefs.getString("turn", "") ?: "",
         turnUser = prefs.getString("turn_user", "") ?: "",
         turnPassword = box.openText(prefs.getString("turn_password", null)),
+        telecom = prefs.getString("telecom", "auto") ?: "auto",
     )
 
     fun save(settings: AccountSettings) {
@@ -61,6 +75,7 @@ class AccountStore(context: Context) {
             .putString("turn", settings.turnServer)
             .putString("turn_user", settings.turnUser)
             .putString("turn_password", box.sealText(settings.turnPassword))
+            .putString("telecom", settings.telecom)
             .apply()
     }
 

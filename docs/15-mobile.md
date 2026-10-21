@@ -928,6 +928,101 @@ A `ForegroundServiceStartNotAllowedException` (Android 12 and later) is
 logged, not thrown: the call goes on for as long as Android lets the
 process run.
 
+### Two telecom adapters
+
+The telecom helper puts calls in front of Android's telecom framework in
+one of two ways, both over the same `TelecomBridge`, so the SIP side, the
+push order above and everything an application builds on the bridge behave
+the same whichever carries the calls:
+
+| | `ConnectionService` | Core-Telecom |
+|---|---|---|
+| Classes | `AndroidTelecomPlatform`, `SipralConnectionService`, a `SipralConnection` per call, the account from `SipralTelecom.registerAccount` | `CoreTelecomPlatform` over Jetpack's `androidx.core:core-telecom` 1.0.1: `CallsManager.addCall`, a `SipralCoreCall` per call over its `CallControlScope` |
+| What it drives | a self-managed `ConnectionService`, on every release from Android 8 | the platform's transactional call API from Android 14 (`TelecomManager.addCall`); below that, a `ConnectionService` of Jetpack's own |
+| A ringing call's screen | `Connection.onShowIncomingCallUi`, then `IncomingCallUi` | as soon as the call is added, `CoreIncomingCallUi`, which posts a `Notification.CallStyle` within five seconds |
+| The framework's hold | `onHold`, held at once (two seconds, or the connection is disconnected) | `onSetInactive`, the call's device let go before the callback returns (five seconds for each callback) |
+| The application's answer, hold, resume | `setActive`, `setOnHold` | `answer` (an incoming call's first activation), `setActive`, `setInactive`: transactions the framework may refuse. A call never let go active is ended on both sides, a refused resume holds the SIP call again, a refused hold resumes it |
+| The far end's hold | `EVENT_CALL_REMOTELY_HELD` and `_UNHELD` | not shown: the API has no counterpart |
+| Call focus | `onConnectionServiceFocusLost` and `Gained` | none; the framework holds a call whose audio it takes |
+| Routes and mute | `CallEndpoint` (Android 14+) or `CallAudioState`, `onMuteStateChanged` | `availableEndpoints`, `currentCallEndpoint`, `isMuted`; a choice goes through `requestEndpointChange` |
+| How a call ends | the seven `TelecomDisconnect` causes | the four a transactional disconnect takes: busy is sent as `REMOTE`, cancelled and error as `LOCAL`, each with the bridge's own name as the reason `dumpsys telecom` shows |
+
+Either way `SipralTelecom.callRoutes` holds each live call's routes and mute
+(`SipralCallRoutes`, which `SipralCallAudio` follows), `SipralCallForeground`
+holds the `phoneCall` foreground service with its call-style notification,
+which Core-Telecom asks for as well, and `SipralCallService`'s Hang up
+reaches the bridge. The helper's AAR depends on Core-Telecom whichever an
+application uses, so its manifest also merges in Core-Telecom's own:
+Jetpack's `ConnectionService` (used below Android 14), a receiver for the
+microphone's mute, `MODIFY_AUDIO_SETTINGS`, and `BLUETOOTH_CONNECT`, a
+runtime permission from Android 12 that, granted, lets Core-Telecom name
+every connected headset rather than only the active one; the sample does
+not ask for it.
+
+**Which to choose.** `SipralTelecomAdapter.preferred(sdk)`, the sample's
+"Automatic", is Core-Telecom from Android 14 (API 34) and the
+`ConnectionService` below it. From 14 Core-Telecom drives the transactional
+API, the one the platform documents for calling applications: API 37
+deprecates `PhoneAccount.CAPABILITY_SELF_MANAGED`, the capability the
+`ConnectionService` stands on, with "VoIP applications that want to
+integrate with the Telecom framework should transition to the new Telecom
+VoIP APIs which are wrapped by the CoreTelecom Jetpack Library". Below 14,
+Core-Telecom would only put a `ConnectionService` of its own where the
+helper's is, and give up call focus and the far end's hold, which the
+helper's handles. An application that wants the other one constructs the
+other platform; the sample's account screen offers Automatic,
+ConnectionService and Core-Telecom, read at Register (and `telecom` in the
+debug build's account file). Neither has run on a phone yet: the checklist
+below runs both.
+
+**What ran, 22 October 2026.** The sample's debug APK built by
+`android.sh --release` from this tree on the lab machine's Docker (every
+check passed: `:telecom:testDebugUnitTest` 24 tests, 12 of them
+`CoreTelecomPlatformTest`'s, `:sample:testDebugUnitTest` 10; 98 artefacts
+on the sample's runtime classpath, every one under a licence `deny.toml`
+allows; the telecom AAR's Kotlin metadata 2.2; the release APK 23,795,970
+bytes, the bundle 16,021,585, 16 KB aligned), on an `android-36`
+`google_apis` arm64-v8a AVD and then an `android-37.0` one, both headless
+and `-no-audio`, with Core-Telecom (Automatic on both). The `android-36`
+run used the build before the account screen's telecom chips were made to
+wrap, its only difference. The Mac's load average was 35 to 40 throughout,
+which the times below carry. On `android-36`:
+
+| | What was seen |
+|---|---|
+| The framework's side | the account `ComponentInfo{org.sipral.sample/org.sipral.sample}` with `Capabilities: SelfManaged TransactOps` and `isCoreTelecomAccount=true` in `dumpsys telecom`; every call created by `TelecomServiceImpl.addCall` (`TSI.aC`), `voip=true`, `self_mng`, capabilities `hld sup_hld`, and moved by transactions (`RequestNewActiveCallTransaction`, `HoldCallTransaction`, `EndCallTransaction`, each `SUCCESS`) |
+| A call to `SipralLabAgent` on the Mac, no registrar | `SET_CONNECTING`, `GAINED_FGS_DELEGATION`, `SET_DIALING`, `SET_ACTIVE` 234 ms after the call was created, the setActive transaction completing in 15 ms; 162 ms from the foreground service's start to the 200 OK's confirmation. Hold and Resume from the sample: `SET_HOLD` and `SET_ACTIVE`, media stopping and coming back. A digit read by the agent. Hung up from the sample after 134 s: `SET_DISCONNECTED` `LOCAL`, `DESTROYED` 24 ms later; the agent counted 4,957 packets sent and 4,956 received. A second call, hung up by the agent: `REMOTE` |
+| A cellular call over it | `adb emu gsm call`, answered with `KEYCODE_CALL`: the framework's `REQUEST_HOLD (swap to TC@1)`, the sample's audio paused 46 ms later, `SET_HOLD` 1 ms after that and the cellular call `SET_ANSWERED` 11 ms after: the device was let go before the other call had the audio. With the cellular call ended, Resume in the sample: `SET_ACTIVE` and audio back 114 ms later |
+| Routes | the emulator offers only Speaker, as under the `ConnectionService`; asking for it went through `requestEndpointChange` and was not refused |
+| A simulated push, no INVITE | `SET_RINGING` through the incoming-call transaction 15 ms after the push, the incoming-call notification 148 ms after it, with the template `Notification$CallStyle`, category `call`, two actions; left alone, `MISSED` 20.0 s after the push, when the announcement's window ran out; Decline in the notification, `REJECTED` |
+| The lab's Asterisk, `labuser-mobile`, over the VPN | registered; `channel originate` rang the sample 15 ms after the INVITE (`SET_RINGING`); Answer in the notification opened the sample and answered (`SET_ACTIVE` by the answer transaction); Hold and Resume; 4,261 packets sent and 4,254 received when the sample hung up, `LOCAL`. Declined in the sample, `REJECTED`; left ringing until Asterisk gave up after 30 s, `MISSED`; hung up by Asterisk, `REMOTE` |
+| A push, then its INVITE | the push naming the caller as Asterisk writes it (`sip:anonymous@anonymous.invalid`), `channel originate` 3.7 s later: one call in the framework (created once, by the push), `call_announced`, answered, hung up |
+| The `ConnectionService` on the same build | ConnectionService chosen and Register again: the call created on `ComponentInfo{org.sipral.sample/org.sipral.android.telecom.SipralConnectionService}`, `SET_ACTIVE (active set explicitly for self-managed)`, hold, resume, `LOCAL`, the two accounts registered side by side |
+
+On `android-37.0` (Android 17), the same, and the same account in
+`dumpsys telecom` (`SelfManaged TransactOps`): the events said "telecom:
+Core-Telecom CallsManager, API 37" at Register. A call to the agent,
+`SET_ACTIVE` 943 ms after it was created; Hold, Resume, Speaker asked for;
+a cellular call answered over it, the framework's `REQUEST_HOLD`, the
+sample's audio paused 206 ms later, `SET_HOLD`, the cellular call answered
+134 ms after the pause; resumed once it ended, hung up from the sample
+(`LOCAL`, `DESTROYED` 23 ms later by the end-call transaction), the agent
+counting 6,168 packets sent and 6,095 received. A simulated push rang 12 ms
+after it, its call-style notification 98 ms after it, and went `MISSED`
+20.0 s after it. From the lab's Asterisk: an INVITE rang 13 ms after it
+arrived; left ringing, `MISSED` when Asterisk gave up; answered in the
+notification and hung up by Asterisk, `REMOTE`; a push and its INVITE
+3.7 s later, one call in the framework, `call_announced`, declined in the
+notification, `REJECTED`, and Asterisk left with no channel.
+
+The first call's first packet from the agent came 4.6 s after the call was
+confirmed, and on the lab calls within 0.75 s; nothing in the framework's
+log sits in that gap, and it was not looked into further. What the
+emulator cannot show: a choice between real routes (earpiece, wired,
+Bluetooth, car), and the framework's own answer, disconnect and set-active
+requests, which come from a headset, a watch or a car; set-inactive was
+seen, from the cellular call.
+
 ### What ran on the emulator, 21 October 2026
 
 An `android-36` `google_apis` arm64-v8a AVD, headless, `-no-audio`, on the
@@ -1186,6 +1281,25 @@ end, and `adb` on a computer for the steps that use it.
     and 7. *Expect:* "audio: AudioRecord and AudioTrack" (no AAudio device
     mode below Android 9), calls heard both ways; no notifications or
     full-screen permission to ask. *Send:* the bundle.
+14. **Both telecom adapters** ("Two telecom adapters" above). Steps 4 to 7
+    ran on Automatic, which on Android 14 and later is Core-Telecom: the
+    events say "telecom: Core-Telecom CallsManager" at Register. During one
+    of those calls, `adb shell dumpsys telecom > core-telecom.txt`. Then,
+    with a Bluetooth headset and a watch or a car if there is one: answer an
+    incoming call from the headset's button (or the watch), hang it up from
+    the headset, and with a call active take a cellular call and end it.
+    *Expect:* each reaches the call as on screen (answered, ended, held and
+    resumed), the far end hears hold, and the headset's name among the
+    route chips. Then Telecom: ConnectionService, Register again, and steps
+    4 and 6 once more, with `dumpsys telecom > connection-service.txt`.
+    *Expect:* the same behaviour; in the first file the call on
+    `ComponentInfo{org.sipral.sample/org.sipral.sample}` with
+    `TransactOps`, in the second on
+    `.../org.sipral.android.telecom.SipralConnectionService`. On an
+    Android 13 phone, Core-Telecom chosen by hand runs over Jetpack's own
+    `ConnectionService`: steps 4 and 6 with it, if there is one. *Send:*
+    the bundle after each adapter, both `dumpsys` files, and anything that
+    behaved differently between the two.
 
 ## The Swift package on iOS
 
