@@ -19,8 +19,8 @@
 
 import PackageDescription
 
-let csipralURL = "https://github.com/SIPRAL/sipral/releases/download/v1.2.2/CSipral.xcframework.zip"
-let csipralChecksum = "4dc92a193561f1b01c152102c0fcbbd40e29394e2dcb1687f84a0a5478733638"
+let csipralURL = "https://github.com/SIPRAL/sipral/releases/download/v1.2.3/CSipral.xcframework.zip"
+let csipralChecksum = "1ba7d4eb82270e91166250e7089b444edb4c47ec03622ae4dd02a04606fe3c56"
 
 let csipral: Target = csipralChecksum.isEmpty
     ? .binaryTarget(name: "CSipral", path: "target/xcframework/CSipral.xcframework")
