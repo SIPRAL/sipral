@@ -38,6 +38,7 @@ import org.sipral.SipralCounters
 import org.sipral.SipralDnsRecordType
 import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
+import org.sipral.SipralSuspending
 import org.sipral.SipralEventKind
 import org.sipral.SipralEventListener
 import org.sipral.SipralException
@@ -694,6 +695,48 @@ class SipralClient private constructor(
         } catch (_: SipralException) {
             // the account, or the client, went away while the resolver ran
         }
+    }
+
+    /**
+     * `sipral_stack_cold_start`, now: the zero every account's
+     * [SipralAccount.timeToReadyMs] is measured from. A process woken by a
+     * push declares it as soon as the client is open; every account's
+     * measurement starts again.
+     */
+    fun coldStart() {
+        retryBusy { Sipral.stackColdStart(handle, nowMs()) }
+    }
+
+    /**
+     * `sipral_stack_suspending`: the operating system is about to stop this
+     * process (`docs/16-lifecycle.md`). Nothing is sent and nothing stays
+     * scheduled; calls are left as they are. Freeze the accounts to keep
+     * first ([SipralLifecycle.enteredBackground] does both, in that order):
+     * from here a registration no longer counts as bound, and there would be
+     * nothing to write down.
+     */
+    fun suspending(): SipralSuspending = retryBusy { Sipral.stackSuspending(handle, nowMs()) }
+
+    /**
+     * `sipral_stack_resumed`: the process runs again after an unmeasurable
+     * time. What the stack believed is proved again, on the transport it has
+     * first. Safe with no [suspending] before it.
+     */
+    fun resumed() {
+        retryBusy { Sipral.stackResumed(handle, nowMs()) }
+    }
+
+    /** `sipral_stack_interface_lost`: there is no usable network. Nothing
+     * is tried until [networkChanged] reports one again. */
+    fun interfaceLost() {
+        retryBusy { Sipral.stackInterfaceLost(handle, nowMs()) }
+    }
+
+    /** `sipral_stack_name_resolution_lost`: names no longer become
+     * addresses, though the network may look healthy. Registrations aimed at
+     * a name stop being trusted; ones aimed at an address go on. */
+    fun nameResolutionLost() {
+        retryBusy { Sipral.stackNameResolutionLost(handle, nowMs()) }
     }
 
     /** Turn the diagnostic trace on or off (`sipral_stack_diagnostic_trace`):

@@ -37,7 +37,7 @@ fun main() {
                 audioChecks() + "; " + loggingChecks() + "; " + securityChecks() + "; " + inBandChecks() + "; " +
                 tlsSignallingChecks() + "; " + protocolsChecks() + "; " + localConferenceChecks() + "; " +
                 datagramLimitChecks() + "; " + mediaMixChecks() + "; " + transferChecks() + "; " +
-                reachabilityChecks() + "; " + challengeChecks() + "; " + appRateChecks()
+                reachabilityChecks() + "; " + challengeChecks() + "; " + appRateChecks() + "; " + freezeChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()
