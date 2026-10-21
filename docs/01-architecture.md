@@ -338,7 +338,9 @@ crosses `sipral-ua` as a `SocketAddr`; `sipral-ua` still names no NAT crate.
 - **No SIP server, proxy, registrar or B2BUA.** Sipral is an endpoint. The
   server side is a different product with different constraints, and pretending
   otherwise is how stacks become unmaintainable.
-- **No WebRTC.** SDP for SIP only. No data channels, no SFU, no simulcast.
+- **No WebRTC beyond audio.** A PBX WebRTC line in 1.3 and a browser at the
+  other end in 1.4 (`10-roadmap.md`, "Phase 7"); no data channels, no SFU, no
+  simulcast.
 - **No video yet.** The audio path came first and is deep; video is planned for
   2.0 ([`10-roadmap.md`](10-roadmap.md)), on top of it rather than instead of it.
 - **No global state, no singletons, no ambient logger.** Multiple independent

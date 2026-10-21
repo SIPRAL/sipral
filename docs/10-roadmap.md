@@ -106,6 +106,27 @@ October 2026, released.
 - LiveCommunicationKit on iOS *(done)*
 - The Rust API promised between releases and published on crates.io, checked on every change *(done)*
 
+### 1.3 — On real phones, and on WebRTC lines
+
+November 2026, planned.
+
+- iOS and Android proven on real phones: the system call screen, a cellular call interrupting, earpiece, speaker, wired and Bluetooth headsets, the car
+- An incoming call that wakes a sleeping phone, end to end through a push gateway (RFC 8599)
+- Wi-Fi to mobile data on a phone, the time until audio returns measured and published
+- A registered phone with no call: battery and background behaviour measured on both platforms
+- Test builds accepted through TestFlight and Google Play internal testing
+- Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH
+
+### 1.4 — Browsers and the telephone network
+
+December 2026, planned.
+
+- Trickle ICE (RFC 8838, RFC 8840): candidates sent as they are found, so a call is set up sooner
+- An audio call to and from a browser over WebRTC, through a SIP over WebSocket server, proven in the lab
+- SIP-T and SIP-I: the ISUP a carrier gateway carries inside SIP (RFC 3204, RFC 3372) read and written
+- Calling number, redirection and release cause taken from the ISUP when a gateway sends them
+- SIP-T and SIP-I calls proven against a carrier-style gateway in the lab
+
 ### 2.0 — Beyond audio
 
 Mid 2027, planned.
@@ -616,7 +637,8 @@ after it. What is left is platform work, and platform work needs the platform.
 
 **Exit:** applications accepted in both stores, incoming calls waking the app
 reliably from the background, and Bluetooth hands-free transitions surviving a
-call.
+call. Planned for 1.3, November 2026: the simulator and the emulator have
+carried everything they can (`15-mobile.md`), and what is left needs phones.
 
 ## Phase 5 — headless and SDK
 
@@ -677,6 +699,38 @@ deliberately does not need.
 **Exit:** a video call in both directions against FreeSWITCH and against a
 second Sipral, surviving the impairment profiles, with audio quality
 unchanged from the audio-only build.
+
+## Phase 7 — WebRTC peers and the telephone network, 1.3 and 1.4
+
+Decided on 21 October 2026: WebRTC for audio, trickle ICE and SIP-T/SIP-I
+move out of "Deliberately not implemented" (`09-rfc-index.md`), each for a
+reason that did not exist when they went in.
+
+- **A PBX WebRTC line (1.3).** Asterisk's `webrtc=yes` endpoints, FreeSWITCH
+  and the voice-agent gateways that front a WebRTC service now hand out lines
+  in that shape: BUNDLE (RFC 8843), `UDP/TLS/RTP/SAVPF`, `a=mid`. The parts
+  underneath are already here — DTLS-SRTP, ICE in both roles, `rtcp-mux`,
+  Opus, SIP over WebSocket — so what is missing is the description, not the
+  media path. A client that refuses such a line is refused by the PBX, and the
+  application blames the stack.
+- **A browser at the other end (1.4).** A browser's SIP client registers over
+  a WebSocket and offers its candidates as it finds them; a call to it has to
+  take trickled candidates (RFC 8838, carried in SIP by RFC 8840's INFO
+  package) and can send its own the same way, so the call is up before the
+  last relay answers. Data channels, SFUs and simulcast stay out: this is a
+  SIP client stack carrying audio, not a WebRTC stack.
+- **SIP-T and SIP-I (1.4).** A carrier gateway carries the ISUP of the call
+  inside SIP (RFC 3204's `application/ISUP` body, RFC 3372's SIP-T, ITU-T
+  Q.1912.5's SIP-I). An endpoint on such a trunk reads the calling number,
+  the redirection and the release cause from it when the SIP headers say
+  less, and answers a gateway that requires the body. Written from the RFCs
+  and the ITU-T Recommendations (Q.763 for the ISUP itself), as every
+  codec here is.
+
+**Exit:** a call on an Asterisk and a FreeSWITCH WebRTC line and with a
+browser SIP client in the lab, both directions, trickled candidates either
+way; an ISUP-carrying INVITE from a lab gateway read into the call's caller
+and cause, and answered.
 
 ## What the phases are risked against
 

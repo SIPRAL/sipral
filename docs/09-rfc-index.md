@@ -135,14 +135,14 @@ whether it is met; *in part* is followed by what is missing.
 
 | Area | Why |
 |---|---|
-| Trickle ICE (RFC 8838, RFC 8840) | Rare between SIP endpoints, which exchange candidates in the offer and the answer. Excluded until a peer needs it |
 | Video and its payload formats | Not before 1.0, so the audio path stays deep; phase 6 after it, per [10-roadmap.md](10-roadmap.md) |
 | SIP server roles: proxy, registrar, B2BUA | Sipral is an endpoint |
 | MSRP (RFC 4975), session-mode messaging | Out of scope. Pager-mode messaging, the MESSAGE method, is phase 2 |
-| SIP-T, SIP-I, ISUP encapsulation | Carrier interconnect, not endpoints |
 | IMS: 3GPP registration, `P-Access-Network-Info` | Different product |
 | iLBC (RFC 3951) | Opus covers the same ground — speech over a lossy link — and covers it better. Nothing in the field asks for iLBC and refuses Opus |
 | AMR and AMR-WB (RFC 4867) | Mobile radio codecs, and patented. On the IP leg an operator offers G.711 or Opus; carrying AMR through would mean licensing it to reach a peer that already speaks something else |
 
 Anything moving out of this table needs a written reason in a design document
-before code exists.
+before code exists. Trickle ICE (RFC 8838, RFC 8840) and SIP-T and SIP-I
+(RFC 3204, RFC 3372) moved out on 21 October 2026, for 1.4; the reason is
+`10-roadmap.md`, "Phase 7".

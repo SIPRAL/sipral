@@ -933,10 +933,11 @@ What it does, in the order a session meets it:
   ends when all of them have answered or after `gathering_timeout`, five
   seconds by default: a dead STUN server would otherwise hold the offer for the
   39.5 seconds of a whole STUN transaction.
-- **No trickle, deliberately.** Candidates are gathered to completion before
-  the description is written. Trickle ICE for SIP (RFC 8840) needs INFO packages
+- **No trickle yet.** Candidates are gathered to completion before the
+  description is written. Trickle ICE for SIP (RFC 8840) needs INFO packages
   the PBXs this stack is aimed at do not carry; the cost is the bounded wait
-  above.
+  above. A browser at the other end does trickle, so it comes in 1.4
+  (`10-roadmap.md`, "Phase 7").
 - **Checklists.** One per data stream. Pairs of the same component and family,
   link-local only with link-local, prioritised by §6.1.2.3, reflexive local
   candidates replaced by their base and pruned, and held to `max_pairs` (100)

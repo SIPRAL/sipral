@@ -135,8 +135,9 @@ order they are published in.
 - **No agent logic in the core.** The connectors to speech services live in
   their own packages ([`integrations/`](integrations/)); the library carries
   audio and never decides what to say.
-- **No WebRTC, and no video yet.** SDP for SIP only, over UDP, TCP, TLS or a
-  WebSocket; video is planned for 2.0.
+- **No WebRTC and no video yet.** Audio on a PBX WebRTC line comes in 1.3, a
+  browser at the other end and trickle ICE in 1.4, video in 2.0. No data
+  channels, SFU or simulcast.
 
 ## Roadmap
 
@@ -144,6 +145,8 @@ order they are published in.
 criteria, the same list as [sipral.org/roadmap](https://sipral.org/roadmap/).
 
 - **1.2, voice agents and more platforms:** the SIP bridge, the Pipecat transport, connectors to five speech services, a bridge run from a configuration file, OAuth2 sign-in to the PBX and the agent's own latency; Node.js and TypeScript, .NET MAUI, a network test before the call, answering-machine detection, SIP over WebSocket and LiveCommunicationKit; the Rust API promised between releases and published on crates.io; a week of calls held with no error. Released on 15 October 2026.
+- **1.3, November 2026:** iOS and Android proven on real phones (call screen, audio routes, a push that wakes the phone, Wi-Fi to mobile data, battery) and through the stores' test tracks; calls on a PBX WebRTC line (BUNDLE, the browser profile).
+- **1.4, December 2026:** trickle ICE, an audio call to and from a browser, and SIP-T and SIP-I on a carrier gateway.
 - **2.0:** video (VP8, VP9, AV1) and ZRTP.
 - **Ongoing:** carrier interop on paid accounts and a commercial SBC, more PBXs in the lab.
 

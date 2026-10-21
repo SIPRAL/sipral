@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Changed
+
+- The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I); trickle ICE and SIP-T/SIP-I leave the list of what is deliberately not implemented (`docs/10-roadmap.md`, "Phase 7").
+
 ## [1.2.3] - 2026-10-21
 
 A move behind a NAT keeps the account registered at an Asterisk that rewrites the `Contact`: the old address is withdrawn on its own before the new one is added, and a 200 that lists no binding is asked again.
