@@ -2331,7 +2331,7 @@ step_windows_python() {
     run="run-$(hostname -s 2>/dev/null || echo host)-$$"
     base="C:\\sipral-gate"
     # what the build and the tests read, as this tree has it now, committed or not
-    tracked Cargo.toml Cargo.lock rust-toolchain.toml 'crates/*' 'interop/harness/*' 'tools/*' \
+    tracked Cargo.toml Cargo.lock rust-toolchain.toml 'crates/*' 'interop/harness/*' 'interop/push-gateway/*' 'tools/*' \
         'bindings/python/*' 'bindings/fixtures/*' 'bindings/c/*' \
         | grep -v '^crates/sipral-aec-webrtc/' >"$work/list"
     if ! tar -czf "$work/src.tgz" -T "$work/list" 2>"$work/out" \
@@ -2360,40 +2360,64 @@ step_windows_python() {
 # environment under target/check made from the python3 the python area runs,
 # whose cffi it still sees, and never into that python3 itself. The version
 # installed is the lowest the integration accepts; the first run fetches it
-# from PyPI and later runs reuse it.
+# from PyPI and later runs reuse it. A python3 newer than the wheels pipecat-ai
+# depends on (Python 3.15 against onnxruntime, October 2026) cannot install
+# it at all, so the next older python3.N on the PATH that has cffi is tried,
+# each in a virtual environment of its own, and the pass says which ran.
 step_pipecat() {
     step "the pipecat integration"
-    local venv="$CHECK_DIR/venv-pipecat" pipecat work
+    local pipecat work py ver venv tried=""
     pipecat=$(sed -n 's/.*"pipecat-ai>=\([0-9.]*\)".*/\1/p' "$ROOT/integrations/pipecat/pyproject.toml")
     if ! command -v python3 >/dev/null 2>&1; then
         fail "python3 is not installed"
+        return
     elif ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
         fail "python3 is $(python3 -c 'import platform; print(platform.python_version())'), and pipecat-ai needs 3.11 or later"
+        return
     elif ! python3 -c 'import cffi' >/dev/null 2>&1; then
         fail "python3 has no cffi (pip install cffi)"
+        return
     elif [ -z "$pipecat" ]; then
         fail "integrations/pipecat/pyproject.toml names no pipecat-ai>= version"
+        return
     elif [ ! -s "$DYLIB" ]; then
         fail "the pipecat integration: $DYLIB is not there to load (the build of the library, above, says why)"
-    else
-        work=$(mktemp -d)
-        if [ ! -x "$venv/bin/python" ] && ! python3 -m venv --system-site-packages "$venv" >"$work/venv" 2>&1; then
-            fail "python3 -m venv $venv:"
-            sed 's/^/        /' "$work/venv"
-        elif ! "$venv/bin/python" -m pip show pipecat-ai 2>/dev/null | found -x "Version: $pipecat" \
-            && ! "$venv/bin/python" -m pip install -q "pipecat-ai==$pipecat" >"$work/pip" 2>&1; then
-            fail "pip install pipecat-ai==$pipecat, into $venv:"
-            tail -20 "$work/pip" | sed 's/^/        /'
-        elif SIPRAL_LIBRARY="$ROOT/$DYLIB" PYTHONPATH="$ROOT/integrations/pipecat:$ROOT/bindings/python" \
-            "$venv/bin/python" -m unittest discover -s "$ROOT/integrations/pipecat/tests" \
-            -t "$ROOT/integrations/pipecat" >"$work/out" 2>&1; then
-            pass "python3 -m unittest discover, integrations/pipecat/tests (pipecat-ai $pipecat)"
-        else
-            fail "python3 -m unittest discover, integrations/pipecat/tests (pipecat-ai $pipecat):"
-            sed 's/^/        /' "$work/out"
-        fi
-        rm -rf "$work"
+        return
     fi
+    work=$(mktemp -d)
+    local minor
+    minor=$(python3 -c 'import sys; print(sys.version_info[1])')
+    for py in python3 $(seq "$((minor - 1))" -1 11 | sed 's/^/python3./'); do
+        command -v "$py" >/dev/null 2>&1 && "$py" -c 'import cffi' >/dev/null 2>&1 || continue
+        ver=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+        venv="$CHECK_DIR/venv-pipecat-$ver"
+        tried="$tried $ver"
+        if [ ! -x "$venv/bin/python" ] && ! "$py" -m venv --system-site-packages "$venv" >"$work/venv" 2>&1; then
+            fail "$py -m venv $venv:"
+            sed 's/^/        /' "$work/venv"
+            rm -rf "$work"
+            return
+        fi
+        if "$venv/bin/python" -m pip show pipecat-ai 2>/dev/null | found -x "Version: $pipecat" \
+            || "$venv/bin/python" -m pip install -q "pipecat-ai==$pipecat" >"$work/pip" 2>&1; then
+            if SIPRAL_LIBRARY="$ROOT/$DYLIB" PYTHONPATH="$ROOT/integrations/pipecat:$ROOT/bindings/python" \
+                "$venv/bin/python" -m unittest discover -s "$ROOT/integrations/pipecat/tests" \
+                -t "$ROOT/integrations/pipecat" >"$work/out" 2>&1; then
+                pass "python $ver -m unittest discover, integrations/pipecat/tests (pipecat-ai $pipecat)"
+            else
+                fail "python $ver -m unittest discover, integrations/pipecat/tests (pipecat-ai $pipecat):"
+                sed 's/^/        /' "$work/out"
+            fi
+            rm -rf "$work"
+            return
+        fi
+        # an install that found no distribution for this Python moves on to the
+        # next older one; any other pip failure is the answer
+        grep -q 'No matching distribution found' "$work/pip" || break
+    done
+    fail "pip install pipecat-ai==$pipecat, tried with Python$tried:"
+    tail -20 "$work/pip" | sed 's/^/        /'
+    rm -rf "$work"
 }
 
 # integrations/agents over bindings/python and $DYLIB: calls between two
