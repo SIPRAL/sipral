@@ -136,7 +136,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)3)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)4)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -4840,6 +4840,21 @@ struct sipral_account_config {
      * How many bytes of it.
      */
     size_t websocket_resource_len;
+    /**
+     * A `sipral_toggle_t`: whether the account is a PBX WebRTC line
+     * (Asterisk's `webrtc=yes`, a gateway in front of a WebRTC
+     * service). On, its calls offer and require DTLS-SRTP on
+     * `UDP/TLS/RTP/SAVPF` with ICE, `a=rtcp-mux-only` and the stream in
+     * a BUNDLE group, whatever `srtp` says, and a plain offer is refused
+     * with 488. Zero or off: as before. On in a build without
+     * `SIPRAL_FEATURE_DTLS_SRTP` is `SIPRAL_STATUS_NOT_SUPPORTED`.
+     * ABI 1.4.
+     */
+    sipral_toggle_t webrtc;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_1_4;
 };
 
 /**

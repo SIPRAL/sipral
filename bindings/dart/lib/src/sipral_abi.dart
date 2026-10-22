@@ -3380,6 +3380,21 @@ final class SipralAccountConfig extends ffi.Struct {
   /// How many bytes of it.
   @ffi.Size()
   external int websocketResourceLen;
+
+  /// A `SipralToggle`: whether the account is a PBX WebRTC line
+  /// (Asterisk's `webrtc=yes`, a gateway in front of a WebRTC
+  /// service). On, its calls offer and require DTLS-SRTP on
+  /// `UDP/TLS/RTP/SAVPF` with ICE, `a=rtcp-mux-only` and the stream in
+  /// a BUNDLE group, whatever `srtp` says, and a plain offer is refused
+  /// with 488. Zero or off: as before. On in a build without
+  /// `SIPRAL_FEATURE_DTLS_SRTP` is `SIPRAL_STATUS_NOT_SUPPORTED`.
+  /// ABI 1.4.
+  @ffi.Uint32()
+  external int webrtc;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved14;
 }
 
 /// What a call is placed with.
@@ -6446,7 +6461,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 3;
+  static const int abiVersionMinor = 4;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -6706,7 +6721,7 @@ final class Sipral {
         'sipral_poll_result_t': [ffi.sizeOf<SipralPollResult>(), 48, 28, 32],
         'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 136, 128, 136],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
-        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 496, 272, 280],
+        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 504, 280, 288],
         'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 160, 92, 92],
         'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
         'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],

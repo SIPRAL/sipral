@@ -126,6 +126,48 @@ public sealed class SecurityTests : IDisposable
         }
     }
 
+    /// <summary>ABI 1.4: two accounts that are WebRTC lines, on stacks that
+    /// set no ICE of their own, keyed by a handshake on the pair ICE chose.
+    /// ICE keeps loopback out of candidates (RFC 8445 §5.1.1.1), so the two
+    /// stacks bind this host's routable address.</summary>
+    [Fact]
+    public async Task TwoWebRtcLinesCallEachOtherKeyedByAHandshake()
+    {
+        var host = NatTests.RoutableAddress();
+        if (host is null)
+        {
+            return; // no routable address on this machine to gather a host candidate from
+        }
+        using var alice = new SipralStack(audio: SipralAudio.Application, bindHost: host, codecs: "PCMU");
+        using var bob = new SipralStack(audio: SipralAudio.Application, bindHost: host, codecs: "PCMU");
+        var placing = alice.AddAccount(
+            "sip:alice@sipral.invalid", registrarAddress: bob.BindAddress,
+            security: new AccountSecurity(Webrtc: true));
+        bob.AddAccount(
+            "sip:bob@sipral.invalid", registrarAddress: alice.BindAddress,
+            security: new AccountSecurity(Webrtc: true));
+        var call = alice.PlaceCall(placing, $"sip:bob@{bob.BindAddress}", mediaHost: host);
+        var incoming = await FirstMatchingAsync(bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
+        var answered = bob.AnswerCall(incoming, mediaHost: host);
+        try
+        {
+            await FirstMatchingAsync(alice.Events, e => e.Kind == SipralEventKind.MediaSecured, Timeout);
+            using var cts = new CancellationTokenSource(Timeout);
+            var media = await call.WaitForMediaAsync(cts.Token);
+            Assert.NotNull(media);
+            var report = media!.Encryption();
+            Assert.Single(report);
+            Assert.Equal(SipralKeyExchange.Dtls, report[0].KeyExchange);
+            Assert.True(report[0].Encrypted);
+            Assert.True(report[0].Authenticated, "the certificate matched the fingerprint");
+        }
+        finally
+        {
+            call.Close();
+            answered.Close();
+        }
+    }
+
     // a moment inside every certificate of the provider chain below
     private const ulong Within = 1_790_000_000;
 

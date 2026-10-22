@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 
@@ -220,6 +220,32 @@ describe('a call that is up', () => {
     assert.ok(callA.media?.info().secured);
     assert.ok((callA.media?.codecCandidates().length ?? 0) > 0);
     assert.deepEqual(callA.media?.pathCandidates(), []);
+  });
+
+  test('on two WebRTC lines is keyed by a handshake (ABI 1.4)', async (t) => {
+    // a WebRTC line offers ICE, which keeps loopback out of its candidates
+    // (RFC 8445 §5.1.1.1): the two stacks bind this host's own address
+    const host = Object.values(networkInterfaces())
+      .flat()
+      .find((one) => one !== undefined && one.family === 'IPv4' && !one.internal)?.address;
+    if (host === undefined) {
+      t.skip('no address but loopback for ICE to gather a host candidate from');
+      return;
+    }
+    const alice = await open({ bindHost: host });
+    const bob = await open({ bindHost: host });
+    const line = alice.addAccount('sip:alice@sipral.invalid', { registrarAddress: bob.bindAddress, webrtc: true });
+    bob.addAccount('sip:bob@sipral.invalid', { registrarAddress: alice.bindAddress, webrtc: true });
+    const ringing = kind(bob, SipralEventKind.IncomingCall);
+    const callA = await alice.placeCall(line, `sip:bob@${bob.bindAddress}`, { mediaHost: host });
+    const callB = await bob.answerCall(await ringing, { mediaHost: host });
+    kept(callA, callB);
+    await Promise.all([callA.confirmed(15000), callB.confirmed(15000)]);
+    await until(() => callA.media?.encryption()[0]?.encrypted === true);
+    const [stream] = callA.media?.encryption() ?? [];
+    assert.ok(stream !== undefined);
+    assert.equal(stream.keyExchange, SipralKeyExchange.Dtls);
+    assert.ok(stream.authenticated, 'the certificate matched the fingerprint');
   });
 
   test('is held and resumed, read back each time, and offered another codec', async () => {

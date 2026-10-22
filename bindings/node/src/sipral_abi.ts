@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 3;
+export const SIPRAL_ABI_VERSION_MINOR = 4;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -4781,6 +4781,21 @@ export interface SipralAccountConfig {
    * How many bytes of it.
    */
   websocket_resource_len: number;
+  /**
+   * A `sipral_toggle_t`: whether the account is a PBX WebRTC line
+   * (Asterisk's `webrtc=yes`, a gateway in front of a WebRTC
+   * service). On, its calls offer and require DTLS-SRTP on
+   * `UDP/TLS/RTP/SAVPF` with ICE, `a=rtcp-mux-only` and the stream in
+   * a BUNDLE group, whatever `srtp` says, and a plain offer is refused
+   * with 488. Zero or off: as before. On in a build without
+   * `SIPRAL_FEATURE_DTLS_SRTP` is `SIPRAL_STATUS_NOT_SUPPORTED`.
+   * ABI 1.4.
+   */
+  webrtc: number;
+  /**
+   * Zero.
+   */
+  reserved_1_4: number;
 }
 koffi.struct('sipral_account_config_t', {
   size: 'size_t',
@@ -4847,6 +4862,8 @@ koffi.struct('sipral_account_config_t', {
   websocket_host_len: 'size_t',
   websocket_resource: 'void *',
   websocket_resource_len: 'size_t',
+  webrtc: 'sipral_toggle_t',
+  reserved_1_4: 'uint32_t',
 });
 
 /**
@@ -12192,7 +12209,7 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_poll_result_t: [48, 28, 32],
   sipral_stack_settings_t: [136, 128, 136],
   sipral_header_t: [32, 16, 16],
-  sipral_account_config_t: [496, 272, 280],
+  sipral_account_config_t: [504, 280, 288],
   sipral_call_config_t: [160, 92, 92],
   sipral_codec_info_t: [32, 28, 28],
   sipral_codec_candidate_t: [24, 20, 20],

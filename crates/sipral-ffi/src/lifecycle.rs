@@ -670,6 +670,8 @@ mod tests {
             websocket_host_len: 0,
             websocket_resource: std::ptr::null(),
             websocket_resource_len: 0,
+            webrtc: 0,
+            reserved_1_4: 0,
         }
     }
 

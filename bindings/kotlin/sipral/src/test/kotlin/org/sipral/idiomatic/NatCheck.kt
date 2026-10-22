@@ -45,6 +45,7 @@ import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralIce
+import org.sipral.SipralKeyExchange
 import org.sipral.SipralPathKind
 import org.sipral.SipralPathOutcome
 import org.sipral.SipralNatMapping
@@ -591,6 +592,43 @@ private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): Stri
  * reports the chosen pair and every other's outcome, and `restartIce()`
  * rechecks under new credentials until a second path is chosen.
  */
+/** ABI 1.4: two accounts that are WebRTC lines, on stacks that set no ICE of
+ * their own, and the call between them keyed by a handshake on the pair ICE
+ * chose. */
+private suspend fun twoWebRtcLinesCallEachOtherKeyedByAHandshake(host: String): String {
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, codecs = "PCMU").use { alice ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, codecs = "PCMU").use { bob ->
+            val aliceAccount = alice.addAccount(
+                aor = "sip:alice@example.invalid",
+                registrarAddress = bob.bindAddress,
+                security = SipralAccountSecurity(webrtc = true),
+            )
+            bob.addAccount(
+                aor = "sip:bob@example.invalid",
+                registrarAddress = alice.bindAddress,
+                security = SipralAccountSecurity(webrtc = true),
+            )
+            val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
+            }
+            aliceCall.use {
+                bob.answerCall(incoming, mediaHost = host).use {
+                    val deadline = System.currentTimeMillis() + 15_000
+                    while (aliceCall.media?.encryption()?.singleOrNull()?.encrypted != true &&
+                        System.currentTimeMillis() < deadline
+                    ) {
+                        delay(20)
+                    }
+                    val stream = assertNotNull(aliceCall.media, "alice's media never started").encryption().single()
+                    assertEquals(SipralKeyExchange.DTLS, stream.keyExchange)
+                    assertTrue(stream.encrypted && stream.authenticated, "not keyed by the handshake: $stream")
+                    return "two WebRTC lines keyed by a handshake"
+                }
+            }
+        }
+    }
+}
+
 private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { bob ->
@@ -955,6 +993,7 @@ internal suspend fun natChecks(): String {
         turnRelayIsAllocatedAndOffered(host),
         iceBehindStunCarriesAudio(host),
         iceCallSaysWhichPathsItTriedAndRestarts(host),
+        twoWebRtcLinesCallEachOtherKeyedByAHandshake(host),
         liteAnsweringAFullAgentCarriesAudio(host),
         turnAllocationIsGivenBackWhenTheCallEnds(host),
         turnOverTcpIsMadeAndGivenBackOnItsConnection(host),
