@@ -40,14 +40,14 @@
 //! digits: a national or subscriber number is a global one only with the
 //! country it belongs to, which the gateway knows and this end does not, and
 //! a `tel:` URI for a local number needs that context (RFC 3966 §5.1.5).
-//! Such a number stays in [`IsupCaller`], digits and nature.
+//! Such a number stays in [`IsupCaller`](crate::isup::IsupCaller), digits and nature.
 //!
 //! # What it sends
 //!
 //! No ISUP. RFC 3372 §4.1: generating the encapsulated ISUP is "not the
 //! responsibility of an IP endpoint like a SIP phone"; the gateway at the
 //! other end writes the ISUP for the network from the SIP it receives
-//! (§4.2, RFC 3398 §10.1 for a BYE). [`IsupBuilder`] is there for an
+//! (§4.2, RFC 3398 §10.1 for a BYE). [`IsupBuilder`](sipral_core::isup::IsupBuilder) is there for an
 //! application that is a gateway.
 //!
 //! [`CallerIdentity::isup`]: crate::CallerIdentity::isup

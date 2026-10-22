@@ -43,7 +43,7 @@
 //! **Receiving.** An INFO naming the package, on a call that announced it, is
 //! answered 200 and handed up as [`UaEvent::TrickleIce`]; one whose body is
 //! not `application/trickle-ice-sdpfrag` gets a 415, and one past
-//! [`MAX_BODY`] a 413. On a call that did not announce it, the INFO goes on
+//! [`MAX_BODY`](crate::trickle::MAX_BODY) a 413. On a call that did not announce it, the INFO goes on
 //! to the 469 every unknown package gets (`crate::admission`). A multipart
 //! body is not unpacked: RFC 8840's own examples carry the fragment alone.
 

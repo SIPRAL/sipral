@@ -69,8 +69,8 @@ pub enum FragError {
     NotText,
     /// A line that is neither an attribute nor a pseudo `m=` line.
     NotAFragment,
-    /// More than [`MAX_SECTIONS`] sections or [`MAX_CANDIDATES`] candidate
-    /// lines in one.
+    /// More than 16 sections, the most streams an agent has, or more than 64
+    /// candidate lines in one.
     TooMany,
 }
 
