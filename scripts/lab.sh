@@ -2089,7 +2089,7 @@ nat_move_flow() {
 # (interop/harness-c's `run_push` says what each one proves) at
 # `labuser-push`, set up as FreePBX sets up an extension; once it says it is
 # asleep, Asterisk calls the account (extension 9010 echoes for eight seconds
-# and hangs up) or, for `message`, sends it a MESSAGE from extension 9040.
+# and hangs up) or, for `message`, sends it a MESSAGE from extension 9043.
 # What the gateway and the service printed during the case is shown after
 # the harness's own lines, and `$2` has to be among them: the gateway's own
 # word for what it did with what it held.
@@ -2146,7 +2146,7 @@ push_case() {
     done
     if [ "$which" = message ]; then
         ( cd interop && docker compose exec -T asterisk asterisk -rx \
-            "channel originate Local/9040@lab application Wait 1" ) >/dev/null 2>&1
+            "channel originate Local/9043@lab application Wait 1" ) >/dev/null 2>&1
     else
         ( cd interop && docker compose exec -T asterisk asterisk -rx \
             "channel originate PJSIP/labuser-push extension 9010@lab" ) >/dev/null 2>&1
