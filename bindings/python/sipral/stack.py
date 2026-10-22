@@ -206,6 +206,7 @@ class Stack:
         offer_dtmf: bool | None = None,
         srtp: int = 0,
         ice: int = 0,
+        ice_trickle: int = 0,
         nat: int = 0,
         stun_server: str | None = None,
         stun_fallbacks: Sequence[str] | None = None,
@@ -305,6 +306,10 @@ class Stack:
         :class:`sipral.enums.Nat`, ``0`` for off. ``Ice.LITE`` suits a server
         reachable only at its advertised address: it answers a full ICE
         peer's checks and sends none (`docs/06-nat.md`, "ICE-lite").
+        ``ice_trickle`` (:class:`sipral.enums.IceTrickle`, ``0`` for off) is
+        whether candidates trickle (RFC 8838, RFC 8840; `docs/06-nat.md`,
+        "Trickle ICE"): a far end that trickles may then send its candidates
+        after its description, and they are taken.
 
         ``referrals=True`` delivers an out-of-dialog REFER (click-to-dial) as
         `SIPRAL_EVENT_KIND_REFERRAL`, to :meth:`accept_referral` or
@@ -574,6 +579,7 @@ class Stack:
         config.media_seed_len = 32
         config.srtp = srtp
         config.ice = ice
+        config.ice_trickle = ice_trickle
         config.nat = nat
         if stun_server_buf is not None:
             config.stun_server = stun_server_buf
@@ -947,6 +953,7 @@ class Stack:
         destination: str | None = None,
         srtp: int = 0,
         ice: int = 0,
+        ice_trickle: int = 0,
         text: bool = False,
         feedback: bool = False,
         focus: bool = False,
@@ -960,10 +967,14 @@ class Stack:
         media address; :class:`sipral.media.Media` starts on
         `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
 
-        ``ice`` is a :class:`sipral.enums.Ice`, ``0`` for the stack default.
+        ``ice`` is a :class:`sipral.enums.Ice` and ``ice_trickle`` a
+        :class:`sipral.enums.IceTrickle`, ``0`` for the stack default.
         With ``nat=Nat.STUN`` this blocks the calling thread (never the poll
         thread) until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING`; sooner
-        would be `SIPRAL_STATUS_WRONG_STATE`.
+        would be `SIPRAL_STATUS_WRONG_STATE`. It waits under
+        ``IceTrickle.FULL`` too, because the socket's datagrams go to the call
+        once its media starts, and a mapping answered after that would be
+        lost; what the stance changes is what the INVITE and the offer say.
 
         ``text`` offers real-time text (RFC 4103) on a second socket
         (:meth:`sipral.call.Call.send_text`, ``call.text``); not offered with
@@ -999,6 +1010,7 @@ class Stack:
         config.media_address_len = len(media_address.encode("utf-8"))
         config.srtp = srtp
         config.ice = ice
+        config.ice_trickle = ice_trickle
         if destination_buf is not None:
             config.destination = destination_buf
             config.destination_len = len(destination.encode("utf-8"))
