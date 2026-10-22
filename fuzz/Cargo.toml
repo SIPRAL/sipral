@@ -305,3 +305,10 @@ path = "fuzz_targets/dtls_connection.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sdpfrag"
+path = "fuzz_targets/sdpfrag.rs"
+test = false
+doc = false
+bench = false
