@@ -111,23 +111,23 @@ October 2026, released.
 November 2026, planned.
 
 - iOS and Android proven on real phones: the system call screen, a cellular call interrupting, earpiece, speaker, wired and Bluetooth headsets, the car
-- An incoming call that wakes a sleeping phone, end to end through a push gateway (RFC 8599)
+- An incoming call that wakes a sleeping phone, end to end through a push gateway (RFC 8599) *(in progress)*
 - Wi-Fi to mobile data on a phone, the time until audio returns measured and published
 - A registered phone with no call: battery and background behaviour measured on both platforms
-- Test builds accepted through TestFlight and Google Play internal testing
-- A cold start after a push in Swift and Kotlin, as in .NET MAUI: the woken app resumes its account rather than registering from scratch
-- Android transactional Telecom API (API 34 and later) beside the self-managed ConnectionService
-- Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH
+- Test builds accepted through TestFlight and Google Play internal testing *(in progress)*
+- A cold start after a push in Swift and Kotlin, as in .NET MAUI: the woken app resumes its account rather than registering from scratch *(done)*
+- Android transactional Telecom API (API 34 and later) beside the self-managed ConnectionService *(done)*
+- Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH *(done)*
 
 ### 1.4 — Browsers and the telephone network
 
 December 2026, planned.
 
-- Trickle ICE (RFC 8838, RFC 8840): candidates sent as they are found, so a call is set up sooner
+- Trickle ICE (RFC 8838, RFC 8840): candidates sent as they are found, so a call is set up sooner *(done)*
 - An audio call to and from a browser over WebRTC, through a SIP over WebSocket server, proven in the lab
-- SIP-T and SIP-I: the ISUP a carrier gateway carries inside SIP (RFC 3204, RFC 3372) read and written
-- Calling number, redirection and release cause taken from the ISUP when a gateway sends them
-- SIP-T and SIP-I calls proven against a carrier-style gateway in the lab
+- SIP-T and SIP-I: the ISUP a carrier gateway carries inside SIP (RFC 3204, RFC 3372) read and written *(done)*
+- Calling number, redirection and release cause taken from the ISUP when a gateway sends them *(done)*
+- SIP-T and SIP-I calls proven against a carrier-style gateway in the lab *(done)*
 
 ### 1.5 — Keys that never leave the device
 
@@ -749,6 +749,14 @@ reason that did not exist when they went in.
 browser SIP client in the lab, both directions, trickled candidates either
 way; an ISUP-carrying INVITE from a lab gateway read into the call's caller
 and cause, and answered.
+
+**SIP-T and SIP-I: built, and their half of the exit met on 22 October
+2026.** `sipral_core::isup` reads and writes Q.763; the user agent takes the
+body, reads the IAM into the caller and a REL into the call's end
+(`04-ua.md`, "SIP-T and SIP-I"); C ABI 1.4 carries it (`08-ffi.md`).
+`scripts/lab.sh isup` has a scripted gateway's IAM call read and answered,
+its BYE's REL reported, a call placed through ACM, CPG and ANM and one
+refused with a REL (`11-testing.md`). No carrier's trunk has been called.
 
 ## What the phases are risked against
 
