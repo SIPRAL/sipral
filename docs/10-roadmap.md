@@ -128,6 +128,9 @@ December 2026, planned.
 - SIP-T and SIP-I: the ISUP a carrier gateway carries inside SIP (RFC 3204, RFC 3372) read and written *(done)*
 - Calling number, redirection and release cause taken from the ISUP when a gateway sends them *(done)*
 - SIP-T and SIP-I calls proven against a carrier-style gateway in the lab *(done)*
+- Networking ready to use from Rust and C: sockets, TLS and NAPTR/SRV lookups in one optional component, so an application without a binding no longer writes its own
+- A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller
+- A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding
 
 ### 1.5 — Keys that never leave the device
 
@@ -757,6 +760,33 @@ body, reads the IAM into the caller and a REL into the call's end
 `scripts/lab.sh isup` has a scripted gateway's IAM call read and answered,
 its BYE's REL reported, a call placed through ACM, CPG and ANM and one
 refused with a REL (`11-testing.md`). No carrier's trunk has been called.
+
+## Phase 8 — embedding without a binding, 1.4
+
+Decided on 22 October 2026. The Swift, Kotlin, .NET, Python, Dart and Node
+bindings open their own sockets, TLS connections and NAPTR/SRV lookups with
+the platform's APIs. An application that calls the C ABI or the Rust crates
+directly gets the sans-I/O core and, in Rust, a reference loop with neither
+TLS nor SRV, so it writes that layer itself. That is the shape of the C and
+C++ softphones that would move off another stack, and three pieces close it:
+
+- **Networking ready to use.** An optional component that runs the sockets,
+  TLS and RFC 3263's NAPTR and SRV lookups for the core, in Rust and behind
+  the C ABI, with the platform's trust store and the same pinning and private
+  CA choices the bindings offer. Its dependencies stay inside the licence set
+  in `deny.toml`.
+- **A C++ API.** Classes over the C ABI for the stack, accounts, calls and
+  events, with lifetimes tied to scope, in a header shipped beside
+  `sipral.h`.
+- **A message hook.** A callback that sees every SIP message just before it
+  goes out and just after it comes in, and may change its header fields and
+  body or drop it, for a PBX or carrier that needs a header no option
+  covers.
+
+**Exit:** a C program and a C++ program that register over TLS to a name found
+by SRV and hold a call, with no networking code of their own, in the lab; the
+hook proven adding, changing and removing a header on the wire, from Rust, C
+and one binding.
 
 ## What the phases are risked against
 
