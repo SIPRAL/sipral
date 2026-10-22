@@ -39,7 +39,7 @@
 //!
 //! The Asterisk step (`asterisk`) is half trickle against a peer that does
 //! not trickle: an offer that says `trickle` and is whole, from the account
-//! `interop/ice/pjsip_local.conf` gives ICE, to the echo; Asterisk answers
+//! the override under `interop/ice/` gives ICE, to the echo; Asterisk answers
 //! regular ICE, no INFO goes, and the echo of the tone comes back on the pair
 //! its checks and this end's chose.
 
@@ -662,7 +662,7 @@ pub(crate) fn answer(proxy: SocketAddr) -> Result<String, String> {
 }
 
 /// Half trickle against Asterisk, which does not trickle: the account
-/// `interop/ice/pjsip_local.conf` gives ICE calls the echo with an offer that
+/// the override under `interop/ice/` gives ICE calls the echo with an offer that
 /// is whole and says `trickle`; the answer has to be regular ICE, nothing may
 /// be trickled to it, and the tone has to come back on the pair ICE chose.
 ///

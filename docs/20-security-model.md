@@ -155,7 +155,7 @@ G.729 decoder — speech frames, Annex B's SID frames, frames not sent and
 frames lost — the payload reader and an encoder with Annex B's DTX; it
 decodes and re-encodes every input, so its 24 hours came to about 0.67
 million executions, the thinnest coverage of any target. `scripts/check.sh`
-builds all thirty-six on every run so none of them rots uncompiled between
+builds all thirty-seven on every run so none of them rots uncompiled between
 releases.
 
 `ice` covers the one seam that is open to anybody before a

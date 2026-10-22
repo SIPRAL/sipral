@@ -60,7 +60,7 @@ whether it is met; *in part* is followed by what is missing.
 | 7044 | History-Info: read, with RFC 4458's `cause` and the `Reason` escaped into each target | sipral-ua | phase 2, built |
 | 4475 | SIP torture test messages | test corpus | phase 1 |
 | 7616 | HTTP Digest: challenge, `qop`, nonce count restarted only for a new nonce (§3.4) | sipral-core | phase 1 |
-| 6086 | The INFO framework, for DTMF over SIP INFO | sipral-ua | phase 2 |
+| 6086 | The INFO framework: DTMF over SIP INFO, and the `Info-Package` and `Recv-Info` headers (§5.2.3, 469) of trickle ICE's package | sipral-ua | phase 2; Info Packages in 1.4 |
 | 3903 | PUBLISH: the RFC 6035 report, an account's presence (`publish_presence`) and any package's state, refreshed and modified under the entity tag the compositor gave and removed with `Expires: 0` | sipral-ua | phase 2, built |
 | 4575 | Conference event package: `application/conference-info+xml` read, full and partial documents merged as §4.6 says | sipral-ua | phase 2, built |
 | 4579 | Conferencing for user agents: `isfocus` read from the far end's `Contact` and written on this end's, and the conference subscribed outside the call's dialog (§3.4) | sipral-ua | phase 2, built |
@@ -129,6 +129,8 @@ whether it is met; *in part* is followed by what is missing.
 | 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; no separate code; the RFC 8445 agents answer an RFC 5245 peer (RFC 8445 §10) |
 | 8863 | ICE patiently awaiting connectivity: a checklist with nothing left to check is waited on, not failed | sipral-nat, sipral | phase 4 |
 | 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`, `a=ice-pacing`, `a=ice-mismatch`); `a=remote-candidates` waits for an offer that would carry one | sipral-nat, sipral, sipral-ua | phase 2; the facade writes the attributes and the user agent carries them onto an answer it writes itself |
+| 8838 | Trickle ICE: candidates paired as they come, checklists that start empty, unfreezing by §12, `a=end-of-candidates`, half trickle (§16) | sipral-nat, sipral | 1.4, built: `IceConfig::trickle`, `IceTrickle` on the catalogue and `SIPRAL_ICE_TRICKLE_*` over the C ABI; off by default |
+| 8840 | Trickle ICE for SIP: the `trickle-ice` Info Package, `application/trickle-ice-sdpfrag`, INFO in the early dialog once the far end's 18x or PRACK says it holds the dialog (§4.3), one INFO pending at a time (§10.9), `Require: trickle-ice` for a call that assumes it (§5.1) | sipral-ua, sipral-nat, sipral | 1.4, built: `sipral_ua::trickle` and `sipral_nat::ice::SdpFrag`; proven in the lab through Kamailio and two NATs, and half trickle against Asterisk |
 | 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |
 
 ## Deliberately not implemented
@@ -145,4 +147,4 @@ whether it is met; *in part* is followed by what is missing.
 Anything moving out of this table needs a written reason in a design document
 before code exists. Trickle ICE (RFC 8838, RFC 8840) and SIP-T and SIP-I
 (RFC 3204, RFC 3372) moved out on 21 October 2026, for 1.4; the reason is
-`10-roadmap.md`, "Phase 7".
+`10-roadmap.md`, "Phase 7". Trickle ICE is now in the table above.

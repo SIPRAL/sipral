@@ -3928,3 +3928,56 @@ screen. Compared as written, case and all. A `call_id_len` of zero is
 has the reasoning. The facade carries it as `UserAgent::announce_call` and
 `Announcement::call_id`; the layers reach it through their printed bindings,
 and their push bridges still announce by caller alone.
+
+## What ABI 1.4 added
+
+### Trickle ICE
+
+One named integer and two members, each appended to the end of its struct,
+and no entry point or event kind: what trickles is carried on the existing
+calls, and the mapping and relay that trickle are the
+`SIPRAL_EVENT_KIND_NAT_MAPPING` and `SIPRAL_EVENT_KIND_NAT_RELAY` an
+application already reads. A struct a 1.3 binding fills is shorter by those
+eight bytes, so its `size` says the members are absent and they read as zero,
+which is the 1.3 behaviour.
+
+**`sipral_ice_trickle_t`**, whether a call trickles its ICE candidates (RFC
+8838, carried in SIP by RFC 8840's `trickle-ice` Info Package):
+`SIPRAL_ICE_TRICKLE_OFF` (1), `SIPRAL_ICE_TRICKLE_HALF` (2) and
+`SIPRAL_ICE_TRICKLE_FULL` (3). Zero is unset. `HALF` and `FULL` are
+`SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`, and
+any other number is `SIPRAL_STATUS_INVALID_ARGUMENT`. Nothing trickles on a
+call whose `sipral_ice_t` is not full ICE, nor with a far end that answers
+without `trickle`: that call gets regular ICE whatever this says.
+
+- **`sipral_stack_config_t::ice_trickle`**, then `reserved_1_4`: every
+  call's default, `OFF` when zero. Anything but `OFF` also has the stack's
+  user agent take trickle ICE: `trickle-ice` in the `Supported` of its answer
+  to OPTIONS (RFC 8840 §10.6), and an INVITE that requires `trickle-ice`
+  answered rather than refused with 420. A call announces the package itself,
+  `Supported: trickle-ice` and `Recv-Info: trickle-ice` on its INVITE and its
+  responses, when its description says `trickle`.
+- **`sipral_call_config_t::ice_trickle`**, then `reserved_1_4`: the call's
+  own, overriding the stack's, read wherever `media_address` is
+  (`sipral_call_place`, `sipral_call_ring_media`, `sipral_call_answer_with`,
+  `sipral_call_accept_transfer`).
+
+Under `HALF` (RFC 8838 §16) the offer or answer waits for the media socket's
+mapping and relay, as under `OFF`, and says `a=ice-options:trickle` with
+`a=end-of-candidates`; a far end that trickles may send its candidates later,
+and they are taken. Under `FULL` a call whose media socket's mapping or relay
+has not come back is placed or answered at once with the candidates known
+then, a call placed carrying `Require: trickle-ice` (RFC 8840 §5.1), where
+any other call is `SIPRAL_STATUS_WRONG_STATE`; the stack hands the mapping
+and the relay to the call as each comes back, in INFO requests the user agent
+sends, and the end of its candidates after the last. `docs/06-nat.md`,
+"Trickle ICE", has the rules and the measurements.
+
+`bindings/c/abi-sizes.txt` moves for those two structs only:
+`sipral_call_config_t` from 160 to 168 bytes on 64-bit targets and from 92 to
+100 on 32-bit ones, `sipral_stack_config_t` from 432 to 440 and from 296 and
+304 to 304 and 312. The facade's side is `IceTrickle` beside `IcePolicy` on
+the catalogue (`CodecCatalog::with_ice_trickle`) and
+`UserAgent::accept_trickle_ice`; every printed binding has the type, and the
+Python, Swift, .NET and Kotlin layers take it on the stack and on a call they
+place (and, in .NET, on one they answer with options).
