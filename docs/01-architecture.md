@@ -163,10 +163,11 @@ deployment needs:
   leaves the locator the host's own addresses. A deployment that has to reach a carrier through SRV supplies its own
   resolver — the platform has one, and on mobile it is the only one allowed to
   answer while the radio is asleep.
-- **TLS.** No TLS implementation is linked here, and none will be: a stack that
-  picks one imposes it on every embedder. `TransportProtocol::Tls` describes a
-  transport the caller has already secured, and the caller supplies the
-  connection.
+- **TLS.** No TLS implementation is linked into the core, so an embedder keeps
+  the one its platform trusts. `TransportProtocol::Tls` describes a transport
+  the caller has already secured, and the caller supplies the connection; the
+  Swift, Kotlin, .NET, Python and Dart bindings do that with the platform's own
+  TLS.
 
 ### sipral-core
 
