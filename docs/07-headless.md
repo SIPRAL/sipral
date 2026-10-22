@@ -412,12 +412,12 @@ voice-agent service over its WebSocket API -- OpenAI Realtime, Gemini Live,
 ElevenLabs Agents, Vapi or Deepgram Voice Agent -- with the frames at the service's rate, barge-in, reconnection and
 either side's end ending the other (`24-voice-agents.md`).
 
-## What it does not do
+## Where the agent's work happens
 
-No speech recognition, no synthesis, no turn detection, no agent logic. Those
-belong to whoever is on the other end of the socket, and putting them here would
-tie the component to a model vendor.
+Speech recognition, synthesis, turn detection and the agent's logic run on the
+other end of the socket, so the component works with any model vendor. The
+connectors in `integrations/` reach the services that do them
+(`24-voice-agents.md`).
 
-No transcoding to Opus or MP3 for the agent side. PCM in, PCM out.
-
-No audio device, on any platform. That is not a missing feature.
+The agent side is PCM in, PCM out, and no audio device is opened on any
+platform: the audio goes to the agent, not to a loudspeaker.

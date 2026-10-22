@@ -6,8 +6,8 @@ Copyright (c) 2026 Sytek
 # 24 — Connecting Sipral to AI voice-agent services
 
 Sipral is a SIP client stack. It answers and places calls and hands their
-audio to the application; it has no speech recognition, synthesis or
-language model of its own (`07-headless.md`, "What it does not do"). A
+audio to the application, and the speech recognition, synthesis and language
+model are the agent's (`07-headless.md`, "Where the agent's work happens"). A
 voice agent is a service somebody else runs, and this page says, service by
 service, how a call handled by Sipral reaches it and what the service
 expects when it does.

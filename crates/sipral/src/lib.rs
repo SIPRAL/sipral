@@ -34,7 +34,7 @@
 //!   by [`MediaEngine::reserve_rtp_port`] until none is free.
 //! - Everything `sipral-ua` exports, re-exported, so an application needs only this crate.
 //!
-//! # What is deliberately not here
+//! # What the application owns
 //!
 //! **No sockets and no audio device.** The application owns both: it hands over datagrams and
 //! passes PCM frames to whichever `sipral-io-*` it linked, so the stack embeds in any runtime. The
