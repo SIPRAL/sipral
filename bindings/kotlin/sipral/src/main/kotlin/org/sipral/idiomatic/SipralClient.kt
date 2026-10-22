@@ -46,6 +46,7 @@ import org.sipral.SipralException
 import org.sipral.SipralHeader
 import org.sipral.SipralHeldAudio
 import org.sipral.SipralIce
+import org.sipral.SipralIceTrickle
 import org.sipral.SipralLink
 import org.sipral.SipralLogLevel
 import org.sipral.SipralLogListener
@@ -327,6 +328,11 @@ class SipralClient private constructor(
          * frames may be a microphone's; [SipralHeldAudio.APPLICATION] sends the
          * application's frames (hold music, an announcement).
          *
+         * [iceTrickle] is whether every call's ICE candidates trickle (RFC 8838,
+         * RFC 8840; `docs/06-nat.md`, "Trickle ICE"); `SipralIceTrickle.OFF` when
+         * null. A call still waits for its media socket's mapping, which this
+         * layer reads only until the call's media starts.
+         *
          * [resolver] answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for accounts added
          * with a `serverUri`, one thread per lookup; [SipralDns.platform] when
          * null.
@@ -371,6 +377,7 @@ class SipralClient private constructor(
             resolver: SipralResolver? = null,
             systemEchoCancellation: Boolean? = null,
             heldAudio: SipralHeldAudio = SipralHeldAudio.DEFAULT,
+            iceTrickle: SipralIceTrickle? = null,
         ): SipralClient {
             require(signalling == SipralTransport.UDP || signalling == SipralTransport.TCP || signalling == SipralTransport.TLS) {
                 "signalling is UDP, TCP or TLS"
@@ -428,7 +435,7 @@ class SipralClient private constructor(
                     stunFallbacks, dtmfDetection, signalling, inviteLimit,
                     Tail(
                         srtpSuites, pathMtu, datagramWithoutStreamBytes, pseudonymSalt, diagnosticTrace,
-                        systemEchoCancellation, heldAudio,
+                        systemEchoCancellation, heldAudio, iceTrickle,
                     ),
                 )
             } catch (refusal: Exception) {
@@ -525,6 +532,7 @@ class SipralClient private constructor(
             diagnosticTrace = toggle(tail.diagnosticTrace),
             systemEchoCancellation = toggle(tail.systemEchoCancellation),
             heldAudio = tail.heldAudio.value.toLong(),
+            iceTrickle = (tail.iceTrickle?.value ?: 0).toLong(),
         )
         handle = Sipral.stackCreate(config)
         if (inviteLimit != null) {
@@ -548,6 +556,7 @@ class SipralClient private constructor(
         val diagnosticTrace: Boolean?,
         val systemEchoCancellation: Boolean?,
         val heldAudio: SipralHeldAudio,
+        val iceTrickle: SipralIceTrickle?,
     )
 
     /** Milliseconds since this stack was created: what every `now_ms` below
@@ -1112,7 +1121,7 @@ class SipralClient private constructor(
      *
      * With a [stunServer] this blocks until the server answers (or 5.5 s
      * pass), and with TURN until the relay is allocated or refused, so call it
-     * off the main thread. [ice] overrides the client's ICE policy. [headers]
+     * off the main thread. [ice] and [iceTrickle] override the client's. [headers]
      * go on the INVITE as written (`Alert-Info`, `Answer-Mode`).
      *
      * [codecs] orders this call's codecs (`sipral_codec_info_t` names,
@@ -1140,6 +1149,7 @@ class SipralClient private constructor(
         feedback: Boolean = false,
         focus: Boolean = false,
         followRedirects: Boolean = false,
+        iceTrickle: SipralIceTrickle? = null,
     ): SipralCall {
         val mediaHost = mediaHostFor(mediaHost, account, destination)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
@@ -1156,6 +1166,7 @@ class SipralClient private constructor(
             destination = destination,
             srtp = srtp,
             ice = (ice?.value ?: 0).toLong(),
+            iceTrickle = (iceTrickle?.value ?: 0).toLong(),
             headers = headers.ifEmpty { null },
             codecs = codecs,
             textAddress = textSocket?.let { formatAddress(it.localAddress.hostAddress, it.localPort) },

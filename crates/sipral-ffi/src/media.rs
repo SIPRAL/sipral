@@ -175,6 +175,40 @@ codes! {
 }
 
 codes! {
+    /// Whether a call trickles its ICE candidates (RFC 8838, carried in SIP by
+    /// RFC 8840's INFO requests). Names for `sipral_stack_config_t::ice_trickle`
+    /// (the stack's default) and `sipral_call_config_t::ice_trickle` (a per-call
+    /// override). Added in ABI 1.4.
+    ///
+    /// Zero means "unset": on the stack, [`SipralIceTrickle::Off`]; on a call,
+    /// the stack's setting. Nothing happens without a `SipralIce` that offers
+    /// full ICE, and nothing for `SIPRAL_ICE_LITE`. A far end that answers
+    /// without trickle gets regular ICE whatever this says.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralIceTrickle: u32 {
+        /// Regular ICE: candidates gathered before the description, no INFO,
+        /// and a far end's trickled candidates refused. The default.
+        Off = 1,
+        /// Half trickle (RFC 8838 §16): the description is written as for
+        /// `Off`, once the socket's mapping and relay are in, and says
+        /// `trickle`; a far end that trickles may send its own candidates
+        /// later, which are taken. Right for a peer whose support is unknown.
+        ///
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+        Half = 2,
+        /// Full trickle: a call on a socket whose STUN mapping or TURN relay
+        /// has not come back yet is placed or answered at once, with the
+        /// candidates known then, under `Require: trickle-ice` for a call
+        /// placed (RFC 8840 §5.1); the stack trickles the mapping and the
+        /// relay to the call when they come, and then the end of its
+        /// candidates. For a far end known to trickle.
+        ///
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+        Full = 3,
+    }
+}
+
+codes! {
     /// One codec this ABI has a number for.
     ///
     /// Values are permanent. Whether this build contains a codec is answered by
@@ -1125,6 +1159,44 @@ pub(crate) fn ice_policy(value: u32, name: &'static str) -> Result<Option<IcePol
             format!(
                 "{name} is {other}, and ice is 0 to leave it unspecified, 1 for off, 2 for \
                  offered, 3 for required or 4 for lite"
+            ),
+        )),
+    }
+}
+
+/// A `sipral_stack_config_t::ice_trickle` or `sipral_call_config_t::ice_trickle`
+/// value, as an [`IceTrickle`](sipral::IceTrickle) the caller actually named:
+/// `None` for the zero that means "unspecified", as [`ice_policy`] reads its
+/// own.
+///
+/// # Errors
+///
+/// `SIPRAL_STATUS_NOT_SUPPORTED` for trickle in a build without ICE, and
+/// `SIPRAL_STATUS_INVALID_ARGUMENT` for a value that names nothing.
+pub(crate) fn ice_trickle(
+    value: u32,
+    name: &'static str,
+) -> Result<Option<sipral::IceTrickle>, Fail> {
+    match value {
+        0 => Ok(None),
+        1 => Ok(Some(sipral::IceTrickle::Off)),
+        #[cfg(feature = "ice")]
+        2 => Ok(Some(sipral::IceTrickle::Half)),
+        #[cfg(feature = "ice")]
+        3 => Ok(Some(sipral::IceTrickle::Full)),
+        #[cfg(not(feature = "ice"))]
+        2 | 3 => Err(fail(
+            SipralStatus::NotSupported,
+            format!(
+                "{name} names trickle ICE and this build has no ICE: SIPRAL_FEATURE_ICE is \
+                 clear in sipral_capabilities"
+            ),
+        )),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "{name} is {other}, and ice_trickle is 0 to leave it unspecified, 1 for off, 2 \
+                 for half or 3 for full"
             ),
         )),
     }

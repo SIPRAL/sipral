@@ -151,6 +151,12 @@ pub enum MediaError {
     /// call moves by an ICE restart on the new socket.
     #[cfg(feature = "ice")]
     MovesWithIce,
+    /// A candidate or an end of candidates handed to a call that does not trickle: its catalogue's
+    /// [`IceTrickle`](crate::IceTrickle) is off, it is a lite end, the far end answered without
+    /// trickle ICE, or the session stopped trickling — this end already said it had no more, or a
+    /// pair was nominated, after which RFC 8838 §13 forbids another. Nothing is sent.
+    #[cfg(feature = "ice")]
+    NotTrickling,
     /// The call requires SRTP and would have carried audio without it: a plain offer or re-offer to
     /// a [`SrtpPolicy::Required`] call, a plain answer to its offer, or an answer keyed the way its
     /// policy forbids.
@@ -461,6 +467,8 @@ impl MediaError {
             Self::MovesWithIce => {
                 "this call runs ICE, which moves by a restart and not a new address"
             }
+            #[cfg(feature = "ice")]
+            Self::NotTrickling => "this call does not trickle ICE candidates, or has stopped",
             Self::SrtpRequired => "this call requires SRTP and the far end described none",
             Self::KeysWouldTravelInClear => {
                 "an SDES key would travel in signalling that is not encrypted, and this call \
@@ -661,6 +669,8 @@ mod tests {
             MediaError::NoIce,
             #[cfg(feature = "ice")]
             MediaError::MovesWithIce,
+            #[cfg(feature = "ice")]
+            MediaError::NotTrickling,
         ];
         let mut said: Vec<String> = Vec::new();
         for refusal in refusals {

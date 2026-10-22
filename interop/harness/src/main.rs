@@ -61,6 +61,7 @@ mod protocols;
 mod quality;
 mod referral;
 mod scale;
+mod trickle;
 mod volume;
 #[cfg(all(feature = "wasapi", target_os = "windows"))]
 mod wasapi;
@@ -525,6 +526,44 @@ fn extra_flows(
             }
             Err(why) => {
                 println!("  FAIL  forked to two phones behind a NAT, relayed, calling — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // trickle ICE through the proxy between two stacks behind two NATs, the
+    // stance `SIPRAL_TRICKLE` names at both ends, and `server` the proxy's
+    // address for both (see `trickle`); then half trickle against Asterisk,
+    // which does not trickle, `server` being Asterisk
+    if wanted.split(',').any(|name| name.trim() == "trickle") {
+        match trickle::call(remote) {
+            Ok(said) => {
+                println!("  pass  trickle ICE through the proxy and two NATs, calling{said}");
+            }
+            Err(why) => {
+                println!("  FAIL  trickle ICE through the proxy and two NATs, calling — {why}");
+                failures += 1;
+            }
+        }
+    }
+    if wanted.split(',').any(|name| name.trim() == "trickleanswer") {
+        match trickle::answer(remote) {
+            Ok(said) => {
+                println!("  pass  trickle ICE through the proxy and two NATs, answering{said}");
+            }
+            Err(why) => {
+                println!("  FAIL  trickle ICE through the proxy and two NATs, answering — {why}");
+                failures += 1;
+            }
+        }
+    }
+    if wanted
+        .split(',')
+        .any(|name| name.trim() == "trickleasterisk")
+    {
+        match trickle::asterisk(remote, pass) {
+            Ok(said) => println!("  pass  half trickle to {server}, which does not trickle{said}"),
+            Err(why) => {
+                println!("  FAIL  half trickle to {server}, which does not trickle — {why}");
                 failures += 1;
             }
         }
@@ -3557,6 +3596,12 @@ mod tests {
             ice_nat::ANSWER_SEED => crate::ice_nat::ANSWER_SEED,
             ice_nat::ANSWER_MEDIA_SEED => crate::ice_nat::ANSWER_MEDIA_SEED,
             ice_nat::ANSWER_RELAY_SEED => crate::ice_nat::ANSWER_RELAY_SEED,
+            trickle::CALLER_SEED => crate::trickle::CALLER_SEED,
+            trickle::CALLER_MEDIA_SEED => crate::trickle::CALLER_MEDIA_SEED,
+            trickle::ANSWER_SEED => crate::trickle::ANSWER_SEED,
+            trickle::ANSWER_MEDIA_SEED => crate::trickle::ANSWER_MEDIA_SEED,
+            trickle::ASTERISK_SEED => crate::trickle::ASTERISK_SEED,
+            trickle::ASTERISK_MEDIA_SEED => crate::trickle::ASTERISK_MEDIA_SEED,
             join::SEED => crate::join::SEED,
             join::MEDIA_SEED => crate::join::MEDIA_SEED,
             own_controls::SEED => crate::own_controls::SEED,

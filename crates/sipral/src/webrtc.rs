@@ -99,6 +99,10 @@ pub(crate) fn offer(description: &mut SessionDescription, source: &Source<'_>) {
     else {
         return;
     };
+    // trickle ICE may have tagged the stream already (RFC 8840 §4.1.1): one tag, first
+    stream
+        .attributes
+        .retain(|attribute| attribute.name != "mid");
     stream
         .attributes
         .insert(0, Attribute::with_value("mid", TAG));
@@ -150,6 +154,10 @@ pub(crate) fn answer(
             continue;
         }
         if let Some(mid) = offered.mid() {
+            // the offer's tag, which trickle ICE may have echoed already (RFC 5888 §9.1)
+            answered
+                .attributes
+                .retain(|attribute| attribute.name != "mid");
             answered
                 .attributes
                 .insert(0, Attribute::with_value("mid", mid));

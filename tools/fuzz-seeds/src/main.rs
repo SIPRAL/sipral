@@ -61,6 +61,7 @@ use sipral_dtls::record::{ContentType, ProtocolVersion, records as dtls_records}
 use sipral_dtls::x509::{Certificate as DtlsCertificate, CertificateParams};
 use sipral_dtls::{Config as DtlsConfig, Connection, Event as DtlsEvent, Random, Role, State};
 use sipral_headless::{ControlMessage, FrameDecoder, write_frame};
+use sipral_nat::ice::SdpFrag;
 use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
 };
@@ -3430,6 +3431,97 @@ fn encode_info(content_type: &[u8], body: &[u8]) -> Result<Vec<u8>, Wrong> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------- trickle ICE
+
+/// Bodies of the `trickle-ice` Info Package (RFC 8840 §9.2), written out as
+/// text: one stream's candidates under its own credentials, as this end
+/// sends them; two streams under the session's credentials, the second
+/// finished; and the end of all candidates with none left to send. Then the
+/// first again as `SdpFrag::write` puts it, the form every reader of this
+/// end's INFO sees. Each is read before it is written, and has to say what
+/// its name says.
+fn sdpfrag_seeds() -> Result<Vec<Seed>, Wrong> {
+    let bodies = [
+        (
+            "one-stream",
+            concat!(
+                "m=audio 9 RTP/AVP 0\r\n",
+                "a=ice-ufrag:Ft3q\r\n",
+                "a=ice-pwd:k9Zr2LwQ8vYp0aBc4dEf6gHi\r\n",
+                "a=rtcp-mux\r\n",
+                "a=mid:0\r\n",
+                "a=candidate:2 1 UDP 1694498815 192.0.2.3 41000 typ srflx raddr 192.0.2.1 rport 41000\r\n",
+            ),
+        ),
+        (
+            "two-streams-session-credentials",
+            concat!(
+                "a=ice-ufrag:Ft3q\r\n",
+                "a=ice-pwd:k9Zr2LwQ8vYp0aBc4dEf6gHi\r\n",
+                "m=audio 9 RTP/AVP 0\r\n",
+                "a=mid:1\r\n",
+                "a=candidate:1 1 UDP 2130706431 192.0.2.1 5010 typ host\r\n",
+                "a=candidate:3 1 UDP 16777215 192.0.2.7 49152 typ relay raddr 192.0.2.3 rport 5010\r\n",
+                "m=audio 9 RTP/AVP 0\r\n",
+                "a=mid:2\r\n",
+                "a=candidate:1 1 UDP 2130706431 192.0.2.1 6010 typ host\r\n",
+                "a=end-of-candidates\r\n",
+            ),
+        ),
+        (
+            "end-of-candidates",
+            concat!(
+                "a=ice-ufrag:Ft3q\r\n",
+                "a=ice-pwd:k9Zr2LwQ8vYp0aBc4dEf6gHi\r\n",
+                "a=end-of-candidates\r\n",
+                "m=audio 9 RTP/AVP 0\r\n",
+                "a=mid:0\r\n",
+            ),
+        ),
+    ];
+    let read = |name: &str, body: &[u8]| {
+        SdpFrag::parse(body).map_err(|why| Wrong(format!("the {name} seed does not read: {why}")))
+    };
+    let mut out = Vec::new();
+    for (name, body) in bodies {
+        let frag = read(name, body.as_bytes())?;
+        let says = match name {
+            "one-stream" => {
+                frag.credentials_for(Some("0")).is_some()
+                    && frag
+                        .section(Some("0"))
+                        .is_some_and(|s| s.candidates.len() == 1)
+                    && !frag.ended(Some("0"))
+            }
+            "two-streams-session-credentials" => {
+                frag.credentials_for(Some("1")).is_some()
+                    && frag
+                        .section(Some("1"))
+                        .is_some_and(|s| s.candidates.len() == 2)
+                    && !frag.ended(Some("1"))
+                    && frag.ended(Some("2"))
+            }
+            _ => frag.end_of_candidates && frag.ended(Some("0")),
+        };
+        if !says {
+            return Err(Wrong(format!(
+                "the {name} seed reads as something else: {frag:?}"
+            )));
+        }
+        out.push((name, body.as_bytes().to_vec()));
+    }
+    let written = read("one-stream", bodies[0].1.as_bytes())?.write();
+    if read("one-stream-written", written.as_bytes())?
+        != read("one-stream", bodies[0].1.as_bytes())?
+    {
+        return Err(Wrong(
+            "the one-stream seed does not read back as itself".to_owned(),
+        ));
+    }
+    out.push(("one-stream-written", written.into_bytes()));
+    Ok(out)
+}
+
 /// 8.3.11's incoming INFO parser: a `Content-Type` and a body, read the way
 /// `dtmf_info` cuts its input. Each seed is checked against
 /// `sipral_ua::dtmf::parse_info`'s own answer before it is written, so a
@@ -3578,6 +3670,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("rtp_dtmf", rtp_dtmf_seeds()?),
         ("rtt", rtt_seeds()?),
         ("sdp", sdp_seeds()?),
+        ("sdpfrag", sdpfrag_seeds()?),
         ("srtp_unprotect", srtp_seeds()?),
         ("stir_identity", stir_identity_seeds()?),
         ("stun", stun_seeds()?),

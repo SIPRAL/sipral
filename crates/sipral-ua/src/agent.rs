@@ -134,6 +134,10 @@ pub struct UserAgent {
     /// Recording sessions are taken, so `siprec` is understood
     /// ([`UserAgent::accept_recording_sessions`]).
     pub(crate) recording_server: bool,
+    /// INVITEs that require trickle ICE are taken, and the package is
+    /// announced on answers to offers that trickle
+    /// ([`UserAgent::accept_trickle_ice`]).
+    pub(crate) trickle_ice: bool,
     /// The registrar flows kept open through a NAT ([`crate::keepalive`]).
     pub(crate) keepalives: crate::keepalive::Keepalives,
     /// The WebSocket connections this agent runs ([`crate::websocket`]).
@@ -238,6 +242,7 @@ impl UserAgent {
             referrals: Referrals::default(),
             info_handed_over: false,
             recording_server: false,
+            trickle_ice: false,
             keepalives: crate::keepalive::Keepalives::default(),
             websockets: crate::websocket::WebSockets::default(),
             locations: crate::locate::Locations::default(),
@@ -1014,6 +1019,8 @@ impl UserAgent {
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;
         let event = self.on_transfer_event(event, now)?;
+        // before DTMF and the 469 every other Info Package gets
+        let event = self.on_trickle_event(event, now)?;
         let event = self.on_dtmf_event(event, now)?;
         // Below transfer: transfer takes `refer` NOTIFYs (RFC 3515 §2.4.4),
         // and this one answers 481 to any NOTIFY nobody owns (RFC 6665

@@ -190,6 +190,7 @@ public sealed class Call : IDisposable
         config.CodecsLen = (nuint)(codecs?.Length ?? 0);
         config.Feedback = (uint)(options.Feedback ? SipralToggle.On : SipralToggle.Default);
         config.Focus = options.Focus ? 1u : 0u;
+        config.IceTrickle = (uint)options.IceTrickle;
         SipralErrors.Call(() => NativeMethods.sipral_call_answer_with(_stack.Handle, Handle, config, _stack.NowMs), "sipral_call_answer_with");
     }
 
@@ -676,4 +677,9 @@ public sealed record SipralCallOptions(bool Text = false, bool Feedback = false,
     /// §8.1.3.4). Off by default: a 3xx ends the call and its
     /// <c>Contact</c> is left to the application. Placing only.</summary>
     public bool FollowRedirects { get; init; }
+
+    /// <summary>Whether this call's ICE candidates trickle (RFC 8838, RFC
+    /// 8840), overriding the stack's <c>iceTrickle</c>; <c>0</c> keeps the
+    /// stack's. <c>docs/06-nat.md</c>, "Trickle ICE".</summary>
+    public SipralIceTrickle IceTrickle { get; init; }
 }

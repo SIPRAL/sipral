@@ -933,11 +933,12 @@ What it does, in the order a session meets it:
   ends when all of them have answered or after `gathering_timeout`, five
   seconds by default: a dead STUN server would otherwise hold the offer for the
   39.5 seconds of a whole STUN transaction.
-- **No trickle yet.** Candidates are gathered to completion before the
-  description is written. Trickle ICE for SIP (RFC 8840) needs INFO packages
-  the PBXs this stack is aimed at do not carry; the cost is the bounded wait
-  above. A browser at the other end does trickle, so it comes in 1.4
-  (`10-roadmap.md`, "Phase 7").
+- **Trickle, when asked for.** By default candidates are gathered to
+  completion before the description is written, and the cost is the bounded
+  wait above. Under trickle ICE (`IceConfig::trickle`) the description can go
+  at once and the rest follow it, which "Trickle ICE" below describes, with
+  the SIP usage of RFC 8840 that carries them and what it was measured to
+  save.
 - **Checklists.** One per data stream. Pairs of the same component and family,
   link-local only with link-local, prioritised by §6.1.2.3, reflexive local
   candidates replaced by their base and pruned, and held to `max_pairs` (100)
@@ -1201,6 +1202,110 @@ waits `nomination_wait`, one second, before settling for the pair it has
 in the full role between two NATted ends, and it is what a shorter
 `nomination_wait` would buy back at the price of nominating a pair a better
 one might have replaced.
+
+### Trickle ICE
+
+RFC 8838 in the full agent, and RFC 8840's SIP usage of it, from release 1.4.
+Off by default: regular ICE gathers first and describes after, and a SIP
+peer whose support is unknown is not asked to do anything new.
+
+In the agent (`IceConfig::trickle`):
+
+- **Checks start before gathering ends.** A description can go with the host
+  candidates alone; the server-reflexive and relayed ones the agent finds
+  later raise `IceEvent::NewCandidates`, are paired at once with every remote
+  candidate already known, and their pairs join the checklist where they
+  rank. A checklist may start empty (§8), and one with nothing left to check
+  is given RFC 8863's wait from the last candidate either end added, not from
+  its start.
+- **The peer's late candidates** go in through `IceAgent::trickle_remote`,
+  under the credentials of the description they belong to — another
+  generation's are refused (`IceError::OtherGeneration`), so a candidate
+  meant for an ICE session before a restart does not join this one. A
+  candidate the agent had already learned as peer-reflexive from a check is
+  replaced by the one signalled, with its kind and priority (§11.4).
+- **Unfreezing.** A pair formed late starts by §12's three rules: Waiting
+  when it is the first of its foundation across the checklists (first
+  checklist, lowest component, highest priority) or when a pair of its
+  foundation has already succeeded, Frozen otherwise — the same states the
+  frozen algorithm gives a checklist formed whole, so a burst of late
+  candidates does not start checks it would have held back.
+- **The end.** `IceAgent::end_of_candidates` says this end has sent its last
+  (§13), and `a=end-of-candidates` or an empty fragment says the peer has.
+  Until both have, a controlling agent settles for the best pair it has only
+  after `nomination_wait`, as it does while a better pair is still being
+  checked: a candidate still to come might make a better one (§14). Once a
+  pair is nominated nothing more is trickled.
+- **Pair limit.** `max_pairs` still holds across the checklists; under
+  trickle the pairs that have failed are the first to go when a late
+  candidate needs room.
+
+`IceTrickle` on the catalogue says how much a call assumes of its far end,
+beside `IcePolicy`, and does nothing unless the policy offers full ICE:
+
+| Stance | The description | Late candidates |
+|---|---|---|
+| `Off`, the default | Regular ICE: gathered first, no `trickle` | Refused: the INFO gets 469 |
+| `Half` (RFC 8838 §16) | Gathered first, every candidate in it, `a=ice-options:trickle` and `a=end-of-candidates` | The far end's taken |
+| `Full` | At once, with what is known; `Require: trickle-ice` on the INVITE (RFC 8840 §5.1) | Both ways |
+
+Half trickle is for a peer whose support is unknown — every SIP trunk and
+PBX line: a peer that does not trickle reads a whole description and answers
+regular ICE, and one that does may answer at once and send the rest after.
+Full trickle is for a peer known to trickle, a browser or another stack set
+so: one that cannot answers 420, and the failure is plain rather than a call
+that waits for candidates that never come. A far end that answers without
+`trickle` gets regular ICE whatever the stance.
+
+**Over SIP** (RFC 8840, `sipral_ua::trickle`). The candidates travel in INFO
+requests of the `trickle-ice` Info Package (RFC 6086), each body an
+`application/trickle-ice-sdpfrag` (`sipral_nat::ice::SdpFrag`) that repeats
+every candidate sent before it, under the call's credentials and `a=mid`. A
+call announces the package — `Supported: trickle-ice` and `Recv-Info:
+trickle-ice` on its INVITE and on its responses — when its description says
+`trickle`. An INFO goes only once the far end has listed the package in its
+own `Recv-Info` and once the dialog exists at both ends (§4.3): for the
+caller, from the first response that made the dialog; for the callee, from
+the PRACK of a reliable provisional, the ACK of its 2xx, or the caller's own
+first INFO. One INFO is pending at a time (§10.9); a body handed in while
+one is in flight replaces any already waiting, which loses nothing because
+every body repeats the ones before it. A 469 stops the package for the call.
+An INFO received on a call that did not announce the package gets the 469
+every unknown package gets; one in another content type, 415; one past 48
+KB, 413.
+
+The facade drives both halves from the call's `MediaEngine`:
+`trickle_public_address` and `trickle_relay` hand it a mapping or a relay
+that came after the description, and `end_of_candidates` its last word. The
+C ABI does that itself (`docs/08-ffi.md`, "What ABI 1.4 added"): under full
+trickle a call is placed or answered while its socket's STUN mapping or TURN
+relay is still on its way, and each is trickled to the call as it comes.
+
+**Measured** on the lab VM (Debian 13, Docker bridges, no impairment), 22
+October 2026, `scripts/lab.sh trickle`: two Rust stacks, each behind a NAT
+of its own, calling through Kamailio, each asking coturn and a second STUN
+server that never answers — the server a regular gathering waits
+`gathering_timeout`, five seconds, for. Times are from the caller's dial,
+except the callee's, which are from the INVITE reaching it:
+
+| Caller, callee | Offer sent | Answer back | Path chosen | Gathering over |
+|---|---|---|---|---|
+| `Off`, `Off` | 5504 ms | 11014 ms | 12127 ms | 5502 ms at each end |
+| `Half`, `Full` | 5506 ms | 5509 ms | 6624 ms | 5504 ms at the caller; never, at the callee |
+| `Full`, `Full` | 0 ms | 6 ms | 1118 ms | never, at either end |
+
+Each call carried audio both ways on a pair ending at the other end's NAT
+(137 to 140 of the 200 frames each end sent were heard; the rest went before
+a path was chosen). With regular ICE each end pays the dead
+server's five and a half seconds in turn, once before the offer and once
+before the answer; half trickle at the caller pays it once; full trickle at
+both ends pays it never, and the path came 1.1 seconds after the dial — the
+one second of `nomination_wait` described above, and nothing for gathering.
+The mapping from coturn came 2 to 3 ms after the dial and went in one INFO
+each way. Half trickle against Asterisk's own ICE endpoint, which does not
+trickle: regular ICE answered, nothing trickled, the echo heard on the chosen
+pair 69 ms after the offer, and Asterisk's RTP debug showing 152 packets
+sent through its ICE session.
 
 ## IPv6
 

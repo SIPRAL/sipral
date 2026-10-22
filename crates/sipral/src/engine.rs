@@ -167,6 +167,10 @@ struct Managed {
     /// [`Managed::ice`] once accepted; a refusal drops it (RFC 8839 §4.4).
     #[cfg(feature = "ice")]
     restarting: Option<crate::ice::LocalIce>,
+    /// What the far end trickled (RFC 8840 §4.4), kept until the call's agent can take it and to
+    /// tell what is new in the next INFO.
+    #[cfg(feature = "ice")]
+    heard: crate::ice::Heard,
     /// Whether [`MediaEngine::ring_with`] already described the call and opened its session.
     /// One-way: ringing with media twice is refused.
     rung_with_media: bool,
@@ -777,6 +781,7 @@ impl MediaEngine {
         {
             return Ok(Some(existing));
         }
+        let trickle = self.trickle_for(call, catalog, we_are_offerer);
         crate::ice::LocalIce::draw(
             &mut self.keys,
             address,
@@ -785,7 +790,29 @@ impl MediaEngine {
             catalog.ice().lite(),
             now,
         )
-        .map(Some)
+        .map(|drawn| Some(drawn.trickling(trickle)))
+    }
+
+    /// How a call's first description trickles: as its catalogue says when this end offers, and
+    /// when it answers an offer that trickles; otherwise not at all, since "If not, the responder
+    /// MUST process the initial ICE description according to regular ICE procedures" (RFC 8838
+    /// §5).
+    #[cfg(feature = "ice")]
+    fn trickle_for(
+        &self,
+        call: Option<CallHandle>,
+        catalog: &CodecCatalog,
+        we_are_offerer: bool,
+    ) -> crate::IceTrickle {
+        let offered = call
+            .and_then(|call| self.calls.get(&call))
+            .and_then(|managed| managed.remote.as_ref())
+            .is_some_and(peer_trickles);
+        if we_are_offerer || offered {
+            catalog.ice_trickle()
+        } else {
+            crate::IceTrickle::Off
+        }
     }
 
     /// ICE lines for a call's first description when the call has a relay. The relay is drawn into
@@ -820,13 +847,14 @@ impl MediaEngine {
             && relay
                 .relayed()
                 .is_some_and(|relayed| relayed.is_ipv4() == address.is_ipv4());
+        let trickle = self.trickle_for(call, catalog, we_are_offerer);
         if usable
             && let Some((local, ice)) = crate::ice::LocalIce::draw_relayed(
                 &mut self.keys,
-                address,
-                public,
+                (address, public),
                 &mut handed.relay,
                 we_are_offerer,
+                trickle,
                 now,
             )?
         {
@@ -1199,10 +1227,14 @@ impl MediaEngine {
             return refuse(());
         };
         let muxed = matches!(plan.rtcp, RtcpPlan::Muxed | RtcpPlan::Off);
+        // a far end that trickles may describe no candidate at all and send them all later (RFC
+        // 8838 §4); one that does not, and described none, has nothing to check
+        let trickling = local.trickles() && peer.trickle;
+        let heard = managed.heard.clone();
         // two lite ends never check; RFC 8445 §6.1.1 leaves both on the default candidates
         if (local.is_lite() && peer.lite)
             || peer.mismatch
-            || peer.candidates.is_empty()
+            || (peer.candidates.is_empty() && !trickling)
             || sipral_nat::ice::ice_mismatch(remote, stream, &peer, muxed)
         {
             return refuse(());
@@ -1224,6 +1256,15 @@ impl MediaEngine {
         if let Err(error) = ice.set_remote(&peer, now) {
             *held = Some(ice);
             return Err(error);
+        }
+        // what the far end trickled before there was an agent to take it, if it was of this
+        // generation; one of another is dropped (RFC 8838 §9)
+        if trickling
+            && let Some(generation) = heard.generation()
+            && generation == (peer.ufrag.as_str(), peer.pwd.as_str())
+        {
+            ice.trickle_remote(generation, &heard.candidates, heard.ended, now)
+                .ok();
         }
         Ok(Some(ice))
     }
@@ -1539,6 +1580,19 @@ impl MediaEngine {
         self.calls.get(&call).map(|managed| &managed.catalog)
     }
 
+    /// Whether the far end's description of a call declares trickle ICE (`a=ice-options:trickle`,
+    /// RFC 8838 §3): for a call that came in, whether its answer may trickle too
+    /// ([`IceTrickle`](crate::IceTrickle)), which an application gathering its candidates decides
+    /// before it answers. `false` for an unknown call and one not described yet.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn far_end_trickles(&self, call: CallHandle) -> bool {
+        self.calls
+            .get(&call)
+            .and_then(|managed| managed.remote.as_ref())
+            .is_some_and(peer_trickles)
+    }
+
     /// The health counters since this engine was created. A plain copy, cheap enough to sample on a
     /// timer.
     #[must_use]
@@ -1756,7 +1810,23 @@ impl MediaEngine {
             sdes_in_clear(&catalog, &offer, agent.placing_securely(account, &outgoing))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
+        // an offer that holds candidates back assumes the far end trickles, and says so
+        // (RFC 8840 §5.1)
+        #[cfg(feature = "ice")]
+        let placing = if ice.as_ref().is_some_and(|local| local.trickle().full()) {
+            placing.require_trickle_ice()
+        } else {
+            placing
+        };
         let call = agent.call(account, &placing, now)?;
+        // the candidates offered, for the INFO the first answer that names the package lets go:
+        // RFC 8840 §4.3.2 has the offerer send one at once after an answer in an unreliable 18x,
+        // repeating them, and it shows an answerer that trickles early that the dialog is up
+        #[cfg(feature = "ice")]
+        if let Some(local) = ice.as_ref().filter(|local| local.trickles()) {
+            let body = local.frag(stream_mid(&offer).as_deref());
+            agent.trickle_ice(call, Arc::from(body), now).ok();
+        }
         self.keep(call, handed, now);
         self.calls.insert(
             call,
@@ -1777,6 +1847,8 @@ impl MediaEngine {
                 ice,
                 #[cfg(feature = "ice")]
                 restarting: None,
+                #[cfg(feature = "ice")]
+                heard: crate::ice::Heard::default(),
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
@@ -1935,6 +2007,8 @@ impl MediaEngine {
                 ice,
                 #[cfg(feature = "ice")]
                 restarting: None,
+                #[cfg(feature = "ice")]
+                heard: crate::ice::Heard::default(),
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
@@ -2411,6 +2485,305 @@ impl MediaEngine {
             managed.restarting = Some(restarted);
         }
         Ok(())
+    }
+
+    /// Trickle the call's public address to the far end, learned after the call was described:
+    /// the server-reflexive candidate [`CallMedia::public_address`] would have made of it (RFC
+    /// 8838 §9).
+    ///
+    /// For a call under [`IceTrickle::Full`](crate::IceTrickle::Full), placed or answered before
+    /// its media socket's STUN mapping came back ([`Mappings`](crate::Mappings)). The candidate is
+    /// paired at once if the call's agent is running, and goes to the far end in an INFO with
+    /// every candidate before it (RFC 8840 §4.4), once the far end takes them
+    /// ([`UserAgent::trickle_ice`]). The call's later descriptions list it too (§3.2).
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::NoSuchCall`]; [`MediaError::NoDescription`] before the call is described;
+    /// [`MediaError::NotTrickling`] for a call that does not trickle or has stopped;
+    /// [`MediaError::Ice`] for a second public address other than the first; and
+    /// [`MediaError::Signalling`] when the INFO could not be sent, after which it goes with the
+    /// next one.
+    #[cfg(feature = "ice")]
+    pub fn trickle_public_address(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        public: SocketAddr,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let address = self.trickling(call)?;
+        if let Some(known) = self
+            .calls
+            .get(&call)
+            .and_then(|managed| managed.ice.as_ref())
+            .and_then(crate::ice::LocalIce::public)
+        {
+            if known == public {
+                return Ok(());
+            }
+            return Err(MediaError::Ice(sipral_nat::ice::IceError::TooMany));
+        }
+        let running = if let Some(held) = self.sessions.get(&call) {
+            let mut slot = share::lock(held);
+            slot.session.add_ice_public(public)?;
+            slot.session.ice_candidates()
+        } else if let Some(ice) = self.gathered.get_mut(&call) {
+            ice.add_public(public)?;
+            ice.gathered()
+        } else {
+            None
+        };
+        let Some(local) = self
+            .calls
+            .get_mut(&call)
+            .and_then(|managed| managed.ice.as_mut())
+        else {
+            return Err(MediaError::NotTrickling);
+        };
+        let added = match running {
+            Some(held) => {
+                local.note_public(public);
+                local.merge(held)
+            }
+            None => local.learn_public(address, public, now)?,
+        };
+        if added {
+            self.send_trickle(agent, call, now)?;
+        }
+        Ok(())
+    }
+
+    /// Trickle a TURN relay allocated for the call's media socket after the call was described: its
+    /// relayed candidate, and the server-reflexive one its allocation named (RFC 8838 §9).
+    ///
+    /// The call's agent takes the allocation as it takes one handed in with
+    /// [`CallMedia::relay`]: permissions, channels, keepalives, and the release when the call ends
+    /// or ICE settles elsewhere (RFC 8445 §8.3.1). An agent waiting for the call's session is
+    /// started for it if there was none. The candidates go to the far end as
+    /// [`MediaEngine::trickle_public_address`] says.
+    ///
+    /// # Errors
+    ///
+    /// As [`MediaEngine::trickle_public_address`]; the relay comes back from
+    /// [`MediaEngine::poll_returned_relay`] when it was not taken, and when it was but the INFO
+    /// could not be sent it stays with the call.
+    #[cfg(feature = "ice")]
+    pub fn trickle_relay(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        relay: crate::Relay,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let address = match self.trickling(call) {
+            Ok(address) => address,
+            Err(error) => {
+                self.returned.push_back(relay);
+                return Err(error);
+            }
+        };
+        let taken = if let Some(held) = self.sessions.get(&call) {
+            let mut slot = share::lock(held);
+            slot.session
+                .add_ice_relay(relay, now)
+                .map(|()| slot.session.ice_candidates())
+        } else {
+            let waiting = if let Some(ice) = self.gathered.remove(&call) {
+                Ok(ice)
+            } else {
+                let seed = self.keys.block();
+                self.calls
+                    .get(&call)
+                    .and_then(|managed| managed.ice.as_ref())
+                    .ok_or(MediaError::NotTrickling)
+                    .and_then(|local| local.agent(address, seed, now))
+            };
+            match waiting {
+                Ok(mut ice) => {
+                    let added = ice.add_relay(relay, now).map(|()| ice.gathered());
+                    if let Some(shared) = ice.shared_relay() {
+                        self.fork_relays.insert(self.root_of(call), shared);
+                    }
+                    self.gathered.insert(call, ice);
+                    added
+                }
+                Err(why) => Err(crate::ice::RelayRefusal::back(why, relay)),
+            }
+        };
+        let held = match taken {
+            Ok(held) => held,
+            Err(refusal) => {
+                self.returned.extend(refusal.relay.map(|relay| *relay));
+                return Err(refusal.why);
+            }
+        };
+        let added = self
+            .calls
+            .get_mut(&call)
+            .and_then(|managed| managed.ice.as_mut())
+            .is_some_and(|local| local.merge(held.unwrap_or_default()));
+        if added {
+            self.send_trickle(agent, call, now)?;
+        }
+        Ok(())
+    }
+
+    /// Say this end has no more candidates for the call: the end of candidates of RFC 8838 §13,
+    /// sent in an INFO with every candidate before it, and written as `a=end-of-candidates` in the
+    /// call's later descriptions. Nothing more can be trickled on the call after it. Saying it
+    /// twice sends nothing the second time.
+    ///
+    /// A controlling agent that knows both ends have finished nominates as soon as nothing better
+    /// can succeed, instead of waiting for a better pair that might still be trickled (§14).
+    ///
+    /// # Errors
+    ///
+    /// As [`MediaEngine::trickle_public_address`].
+    #[cfg(feature = "ice")]
+    pub fn end_of_candidates(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        let local = managed.ice.as_ref().ok_or(MediaError::NotTrickling)?;
+        if !local.trickles() {
+            return Err(MediaError::NotTrickling);
+        }
+        if local.ended() {
+            return Ok(());
+        }
+        if let Some(held) = self.sessions.get(&call) {
+            share::lock(held).session.end_ice_candidates();
+        }
+        if let Some(ice) = self.gathered.get_mut(&call) {
+            ice.end_of_candidates();
+        }
+        if let Some(local) = self
+            .calls
+            .get_mut(&call)
+            .and_then(|managed| managed.ice.as_mut())
+        {
+            local.end();
+        }
+        self.send_trickle(agent, call, now)
+    }
+
+    /// Whether a candidate may be trickled on `call` now, and the media socket's address if so.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::NoSuchCall`], [`MediaError::NoDescription`] before the call is described, and
+    /// [`MediaError::NotTrickling`] for a call that does not trickle, whose far end answered
+    /// without trickle (RFC 8838 §5), that has said it has no more, or whose agent has nominated a
+    /// pair (§13).
+    #[cfg(feature = "ice")]
+    fn trickling(&self, call: CallHandle) -> Result<SocketAddr, MediaError> {
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        let address = managed.address.ok_or(MediaError::NoDescription)?;
+        let local = managed.ice.as_ref().ok_or(MediaError::NotTrickling)?;
+        let refused = managed
+            .remote
+            .as_ref()
+            .is_some_and(|remote| !peer_trickles(remote));
+        if !local.trickles() || local.ended() || refused {
+            return Err(MediaError::NotTrickling);
+        }
+        if let Some(held) = self.sessions.get(&call)
+            && !share::lock(held).session.ice_may_trickle()
+        {
+            return Err(MediaError::NotTrickling);
+        }
+        Ok(address)
+    }
+
+    /// Hand the user agent the call's candidates as one `application/trickle-ice-sdpfrag` body,
+    /// for the INFO that carries them (RFC 8840 §4.4).
+    #[cfg(feature = "ice")]
+    fn send_trickle(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let Some(managed) = self.calls.get(&call) else {
+            return Err(MediaError::NoSuchCall);
+        };
+        let Some(local) = managed.ice.as_ref() else {
+            return Err(MediaError::NotTrickling);
+        };
+        let mid = managed.local.as_ref().and_then(stream_mid);
+        let body = local.frag(mid.as_deref());
+        agent.trickle_ice(call, Arc::from(body), now)?;
+        Ok(())
+    }
+
+    /// Candidates the far end trickled in an INFO (RFC 8840 §4.4): the new ones go to the call's
+    /// running agent, and all of them wait in [`Managed::heard`] for an agent built later. A body
+    /// of another generation than the far end's description, one after its end of candidates, and
+    /// any on a call that does not trickle are dropped.
+    #[cfg(feature = "ice")]
+    fn trickled_in(&mut self, call: CallHandle, body: &[u8], now: Instant) {
+        let Ok(frag) = sipral_nat::ice::SdpFrag::parse(body) else {
+            return;
+        };
+        let Some(managed) = self.calls.get_mut(&call) else {
+            return;
+        };
+        let takes = managed
+            .ice
+            .as_ref()
+            .map_or(managed.catalog.ice_trickle().trickles(), |local| {
+                local.trickles()
+            });
+        if !takes {
+            return;
+        }
+        let mid = managed
+            .local
+            .as_ref()
+            .and_then(stream_mid)
+            .or_else(|| managed.remote.as_ref().and_then(stream_mid));
+        let described = managed.remote.as_ref().and_then(|remote| {
+            remote
+                .media
+                .iter()
+                .find(|stream| !stream.is_rejected())
+                .and_then(|stream| sipral_nat::ice::parse_remote(remote, stream))
+        });
+        if let Some(described) = described.as_ref() {
+            let generation = (described.ufrag.as_str(), described.pwd.as_str());
+            if frag.credentials_for(mid.as_deref()) != Some(generation) {
+                return;
+            }
+            // a restart is a new generation, and what was heard before it is spent
+            if managed
+                .heard
+                .generation()
+                .is_some_and(|heard| heard != generation)
+            {
+                managed.heard = crate::ice::Heard::default();
+            }
+        }
+        let known = described
+            .map(|remote| remote.candidates)
+            .unwrap_or_default();
+        let Some(fresh) = managed.heard.take(&frag, mid.as_deref(), &known) else {
+            return;
+        };
+        let ended = managed.heard.ended;
+        let Some((ufrag, pwd)) = managed.heard.generation.clone() else {
+            return;
+        };
+        if let Some(held) = self.sessions.get(&call) {
+            // a refusal here is a body of another generation, dropped as RFC 8838 §9 asks
+            share::lock(held)
+                .session
+                .trickle_ice_remote((&ufrag, &pwd), &fresh, ended, now)
+                .ok();
+        }
     }
 
     /// Move a call's media to a new socket after a network change and offer that to the far end
@@ -2969,6 +3342,8 @@ impl MediaEngine {
                 digit,
                 held_ms,
             } => self.dtmf_received(*call, *digit, *held_ms),
+            #[cfg(feature = "ice")]
+            UaEvent::TrickleIce { call, body } => self.trickled_in(*call, body, now),
             _ => {}
         }
     }
@@ -3132,6 +3507,8 @@ impl MediaEngine {
                 ice: None,
                 #[cfg(feature = "ice")]
                 restarting: None,
+                #[cfg(feature = "ice")]
+                heard: crate::ice::Heard::default(),
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
@@ -3167,6 +3544,9 @@ impl MediaEngine {
             Managed {
                 identity,
                 session_id,
+                // each branch is a far end of its own, trickling its own candidates
+                #[cfg(feature = "ice")]
+                heard: crate::ice::Heard::default(),
                 ..parent
             },
         );
@@ -4487,6 +4867,21 @@ fn describe_ice(
         return;
     };
     sipral_nat::ice::write_stream(stream, local.credentials(), local.candidates());
+    // RFC 8840 §4.1.1 and §4.1.3: `trickle` among the options and an `a=mid` on the stream, for
+    // an offer of a call that trickles and an answer to an offer that did
+    if local.trickles() && answering.is_none_or(peer_trickles) {
+        let mid = match answering {
+            // RFC 5888 §9.1: the answer's tag is the offer's, and none when it had none
+            Some(offer) => stream_mid(offer),
+            None => Some(OWN_MID.to_owned()),
+        };
+        if let Some(mid) = mid
+            && stream.attribute("mid").is_none()
+        {
+            stream.attributes.push(Attribute::with_value("mid", &mid));
+        }
+        sipral_nat::ice::declare_trickle(stream, local.ended());
+    }
     if local.is_lite() {
         sipral_nat::ice::write_session(description);
     } else {
@@ -4532,6 +4927,34 @@ fn describe_line(
         Some(offer) => crate::webrtc::answer(description, offer, &source, catalog.webrtc()),
         None => crate::webrtc::offer(description, &source),
     }
+}
+
+/// The identification tag this end gives its audio stream when it offers trickle ICE, which
+/// needs one to tie a trickled candidate to its stream (RFC 8840 §4.4).
+#[cfg(feature = "ice")]
+const OWN_MID: &str = "0";
+
+/// Whether a description's ICE declares `trickle` on its stream (RFC 8838 §3).
+#[cfg(feature = "ice")]
+fn peer_trickles(description: &SessionDescription) -> bool {
+    description
+        .media
+        .iter()
+        .find(|stream| !stream.is_rejected())
+        .and_then(|stream| sipral_nat::ice::parse_remote(description, stream))
+        .is_some_and(|remote| remote.trickle)
+}
+
+/// The identification tag (RFC 5888) of a description's audio stream, when it has one.
+#[cfg(feature = "ice")]
+fn stream_mid(description: &SessionDescription) -> Option<String> {
+    description
+        .media
+        .iter()
+        .find(|stream| !stream.is_rejected())
+        .and_then(|stream| stream.attribute("mid"))
+        .and_then(|attribute| attribute.value.as_deref())
+        .map(|tag| tag.trim().to_owned())
 }
 
 /// Remove every ICE line from a description this end wrote, so [`describe_ice`] can write a

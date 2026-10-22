@@ -295,6 +295,12 @@ public sealed partial class SipralStack : IDisposable
     /// frames may be a microphone's), or the application's frames for
     /// <see cref="SipralHeldAudio.Application"/>.
     ///
+    /// <paramref name="iceTrickle"/> is whether every call's ICE candidates
+    /// trickle (RFC 8838, RFC 8840; <c>docs/06-nat.md</c>, "Trickle ICE"):
+    /// <c>0</c> for off, or a <see cref="SipralIceTrickle"/>. A call still
+    /// waits for its media socket's mapping, which this layer reads only until
+    /// the call's media starts.
+    ///
     /// <paramref name="resolver"/> answers
     /// <see cref="SipralEventKind.LookupWanted"/> for accounts added with
     /// <c>serverUri</c>, one thread per lookup; defaults to
@@ -346,7 +352,8 @@ public sealed partial class SipralStack : IDisposable
         bool? diagnosticTrace = null,
         SipralResolver? resolver = null,
         bool? systemEchoCancellation = null,
-        SipralHeldAudio heldAudio = SipralHeldAudio.Default)
+        SipralHeldAudio heldAudio = SipralHeldAudio.Default,
+        SipralIceTrickle iceTrickle = 0)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _chosenPort = bindPort;
@@ -474,6 +481,7 @@ public sealed partial class SipralStack : IDisposable
             config.DiagnosticTrace = ToggleOf(diagnosticTrace);
             config.SystemEchoCancellation = ToggleOf(systemEchoCancellation);
             config.HeldAudio = (uint)heldAudio;
+            config.IceTrickle = (uint)iceTrickle;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -931,6 +939,7 @@ public sealed partial class SipralStack : IDisposable
             config.Feedback = (uint)(options is { Feedback: true } ? SipralToggle.On : SipralToggle.Default);
             config.Focus = options is { Focus: true } ? 1u : 0u;
             config.FollowRedirects = options is { FollowRedirects: true } ? 1u : 0u;
+            config.IceTrickle = (uint)(options?.IceTrickle ?? 0);
             config.Codecs = codecsPin.Pointer;
             config.CodecsLen = (nuint)(codecsBytes?.Length ?? 0);
 

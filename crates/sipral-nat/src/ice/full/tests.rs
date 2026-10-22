@@ -71,5 +71,7 @@ fn remote_of(agent: &IceAgent, stream: StreamId) -> RemoteIce {
         candidates: agent.local_candidates(stream),
         pacing: Some(agent.ta()),
         mismatch: false,
+        trickle: false,
+        end_of_candidates: true,
     }
 }

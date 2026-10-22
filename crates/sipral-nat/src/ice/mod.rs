@@ -22,12 +22,20 @@
 //!
 //! Both roles authenticate a check the same way, in one private module both
 //! call.
+//!
+//! **Trickle ICE** (RFC 8838) is the full agent's, when
+//! [`IceConfig::trickle`] asks for it: candidates found after the
+//! description went out are paired as they arrive, the peer's are taken the
+//! same way, and a checklist is not given up while either end may still send
+//! one. [`SdpFrag`] reads and writes the body RFC 8840 carries them in over
+//! SIP.
 
 mod agent;
 mod candidate;
 mod checklist;
 mod full;
 mod sdp;
+mod sdpfrag;
 mod server;
 
 pub use agent::{CheckAnswer, LiteAgent, Role, ValidPair};
@@ -42,5 +50,9 @@ pub use full::{
     SendError, SharedRelay, StreamId, TRANSMIT_CEILING, Transmit, TurnServer,
 };
 pub use sdp::{
-    RemoteIce, ice_mismatch, parse_remote, write_media, write_pacing, write_session, write_stream,
+    END_OF_CANDIDATES, RemoteIce, TRICKLE, declare_trickle, ice_mismatch, parse_remote,
+    write_media, write_pacing, write_session, write_stream,
+};
+pub use sdpfrag::{
+    FragError, FragSection, MAX_BODY as MAX_SDPFRAG, MEDIA_TYPE as SDPFRAG_MEDIA_TYPE, SdpFrag,
 };

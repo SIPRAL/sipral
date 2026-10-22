@@ -34,7 +34,7 @@ use sipral_media::{g711, g722, g729, l16};
 use sipral_rtp::srtp::Suite;
 
 use crate::error::MediaError;
-use crate::ice::IcePolicy;
+use crate::ice::{IcePolicy, IceTrickle};
 use crate::keying::{self, SdesSignalling, SrtpPolicy};
 
 /// Default packetisation. 20 ms is what every peer expects and every codec here cuts cleanly.
@@ -416,6 +416,8 @@ pub struct CodecCatalog {
     /// ([`CodecCatalog::with_sdes_signalling`]).
     sdes_signalling: SdesSignalling,
     ice: IcePolicy,
+    /// Whether ICE candidates trickle ([`CodecCatalog::with_ice_trickle`]).
+    ice_trickle: IceTrickle,
     annex_b: bool,
     feedback: bool,
     voip_metrics: bool,
@@ -443,6 +445,7 @@ impl CodecCatalog {
             srtp_suites: None,
             sdes_signalling: SdesSignalling::AnyTransport,
             ice: IcePolicy::Off,
+            ice_trickle: IceTrickle::Off,
             annex_b: true,
             feedback: false,
             voip_metrics: true,
@@ -625,6 +628,20 @@ impl CodecCatalog {
             return IcePolicy::Offered;
         }
         self.ice
+    }
+
+    /// Whether this call's ICE candidates trickle (RFC 8838, RFC 8840). Off by default; see
+    /// [`IceTrickle`]. Nothing without an [`IcePolicy`] that offers full ICE.
+    #[must_use]
+    pub const fn with_ice_trickle(mut self, trickle: IceTrickle) -> Self {
+        self.ice_trickle = trickle;
+        self
+    }
+
+    /// Whether this call's ICE candidates trickle.
+    #[must_use]
+    pub const fn ice_trickle(&self) -> IceTrickle {
+        self.ice_trickle
     }
 
     /// Whether G.729 Annex B (SID frames and comfort noise in pauses) is allowed.

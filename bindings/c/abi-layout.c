@@ -79,7 +79,7 @@ _Static_assert(offsetof(sipral_counters_t, transactions_timed_out) == SIPRAL_LAY
 _Static_assert(offsetof(sipral_counters_t, requests_refused_at_limit) == SIPRAL_LAYOUT(224, 220, 224), "sipral_counters_t::requests_refused_at_limit");
 _Static_assert(offsetof(sipral_counters_t, requests_refused_at_limit) + sizeof(((sipral_counters_t *)0)->requests_refused_at_limit) == SIPRAL_LAYOUT(232, 228, 232), "sipral_counters_t is pinned through requests_refused_at_limit");
 
-_Static_assert(sizeof(sipral_stack_config_t) == SIPRAL_LAYOUT(432, 296, 304), "sipral_stack_config_t");
+_Static_assert(sizeof(sipral_stack_config_t) == SIPRAL_LAYOUT(440, 304, 312), "sipral_stack_config_t");
 _Static_assert(offsetof(sipral_stack_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_stack_config_t::size");
 _Static_assert(offsetof(sipral_stack_config_t, event_callback) == SIPRAL_LAYOUT(8, 4, 4), "sipral_stack_config_t::event_callback");
 _Static_assert(offsetof(sipral_stack_config_t, event_user_data) == SIPRAL_LAYOUT(16, 8, 8), "sipral_stack_config_t::event_user_data");
@@ -147,6 +147,8 @@ _Static_assert(offsetof(sipral_stack_config_t, system_echo_cancellation) == SIPR
 _Static_assert(offsetof(sipral_stack_config_t, reserved_35) == SIPRAL_LAYOUT(420, 284, 292), "sipral_stack_config_t::reserved_35");
 _Static_assert(offsetof(sipral_stack_config_t, held_audio) == SIPRAL_LAYOUT(424, 288, 296), "sipral_stack_config_t::held_audio");
 _Static_assert(offsetof(sipral_stack_config_t, reserved_36) == SIPRAL_LAYOUT(428, 292, 300), "sipral_stack_config_t::reserved_36");
+_Static_assert(offsetof(sipral_stack_config_t, ice_trickle) == SIPRAL_LAYOUT(432, 296, 304), "sipral_stack_config_t::ice_trickle");
+_Static_assert(offsetof(sipral_stack_config_t, reserved_1_4) == SIPRAL_LAYOUT(436, 300, 308), "sipral_stack_config_t::reserved_1_4");
 _Static_assert(offsetof(sipral_stack_config_t, rtp_port_max) + sizeof(((sipral_stack_config_t *)0)->rtp_port_max) == SIPRAL_LAYOUT(368, 248, 256), "sipral_stack_config_t is pinned through rtp_port_max");
 
 _Static_assert(sizeof(sipral_poll_result_t) == SIPRAL_LAYOUT(48, 28, 32), "sipral_poll_result_t");
@@ -263,7 +265,7 @@ _Static_assert(offsetof(sipral_account_config_t, webrtc) == SIPRAL_LAYOUT(496, 2
 _Static_assert(offsetof(sipral_account_config_t, reserved_1_4) == SIPRAL_LAYOUT(500, 276, 284), "sipral_account_config_t::reserved_1_4");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
-_Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(160, 92, 92), "sipral_call_config_t");
+_Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(168, 100, 100), "sipral_call_config_t");
 _Static_assert(offsetof(sipral_call_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_call_config_t::size");
 _Static_assert(offsetof(sipral_call_config_t, target) == SIPRAL_LAYOUT(8, 4, 4), "sipral_call_config_t::target");
 _Static_assert(offsetof(sipral_call_config_t, target_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_call_config_t::target_len");
@@ -287,6 +289,8 @@ _Static_assert(offsetof(sipral_call_config_t, feedback) == SIPRAL_LAYOUT(144, 76
 _Static_assert(offsetof(sipral_call_config_t, focus) == SIPRAL_LAYOUT(148, 80, 80), "sipral_call_config_t::focus");
 _Static_assert(offsetof(sipral_call_config_t, follow_redirects) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t::follow_redirects");
 _Static_assert(offsetof(sipral_call_config_t, reserved) == SIPRAL_LAYOUT(156, 88, 88), "sipral_call_config_t::reserved");
+_Static_assert(offsetof(sipral_call_config_t, ice_trickle) == SIPRAL_LAYOUT(160, 92, 92), "sipral_call_config_t::ice_trickle");
+_Static_assert(offsetof(sipral_call_config_t, reserved_1_4) == SIPRAL_LAYOUT(164, 96, 96), "sipral_call_config_t::reserved_1_4");
 _Static_assert(offsetof(sipral_call_config_t, focus) + sizeof(((sipral_call_config_t *)0)->focus) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t is pinned through focus");
 
 _Static_assert(sizeof(sipral_codec_info_t) == SIPRAL_LAYOUT(32, 28, 28), "sipral_codec_info_t");

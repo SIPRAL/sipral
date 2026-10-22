@@ -1084,6 +1084,8 @@ fn a_full_agent_takes_control_and_completes_against_a_lite_peer() {
         )]),
         pacing: None,
         mismatch: false,
+        trickle: false,
+        end_of_candidates: true,
     };
     let now = net.now;
     net.peer_mut(a)
@@ -1398,4 +1400,151 @@ fn two_branches_of_a_fork_each_run_their_own_checks_over_one_relay() {
     net.run_for(Duration::from_millis(200));
     assert!(net.turn.allocations.is_empty(), "a Refresh of lifetime 0");
     assert_eq!(relay.holders(), 0);
+}
+
+/// A STUN server nothing answers from: the unreachable one of RFC 8838
+/// Appendix A's second case, which holds a regular agent's gathering for
+/// all of `gathering_timeout`.
+const DEAD_STUN_SERVER: &str = "203.0.113.250:3478";
+
+/// Trickle what `from` has gathered since `sent` events ago to `to`, the way
+/// RFC 8840's INFO does: every candidate so far, under `from`'s credentials,
+/// and the receiver keeps what is new.
+fn forward_trickled(net: &mut Network, from: usize, to: usize, sent: &mut usize) {
+    let found = net
+        .peer(from)
+        .events
+        .iter()
+        .filter(|(_, event)| matches!(event, IceEvent::NewCandidates { .. }))
+        .count();
+    if found == *sent {
+        return;
+    }
+    *sent = found;
+    let now = net.now;
+    let (from_stream, to_stream) = (net.peer(from).stream, net.peer(to).stream);
+    let candidates = net.peer(from).agent.local_candidates(from_stream);
+    let generation = net.peer(from).agent.local_credentials().clone();
+    net.peer_mut(to)
+        .agent
+        .trickle_remote(
+            to_stream,
+            (generation.ufrag(), generation.pwd()),
+            &candidates,
+            false,
+            now,
+        )
+        .expect("the stream's generation");
+}
+
+/// Two agents behind NATs that map endpoint-independently and filter by
+/// address, each asking a STUN server that answers and one that never does,
+/// with their descriptions exchanged as soon as gathering starts: host
+/// candidates only, `trickle` declared. Returns how long after gathering
+/// started each end selected, and when each end's gathering finished.
+fn trickled_through_two_nats(trickle: bool, seed: u64) -> (Duration, Duration, Duration) {
+    let mut net = Network::new(seed);
+    let (nat_a, nat_b) = nat_pair(
+        &mut net,
+        Mapping::EndpointIndependent,
+        Filtering::AddressDependent,
+    );
+    let slow = IceConfig {
+        stun_servers: vec![
+            address(super::sim_tests::STUN_SERVER),
+            address(DEAD_STUN_SERVER),
+        ],
+        trickle,
+        ..IceConfig::default()
+    };
+    let (a_agent, a_stream) = agent(slow.clone(), "A", Role::Controlling, 10, address(A_HOST));
+    let (b_agent, b_stream) = agent(slow, "B", Role::Controlled, 20, address(B_HOST));
+    let a = net.add_full(a_agent, a_stream, &[address(A_HOST)], Some(nat_a));
+    let b = net.add_full(b_agent, b_stream, &[address(B_HOST)], Some(nat_b));
+    let start = net.now;
+    for index in [a, b] {
+        let now = net.now;
+        net.peer_mut(index).feed();
+        net.peer_mut(index)
+            .agent
+            .gather(now)
+            .expect("gathering starts");
+    }
+    let picked = |net: &Network, index: usize| {
+        net.peer(index)
+            .saw(|event| matches!(event, IceEvent::Selected { .. }))
+    };
+    if trickle {
+        // full trickle: the descriptions go at once, with what is known
+        let now = net.now;
+        let described = |net: &Network, index: usize| RemoteIce {
+            trickle: true,
+            end_of_candidates: false,
+            ..remote_of(&net.peer(index).agent, net.peer(index).stream)
+        };
+        let (from_a, from_b) = (described(&net, a), described(&net, b));
+        net.peer_mut(a)
+            .agent
+            .set_remote(a_stream, &from_b, now)
+            .expect("b's description");
+        net.peer_mut(b)
+            .agent
+            .set_remote(b_stream, &from_a, now)
+            .expect("a's description");
+        let (mut sent_a, mut sent_b) = (0, 0);
+        for _ in 0..2_000 {
+            net.run_for(Duration::from_millis(5));
+            forward_trickled(&mut net, a, b, &mut sent_a);
+            forward_trickled(&mut net, b, a, &mut sent_b);
+            if picked(&net, a) && picked(&net, b) && gathered(&net, a) && gathered(&net, b) {
+                break;
+            }
+        }
+    } else {
+        assert!(net.run_until(Duration::from_secs(10), |n| gathered(n, a)
+            && gathered(n, b)));
+        exchange(&mut net, a, b);
+        assert!(net.run_until(Duration::from_secs(20), |n| picked(n, a) && picked(n, b)));
+    }
+    let when = |index: usize, wanted: fn(&IceEvent) -> bool| {
+        net.peer(index)
+            .when(wanted)
+            .expect("it happened")
+            .duration_since(start)
+    };
+    let selected = |event: &IceEvent| matches!(event, IceEvent::Selected { .. });
+    let finished = |event: &IceEvent| *event == IceEvent::GatheringComplete;
+    let pair = net
+        .peer(a)
+        .agent
+        .selected_pair(a_stream, ComponentId::RTP)
+        .expect("a selected pair");
+    assert_eq!(pair.remote_kind, CandidateType::ServerReflexive, "{pair:?}");
+    let timings = (
+        when(a, selected).max(when(b, selected)),
+        when(a, finished),
+        when(b, finished),
+    );
+    assert_media_flows(&mut net, a, b);
+    timings
+}
+
+#[test]
+fn trickled_candidates_find_the_path_while_a_dead_server_still_holds_gathering() {
+    let (trickled, a_gathered, b_gathered) = trickled_through_two_nats(true, 21);
+    let timeout = IceConfig::default().gathering_timeout;
+    assert!(
+        a_gathered >= timeout && b_gathered >= timeout,
+        "the dead server held gathering for the whole timeout: {a_gathered:?}, {b_gathered:?}"
+    );
+    assert!(
+        trickled < timeout,
+        "both ends selected after {trickled:?}, before gathering finished"
+    );
+
+    let (regular, _, _) = trickled_through_two_nats(false, 21);
+    assert!(
+        regular > timeout,
+        "without trickle nothing could start before gathering finished: {regular:?}"
+    );
 }

@@ -109,6 +109,8 @@ fuzz_target!(|data: &[u8]| {
         candidates,
         pacing: None,
         mismatch: shape & 16 != 0,
+        trickle: shape & 32 != 0,
+        end_of_candidates: shape & 64 != 0,
     };
     if agent.set_remote(stream, &remote, now).is_err() {
         return;

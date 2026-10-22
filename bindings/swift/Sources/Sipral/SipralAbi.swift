@@ -1856,6 +1856,37 @@ public enum SipralHeldAudio: UInt32, Sendable {
     case application = 2
 }
 
+/// Whether a call trickles its ICE candidates (RFC 8838, carried in SIP by
+/// RFC 8840's INFO requests). Names for `sipral_stack_config_t::ice_trickle`
+/// (the stack's default) and `sipral_call_config_t::ice_trickle` (a per-call
+/// override). Added in ABI 1.4.
+///
+/// Zero means "unset": on the stack, SipralIceTrickle.off; on a call,
+/// the stack's setting. Nothing happens without a `SipralIce` that offers
+/// full ICE, and nothing for `SIPRAL_ICE_LITE`. A far end that answers
+/// without trickle gets regular ICE whatever this says.
+public enum SipralIceTrickle: UInt32, Sendable {
+    /// Regular ICE: candidates gathered before the description, no INFO,
+    /// and a far end's trickled candidates refused. The default.
+    case off = 1
+    /// Half trickle (RFC 8838 §16): the description is written as for
+    /// `Off`, once the socket's mapping and relay are in, and says
+    /// `trickle`; a far end that trickles may send its own candidates
+    /// later, which are taken. Right for a peer whose support is unknown.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+    case half = 2
+    /// Full trickle: a call on a socket whose STUN mapping or TURN relay
+    /// has not come back yet is placed or answered at once, with the
+    /// candidates known then, under `Require: trickle-ice` for a call
+    /// placed (RFC 8840 §5.1); the stack trickles the mapping and the
+    /// relay to the call when they come, and then the end of its
+    /// candidates. For a far end known to trickle.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+    case full = 3
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2710,12 +2741,12 @@ public enum Sipral {
         ("sipral_abi_version_t", MemoryLayout<sipral_abi_version_t>.size, 24, 20, 20),
         ("sipral_capabilities_t", MemoryLayout<sipral_capabilities_t>.size, 24, 16, 16),
         ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 232, 228, 232),
-        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 432, 296, 304),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 440, 304, 312),
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
         ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 504, 280, 288),
-        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 160, 92, 92),
+        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 168, 100, 100),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
         ("sipral_path_candidate_t", MemoryLayout<sipral_path_candidate_t>.size, 88, 60, 64),

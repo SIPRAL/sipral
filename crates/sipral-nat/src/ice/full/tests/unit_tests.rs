@@ -70,6 +70,8 @@ fn from_peer(candidates: Vec<Candidate>) -> RemoteIce {
         candidates,
         pacing: None,
         mismatch: false,
+        trickle: false,
+        end_of_candidates: true,
     }
 }
 
@@ -2026,4 +2028,422 @@ fn a_peer_that_arrives_inside_the_wait_still_connects_the_call() {
     agent.handle_timeout(now + IceConfig::default().patience);
     assert!(!events(&mut agent).contains(&IceEvent::StreamFailed { stream }));
     assert_eq!(agent.state(), IceState::Running);
+}
+
+// -- trickle ICE (RFC 8838) ---------------------------------------------------
+
+fn trickling(role: Role, config: IceConfig) -> (IceAgent, StreamId, Ids, Instant) {
+    gathered(
+        role,
+        IceConfig {
+            trickle: true,
+            ..config
+        },
+    )
+}
+
+/// The peer's description of a stream it trickles, with the candidates it
+/// knew when it wrote it.
+fn trickling_peer(candidates: Vec<Candidate>) -> RemoteIce {
+    RemoteIce {
+        trickle: true,
+        end_of_candidates: false,
+        ..from_peer(candidates)
+    }
+}
+
+/// The peer's generation, as an INFO body names it.
+fn peer_generation() -> (String, String) {
+    let peer = credentials("B");
+    (peer.ufrag().to_owned(), peer.pwd().to_owned())
+}
+
+/// Run the agent's checks for a while, answering every one sent to an
+/// address in `answering` as the peer would, and return every request sent.
+fn checks_answered(
+    agent: &mut IceAgent,
+    ids: &mut Ids,
+    now: &mut Instant,
+    answering: &[SocketAddr],
+    until: impl Fn(&IceAgent) -> bool,
+) -> Vec<(Instant, Transmit)> {
+    let mut sent = Vec::new();
+    for _ in 0..400 {
+        ids.feed(agent);
+        agent.handle_timeout(*now);
+        for transmit in drain(agent) {
+            let Ok(request) = Message::parse(&transmit.data) else {
+                continue;
+            };
+            if request.class() != Class::Request {
+                continue;
+            }
+            if answering.contains(&transmit.destination) {
+                let reply = response(request.transaction_id(), Class::Success, |builder| {
+                    builder
+                        .add_xor_address(AttributeType::XOR_MAPPED_ADDRESS, address(LOCAL))
+                        .expect("mapped");
+                });
+                agent.handle_datagram(address(LOCAL), transmit.destination, &reply, *now);
+            }
+            sent.push((*now, transmit));
+        }
+        if until(agent) {
+            break;
+        }
+        *now += Duration::from_millis(10);
+    }
+    sent
+}
+
+#[test]
+fn a_candidate_trickled_into_an_empty_checklist_is_paired_and_checked() {
+    let (mut agent, stream, mut ids, now) = trickling(Role::Controlling, config(false, false));
+    agent
+        .set_remote(stream, &trickling_peer(Vec::new()), now)
+        .expect("an answer with no candidates");
+    ids.feed(&mut agent);
+    agent.handle_timeout(now);
+    assert!(
+        requests(&drain(&mut agent)).is_empty(),
+        "an empty checklist sends nothing"
+    );
+    assert_eq!(agent.state(), IceState::Running);
+
+    let (ufrag, pwd) = peer_generation();
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host(PEER, PEER_PRIORITY, "1")],
+            false,
+            now,
+        )
+        .expect("the stream's generation");
+    ids.feed(&mut agent);
+    agent.handle_timeout(now);
+    let checked: Vec<SocketAddr> = requests(&drain(&mut agent))
+        .into_iter()
+        .map(|(to, _)| to)
+        .collect();
+    assert_eq!(checked, vec![address(PEER)]);
+}
+
+#[test]
+fn trickled_candidates_are_tied_to_a_generation_and_stop_at_the_peers_last() {
+    let (mut agent, stream, _, now) = trickling(Role::Controlled, config(false, false));
+    let (ufrag, pwd) = peer_generation();
+    let one = [host(PEER, PEER_PRIORITY, "1")];
+    assert_eq!(
+        agent.trickle_remote(stream, (&ufrag, &pwd), &one, false, now),
+        Err(IceError::NotDescribed)
+    );
+    agent
+        .set_remote(stream, &trickling_peer(Vec::new()), now)
+        .expect("an answer with no candidates");
+    assert!(!agent.remote_ended(stream));
+    let stale = credentials("C");
+    assert_eq!(
+        agent.trickle_remote(stream, (stale.ufrag(), stale.pwd()), &one, false, now),
+        Err(IceError::OtherGeneration),
+        "a delayed update from another generation (RFC 8838 §9)"
+    );
+    assert!(agent.remotes.is_empty());
+
+    agent
+        .trickle_remote(stream, (&ufrag, &pwd), &one, true, now)
+        .expect("the last of them");
+    assert!(agent.remote_ended(stream));
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host("198.51.100.21:6000", PEER_PRIORITY, "2")],
+            false,
+            now,
+        )
+        .expect("ignored rather than refused");
+    // and the answer repeated in a 2xx, listing what it listed then (RFC
+    // 8840 §4.3.2), adds nothing either
+    agent
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host("198.51.100.22:6000", PEER_PRIORITY, "3")]),
+            now,
+        )
+        .expect("the same generation");
+    assert_eq!(
+        agent.remotes.len(),
+        1,
+        "nothing after the end of candidates (RFC 8838 §14)"
+    );
+}
+
+#[test]
+fn a_peer_that_does_not_trickle_has_sent_its_last_candidate() {
+    let (mut agent, stream, _, now) = trickling(Role::Controlled, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("a regular ICE answer");
+    assert!(agent.remote_ended(stream));
+}
+
+#[test]
+fn a_candidate_the_caller_learns_late_is_taken_only_while_the_session_trickles() {
+    let learned = address("192.0.2.1:40000");
+    let server = Some(address(STUN_SERVER));
+
+    let (mut regular, stream, _, now) = gathered(Role::Controlling, config(false, false));
+    regular
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    assert_eq!(
+        regular.add_server_reflexive(stream, ComponentId::RTP, address(LOCAL), learned, server),
+        Err(IceError::AlreadyPaired),
+        "without trickle nothing would ever tell the peer"
+    );
+
+    let (mut agent, stream, _, now) = trickling(Role::Controlling, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    assert!(agent.may_trickle(stream));
+    let pairs = agent.pairs.len();
+    agent
+        .add_server_reflexive(stream, ComponentId::RTP, address(LOCAL), learned, server)
+        .expect("trickled after the answer");
+    assert!(
+        agent
+            .local_candidates(stream)
+            .iter()
+            .any(|candidate| candidate.address == learned
+                && candidate.kind == CandidateType::ServerReflexive),
+        "listed for the caller to send"
+    );
+    assert_eq!(
+        agent.pairs.len(),
+        pairs,
+        "it pairs as its base does, so no pair is added (RFC 8838 §10, item 4)"
+    );
+
+    agent.end_of_candidates();
+    assert!(!agent.may_trickle(stream));
+    assert_eq!(
+        agent.add_server_reflexive(
+            stream,
+            ComponentId::RTP,
+            address(LOCAL),
+            address("192.0.2.1:40002"),
+            server
+        ),
+        Err(IceError::TrickleOver),
+        "no candidate after the end of candidates (RFC 8838 §13)"
+    );
+}
+
+#[test]
+fn pairs_formed_late_start_waiting_or_frozen_by_their_foundation() {
+    let (mut agent, stream, mut ids, mut now) = trickling(Role::Controlled, config(false, false));
+    let (ufrag, pwd) = peer_generation();
+    agent
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    let state_of = |agent: &IceAgent, remote: &str| {
+        agent
+            .pairs
+            .iter()
+            .find(|pair| {
+                agent
+                    .remotes
+                    .get(pair.remote)
+                    .is_some_and(|candidate| candidate.candidate.address == address(remote))
+            })
+            .map(|pair| pair.state)
+    };
+    // rule 3: a foundation whose first pair has not succeeded leaves a lower
+    // pair of it Frozen
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host("198.51.100.21:6000", PEER_PRIORITY - 10, "1")],
+            false,
+            now,
+        )
+        .expect("trickled");
+    assert_eq!(
+        state_of(&agent, "198.51.100.21:6000"),
+        Some(PairState::Frozen)
+    );
+    // rule 1: a new foundation's first pair is Waiting at once
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host("198.51.100.30:6000", PEER_PRIORITY - 20, "2")],
+            false,
+            now,
+        )
+        .expect("trickled");
+    assert_eq!(
+        state_of(&agent, "198.51.100.30:6000"),
+        Some(PairState::Waiting)
+    );
+
+    let succeeded = |agent: &IceAgent| {
+        agent
+            .pairs
+            .iter()
+            .any(|pair| pair.state == PairState::Succeeded)
+    };
+    checks_answered(&mut agent, &mut ids, &mut now, &[address(PEER)], succeeded);
+    assert_eq!(state_of(&agent, PEER), Some(PairState::Succeeded));
+    // rule 2: once a pair of the foundation has succeeded, a new one of it
+    // starts Waiting even though it is not the first of its column
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host("198.51.100.22:6000", PEER_PRIORITY - 30, "1")],
+            false,
+            now,
+        )
+        .expect("trickled");
+    assert_eq!(
+        state_of(&agent, "198.51.100.22:6000"),
+        Some(PairState::Waiting)
+    );
+}
+
+#[test]
+fn a_signalled_candidate_takes_over_the_peer_reflexive_one_a_check_taught() {
+    let (mut agent, stream, mut ids, now) = trickling(Role::Controlling, config(false, false));
+    agent
+        .set_remote(stream, &trickling_peer(Vec::new()), now)
+        .expect("the answer");
+    // the peer's check beats its INFO: its source is learned as
+    // peer-reflexive (RFC 8445 §7.3.1.3)
+    ids.feed(&mut agent);
+    agent.handle_datagram(
+        address(LOCAL),
+        address(PEER),
+        &check_from_peer(3, Some(PEER_PRIORITY + 7), false),
+        now,
+    );
+    let kind = |agent: &IceAgent| {
+        agent
+            .remotes
+            .iter()
+            .find(|remote| {
+                remote.stream == stream.index() && remote.candidate.address == address(PEER)
+            })
+            .map(|remote| remote.candidate.kind)
+    };
+    assert_eq!(kind(&agent), Some(CandidateType::PeerReflexive));
+    let pairs = agent.pairs.len();
+
+    let (ufrag, pwd) = peer_generation();
+    let mut signalled = host(PEER, PEER_PRIORITY, "4");
+    signalled.kind = CandidateType::ServerReflexive;
+    agent
+        .trickle_remote(stream, (&ufrag, &pwd), &[signalled], false, now)
+        .expect("trickled");
+    assert_eq!(agent.pairs.len(), pairs, "the same pair, not a second one");
+    assert_eq!(kind(&agent), Some(CandidateType::ServerReflexive));
+    let priority = agent.pairs.first().map(|pair| pair.priority);
+    let local = agent.local_candidates(stream)[0].priority;
+    assert_eq!(
+        priority,
+        Some(pair_priority(local, PEER_PRIORITY)),
+        "ranked by the signalled priority, as the peer ranks it (RFC 8838 §11, 4.A)"
+    );
+}
+
+#[test]
+fn a_controlling_agent_waits_for_both_ends_to_finish_before_settling_early() {
+    let nominated_at = |sent: &[(Instant, Transmit)]| {
+        sent.iter()
+            .find(|(_, transmit)| {
+                Message::parse(&transmit.data).is_ok_and(|message| message.use_candidate())
+            })
+            .map(|(at, _)| *at)
+    };
+    let selected = |stream: StreamId| {
+        move |agent: &IceAgent| agent.selected_pair(stream, ComponentId::RTP).is_some()
+    };
+
+    // one pair, which succeeds at once: with both ends done there is nothing
+    // to wait for, as without trickle
+    let (mut agent, stream, mut ids, mut now) = trickling(Role::Controlling, config(false, false));
+    let start = now;
+    agent
+        .set_remote(
+            stream,
+            &RemoteIce {
+                end_of_candidates: true,
+                ..trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")])
+            },
+            now,
+        )
+        .expect("the answer");
+    agent.end_of_candidates();
+    let sent = checks_answered(
+        &mut agent,
+        &mut ids,
+        &mut now,
+        &[address(PEER)],
+        selected(stream),
+    );
+    let early = nominated_at(&sent).expect("a nomination");
+    assert!(
+        early.duration_since(start) < Duration::from_millis(500),
+        "nominated after {:?}",
+        early.duration_since(start)
+    );
+
+    // the same pair while the peer may still trickle a better one: the
+    // nomination waits `nomination_wait` (RFC 8838 §14)
+    let (mut agent, stream, mut ids, mut now) = trickling(Role::Controlling, config(false, false));
+    let start = now;
+    agent
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    agent.end_of_candidates();
+    let sent = checks_answered(
+        &mut agent,
+        &mut ids,
+        &mut now,
+        &[address(PEER)],
+        selected(stream),
+    );
+    let late = nominated_at(&sent).expect("a nomination");
+    assert!(
+        late.duration_since(start) >= IceConfig::default().nomination_wait,
+        "nominated after {:?}",
+        late.duration_since(start)
+    );
+    assert!(
+        !agent.may_trickle(stream),
+        "nothing is trickled after a nomination (RFC 8838 §13)"
+    );
 }

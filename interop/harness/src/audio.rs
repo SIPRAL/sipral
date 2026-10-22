@@ -300,6 +300,11 @@ pub(crate) struct Media {
     /// `Flow::Renumbered` stands between the stack and a far end that
     /// renumbered a dynamic type with (see [`Media::rewrite_payload`]).
     rewrite: Option<(u8, u8)>,
+    /// Servers whose datagrams are not the call's: the STUN servers a call
+    /// that trickles still asks while it runs ([`Media::intercept`]).
+    intercept: Vec<SocketAddr>,
+    /// What came from them, for [`Media::take_intercepted`].
+    intercepted: Vec<(SocketAddr, Vec<u8>)>,
 }
 
 impl Media {
@@ -338,6 +343,41 @@ impl Media {
             pending_mark: None,
             marks: Vec::new(),
             rewrite: None,
+            intercept: Vec::new(),
+            intercepted: Vec::new(),
+        }
+    }
+
+    /// Keep what `servers` send out of the call: [`Media::turn`] and
+    /// [`Media::receive_waiting`] set it aside for [`Media::take_intercepted`]
+    /// instead. For the STUN servers a call that trickles is still asking
+    /// while its description is out and its session runs (`crate::trickle`).
+    pub(crate) fn intercept(&mut self, servers: &[SocketAddr]) {
+        self.intercept = servers.to_vec();
+    }
+
+    /// What the servers [`Media::intercept`] names sent since the last call.
+    pub(crate) fn take_intercepted(&mut self) -> Vec<(SocketAddr, Vec<u8>)> {
+        std::mem::take(&mut self.intercepted)
+    }
+
+    /// Before the call on this socket, known to it as `local`, has a
+    /// session: what the intercepted servers send is set aside, and
+    /// everything else goes to `engine` (`MediaEngine::receive_early`), which
+    /// keeps the far end's first checks for the agent the session will open.
+    pub(crate) fn receive_waiting(
+        &mut self,
+        engine: &mut sipral::MediaEngine,
+        local: SocketAddr,
+        now: Instant,
+    ) {
+        while let Ok((length, from)) = self.socket.recv_from(&mut self.inbox) {
+            let data = self.inbox.get(..length).unwrap_or_default();
+            if self.intercept.contains(&from) {
+                self.intercepted.push((from, data.to_vec()));
+            } else {
+                let _ = engine.receive_early(local, from, data, now);
+            }
         }
     }
 
@@ -621,6 +661,10 @@ impl Media {
             match self.socket.recv_from(&mut self.inbox) {
                 Ok((length, from)) => {
                     let datagram = self.inbox.get_mut(..length).unwrap_or_default();
+                    if self.intercept.contains(&from) {
+                        self.intercepted.push((from, datagram.to_vec()));
+                        continue;
+                    }
                     match session.receive(datagram, from, now) {
                         Arrival::Queued => {
                             self.heard.received = self.heard.received.saturating_add(1);

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     CONSENT_EXPIRY, Check, ChecklistState, Consent, Credentials, IceAgent, IceEvent, Pair,
-    PairOutcome, Phase, Purpose, Remote, Valid, link_local, priority_in_range,
+    PairOutcome, Purpose, Remote, Valid, link_local, priority_in_range,
 };
 use crate::ice::agent::Role;
 use crate::ice::candidate::{
@@ -62,11 +62,24 @@ impl IceAgent {
                 && candidate.address.port() != 0
                 && !candidate.address.ip().is_unspecified()
                 && components.contains(&candidate.component);
-            if !usable
-                || self
-                    .remote_at(stream, candidate.component, candidate.address)
-                    .is_some()
-            {
+            if !usable {
+                continue;
+            }
+            if let Some(held) = self.remote_at(stream, candidate.component, candidate.address) {
+                // RFC 8838 §11, item 4.A: a check taught this agent the
+                // address before the peer's signalling did, as
+                // peer-reflexive; the pair keeps its state and takes the
+                // signalled priority, so both ends rank it alike
+                let learned = self.remotes.get(held).is_some_and(|remote| {
+                    remote.candidate.kind == CandidateType::PeerReflexive
+                        && candidate.kind != CandidateType::PeerReflexive
+                });
+                if learned && let Some(remote) = self.remotes.get_mut(held) {
+                    remote.candidate.kind = candidate.kind;
+                    remote.candidate.priority = candidate.priority;
+                    remote.candidate.related = candidate.related;
+                    self.reprioritise();
+                }
                 continue;
             }
             self.remotes.push(Remote {
@@ -169,6 +182,21 @@ impl IceAgent {
     /// would leave them pointing at nothing — a valid pair whose check could
     /// never be repeated with USE-CANDIDATE.
     fn enforce_pair_limit(&mut self) {
+        // RFC 8838 §10, item 6, and §11, item 5: a pair formed late "SHOULD
+        // discard any pairs in the Failed state to make room for the new
+        // pair" before discarding one that may still succeed
+        if self.config.trickle {
+            while self.pairs.len() > self.config.max_pairs {
+                let Some(lowest) = self
+                    .pairs
+                    .iter()
+                    .rposition(|pair| pair.state == PairState::Failed)
+                else {
+                    break;
+                };
+                self.pairs.remove(lowest);
+            }
+        }
         let sizes: Vec<usize> = (0..self.streams.len())
             .map(|stream| {
                 self.pairs
@@ -209,23 +237,22 @@ impl IceAgent {
         }
     }
 
-    /// The starting states of pairs just formed (§6.1.2.6, step 4). A
-    /// foundation some older pair already has is left to that pair's fate.
+    /// The starting states of pairs just formed: §6.1.2.6, step 4, when the
+    /// checklist set is formed, and RFC 8838 §12's three rules for a pair
+    /// formed later, which reduce to the same when every pair is new.
+    ///
+    /// A new pair is Waiting when it is the first of its foundation across
+    /// the set, by first checklist, lowest component and highest priority
+    /// (rule one), or when a pair of its foundation has already Succeeded
+    /// (rule two), and Frozen otherwise (rule three).
     fn unfreeze_new(&mut self, first: u32) {
         let waiting: Vec<u32> = {
             let mut ids = Vec::new();
             let mut slots = Vec::new();
-            for pair in self.pairs.iter().filter(|pair| pair.id >= first) {
+            for pair in &self.pairs {
                 let Some(foundation) = self.foundation_of(pair) else {
                     continue;
                 };
-                let taken = self
-                    .pairs
-                    .iter()
-                    .any(|older| older.id < first && self.foundation_of(older) == Some(foundation));
-                if taken {
-                    continue;
-                }
                 ids.push(pair.id);
                 slots.push(Slot {
                     checklist: pair.stream,
@@ -234,9 +261,23 @@ impl IceAgent {
                     foundation,
                 });
             }
-            initially_waiting(&slots)
+            let topmost: Vec<u32> = initially_waiting(&slots)
                 .into_iter()
                 .filter_map(|position| ids.get(position).copied())
+                .collect();
+            self.pairs
+                .iter()
+                .filter(|pair| pair.id >= first && pair.state == PairState::Frozen)
+                .filter(|pair| {
+                    let foundation = self.foundation_of(pair);
+                    topmost.contains(&pair.id)
+                        || self.pairs.iter().any(|older| {
+                            older.id < first
+                                && older.state == PairState::Succeeded
+                                && self.foundation_of(older) == foundation
+                        })
+                })
+                .map(|pair| pair.id)
                 .collect()
         };
         for id in waiting {
@@ -280,7 +321,7 @@ impl IceAgent {
     /// §6.1.4.2: the next Running checklist in the set, and a check in it;
     /// a checklist with nothing to check hands its turn straight on.
     fn check_step(&mut self, now: Instant) -> Paced {
-        if self.phase != Phase::Gathered {
+        if !self.checking() {
             return Paced::Idle;
         }
         let count = self.streams.len();
@@ -1050,7 +1091,7 @@ impl IceAgent {
     /// [`super::IceConfig::nomination_wait`] has passed since its first valid
     /// pair, whichever comes first.
     pub(super) fn consider_nomination(&mut self, now: Instant) {
-        if self.role != Role::Controlling || self.phase != Phase::Gathered {
+        if self.role != Role::Controlling || !self.checking() {
             return;
         }
         for stream in 0..self.streams.len() {
@@ -1090,7 +1131,12 @@ impl IceAgent {
                 let waited = first
                     .checked_add(self.config.nomination_wait)
                     .is_none_or(|at| at <= now);
-                if higher_pending && !waited {
+                // under trickle ICE a pair nobody has formed yet can still
+                // beat this one, until both ends have said they are done:
+                // the end of candidates "provides a notification that such
+                // candidates are not forthcoming" (RFC 8838 §14)
+                let more_may_come = self.candidates_may_come(stream);
+                if (higher_pending || more_may_come) && !waited {
                     continue;
                 }
                 let Some(pair) = self.pair_mut(generating) else {

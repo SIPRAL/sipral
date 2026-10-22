@@ -207,6 +207,10 @@ public final class SipralStack: @unchecked Sendable {
     /// every call does about ICE (RFC 8445) unless `placeCall(ice:)` says
     /// otherwise; `SipralIce.off` by default. `SipralIce.lite` is only for a
     /// server reachable at the address it advertises (`docs/06-nat.md`).
+    /// `iceTrickle` is whether candidates trickle (RFC 8838, RFC 8840;
+    /// `docs/06-nat.md`, "Trickle ICE"); `SipralIceTrickle.off` by default.
+    /// A call still waits for its media socket's mapping, which this layer
+    /// reads only until the call's media starts.
     ///
     /// `stunServer` (`host:port`, an address, not a name) turns on
     /// `SIPRAL_NAT_STUN`: accounts' `Contact` and every media socket move to
@@ -331,6 +335,7 @@ public final class SipralStack: @unchecked Sendable {
         offerDtmf: Bool? = nil,
         srtp: SipralSrtp? = nil,
         ice: SipralIce? = nil,
+        iceTrickle: SipralIceTrickle? = nil,
         stunServer: String? = nil,
         turn: TurnServer? = nil,
         g729AnnexB: Bool? = nil,
@@ -457,6 +462,7 @@ public final class SipralStack: @unchecked Sendable {
                     config.media_seed_len = 32
                     config.srtp = srtp?.rawValue ?? 0
                     config.ice = ice?.rawValue ?? 0
+                    config.ice_trickle = iceTrickle?.rawValue ?? 0
                     config.g729_annex_b = SipralStack.toggle(g729AnnexB)
                     config.referrals = SipralStack.toggle(referrals)
                     config.registrar_keepalive = SipralStack.toggle(registrarKeepalive)
@@ -1426,8 +1432,8 @@ public final class SipralStack: @unchecked Sendable {
     ///
     /// With a `stunServer` this returns once the server answers or 5.5 s
     /// pass (and, with TURN, once the relay is allocated or refused);
-    /// `takeIncomingCall` waits the same way. `ice` overrides the stack's
-    /// policy. `headers` go on the INVITE as written (`Alert-Info`,
+    /// `takeIncomingCall` waits the same way. `ice` and `iceTrickle` override
+    /// the stack's. `headers` go on the INVITE as written (`Alert-Info`,
     /// `Answer-Mode`).
     ///
     /// `codecs` replaces the stack's order (`sipral_codec_info_t` names,
@@ -1452,7 +1458,8 @@ public final class SipralStack: @unchecked Sendable {
         text: Bool = false,
         feedback: Bool = false,
         focus: Bool = false,
-        followRedirects: Bool = false
+        followRedirects: Bool = false,
+        iceTrickle: SipralIceTrickle? = nil
     ) throws -> Call {
         let mediaHost = self.mediaHost(mediaHost, account: account, destination: destination)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
@@ -1479,6 +1486,7 @@ public final class SipralStack: @unchecked Sendable {
                 config.media_address_len = parts[1].count
                 config.srtp = srtp?.rawValue ?? 0
                 config.ice = ice?.rawValue ?? 0
+                config.ice_trickle = iceTrickle?.rawValue ?? 0
                 if let destinationPointer = parts[2].pointer {
                     config.destination = destinationPointer
                     config.destination_len = parts[2].count

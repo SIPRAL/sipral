@@ -36,6 +36,7 @@ __all__ = [
     "Direction",
     "MediaFault",
     "Ice",
+    "IceTrickle",
     "Nat",
     "NatMapping",
     "NatRelay",
@@ -180,7 +181,11 @@ MediaFault = _enum("MediaFault", "SIPRAL_MEDIA_FAULT_")
 
 #: A `sipral_ice_t`, per stack or per call; `docs/06-nat.md` says why `OFF`
 #: is the default.
-Ice = _enum("Ice", "SIPRAL_ICE_")
+Ice = _enum("Ice", "SIPRAL_ICE_", exclude=("SIPRAL_ICE_TRICKLE_",))
+
+#: A `sipral_ice_trickle_t`, per stack or per call: whether ICE candidates
+#: trickle (RFC 8838, RFC 8840); `docs/06-nat.md`, "Trickle ICE".
+IceTrickle = _enum("IceTrickle", "SIPRAL_ICE_TRICKLE_")
 
 #: A `sipral_nat_t`.
 Nat = _enum("Nat", "SIPRAL_NAT_", exclude=("SIPRAL_NAT_MAPPING_", "SIPRAL_NAT_RELAY_"))

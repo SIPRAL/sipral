@@ -238,8 +238,8 @@ impl IceAgent {
                 }
             }
             BindingProgress::Mapped(mapped) => {
-                if first {
-                    self.add_reflexive(base, mapped, Some(server.ip()), preference);
+                if first && self.add_reflexive(base, mapped, Some(server.ip()), preference) {
+                    self.trickled(base);
                 }
                 if let Some(entry) = self.gatherers.get_mut(index) {
                     if first {
@@ -289,6 +289,12 @@ impl IceAgent {
     /// host candidate exists yet — and [`IceError::AlreadyPaired`] once the
     /// peer's candidates have arrived for the stream, since a candidate
     /// advertised after its checklist was formed is one nothing checks.
+    ///
+    /// Under [`super::IceConfig::trickle`] it may come after the peer's
+    /// candidates, for the caller to trickle (RFC 8838 §9): it pairs as its
+    /// base already does (§10, item 4), so no pair is added, and the peer
+    /// checks it once told. Then only [`IceError::TrickleOver`] refuses it,
+    /// after [`IceAgent::end_of_candidates`] or a nomination.
     pub fn add_server_reflexive(
         &mut self,
         stream: StreamId,
@@ -297,10 +303,7 @@ impl IceAgent {
         mapped: SocketAddr,
         server: Option<SocketAddr>,
     ) -> Result<(), IceError> {
-        let entry = self.streams.get(stream.0).ok_or(IceError::UnknownStream)?;
-        if entry.remote.is_some() {
-            return Err(IceError::AlreadyPaired);
-        }
+        self.may_add(stream)?;
         if self.phase == Phase::New {
             return Err(IceError::UnknownBase);
         }
@@ -382,10 +385,7 @@ impl IceAgent {
         relay: &SharedRelay,
         now: Instant,
     ) -> Result<(), IceError> {
-        let entry = self.streams.get(stream.0).ok_or(IceError::UnknownStream)?;
-        if entry.remote.is_some() {
-            return Err(IceError::AlreadyPaired);
-        }
+        self.may_add(stream)?;
         if self.phase == Phase::New {
             return Err(IceError::UnknownBase);
         }
@@ -417,7 +417,53 @@ impl IceAgent {
         let relay = self.relays.len() - 1;
         self.add_relayed_candidate(relay, relayed, mapped);
         self.drain_relay(relay, now);
+        self.pair_late(stream.0, now);
         Ok(())
+    }
+
+    /// Whether a candidate the caller hands in for `stream` may be added:
+    /// before the peer's candidates always, and after them only while the
+    /// session trickles (RFC 8838 §9, §13).
+    fn may_add(&self, stream: StreamId) -> Result<(), IceError> {
+        let entry = self.streams.get(stream.0).ok_or(IceError::UnknownStream)?;
+        if entry.remote.is_none() {
+            return Ok(());
+        }
+        if !self.config.trickle {
+            return Err(IceError::AlreadyPaired);
+        }
+        if !self.may_trickle(stream) {
+            return Err(IceError::TrickleOver);
+        }
+        Ok(())
+    }
+
+    /// Pair a stream's candidates again after one was added once checks may
+    /// have started: a relayed candidate has no base among the others, so it
+    /// forms pairs of its own, and its relay needs the peer's permissions
+    /// (RFC 8838 §10).
+    fn pair_late(&mut self, stream: usize, now: Instant) {
+        let described = self
+            .streams
+            .get(stream)
+            .is_some_and(|entry| entry.remote.is_some() && entry.formed);
+        if described && self.checking() {
+            self.permit_remotes(stream, now);
+            self.form_checklist(stream, now);
+        }
+    }
+
+    /// Tell the caller gathering found something to trickle for the stream
+    /// `base` belongs to.
+    fn trickled(&mut self, base: usize) {
+        if !self.config.trickle {
+            return;
+        }
+        if let Some(stream) = self.bases.get(base).map(|entry| entry.stream) {
+            self.events.push_back(IceEvent::NewCandidates {
+                stream: StreamId(stream),
+            });
+        }
     }
 
     /// The allocations this agent holds and has not let go of, as handles
@@ -483,32 +529,39 @@ impl IceAgent {
     /// the redundant candidate with the lower priority" (RFC 8445 §5.1.3).
     /// The common case is a host with no NAT in front of it, whose
     /// server-reflexive address is its host address.
+    ///
+    /// Under trickle ICE the held one stays whatever the priorities:
+    /// "Trickle ICE agents will consider the new candidate redundant
+    /// regardless of its priority" (RFC 8838 §9), since the peer may already
+    /// have been told the one held. `true` when a candidate was added.
     fn add_reflexive(
         &mut self,
         base: usize,
         mapped: SocketAddr,
         server: Option<IpAddr>,
         local_preference: u16,
-    ) {
+    ) -> bool {
         let Some(entry) = self.bases.get(base) else {
-            return;
+            return false;
         };
         let (stream, component, address) = (entry.stream, entry.component, entry.address);
         let kind = CandidateType::ServerReflexive;
         let priority = candidate_priority(kind, local_preference, component);
         let foundation = self.foundation(kind, address.ip(), server, Transport::Udp);
+        let trickle = self.config.trickle;
         if let Some(existing) = self.locals.iter_mut().find(|local| {
             local.stream == stream
                 && local.candidate.component == component
                 && local.candidate.address == mapped
                 && local.base == address
         }) {
-            if existing.candidate.kind == kind && existing.candidate.priority < priority {
+            if !trickle && existing.candidate.kind == kind && existing.candidate.priority < priority
+            {
                 existing.candidate.priority = priority;
                 existing.candidate.foundation = foundation;
                 existing.local_preference = local_preference;
             }
-            return;
+            return false;
         }
         self.locals.push(LocalCandidate {
             stream,
@@ -525,6 +578,7 @@ impl IceAgent {
             relay: None,
             local_preference,
         });
+        true
     }
 
     /// Send what a TURN client has queued and act on what it reports.
@@ -605,25 +659,33 @@ impl IceAgent {
             entry.progress = Progress::Done;
             entry.refresh_at = now.checked_add(keepalive);
         }
-        self.add_relayed_candidate(relay, relayed, mapped);
+        if self.add_relayed_candidate(relay, relayed, mapped)
+            && let Some(base) = self.relays.get(relay).map(|entry| entry.base)
+        {
+            self.trickled(base);
+            if let Some(stream) = self.bases.get(base).map(|entry| entry.stream) {
+                self.pair_late(stream, now);
+            }
+        }
     }
 
     /// The relayed candidate an allocation stands for, and the
-    /// server-reflexive one its response named beside it.
+    /// server-reflexive one its response named beside it. `true` when either
+    /// was added.
     fn add_relayed_candidate(
         &mut self,
         relay: usize,
         relayed: SocketAddr,
         mapped: Option<SocketAddr>,
-    ) {
+    ) -> bool {
         let Some(entry) = self.relays.get(relay) else {
-            return;
+            return false;
         };
         let (base, server, transport) = (entry.base, entry.server, entry.client.transport());
         let (relay_preference, reflexive_preference) =
             (entry.relay_preference, entry.reflexive_preference);
         let Some(host) = self.bases.get(base) else {
-            return;
+            return false;
         };
         let (stream, component, socket) = (host.stream, host.component, host.address);
 
@@ -666,9 +728,12 @@ impl IceAgent {
         // connection's segments come from, a mapping the NAT made for that
         // connection alone: nothing sent to it reaches the host socket's
         // datagrams, so it is no server-reflexive candidate of the socket's
-        if let Some(mapped) = mapped.filter(|_| !transport.is_stream()) {
-            self.add_reflexive(base, mapped, Some(server.ip()), reflexive_preference);
-        }
+        let reflexive = mapped
+            .filter(|_| !transport.is_stream())
+            .is_some_and(|mapped| {
+                self.add_reflexive(base, mapped, Some(server.ip()), reflexive_preference)
+            });
+        !duplicate || reflexive
     }
 
     fn relay_closed(&mut self, relay: usize, error: TurnError, now: Instant) {

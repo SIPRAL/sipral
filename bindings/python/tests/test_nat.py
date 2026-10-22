@@ -34,6 +34,7 @@ from sipral.enums import (
     CandidateKind,
     EventKind,
     Ice,
+    IceTrickle,
     Nat,
     NatRelay,
     PathKind,
@@ -793,3 +794,74 @@ class TwoStacksTalkThroughIce(unittest.IsolatedAsyncioTestCase):
             while event is None or event.kind != EventKind.MEDIA_PATH_CHOSEN:
                 event = await asyncio.wait_for(call.events.get(), timeout=8)
         return alice_call, bob_call
+
+
+class TwoStacksTrickleIce(unittest.IsolatedAsyncioTestCase):
+    """`ice_trickle` on the stack and on a call (RFC 8838, RFC 8840): a call
+    placed under ``IceTrickle.FULL`` requires `trickle-ice`, which the far
+    stack takes because its own setting is not off, and ICE chooses a path
+    on both. A value that names no stance is refused before anything is sent.
+    """
+
+    async def asyncSetUp(self) -> None:
+        host = _routable_address()
+        if host is None:
+            self.skipTest("no routable address on this machine to gather a host candidate from")
+        self.host = host
+        loop = asyncio.get_running_loop()
+        self.alice_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, ice=Ice.REQUIRED)
+        self.bob_stack = Stack(
+            bind_host=host,
+            loop=loop,
+            audio=AudioMode.APPLICATION,
+            ice=Ice.REQUIRED,
+            ice_trickle=IceTrickle.HALF,
+        )
+        self.addAsyncCleanup(self._close_stacks)
+
+    async def _close_stacks(self) -> None:
+        self.alice_stack.close()
+        self.bob_stack.close()
+
+    async def test_a_call_that_trickles_in_full_chooses_a_path(self) -> None:
+        alice_account = self.alice_stack.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address=self.bob_stack.bind_address,
+        )
+        self.bob_stack.add_account(
+            "sip:bob@sipral.invalid",
+            registrar_address=self.alice_stack.bind_address,
+        )
+        alice_call = self.alice_stack.place_call(
+            alice_account,
+            f"sip:bob@{self.bob_stack.bind_address}",
+            media_host=self.host,
+            ice_trickle=IceTrickle.FULL,
+        )
+        self.addAsyncCleanup(alice_call.close)
+
+        bob_call = None
+        while bob_call is None:
+            event = await asyncio.wait_for(self.bob_stack.events.get(), timeout=8)
+            if event.kind == EventKind.INCOMING_CALL:
+                bob_call = self.bob_stack.answer_call(event, media_host=self.host)
+        self.addAsyncCleanup(bob_call.close)
+
+        for call in (alice_call, bob_call):
+            event = None
+            while event is None or event.kind != EventKind.MEDIA_PATH_CHOSEN:
+                event = await asyncio.wait_for(call.events.get(), timeout=8)
+        self.assertEqual(alice_call.state, CallState.CONFIRMED)
+
+    async def test_a_trickle_nobody_named_is_refused(self) -> None:
+        alice_account = self.alice_stack.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address=self.bob_stack.bind_address,
+        )
+        with self.assertRaises(SipralError):
+            self.alice_stack.place_call(
+                alice_account,
+                f"sip:bob@{self.bob_stack.bind_address}",
+                media_host=self.host,
+                ice_trickle=99,
+            )

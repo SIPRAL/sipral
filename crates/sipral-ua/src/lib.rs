@@ -111,6 +111,11 @@ mod subscription;
 mod tests;
 mod timers;
 mod transfer;
+/// The `trickle-ice` Info Package (RFC 8840 §10): trickled ICE candidates in
+/// INFO requests.
+pub mod trickle;
+#[cfg(test)]
+mod trickle_tests;
 mod verification;
 pub mod websocket;
 #[cfg(test)]

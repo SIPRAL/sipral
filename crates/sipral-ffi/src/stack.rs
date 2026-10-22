@@ -52,8 +52,9 @@ use crate::handle::{
 };
 use crate::inband::SipralDtmfDetection;
 use crate::media::{
-    SipralIce, SipralSrtp, SipralSrtpSuite, SipralStreamStats, SipralToggle, catalog_of,
-    ice_policy, media_failed, srtp_policy, stream_stats, toggle_of, toggled,
+    SipralIce, SipralIceTrickle, SipralSrtp, SipralSrtpSuite, SipralStreamStats, SipralToggle,
+    catalog_of, ice_policy, ice_trickle, media_failed, srtp_policy, stream_stats, toggle_of,
+    toggled,
 };
 use crate::names::Names;
 use crate::nat::SipralNat;
@@ -371,6 +372,14 @@ record! {
         pub held_audio: Number<SipralHeldAudio>,
         /// Zero.
         pub reserved_36: u32,
+        /// Default trickle ICE for every call: a `SipralIceTrickle`, or zero for
+        /// `SIPRAL_ICE_TRICKLE_OFF`. `sipral_call_config_t::ice_trickle` overrides
+        /// it. Anything but off also takes an INVITE that requires trickle ICE
+        /// rather than refusing it 420 (`docs/06-nat.md`, "Trickle ICE"). Added
+        /// in ABI 1.4.
+        pub ice_trickle: Number<SipralIceTrickle>,
+        /// Zero.
+        pub reserved_1_4: u32,
     }
 }
 
@@ -1075,13 +1084,19 @@ fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// The user agent's policies: out-of-dialog REFER, registrar keep-alive.
+/// The user agent's policies: out-of-dialog REFER, trickle ICE's INVITEs,
+/// registrar keep-alive.
 fn agent_policy(
     agent: &mut UserAgent,
     config: &SipralStackConfig,
     now: Instant,
 ) -> Result<(), Fail> {
     agent.allow_referrals(toggled(config.referrals, "referrals", false)?);
+    // a stack that trickles takes an INVITE that requires it (RFC 8840 §5.1)
+    agent.accept_trickle_ice(
+        ice_trickle(config.ice_trickle, "ice_trickle")?
+            .is_some_and(|trickle| trickle != sipral::IceTrickle::Off),
+    );
     agent
         .keep_registrar_flows_alive(registrar_keepalive(config)?, now)
         .map_err(|error| {
@@ -1169,6 +1184,9 @@ unsafe fn engine_for(
         catalog = catalog
             .with_srtp_suites(&suites)
             .map_err(|error| media_failed(&error))?;
+    }
+    if let Some(trickle) = ice_trickle(config.ice_trickle, "ice_trickle")? {
+        catalog = catalog.with_ice_trickle(trickle);
     }
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
     Ok(MediaEngine::new(catalog, media, clock, *media_seed))
@@ -2633,6 +2651,8 @@ pub(crate) mod tests {
             reserved_35: 0,
             held_audio: 0,
             reserved_36: 0,
+            ice_trickle: 0,
+            reserved_1_4: 0,
             dtmf_detection: 0,
         }
     }
