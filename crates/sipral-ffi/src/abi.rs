@@ -691,6 +691,7 @@ pub const SURFACE: Surface = Surface {
         crate::network_test::SipralNatKind::ABI,
         crate::network_test::SipralServerReach::ABI,
         crate::stack::SipralHeldAudio::ABI,
+        crate::media::SipralIceTrickle::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,

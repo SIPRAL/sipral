@@ -469,6 +469,11 @@ struct Active {
     relay_out: VecDeque<sipral::RelayDatagram>,
     #[cfg(feature = "ice")]
     streams: Streams,
+    /// Media sockets whose call trickles in full and was described before
+    /// their mapping or relay came back, with that call: what comes goes to
+    /// it ([`Nat::described`]).
+    #[cfg(feature = "ice")]
+    trickling: HashMap<SocketAddr, sipral::CallHandle>,
 }
 
 /// TURN connections over TCP or TLS, one per media socket.
@@ -551,6 +556,8 @@ impl Nat {
             relay_out: VecDeque::new(),
             #[cfg(feature = "ice")]
             streams: Streams::default(),
+            #[cfg(feature = "ice")]
+            trickling: HashMap::new(),
         });
         Self::bound(state, transport, protocol, local, now);
     }
@@ -743,7 +750,131 @@ impl Nat {
         }
         #[cfg(feature = "ice")]
         Self::drain_relays(state, stack, &mut raised);
+        #[cfg(feature = "ice")]
+        Self::trickle(state, now);
         raised
+    }
+
+    /// What a call that trickles in full on `local` is described by: the mapping and the relay
+    /// that have come back, and nothing for those still on their way, which go to the call when
+    /// they come ([`Nat::described`]). A socket nobody asked about has neither.
+    #[cfg(feature = "ice")]
+    pub(crate) fn so_far(
+        state: &mut StackState,
+        local: SocketAddr,
+    ) -> (Option<SocketAddr>, HeldRelay) {
+        let Some(active) = state.nat.active.as_mut() else {
+            return (None, None);
+        };
+        let public = match active.mappings.state(local) {
+            Some(sipral::MappingState::Mapped(public)) => Some(public),
+            _ => None,
+        };
+        let relay = active.relays.as_mut().and_then(|relays| relays.take(local));
+        (public, relay)
+    }
+
+    /// Whether `local` still waits for its STUN mapping or its TURN relay.
+    #[cfg(feature = "ice")]
+    fn waiting(active: &Active, local: SocketAddr) -> bool {
+        let mapping = matches!(
+            active.mappings.state(local),
+            Some(sipral::MappingState::Asking)
+        );
+        let relay = active
+            .relays
+            .as_ref()
+            .is_some_and(|relays| relays.pending(local))
+            || active.streams.connecting.contains(&local);
+        mapping || relay
+    }
+
+    /// A call was described on `local`; without ICE nothing trickles, and the socket is spent.
+    #[cfg(not(feature = "ice"))]
+    pub(crate) fn described(
+        state: &mut StackState,
+        local: SocketAddr,
+        _call: sipral::CallHandle,
+        _trickling: bool,
+        now: Instant,
+    ) {
+        Self::spent(state, local, now);
+    }
+
+    /// A call was described on `local`.
+    ///
+    /// One that trickles in full whose socket still waits for its mapping or relay keeps them
+    /// coming: each goes to the call as it arrives ([`Nat::trickle`]), and the end of its
+    /// candidates (RFC 8838 §13) after the last. Any other is [`Nat::spent`] as before; one that
+    /// trickles says at once that it has no more candidates, since nothing else is coming.
+    #[cfg(feature = "ice")]
+    pub(crate) fn described(
+        state: &mut StackState,
+        local: SocketAddr,
+        call: sipral::CallHandle,
+        trickling: bool,
+        now: Instant,
+    ) {
+        if trickling {
+            if let Some(active) = state.nat.active.as_mut()
+                && Self::waiting(active, local)
+            {
+                active.trickling.insert(local, call);
+                return;
+            }
+            let _settled = state.engine.end_of_candidates(&mut state.agent, call, now);
+        }
+        Self::spent(state, local, now);
+    }
+
+    /// Trickle to each waiting call what its socket learned since the last poll (RFC 8838 §9),
+    /// and the end of its candidates once nothing more is coming (§13). A call that has
+    /// stopped taking them (a pair nominated, the far end without trickle, the call gone) is
+    /// left alone; its socket is spent all the same once nothing more is coming.
+    #[cfg(feature = "ice")]
+    fn trickle(state: &mut StackState, now: Instant) {
+        let Some(active) = state.nat.active.as_ref() else {
+            return;
+        };
+        let waiting: Vec<(SocketAddr, sipral::CallHandle)> = active
+            .trickling
+            .iter()
+            .map(|(local, call)| (*local, *call))
+            .collect();
+        for (local, call) in waiting {
+            let (public, relay, done) = {
+                let Some(active) = state.nat.active.as_mut() else {
+                    return;
+                };
+                let public = match active.mappings.state(local) {
+                    Some(sipral::MappingState::Mapped(public)) => Some(public),
+                    _ => None,
+                };
+                let relay = active.relays.as_mut().and_then(|relays| relays.take(local));
+                (public, relay, !Self::waiting(active, local))
+            };
+            // each refusal is a call that no longer takes candidates; a relay it refused comes
+            // back through `take_back`
+            if let Some(public) = public {
+                let _trickled =
+                    state
+                        .engine
+                        .trickle_public_address(&mut state.agent, call, public, now);
+            }
+            if let Some(relay) = relay {
+                let _trickled = state
+                    .engine
+                    .trickle_relay(&mut state.agent, call, relay, now);
+            }
+            if done {
+                let _ended = state.engine.end_of_candidates(&mut state.agent, call, now);
+                if let Some(active) = state.nat.active.as_mut() {
+                    active.trickling.remove(&local);
+                }
+                Self::spent(state, local, now);
+            }
+        }
+        Self::take_back(state, now);
     }
 
     /// What the relays and their connections came to since the last poll.
@@ -882,6 +1013,17 @@ impl Nat {
     /// A call was described on `local`: the mapping is spent, and the next call maps again. A
     /// relay the call did not take goes back to the server.
     pub(crate) fn spent(state: &mut StackState, local: SocketAddr, now: Instant) {
+        // a socket still trickling to its call is spent once nothing more is coming
+        // (`Nat::trickle`)
+        #[cfg(feature = "ice")]
+        if state
+            .nat
+            .active
+            .as_ref()
+            .is_some_and(|active| active.trickling.contains_key(&local))
+        {
+            return;
+        }
         if let Some(active) = state.nat.active.as_mut()
             && !active.signalling.contains_key(&local)
         {
@@ -1363,7 +1505,40 @@ impl Nat {
         Ok(None)
     }
 
-    pub(crate) const fn spent(_state: &mut StackState, _local: SocketAddr, _now: Instant) {}
+    /// Asking nobody, a call is described by its own address, and nothing comes later.
+    #[cfg(feature = "ice")]
+    pub(crate) const fn so_far(
+        _state: &mut StackState,
+        _local: SocketAddr,
+    ) -> (Option<SocketAddr>, HeldRelay) {
+        (None, None)
+    }
+
+    /// Nothing is coming for the socket, so a call that trickles says it has no more candidates
+    /// at once.
+    #[cfg(feature = "ice")]
+    pub(crate) fn described(
+        state: &mut StackState,
+        _local: SocketAddr,
+        call: sipral::CallHandle,
+        trickling: bool,
+        now: Instant,
+    ) {
+        if trickling {
+            let _settled = state.engine.end_of_candidates(&mut state.agent, call, now);
+        }
+    }
+
+    /// Without ICE there is nothing to trickle.
+    #[cfg(not(feature = "ice"))]
+    pub(crate) const fn described(
+        _state: &mut StackState,
+        _local: SocketAddr,
+        _call: sipral::CallHandle,
+        _trickling: bool,
+        _now: Instant,
+    ) {
+    }
 
     pub(crate) const fn take_back(_state: &mut StackState, _now: Instant) {}
 
@@ -5554,6 +5729,138 @@ Content-Type: application/sdp\r\n"
             "the echo call is hung up"
         );
         release(media);
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    /// The far end's answer to an offer that trickles, trickling too.
+    #[cfg(feature = "ice")]
+    fn trickling_answer() -> Vec<u8> {
+        let plain = String::from_utf8(ice_answer()).expect("text");
+        plain
+            .replace(
+                "a=rtcp-mux\r\n",
+                "a=rtcp-mux\r\na=mid:0\r\na=ice-options:trickle ice2\r\n",
+            )
+            .into_bytes()
+    }
+
+    /// Every INFO the stack wrote, answered 200 at `now_ms`, so that the next may go.
+    #[cfg(feature = "ice")]
+    fn infos_answered(stack: SipralHandle, now_ms: u64) -> Vec<String> {
+        let infos: Vec<Vec<u8>> = signalling_out(stack)
+            .into_iter()
+            .map(|(message, _)| message)
+            .filter(|message| message.starts_with(b"INFO "))
+            .collect();
+        for info in &infos {
+            crate::call::tests::deliver(
+                stack,
+                &crate::call::tests::answered_with(info, 200, "OK"),
+                now_ms,
+            );
+        }
+        let _ = poll(stack, now_ms);
+        infos
+            .iter()
+            .map(|info| String::from_utf8_lossy(info).into_owned())
+            .collect()
+    }
+
+    /// A call that trickles in full is placed while its socket's mapping is still on its way
+    /// (RFC 8840 §5.1), where any other call is refused: the offer names the socket itself and
+    /// requires trickle, and the mapping goes to the far end in an INFO once it comes, the end of
+    /// candidates after it.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_call_that_trickles_goes_before_its_mapping_and_the_mapping_follows_it() {
+        let mut observed = Observed::default();
+        let stack = asking_stack(&mut observed);
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let asked = stun_out(stack);
+
+        let mut offering = managed_config();
+        offering.ice = crate::media::SipralIce::Required as u32;
+        offering.ice_trickle = crate::media::SipralIceTrickle::Half as u32;
+        let (status, _) = place(stack, account, &offering, 20);
+        assert_eq!(
+            status,
+            SipralStatus::WrongState,
+            "half trickle waits for the mapping, as regular ICE does"
+        );
+
+        offering.ice_trickle = crate::media::SipralIceTrickle::Full as u32;
+        let (status, _) = place(stack, account, &offering, 20);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE")
+            .0;
+        let text = String::from_utf8_lossy(&invite).into_owned();
+        assert!(text.contains("Require: trickle-ice\r\n"), "{text}");
+        assert!(text.contains("a=ice-options:trickle ice2\r\n"), "{text}");
+        assert!(text.contains("c=IN IP4 192.0.2.10\r\n"), "{text}");
+        assert!(!text.contains("typ srflx"), "{text}");
+        assert!(!text.contains("a=end-of-candidates"), "{text}");
+
+        let answered = String::from_utf8_lossy(&crate::call::tests::accepted(
+            &invite,
+            &trickling_answer(),
+            true,
+        ))
+        .replace("Content-Type:", "Recv-Info: trickle-ice\r\nContent-Type:")
+        .into_bytes();
+        crate::call::tests::deliver(stack, &answered, 30);
+        let _ = poll(stack, 30);
+        let first = infos_answered(stack, 30);
+        assert_eq!(
+            first.len(),
+            1,
+            "the offer's candidates, at the answer (RFC 8840 §4.3.2)"
+        );
+
+        assert_eq!(
+            on_media_socket(stack, &answer(&asked[0].0, MEDIA_PUBLIC), SERVER, 40),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 40);
+        let mut trickled = infos_answered(stack, 40);
+        trickled.extend(infos_answered(stack, 41));
+        assert!(
+            trickled
+                .iter()
+                .any(|info| info.contains("203.0.113.7 41002 typ srflx")
+                    && info.contains("Info-Package: trickle-ice")),
+            "the mapping trickled: {trickled:?}"
+        );
+        assert!(
+            trickled
+                .last()
+                .is_some_and(|info| info.contains("a=end-of-candidates")),
+            "and the end of candidates last: {trickled:?}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    /// A value `ice_trickle` does not name is refused where it is read.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn an_ice_trickle_nobody_named_is_refused() {
+        let mut observed = Observed::default();
+        let mut settings = asking(&mut observed);
+        settings.ice_trickle = 9;
+        let (status, _) = create(&settings);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("ice_trickle"));
+
+        let stack = asking_stack(&mut observed);
+        let account = account_on(stack);
+        let mut offering = managed_config();
+        offering.ice_trickle = 4;
+        let (status, _) = place(stack, account, &offering, 10);
+        assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 }

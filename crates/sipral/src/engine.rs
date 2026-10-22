@@ -1570,6 +1570,19 @@ impl MediaEngine {
         self.calls.get(&call).map(|managed| &managed.catalog)
     }
 
+    /// Whether the far end's description of a call declares trickle ICE (`a=ice-options:trickle`,
+    /// RFC 8838 §3): for a call that came in, whether its answer may trickle too
+    /// ([`IceTrickle`](crate::IceTrickle)), which an application gathering its candidates decides
+    /// before it answers. `false` for an unknown call and one not described yet.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn far_end_trickles(&self, call: CallHandle) -> bool {
+        self.calls
+            .get(&call)
+            .and_then(|managed| managed.remote.as_ref())
+            .is_some_and(peer_trickles)
+    }
+
     /// The health counters since this engine was created. A plain copy, cheap enough to sample on a
     /// timer.
     #[must_use]

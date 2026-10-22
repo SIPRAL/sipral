@@ -31,7 +31,7 @@ use crate::error::{Fail, entry, fail};
 use crate::event::{SipralCallState, call_state};
 use crate::handle::SipralHandle;
 use crate::header::{SipralHeader, supplied};
-use crate::media::{SipralIce, SipralSrtp, SipralToggle, address, media_failed};
+use crate::media::{SipralIce, SipralIceTrickle, SipralSrtp, SipralToggle, address, media_failed};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -131,6 +131,13 @@ record! {
         /// Zero. Pads the struct to a multiple of its alignment, so a member a later version
         /// appends never lands in padding. The library reads nothing from it.
         pub reserved: u32,
+        /// Whether this call trickles its ICE candidates, overriding
+        /// `sipral_stack_config_t::ice_trickle`: a `SipralIceTrickle`, or zero for the stack's
+        /// setting. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`. Read only with
+        /// `media_address` set. Added in ABI 1.4.
+        pub ice_trickle: Number<SipralIceTrickle>,
+        /// Zero, as `reserved`.
+        pub reserved_1_4: u32,
     }
 }
 
@@ -326,9 +333,15 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
 fn call_catalog(
     base: &CodecCatalog,
     floor: Option<SrtpPolicy>,
-    (srtp, ice, feedback): (Option<SrtpPolicy>, Option<IcePolicy>, bool),
+    choices: Choices,
     codecs: Option<&[&str]>,
 ) -> Result<Option<CodecCatalog>, Fail> {
+    let Choices {
+        srtp,
+        ice,
+        trickle,
+        feedback,
+    } = choices;
     if let (Some(policy), Some(floor)) = (srtp, floor)
         && !policy.at_least(floor)
     {
@@ -340,7 +353,7 @@ fn call_catalog(
             ),
         ));
     }
-    if srtp.is_none() && ice.is_none() && !feedback && codecs.is_none() {
+    if srtp.is_none() && ice.is_none() && trickle.is_none() && !feedback && codecs.is_none() {
         return Ok(None);
     }
     let mut catalog = base.clone();
@@ -355,10 +368,23 @@ fn call_catalog(
     if let Some(policy) = ice {
         catalog = catalog.with_ice(policy);
     }
+    if let Some(trickle) = trickle {
+        catalog = catalog.with_ice_trickle(trickle);
+    }
     if feedback {
         catalog = catalog.with_feedback(true);
     }
     Ok(Some(catalog))
+}
+
+/// What a call's configuration says about its media beyond the codecs, read before the stack is
+/// locked ([`media_choices`]).
+#[derive(Clone, Copy)]
+struct Choices {
+    srtp: Option<SrtpPolicy>,
+    ice: Option<IcePolicy>,
+    trickle: Option<sipral::IceTrickle>,
+    feedback: bool,
 }
 
 /// The SRTP policy `account` named for itself, which no call of it may
@@ -396,14 +422,14 @@ fn call_media(
 }
 
 /// What a call's configuration says about its media beyond the codecs:
-/// SRTP, ICE and feedback, checked before the stack is locked.
-fn media_choices(
-    config: &SipralCallConfig,
-) -> Result<(Option<SrtpPolicy>, Option<IcePolicy>, bool), Fail> {
-    let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
-    let ice = crate::media::ice_policy(config.ice, "ice")?;
-    let feedback = crate::media::toggled(config.feedback, "feedback", false)?;
-    Ok((srtp, ice, feedback))
+/// SRTP, ICE, trickle and feedback, checked before the stack is locked.
+fn media_choices(config: &SipralCallConfig) -> Result<Choices, Fail> {
+    Ok(Choices {
+        srtp: crate::media::srtp_policy(config.srtp, "srtp")?,
+        ice: crate::media::ice_policy(config.ice, "ice")?,
+        trickle: crate::media::ice_trickle(config.ice_trickle, "ice_trickle")?,
+        feedback: crate::media::toggled(config.feedback, "feedback", false)?,
+    })
 }
 
 /// Where the call's real-time text arrives, when its configuration names a socket.
@@ -467,14 +493,46 @@ fn dressed(
 
 /// Where a call on media socket `local` is described as being, and the relay it takes,
 /// asked in that order so a socket still awaiting STUN is refused before its relay is taken.
+///
+/// A call that trickles in full (`trickling`, [`full_trickle`]) is never refused for waiting:
+/// it is described by what has come back, and the rest follows it
+/// ([`crate::nat::Nat::described`]).
 fn outside(
     state: &mut StackState,
     local: SocketAddr,
+    trickling: bool,
 ) -> Result<(Option<SocketAddr>, crate::nat::HeldRelay), Fail> {
     crate::stack::media_port_allowed(state, local)?;
+    #[cfg(feature = "ice")]
+    if trickling {
+        return Ok(crate::nat::Nat::so_far(state, local));
+    }
+    #[cfg(not(feature = "ice"))]
+    let _ = trickling;
     let public = crate::nat::Nat::public_for(state, local)?;
     let relay = crate::nat::Nat::relay_for(state, local)?;
     Ok((public, relay))
+}
+
+/// Whether a call described from `catalog` trickles in full: full ICE offered, and
+/// `SIPRAL_ICE_TRICKLE_FULL`. `answering` names the call that came in, whose far end's offer has
+/// to trickle as well (RFC 8838 §5); `None` for a call being placed.
+fn full_trickle(
+    state: &StackState,
+    catalog: &CodecCatalog,
+    answering: Option<sipral::CallHandle>,
+) -> bool {
+    #[cfg(feature = "ice")]
+    {
+        matches!(catalog.ice(), IcePolicy::Offered | IcePolicy::Required)
+            && catalog.ice_trickle() == sipral::IceTrickle::Full
+            && answering.is_none_or(|call| state.engine.far_end_trickles(call))
+    }
+    #[cfg(not(feature = "ice"))]
+    {
+        let _ = (state, catalog, answering);
+        false
+    }
 }
 
 /// Where `config` sends the INVITE, other than the account's address, and what it does with
@@ -614,7 +672,8 @@ entry! {
                     let base = state.engine.account_catalog(id);
                     let floor = floor_of(state, Some(id));
                     let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
-                    let outside = outside(state, local)?;
+                    let trickling = full_trickle(state, catalog.as_ref().unwrap_or(&base), None);
+                    let outside = outside(state, local, trickling)?;
                     let placed = match call_media(state, &base, catalog, outside, text) {
                         // the stack's own catalogue, untouched
                         None => {
@@ -632,7 +691,7 @@ entry! {
                     // the refused call's relay goes back onto its socket
                     crate::nat::Nat::take_back(state, now);
                     let placed = placed.map_err(|error| media_failed(&error))?;
-                    crate::nat::Nat::spent(state, local, now);
+                    crate::nat::Nat::described(state, local, placed, trickling, now);
                     state.manage(placed);
                     state.expect_audio(placed);
                     placed
@@ -756,11 +815,12 @@ unsafe fn described(
                 .set_focus(id, true)
                 .map_err(|error| ua_failed(&error))?;
         }
+        let trickling = full_trickle(state, catalog.as_ref().unwrap_or(&base), Some(id));
         // a call rung with media keeps its 183's description and mapping
         let (public, relay) = if reply == Reply::Answer && state.agent.has_described(id) {
             (None, None)
         } else {
-            outside(state, local)?
+            outside(state, local, trickling)?
         };
         let sent = match (
             call_media(state, &base, catalog, (public, relay), text),
@@ -783,7 +843,7 @@ unsafe fn described(
         // a refused response hands the socket's relay back
         crate::nat::Nat::take_back(state, now);
         sent.map_err(|error| media_failed(&error))?;
-        crate::nat::Nat::spent(state, local, now);
+        crate::nat::Nat::described(state, local, id, trickling, now);
         state.manage(id);
         if reply == Reply::Answer {
             state.expect_audio(id);
@@ -847,10 +907,13 @@ entry! {
             // a call rung with media keeps its 183's description, so its mapping is not asked
             // again; nor for a call the engine never saw, refused below with nothing taken
             let catalog = state.engine.call_catalog(id).cloned();
+            let trickling = catalog
+                .as_ref()
+                .is_some_and(|catalog| full_trickle(state, catalog, Some(id)));
             let (public, relay) = if state.agent.has_described(id) || catalog.is_none() {
                 (None, None)
             } else {
-                outside(state, local)?
+                outside(state, local, trickling)?
             };
             let answered = match catalog {
                 Some(catalog) if public.is_some() || relay.is_some() => {
@@ -866,7 +929,7 @@ entry! {
             };
             crate::nat::Nat::take_back(state, now);
             answered.map_err(|error| media_failed(&error))?;
-            crate::nat::Nat::spent(state, local, now);
+            crate::nat::Nat::described(state, local, id, trickling, now);
             state.manage(id);
             state.expect_audio(id);
             Ok(())
@@ -1617,11 +1680,13 @@ entry! {
                 || state.engine.catalog().clone(),
                 |account| state.engine.account_catalog(account),
             );
+            let mut trickling = false;
             let outside = match media {
                 Some(local) => {
                     let floor = floor_of(state, state.agent.call_account(id));
                     let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
-                    Some((catalog, outside(state, local)?))
+                    trickling = full_trickle(state, catalog.as_ref().unwrap_or(&base), None);
+                    Some((catalog, outside(state, local, trickling)?))
                 }
                 None => None,
             };
@@ -1655,7 +1720,7 @@ entry! {
                 // a refused transfer hands the socket's relay back
                 crate::nat::Nat::take_back(state, now);
                 let placed = placed.map_err(|error| media_failed(&error))?;
-                crate::nat::Nat::spent(state, local, now);
+                crate::nat::Nat::described(state, local, placed, trickling, now);
                 state.manage(placed);
                 state.expect_audio(placed);
                 placed
@@ -2044,6 +2109,8 @@ a=recvonly\r\n";
             focus: 0,
             follow_redirects: 0,
             reserved: 0,
+            ice_trickle: 0,
+            reserved_1_4: 0,
         }
     }
 
@@ -2104,6 +2171,8 @@ a=recvonly\r\n";
             focus: 0,
             follow_redirects: 0,
             reserved: 0,
+            ice_trickle: 0,
+            reserved_1_4: 0,
         }
     }
 

@@ -2379,6 +2379,39 @@ abstract final class SipralHeldAudio {
   static const int application = 2;
 }
 
+/// Whether a call trickles its ICE candidates (RFC 8838, carried in SIP by
+/// RFC 8840's INFO requests). Names for `sipral_stack_config_t::ice_trickle`
+/// (the stack's default) and `sipral_call_config_t::ice_trickle` (a per-call
+/// override). Added in ABI 1.4.
+///
+/// Zero means "unset": on the stack, SipralIceTrickle.off; on a call,
+/// the stack's setting. Nothing happens without a `SipralIce` that offers
+/// full ICE, and nothing for `SIPRAL_ICE_LITE`. A far end that answers
+/// without trickle gets regular ICE whatever this says.
+abstract final class SipralIceTrickle {
+  /// Regular ICE: candidates gathered before the description, no INFO,
+  /// and a far end's trickled candidates refused. The default.
+  static const int off = 1;
+
+  /// Half trickle (RFC 8838 §16): the description is written as for
+  /// `Off`, once the socket's mapping and relay are in, and says
+  /// `trickle`; a far end that trickles may send its own candidates
+  /// later, which are taken. Right for a peer whose support is unknown.
+  ///
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+  static const int half = 2;
+
+  /// Full trickle: a call on a socket whose STUN mapping or TURN relay
+  /// has not come back yet is placed or answered at once, with the
+  /// candidates known then, under `Require: trickle-ice` for a call
+  /// placed (RFC 8840 §5.1); the stack trickles the mapping and the
+  /// relay to the call when they come, and then the end of its
+  /// candidates. For a far end known to trickle.
+  ///
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+  static const int full = 3;
+}
+
 /// The version of the ABI this library provides.
 ///
 /// Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -2864,6 +2897,18 @@ final class SipralStackConfig extends ffi.Struct {
   /// Zero.
   @ffi.Uint32()
   external int reserved36;
+
+  /// Default trickle ICE for every call: a `SipralIceTrickle`, or zero for
+  /// `SIPRAL_ICE_TRICKLE_OFF`. `sipral_call_config_t::ice_trickle` overrides
+  /// it. Anything but off also takes an INVITE that requires trickle ICE
+  /// rather than refusing it 420 (`docs/06-nat.md`, "Trickle ICE"). Added
+  /// in ABI 1.4.
+  @ffi.Uint32()
+  external int iceTrickle;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved14;
 }
 
 /// What one call to sipral_stack_poll did. Set `size` first.
@@ -3512,6 +3557,17 @@ final class SipralCallConfig extends ffi.Struct {
   /// appends never lands in padding. The library reads nothing from it.
   @ffi.Uint32()
   external int reserved;
+
+  /// Whether this call trickles its ICE candidates, overriding
+  /// `sipral_stack_config_t::ice_trickle`: a `SipralIceTrickle`, or zero for the stack's
+  /// setting. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`. Read only with
+  /// `media_address` set. Added in ABI 1.4.
+  @ffi.Uint32()
+  external int iceTrickle;
+
+  /// Zero, as `reserved`.
+  @ffi.Uint32()
+  external int reserved14;
 }
 
 /// One codec this build contains.
@@ -6446,7 +6502,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 3;
+  static const int abiVersionMinor = 4;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -6702,12 +6758,12 @@ final class Sipral {
         'sipral_abi_version_t': [ffi.sizeOf<SipralAbiVersion>(), 24, 20, 20],
         'sipral_capabilities_t': [ffi.sizeOf<SipralCapabilities>(), 24, 16, 16],
         'sipral_counters_t': [ffi.sizeOf<SipralCounters>(), 232, 228, 232],
-        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 432, 296, 304],
+        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 440, 304, 312],
         'sipral_poll_result_t': [ffi.sizeOf<SipralPollResult>(), 48, 28, 32],
         'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 136, 128, 136],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
         'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 496, 272, 280],
-        'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 160, 92, 92],
+        'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 168, 100, 100],
         'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
         'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],
         'sipral_path_candidate_t': [ffi.sizeOf<SipralPathCandidate>(), 88, 60, 64],

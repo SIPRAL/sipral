@@ -3522,6 +3522,50 @@ enum class SipralHeldAudio(val value: Int) {
 }
 
 /**
+ * Whether a call trickles its ICE candidates (RFC 8838, carried in SIP by
+ * RFC 8840's INFO requests). Names for `sipral_stack_config_t::ice_trickle`
+ * (the stack's default) and `sipral_call_config_t::ice_trickle` (a per-call
+ * override). Added in ABI 1.4.
+ *
+ * Zero means "unset": on the stack, SipralIceTrickle.OFF; on a call,
+ * the stack's setting. Nothing happens without a `SipralIce` that offers
+ * full ICE, and nothing for `SIPRAL_ICE_LITE`. A far end that answers
+ * without trickle gets regular ICE whatever this says.
+ */
+enum class SipralIceTrickle(val value: Int) {
+    /**
+     * Regular ICE: candidates gathered before the description, no INFO,
+     * and a far end's trickled candidates refused. The default.
+     */
+    OFF(1),
+    /**
+     * Half trickle (RFC 8838 §16): the description is written as for
+     * `Off`, once the socket's mapping and relay are in, and says
+     * `trickle`; a far end that trickles may send its own candidates
+     * later, which are taken. Right for a peer whose support is unknown.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+     */
+    HALF(2),
+    /**
+     * Full trickle: a call on a socket whose STUN mapping or TURN relay
+     * has not come back yet is placed or answered at once, with the
+     * candidates known then, under `Require: trickle-ice` for a call
+     * placed (RFC 8840 §5.1); the stack trickles the mapping and the
+     * relay to the call when they come, and then the end of its
+     * candidates. For a far end known to trickle.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
+     */
+    FULL(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralIceTrickle? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -5346,6 +5390,18 @@ class SipralStackConfig(
      * Zero.
      */
     val reserved36: Long = 0,
+    /**
+     * Default trickle ICE for every call: a `SipralIceTrickle`, or zero for
+     * `SIPRAL_ICE_TRICKLE_OFF`. `sipral_call_config_t::ice_trickle` overrides
+     * it. Anything but off also takes an INVITE that requires trickle ICE
+     * rather than refusing it 420 (`docs/06-nat.md`, "Trickle ICE"). Added
+     * in ABI 1.4.
+     */
+    val iceTrickle: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved14: Long = 0,
 )
 
 /**
@@ -5747,6 +5803,17 @@ class SipralCallConfig(
      * appends never lands in padding. The library reads nothing from it.
      */
     val reserved: Long = 0,
+    /**
+     * Whether this call trickles its ICE candidates, overriding
+     * `sipral_stack_config_t::ice_trickle`: a `SipralIceTrickle`, or zero for the stack's
+     * setting. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`. Read only with
+     * `media_address` set. Added in ABI 1.4.
+     */
+    val iceTrickle: Long = 0,
+    /**
+     * Zero, as `reserved`.
+     */
+    val reserved14: Long = 0,
 )
 
 /**
@@ -8404,7 +8471,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 3)
+        agree(1, 4)
     }
 
     /**
@@ -8428,7 +8495,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, configSystemEchoCancellation: Long, configReserved35: Long, configHeldAudio: Long, configReserved36: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, configSystemEchoCancellation: Long, configReserved35: Long, configHeldAudio: Long, configReserved36: Long, configIceTrickle: Long, configReserved14: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -8455,12 +8522,12 @@ internal object SipralNative {
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
     external fun sipral_account_set_access_token(stack: Long, account: Long, token: ByteArray): Int
     external fun sipral_stack_network_test(stack: Long, configAccount: Long, configProbeSocket: ByteArray?, configEchoCall: Long, configEchoMs: Long, configTimeoutMs: Long, nowMs: Long, test: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, nowMs: Long): Int
+    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
-    external fun sipral_call_answer_with(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, nowMs: Long): Int
+    external fun sipral_call_answer_with(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_hangup(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_set_headers(stack: Long, call: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
@@ -8479,9 +8546,9 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_accept_transfer_placed(stack: Long, call: Long, placed: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
@@ -8635,7 +8702,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 3
+    const val ABI_VERSION_MINOR: Long = 4
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -8992,12 +9059,12 @@ object Sipral {
         "sipral_abi_version_t" to intArrayOf(24, 20, 20),
         "sipral_capabilities_t" to intArrayOf(24, 16, 16),
         "sipral_counters_t" to intArrayOf(232, 228, 232),
-        "sipral_stack_config_t" to intArrayOf(432, 296, 304),
+        "sipral_stack_config_t" to intArrayOf(440, 304, 312),
         "sipral_poll_result_t" to intArrayOf(48, 28, 32),
         "sipral_stack_settings_t" to intArrayOf(136, 128, 136),
         "sipral_header_t" to intArrayOf(32, 16, 16),
         "sipral_account_config_t" to intArrayOf(496, 272, 280),
-        "sipral_call_config_t" to intArrayOf(160, 92, 92),
+        "sipral_call_config_t" to intArrayOf(168, 100, 100),
         "sipral_codec_info_t" to intArrayOf(32, 28, 28),
         "sipral_codec_candidate_t" to intArrayOf(24, 20, 20),
         "sipral_path_candidate_t" to intArrayOf(88, 60, 64),
@@ -9211,7 +9278,7 @@ object Sipral {
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, config.systemEchoCancellation, config.reserved35, config.heldAudio, config.reserved36, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, config.systemEchoCancellation, config.reserved35, config.heldAudio, config.reserved36, config.iceTrickle, config.reserved14, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -9780,7 +9847,7 @@ object Sipral {
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -9829,7 +9896,7 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, nowMs))
+        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, nowMs))
     }
 
     /**
@@ -9880,7 +9947,7 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_answer_with(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, nowMs))
+        check(SipralNative.sipral_call_answer_with(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, nowMs))
     }
 
     /**
@@ -10235,7 +10302,7 @@ object Sipral {
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -10282,7 +10349,7 @@ object Sipral {
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, placedSlot, nowMs))
         return placedSlot[0]
     }
 
