@@ -3989,7 +3989,7 @@ out of it with no stack:
 **What this end sends.** No ISUP. RFC 3372 §4.1 makes generating it the
 gateway's work and "not the responsibility of an IP endpoint like a SIP
 phone"; the gateway at the far end writes the REL for a BYE itself (RFC 3398
-§10). A 415 now lists `application/sdp, application/isup, multipart/mixed` in
+§10.1). A 415 now lists `application/sdp, application/isup, multipart/mixed` in
 `Accept`, and an INFO's 415 adds `application/isup`.
 
 A binding printed at 1.3 loads against a 1.4 library and works as it did; one

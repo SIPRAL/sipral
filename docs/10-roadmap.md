@@ -747,6 +747,14 @@ browser SIP client in the lab, both directions, trickled candidates either
 way; an ISUP-carrying INVITE from a lab gateway read into the call's caller
 and cause, and answered.
 
+**SIP-T and SIP-I: built, and their half of the exit met on 22 October
+2026.** `sipral_core::isup` reads and writes Q.763; the user agent takes the
+body, reads the IAM into the caller and a REL into the call's end
+(`04-ua.md`, "SIP-T and SIP-I"); C ABI 1.4 carries it (`08-ffi.md`).
+`scripts/lab.sh isup` has a scripted gateway's IAM call read and answered,
+its BYE's REL reported, a call placed through ACM, CPG and ANM and one
+refused with a REL (`11-testing.md`). No carrier's trunk has been called.
+
 ## What the phases are risked against
 
 Phases 1 and 2 carry the technical risk: signalling interoperability and audio
