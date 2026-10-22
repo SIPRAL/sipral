@@ -419,6 +419,8 @@ pub struct CodecCatalog {
     annex_b: bool,
     feedback: bool,
     voip_metrics: bool,
+    /// A WebRTC line ([`CodecCatalog::with_webrtc`]).
+    webrtc: bool,
 }
 
 impl CodecCatalog {
@@ -444,6 +446,7 @@ impl CodecCatalog {
             annex_b: true,
             feedback: false,
             voip_metrics: true,
+            webrtc: false,
         }
     }
 
@@ -531,9 +534,14 @@ impl CodecCatalog {
         self
     }
 
-    /// What this call does about SRTP.
+    /// What this call does about SRTP: [`SrtpPolicy::DtlsRequired`] on a WebRTC line
+    /// ([`CodecCatalog::with_webrtc`]), whatever was set.
     #[must_use]
     pub const fn srtp(&self) -> SrtpPolicy {
+        #[cfg(feature = "dtls")]
+        if self.webrtc {
+            return SrtpPolicy::DtlsRequired;
+        }
         self.srtp
     }
 
@@ -608,9 +616,14 @@ impl CodecCatalog {
         self
     }
 
-    /// What this call does about ICE.
+    /// What this call does about ICE: [`IcePolicy::Offered`] on a WebRTC line
+    /// ([`CodecCatalog::with_webrtc`]) that was set to [`IcePolicy::Off`].
     #[must_use]
     pub const fn ice(&self) -> IcePolicy {
+        #[cfg(feature = "ice")]
+        if self.webrtc && matches!(self.ice, IcePolicy::Off) {
+            return IcePolicy::Offered;
+        }
         self.ice
     }
 
@@ -645,10 +658,39 @@ impl CodecCatalog {
         self
     }
 
-    /// Whether this call asks for RTCP feedback.
+    /// Whether this call asks for RTCP feedback: always on a WebRTC line
+    /// ([`CodecCatalog::with_webrtc`]).
     #[must_use]
     pub const fn feedback(&self) -> bool {
-        self.feedback
+        self.feedback || self.webrtc
+    }
+
+    /// Describe this call as a WebRTC line does, the shape a PBX's WebRTC
+    /// endpoint (Asterisk's `webrtc=yes`, a gateway in front of a WebRTC
+    /// service) offers and expects for one audio stream: `UDP/TLS/RTP/SAVPF`
+    /// keyed by DTLS-SRTP, ICE, RTP and RTCP on one port and on nothing else
+    /// (`a=rtcp-mux-only`, RFC 8858), and the stream in a BUNDLE group (RFC
+    /// 8843) with its identification-tag, the header extension that carries
+    /// it, `a=msid` (RFC 8830) and `a=ssrc` with the stream's CNAME (RFC
+    /// 5576).
+    ///
+    /// On, [`CodecCatalog::srtp`] is [`SrtpPolicy::DtlsRequired`] whatever was set,
+    /// [`CodecCatalog::ice`] is [`IcePolicy::Offered`] where it was
+    /// [`IcePolicy::Off`] (built with the `ice` feature) and
+    /// [`CodecCatalog::feedback`] is on; off, each is what was set. Off by
+    /// default. An offer that bundles is answered as RFC 8843 asks either way;
+    /// this decides only what this end offers and requires.
+    #[cfg(feature = "dtls")]
+    #[must_use]
+    pub const fn with_webrtc(mut self, webrtc: bool) -> Self {
+        self.webrtc = webrtc;
+        self
+    }
+
+    /// Whether this call is a WebRTC line ([`CodecCatalog::with_webrtc`]).
+    #[must_use]
+    pub const fn webrtc(&self) -> bool {
+        self.webrtc
     }
 
     /// Whether offers and answers ask for the RFC 3611 §4.7 VoIP metrics report
@@ -728,7 +770,7 @@ impl CodecCatalog {
             .with_dtmf(self.dtmf)
             .with_voip_metrics_xr(self.voip_metrics)
             // one ICE component is what mux gives
-            .with_rtcp_mux(self.rtcp_mux || self.ice.offers())
+            .with_rtcp_mux(self.rtcp_mux || self.webrtc || self.ice().offers())
     }
 
     /// The same, with the keying for a description under this policy.
@@ -747,7 +789,7 @@ impl CodecCatalog {
     ) -> MediaCapabilities {
         let capabilities = self.capabilities();
         #[cfg(feature = "dtls")]
-        if self.srtp.falls_back() {
+        if self.srtp().falls_back() {
             return match keys {
                 Some(keys) => capabilities
                     .with_rtcp_mux(true)
@@ -756,7 +798,7 @@ impl CodecCatalog {
             };
         }
         #[cfg(feature = "dtls")]
-        if let Some(keyed) = dtls.filter(|_| self.srtp.offers()) {
+        if let Some(keyed) = dtls.filter(|_| self.srtp().offers()) {
             return capabilities
                 .with_rtcp_mux(true)
                 .with_srtp(SrtpSupport::Dtls {
@@ -766,9 +808,9 @@ impl CodecCatalog {
         }
         #[cfg(not(feature = "dtls"))]
         let _ = dtls;
-        match keys.filter(|_| self.srtp.offers()) {
+        match keys.filter(|_| self.srtp().offers()) {
             // `SrtpPolicy::BestEffort`: same lines, plain profile
-            Some(keys) if self.srtp.on_plain_profile() => {
+            Some(keys) if self.srtp().on_plain_profile() => {
                 capabilities.with_srtp(SrtpSupport::SdesOnAvp(keying::offer_lines(keys)))
             }
             Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(keying::offer_lines(keys))),

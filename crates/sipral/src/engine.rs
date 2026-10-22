@@ -197,6 +197,16 @@ struct Exposure {
     forked: bool,
 }
 
+/// What the two descriptions agreed beside the plan, for [`MediaEngine::start`]: G.729 Annex B,
+/// RTCP feedback, real-time text, and the identification-tag a new stream announces with its
+/// header extension number (`crate::webrtc::mid_to_send`).
+type Agreed = (
+    bool,
+    Option<sipral_rtp::avpf::Negotiated>,
+    Option<crate::text::TextPlan>,
+    Option<(u8, String)>,
+);
+
 /// A codec change on its way to the far end.
 #[derive(Clone, Debug)]
 struct Pending {
@@ -1741,6 +1751,7 @@ impl MediaEngine {
             text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
+        describe_line(&mut offer, &catalog, None, &config, identity.ssrc);
         let keys_in_clear =
             sdes_in_clear(&catalog, &offer, agent.placing_securely(account, &outgoing))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
@@ -1899,6 +1910,7 @@ impl MediaEngine {
             text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
+        describe_line(&mut offer, &catalog, None, &config, identity.ssrc);
         // the new call inherits the transferred call's signalling security
         let keys_in_clear = sdes_in_clear(&catalog, &offer, agent.call_signalling_secure(call))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
@@ -2017,7 +2029,8 @@ impl MediaEngine {
             let state = agent.call_state(call).unwrap_or(CallState::EarlyMedia);
             return Err(MediaError::from(UaError::WrongState(state)));
         }
-        let (session_id, version) = (managed.session_id, managed.version);
+        let (session_id, version, ssrc) =
+            (managed.session_id, managed.version, managed.identity.ssrc);
         // with no offer this end would have to offer, and RFC 3261 §13.2.1 / RFC 6337 §3.1.2 keep
         // that out of a provisional; the answer would come in a PRACK this engine never sees
         let Some(offer) = managed.remote.clone() else {
@@ -2043,6 +2056,7 @@ impl MediaEngine {
             text,
         )?;
         describe_ice(&mut description, ice.as_ref(), Some(&offer));
+        describe_line(&mut description, &catalog, Some(&offer), &config, ssrc);
         let keys_in_clear =
             sdes_in_clear(&catalog, &description, agent.call_signalling_secure(call))?;
         let bytes = description.to_bytes();
@@ -2159,6 +2173,7 @@ impl MediaEngine {
         let described = public.unwrap_or(local);
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         let (session_id, version) = (managed.session_id, managed.version.saturating_add(1));
+        let ssrc = managed.identity.ssrc;
         let offered = managed.remote.clone();
         if !keying_allows(&catalog, offered.as_ref()) {
             return Err(refuse_insecure(agent, call, now));
@@ -2209,6 +2224,7 @@ impl MediaEngine {
             )
         };
         describe_ice(&mut description, ice.as_ref(), offered.as_ref());
+        describe_line(&mut description, &catalog, offered.as_ref(), &config, ssrc);
         let keys_in_clear =
             sdes_in_clear(&catalog, &description, agent.call_signalling_secure(call))?;
         let bytes = description.to_bytes();
@@ -3344,10 +3360,9 @@ impl MediaEngine {
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         };
-        let version = managed.version.saturating_add(1);
-        let session_id = managed.session_id;
-        let catalog = managed.catalog.clone();
-        let text = managed.text;
+        let (version, session_id) = (managed.version.saturating_add(1), managed.session_id);
+        let (catalog, text) = (managed.catalog.clone(), managed.text);
+        let (config, ssrc) = (managed.config.clone(), managed.identity.ssrc);
         // repeat the running key (RFC 4568 §7.1.4 warns a new one opens a decrypt gap). It comes
         // from the running plan, since the far end may have taken any of our offered lines
         let in_force = self.sessions.get(&call).and_then(|held| {
@@ -3413,6 +3428,7 @@ impl MediaEngine {
             Ok(mut answer) => {
                 // RFC 8839 §4.4: leaving the attributes out would read as ICE withdrawn
                 describe_ice(&mut answer, ice.as_ref(), Some(&offer));
+                describe_line(&mut answer, &catalog, Some(&offer), &config, ssrc);
                 // a running stream cannot change its kind of keying, so refuse instead of answering
                 // and not following
                 if self.changes_keying(call, &answer, &offer) {
@@ -3596,6 +3612,7 @@ impl MediaEngine {
             _ => None,
         };
         let text = crate::text::plan(local, remote);
+        let mid = crate::webrtc::mid_to_send(local, remote);
         // recorded now from the far end's description and this call's catalogue, never rebuilt
         // later
         let candidates = remote
@@ -3663,7 +3680,7 @@ impl MediaEngine {
             call,
             &plan,
             codec,
-            (annex_b, feedback, text),
+            (annex_b, feedback, text, mid),
             candidates,
             now,
         );
@@ -3672,22 +3689,18 @@ impl MediaEngine {
     /// Open the stream for a plan, or move the running one to a new codec.
     ///
     /// A running session is reformatted rather than replaced, so its SRTP contexts and history
-    /// survive ([`MediaSession::reformat`]). `agreed` carries G.729 Annex B, RTCP feedback and
-    /// real-time text settings.
+    /// survive ([`MediaSession::reformat`]). `agreed` is the rest of what was settled
+    /// ([`Agreed`]).
     fn start(
         &mut self,
         call: CallHandle,
         plan: &MediaPlan,
         codec: Codec,
-        agreed: (
-            bool,
-            Option<sipral_rtp::avpf::Negotiated>,
-            Option<crate::text::TextPlan>,
-        ),
+        agreed: Agreed,
         candidates: Vec<CodecCandidate>,
         now: Instant,
     ) {
-        let (annex_b, feedback, text) = agreed;
+        let (annex_b, feedback, text, mid) = agreed;
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
@@ -3745,6 +3758,9 @@ impl MediaEngine {
             .map(|mut session| {
                 if let Some(agreed) = feedback {
                     session.use_feedback(agreed, now);
+                }
+                if let Some((id, tag)) = &mid {
+                    session.announce_mid(*id, tag);
                 }
                 session.set_text(text, now);
                 self.keep_session(call, session);
@@ -4479,6 +4495,45 @@ fn describe_ice(
     }
 }
 
+/// Put the lines `crate::webrtc` writes on a freshly built description, after [`describe_ice`]: an
+/// offer from a WebRTC line ([`CodecCatalog::with_webrtc`]) bundles its stream and names its source;
+/// an answer gives an offer that tags or bundles its streams what RFC 8843 asks back, and names
+/// its source on a WebRTC line. `answering` is the offer for an answer.
+///
+/// The CNAME is the one the stream will send ([`crate::session::cname`]), from the address the
+/// description gives the stream, which is the one the plan reads back; `ssrc` is the call's own
+/// ([`StreamIdentity`]), and the `a=msid` identifier comes from the `o=` session id.
+fn describe_line(
+    description: &mut SessionDescription,
+    catalog: &CodecCatalog,
+    answering: Option<&SessionDescription>,
+    config: &MediaConfig,
+    ssrc: u32,
+) {
+    if answering.is_none() && !catalog.webrtc() {
+        return;
+    }
+    let Some(ip) = description
+        .media
+        .iter()
+        .find(|stream| !stream.is_rejected())
+        .and_then(|stream| description.connection_of(stream))
+        .and_then(Connection::ip)
+    else {
+        return;
+    };
+    let cname = crate::session::cname(config, ip);
+    let source = crate::webrtc::Source {
+        ssrc,
+        cname: &cname,
+        stream: description.origin.session_id,
+    };
+    match answering {
+        Some(offer) => crate::webrtc::answer(description, offer, &source, catalog.webrtc()),
+        None => crate::webrtc::offer(description, &source),
+    }
+}
+
 /// Remove every ICE line from a description this end wrote, so [`describe_ice`] can write a
 /// restart's (RFC 8839 §5).
 #[cfg(feature = "ice")]
@@ -4801,7 +4856,8 @@ fn write_answer(
             if taken {
                 return StreamAnswer::Reject;
             }
-            let answer = take_stream(catalog, offered, address, keys, dtls);
+            let mux = crate::webrtc::mux_required(offer, offered);
+            let answer = take_stream(catalog, offered, address, keys, dtls, mux);
             taken = matches!(answer, StreamAnswer::Accept(_));
             answer
         })
@@ -4819,13 +4875,15 @@ fn write_answer(
     Ok(answer)
 }
 
-/// What to do with one offered stream, kept to what `catalog` holds.
+/// What to do with one offered stream, kept to what `catalog` holds. `mux` says the offer leaves
+/// no choice but to multiplex RTP and RTCP (`crate::webrtc::mux_required`).
 fn take_stream(
     catalog: &CodecCatalog,
     offered: &MediaDescription,
     address: SocketAddr,
     keys: Option<&KeySalt>,
     #[cfg_attr(not(feature = "dtls"), allow(unused_variables))] dtls: Option<Keyed<'_>>,
+    mux: bool,
 ) -> StreamAnswer {
     if offered.media != AUDIO || offered.is_rejected() {
         return StreamAnswer::Reject;
@@ -4876,9 +4934,10 @@ fn take_stream(
     {
         accepted = accepted.with_attribute(line);
     }
-    // RFC 5761 §5.1.1: mux only if offered and wanted, or if DTLS-keyed (RFC 5764 §4.2)
+    // RFC 5761 §5.1.1: mux only if offered and wanted, or if DTLS-keyed (RFC 5764 §4.2), or if the
+    // offer allows nothing else (RFC 8858 §4.3, RFC 8843 §9.3.1.2)
     let capabilities = catalog.capabilities();
-    if (capabilities.rtcp_mux || handshake.is_some()) && offered.has_rtcp_mux() {
+    if (capabilities.rtcp_mux || handshake.is_some() || mux) && offered.has_rtcp_mux() {
         accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
     }
     // RFC 3611 §5.2: the answerer may add rtcp-xr so the offerer sends XR blocks; without it we

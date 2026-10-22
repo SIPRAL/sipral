@@ -71,7 +71,7 @@ pub(crate) const SEED: u8 = 226;
 pub(crate) const MEDIA_SEED: u8 = 228;
 
 /// The WebSocket's transport, beside the endpoint's own UDP one.
-const WS: TransportId = TransportId(2);
+pub(crate) const WS: TransportId = TransportId(2);
 
 const PATIENCE: Duration = Duration::from_secs(20);
 const LISTEN: Duration = Duration::from_secs(3);
@@ -92,15 +92,15 @@ enum Stage {
 
 /// The connection under the WebSocket: what the stack wants written goes on
 /// it, and what arrives on it goes to the stack.
-struct Connection {
-    socket: TcpStream,
-    inbox: Vec<u8>,
+pub(crate) struct Connection {
+    pub(crate) socket: TcpStream,
+    pub(crate) inbox: Vec<u8>,
 }
 
 impl Connection {
     /// Everything waiting to go: frames on the WebSocket, datagrams (RTCP is
     /// the media engine's) on the endpoint's own socket.
-    fn flush(&mut self, endpoint: &mut Endpoint) -> Result<(), String> {
+    pub(crate) fn flush(&mut self, endpoint: &mut Endpoint) -> Result<(), String> {
         while let Some(transmit) = endpoint.agent.poll_transmit() {
             if transmit.transport == WS {
                 self.socket
@@ -118,7 +118,7 @@ impl Connection {
     /// Hand the stack whatever the connection has; `false` when nothing
     /// was there. Once the WebSocket is over, the connection is only waited
     /// on: the server closes it after its close frame, as §7.1.1 has it.
-    fn read(&mut self, endpoint: &mut Endpoint, now: Instant) -> Result<bool, String> {
+    pub(crate) fn read(&mut self, endpoint: &mut Endpoint, now: Instant) -> Result<bool, String> {
         if !endpoint.agent.runs_websocket(WS) {
             return Ok(false);
         }

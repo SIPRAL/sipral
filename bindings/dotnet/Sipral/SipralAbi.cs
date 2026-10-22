@@ -4390,6 +4390,21 @@ public struct SipralAccountConfig
     /// How many bytes of it.
     /// </summary>
     public nuint WebsocketResourceLen;
+    /// <summary>
+    /// A `SipralToggle`: whether the account is a PBX WebRTC line
+    /// (Asterisk's `webrtc=yes`, a gateway in front of a WebRTC
+    /// service). On, its calls offer and require DTLS-SRTP on
+    /// `UDP/TLS/RTP/SAVPF` with ICE, `a=rtcp-mux-only` and the stream in
+    /// a BUNDLE group, whatever `srtp` says, and a plain offer is refused
+    /// with 488. Zero or off: as before. On in a build without
+    /// `SIPRAL_FEATURE_DTLS_SRTP` is `SIPRAL_STATUS_NOT_SUPPORTED`.
+    /// ABI 1.4.
+    /// </summary>
+    public uint Webrtc;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved14;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -8905,7 +8920,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 3;
+    public const uint AbiVersionMinor = 4;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9264,7 +9279,7 @@ public static partial class Sipral
         ("sipral_poll_result_t", Marshal.SizeOf<SipralPollResult>(), 48, 28, 32),
         ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 136, 128, 136),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
-        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 496, 272, 280),
+        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 504, 280, 288),
         ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 160, 92, 92),
         ("sipral_codec_info_t", Marshal.SizeOf<SipralCodecInfo>(), 32, 28, 28),
         ("sipral_codec_candidate_t", Marshal.SizeOf<SipralCodecCandidate>(), 24, 20, 20),

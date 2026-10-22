@@ -6,6 +6,7 @@
 // digits over, hung up from one side and ended on both.
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:sipral/sipral.dart';
@@ -343,6 +344,66 @@ void main() {
     expect(roomy.settings().maxServerTransactions, 3256);
     await expectLater(SipralStack.open(maxDialogs: -1), throwsArgumentError);
   });
+
+  test(
+    'two WebRTC lines call each other keyed by a handshake (ABI 1.4)',
+    () async {
+      // a WebRTC line offers ICE, which keeps loopback out of its candidates
+      // (RFC 8445 §5.1.1.1): two stacks of their own, on this host's address
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+      final host =
+          interfaces
+              .expand((interface) => interface.addresses)
+              .where((address) => !address.isLoopback)
+              .firstOrNull
+              ?.address;
+      if (host == null) {
+        markTestSkipped(
+          'no address but loopback for ICE to gather a host candidate from',
+        );
+        return;
+      }
+      final caller = await SipralStack.open(bindHost: host);
+      final callee = await SipralStack.open(bindHost: host);
+      addTearDown(caller.close);
+      addTearDown(callee.close);
+      final fromCaller = caller.addAccount(
+        'sip:alice@sipral.invalid',
+        registrarAddress: callee.bindAddress,
+        webrtc: true,
+      );
+      callee.addAccount(
+        'sip:bob@sipral.invalid',
+        registrarAddress: caller.bindAddress,
+        webrtc: true,
+      );
+      final ringing = callee.events.firstWhere(
+        (event) => event.kind == SipralEventKind.incomingCall,
+      );
+      final secured = caller.events.firstWhere(
+        (event) => event.kind == SipralEventKind.mediaSecured,
+      );
+      // one codec keeps the INVITE under RFC 3261 §18.1.1's 1300 bytes,
+      // with no stream to move it to here
+      final callA = await caller.placeCall(
+        fromCaller,
+        'sip:bob@${callee.bindAddress}',
+        mediaHost: host,
+        codecs: 'PCMU',
+      );
+      final callB = await callee.answerCall(
+        await ringing.timeout(const Duration(seconds: 15)),
+        mediaHost: host,
+      );
+      final event = await secured.timeout(const Duration(seconds: 15));
+      expect(event.call, callA.handle);
+      callA.hangup();
+      await callA.whenEnded(timeout: const Duration(seconds: 15));
+      await until(() => callB.ended);
+    },
+  );
 
   test('a library call that fails throws with the library\'s own words', () {
     expect(

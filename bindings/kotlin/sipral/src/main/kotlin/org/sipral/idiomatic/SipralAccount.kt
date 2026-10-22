@@ -163,6 +163,7 @@ class SipralAccount internal constructor(
                 realms = location.realms.takeIf { it.isNotEmpty() }?.joinToString("\n"),
                 websocketHost = location.websocketHost,
                 websocketResource = location.websocketResource,
+                webrtc = if (security.webrtc) SipralToggle.ON.value.toLong() else 0,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(

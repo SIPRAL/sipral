@@ -41,6 +41,7 @@ pub mod avpf;
 mod dtmf;
 mod emodel;
 mod endpoint;
+mod mid;
 mod playout;
 mod rtcp;
 mod rtcp_stats;
@@ -61,6 +62,7 @@ pub use emodel::{
     evaluate as evaluate_e_model,
 };
 pub use endpoint::{Discard, Received, RtcpReceived, RtpSession, StreamConfig, StreamFormat};
+pub use mid::{MID, MID_PACKETS};
 pub use playout::{Activity, BufferConfig, Frame, Insert, JitterBuffer, MAX_DEPTH, Pull, Quality};
 pub use rtcp::{
     CNAME, Chunk, ChunkBuilder, Chunks, CompoundBuilder, CompoundPacket, Goodbye, GoodbyeBuilder,

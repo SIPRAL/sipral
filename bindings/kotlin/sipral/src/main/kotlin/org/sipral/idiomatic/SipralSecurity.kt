@@ -31,6 +31,9 @@ import org.sipral.SipralVerstat
  * [SipralClient.stir] supplies: call it first, without anchors on a
  * sign-only client. [recordingInClear] lets encrypted calls be recorded as
  * plain RTP; otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
+ * [webrtc] makes the account a PBX WebRTC line (Asterisk's `webrtc=yes`):
+ * its calls offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE and
+ * BUNDLE, whatever [srtp] says (`sipral_account_config_t::webrtc`).
  */
 class SipralAccountSecurity(
     val srtp: SipralSrtp? = null,
@@ -42,6 +45,7 @@ class SipralAccountSecurity(
     val stirOrigid: String? = null,
     val stirAttestation: SipralAttestation? = null,
     val recordingInClear: Boolean = false,
+    val webrtc: Boolean = false,
 )
 
 /** How one stream is protected: a `sipral_stream_encryption_t`

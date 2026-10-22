@@ -777,6 +777,7 @@ class Stack:
         realms: Sequence[str] | None = None,
         websocket_host: str | None = None,
         websocket_resource: str | None = None,
+        webrtc: bool = False,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
 
@@ -799,6 +800,9 @@ class Stack:
         ``None`` to only sign): it gives the stack the clock.
         ``recording_in_clear`` lets encrypted calls be recorded as plain RTP;
         otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
+        ``webrtc`` makes the account a PBX WebRTC line (Asterisk's
+        ``webrtc=yes``): its calls offer and require DTLS-SRTP on
+        ``UDP/TLS/RTP/SAVPF`` with ICE and BUNDLE, whatever ``srtp`` says.
 
         ``session_timer`` (:class:`sipral.enums.SessionTimer`): ``0`` default,
         ``OFF``, or ``INTERVAL`` with ``session_interval_seconds`` (90+,
@@ -880,6 +884,7 @@ class Stack:
             stir_attestation=stir_attestation,
             recording_in_clear=recording_in_clear,
             realms=realms,
+            webrtc=webrtc,
         )
         with self._lock:
             self._accounts.append(account)

@@ -27,6 +27,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralHeldAudio
 import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralAccount
+import org.sipral.idiomatic.SipralAccountSecurity
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
@@ -107,6 +108,8 @@ object SipralJava {
      * [websocketHost] as `Host`. [realms] are the realms the password answers, for a server that
      * challenges calls under a realm REGISTER never sees; other challenges go
      * unanswered and raise `CHALLENGE_DECLINED` ([declinedChallengeOf]).
+     * [webrtc] makes the account a PBX WebRTC line
+     * ([SipralAccountSecurity.webrtc]).
      */
     @JvmStatic
     @JvmOverloads
@@ -122,6 +125,7 @@ object SipralJava {
         realms: List<String> = emptyList(),
         websocketHost: String? = null,
         websocketResource: String? = null,
+        webrtc: Boolean = false,
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
@@ -133,6 +137,7 @@ object SipralJava {
         realms = realms,
         websocketHost = websocketHost,
         websocketResource = websocketResource,
+        security = SipralAccountSecurity(webrtc = webrtc),
     )
 
     /** The challenge a `CHALLENGE_DECLINED` [event] reports, or null for

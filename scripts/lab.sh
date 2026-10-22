@@ -61,6 +61,16 @@
 #                               registered at Asterisk's /ws as labuser-ws,
 #                               the echo called and heard, the binding given
 #                               back (part of the Asterisk run too)
+#   scripts/lab.sh webrtc       only a PBX WebRTC line: Asterisk's
+#                               webrtc=yes endpoints, labuser-webrtc over
+#                               UDP and labuser-webrtc-ws over the
+#                               WebSocket, each registered as a WebRTC line
+#                               (UDP/TLS/RTP/SAVPF, DTLS-SRTP, ICE, BUNDLE),
+#                               a call placed to the echo and one Asterisk
+#                               places back (9051), audio counted both ways
+#                               on each; then the same line through
+#                               Kamailio to FreeSWITCH's echo (part of the
+#                               Asterisk run too)
 #   scripts/lab.sh wss          only the same over TLS: Asterisk restarted
 #                               with a TLS listener on 8089 (interop/wss/),
 #                               the connection secured by a socat that checks
@@ -3843,6 +3853,46 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = websocket ]; then
     step "SIP over a WebSocket the stack opened -- straight at Asterisk"
     websocket_flow && pass "registered, called and heard the echo over the WebSocket" \
         || fail "SIP over a WebSocket the stack opened"
+fi
+
+# A PBX WebRTC line: Asterisk's webrtc=yes endpoints (interop/asterisk's
+# labuser-webrtc and labuser-webrtc-ws), reached by an account the stack is
+# told is a WebRTC line, over UDP and then over a WebSocket on 8088. Each run
+# places a call to the echo and has Asterisk call back into it (9051), and
+# counts the audio both ways on both (interop/harness/src/webrtc.rs). Then
+# the same line through Kamailio to FreeSWITCH's echo, whose lab profile
+# answers it as it stands.
+webrtc_flow() {
+    local server="$1" flows="$2" calls="$3"
+    lab_run "the WebRTC line's calls at $server" $((LAB_START_APT_S + calls * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_FLOWS="$flows" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
+            tcpdump -i any -s 0 -U -w /pcap/webrtc-$server.pcap 2>/dev/null &
+            sleep 2
+            /harness $server 5060 9000
+            status=\$?
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = webrtc ]; then
+    step "a PBX WebRTC line -- Asterisk's webrtc=yes, over UDP and over a WebSocket"
+    webrtc_flow asterisk webrtc,webrtcws 4 \
+        && pass "a call each way on the WebRTC line, heard both ways, over UDP and over the WebSocket" \
+        || fail "a call each way on Asterisk's WebRTC line"
+    step "a WebRTC line through the proxy -- FreeSWITCH's echo"
+    webrtc_flow kamailio webrtcfs 2 \
+        && pass "a call on the WebRTC line to FreeSWITCH, heard both ways" \
+        || fail "a call on a WebRTC line to FreeSWITCH"
 fi
 
 # The one step in this file where the far end is a client stack rather than

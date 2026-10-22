@@ -243,6 +243,44 @@ fn awkward_sdp() -> Vec<u8> {
     text.into_bytes()
 }
 
+/// What a WebRTC line offers for one audio stream, written out from RFC 8843
+/// §7 and §9, RFC 8858 §4.2, RFC 8285 §5, RFC 8830 §2 and RFC 5576 §4.1: the
+/// BUNDLE group, the tag, the MID header extension, exclusive mux, the source
+/// lines and the DTLS and ICE lines around them.
+fn webrtc_offer() -> Vec<u8> {
+    let mut text = String::new();
+    let _ = write!(
+        text,
+        "v=0\r\n\
+         o=- 4611731400430051336 2 IN IP4 192.0.2.1\r\n\
+         s=-\r\n\
+         c=IN IP4 192.0.2.1\r\n\
+         t=0 0\r\n\
+         a=group:BUNDLE 0\r\n\
+         m=audio 49170 UDP/TLS/RTP/SAVPF 111 0 101\r\n\
+         a=mid:0\r\n\
+         a=rtpmap:111 opus/48000/2\r\n\
+         a=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:101 telephone-event/8000\r\n\
+         a=rtcp-mux\r\n\
+         a=rtcp-mux-only\r\n\
+         a=rtcp-fb:* nack\r\n\
+         a=rtcp-rsize\r\n\
+         a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+         a=extmap:2/recvonly urn:ietf:params:rtp-hdrext:ssrc-audio-level vad=on\r\n\
+         a=ice-ufrag:8hhY\r\n\
+         a=ice-pwd:asd88fgpdd777uzjYhagZg\r\n\
+         a=candidate:1 1 UDP 2130706431 192.0.2.1 49170 typ host\r\n\
+         a=fingerprint:sha-256 \
+         19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\n\
+         a=setup:actpass\r\n\
+         a=msid:0123456789abcdef audio\r\n\
+         a=ssrc:305419896 cname:sipral@192.0.2.1\r\n\
+         a=sendrecv\r\n"
+    );
+    text.into_bytes()
+}
+
 fn sip_seeds() -> Result<Vec<Seed>, Wrong> {
     let mut out = Vec::new();
     for (name, bytes) in [
@@ -384,6 +422,7 @@ fn sdp_seeds() -> Result<Vec<Seed>, Wrong> {
         ("offer", offer()),
         ("answer", answer()),
         ("two-streams-one-rejected", awkward_sdp()),
+        ("webrtc-line-offer", webrtc_offer()),
         ("bare-lf-at-body-limit", bare_lf_at_body_limit()?),
         ("answer-past-body-limit", answer_past_body_limit()?),
         ("answer-past-line-limit", answer_past_line_limit()?),

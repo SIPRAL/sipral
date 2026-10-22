@@ -3928,3 +3928,49 @@ screen. Compared as written, case and all. A `call_id_len` of zero is
 has the reasoning. The facade carries it as `UserAgent::announce_call` and
 `Announcement::call_id`; the layers reach it through their printed bindings,
 and their push bridges still announce by caller alone.
+
+## What ABI 1.4 added
+
+### A PBX WebRTC line
+
+Two members appended to `sipral_account_config_t` behind its `size`, no
+entry point, no event kind and no status code, and nothing else in the header
+moved: `bindings/c/abi-sizes.txt` grows the account's length by eight octets
+on every layout (504 on 64-bit, 280 and 288 on the two 32-bit ones) and its
+pin stays where 1.0 put it. A binding printed at 1.3 loads against a 1.4
+library and works as it did, its shorter struct read with `webrtc` zero; one
+printed at 1.4 is refused by a 1.3 library, with both versions named.
+
+- `webrtc`, a `sipral_toggle_t`: `SIPRAL_TOGGLE_ON` makes the account a PBX
+  WebRTC line, the shape Asterisk's `webrtc=yes` endpoints and the gateways in
+  front of a WebRTC service expect (`docs/05-media.md`, "A WebRTC line"). Its
+  calls, placed or answered, run under `SIPRAL_SRTP_DTLS_REQUIRED` whatever
+  `srtp` or a call's own `srtp` says, offer ICE when neither the stack nor the
+  call does, offer `UDP/TLS/RTP/SAVPF` with `a=rtcp-mux-only`, and put the
+  stream in a BUNDLE group with `a=mid`, the MID header extension, `a=msid`
+  and `a=ssrc`. A plain INVITE for the account is answered 488 and
+  `sipral_call_answer` returns `SIPRAL_STATUS_SECURITY_POLICY`, as under any
+  required policy. `SIPRAL_TOGGLE_DEFAULT` and `SIPRAL_TOGGLE_OFF` leave the
+  account as before; any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`, and
+  `SIPRAL_TOGGLE_ON` in a build without `SIPRAL_FEATURE_DTLS_SRTP` is
+  `SIPRAL_STATUS_NOT_SUPPORTED`.
+- `reserved_1_4`, zero, which keeps the struct a whole multiple of its
+  alignment.
+
+An offer that bundles is answered as RFC 8843 asks on every account, the
+setting or not: that part needed nothing at the boundary. The facade carries
+the setting as `AccountSrtp::webrtc` (`MediaEngine::set_account_srtp`) and,
+per call, `CodecCatalog::with_webrtc`.
+
+**In the layers.** Each idiomatic layer takes it where it takes the
+account's SRTP policy: Swift `AccountSecurity(webrtc: true)`, .NET
+`new AccountSecurity(Webrtc: true)`, Kotlin `SipralAccountSecurity(webrtc =
+true)` and the JVM jar's `SipralJava.addAccount(..., webrtc)`, Python
+`add_account(..., webrtc=True)`, Dart `addAccount(..., webrtc: true)` and
+Node `stack.addAccount(aor, {webrtc: true})`. Each layer's tests call between
+two such accounts on this machine's own routable address — the line offers
+ICE, and ICE keeps loopback out of its candidates (RFC 8445 §5.1.1.1), so a
+WebRTC line between two stacks on `127.0.0.1` is refused before the INVITE
+with `SIPRAL_STATUS_NOT_SENT` — and read the call back as keyed by a
+DTLS-SRTP handshake (Dart, whose layer has no encryption report, by the
+handshake's `SIPRAL_EVENT_KIND_MEDIA_SECURED`). React Native's account options do not carry it yet.

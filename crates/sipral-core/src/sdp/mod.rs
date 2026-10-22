@@ -13,6 +13,7 @@
 //! negotiation: what goes into an offer, and what the answer settled on.
 
 mod answer;
+mod bundle;
 mod crypto;
 mod error;
 mod media;
@@ -21,6 +22,7 @@ mod plan;
 mod session;
 
 pub use answer::{AcceptedStream, StreamAnswer};
+pub use bundle::MID_EXTENSION;
 pub use crypto::{
     CryptoPolicy, CryptoSuite, Inline, KeyIdentifier, KeySalt, MASTER_KEY, MASTER_SALT,
     SessionParams,

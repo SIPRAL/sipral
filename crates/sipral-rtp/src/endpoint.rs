@@ -14,6 +14,7 @@ use crate::avpf::rsize::{
 use crate::avpf::session::{FeedbackCounts, FeedbackState, Negotiated, Send as FeedbackSend};
 use crate::dtmf::{EVENT_LEN, EventSender, HALF_CLOCK, Outgoing};
 use crate::emodel::{self, BurstRatio, CodecQualityModel, EModelInputs};
+use crate::mid::{MID, MidTag};
 use crate::playout::{
     Activity, BufferConfig, Frame, Insert, JitterBuffer, Pull, Quality, clock_ticks,
 };
@@ -30,9 +31,7 @@ use crate::rtcp_xr::{
 };
 use crate::source::{SeqUpdate, SequenceState};
 use crate::srtp::{Master, Policy, Rekeyed, Security, SrtpError};
-use crate::wire::{
-    BuildError, FIXED_HEADER_LEN, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket,
-};
+use crate::wire::{BuildError, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket};
 
 /// What a re-negotiation onto a different codec changes about a stream that
 /// is going to carry on regardless.
@@ -239,6 +238,9 @@ pub struct RtpSession {
     /// feedback schedule, the losses not yet reported and what was counted.
     /// Boxed because most streams never have it.
     feedback: Option<Box<FeedbackState>>,
+    /// The identification-tag this stream announces, once
+    /// [`RtpSession::announce_mid`] gave one.
+    mid: Option<MidTag>,
 }
 
 /// Whether this stream is secured, and whether it can be yet.
@@ -433,7 +435,22 @@ impl RtpSession {
             far_voip_metrics: None,
             security: Protection::Clear,
             feedback: None,
+            mid: None,
         }
+    }
+
+    /// Announce `mid` as this stream's identification-tag from now on (RFC
+    /// 8843 §15): in a header extension numbered `id` on the next
+    /// [`MID_PACKETS`](crate::MID_PACKETS) RTP packets, and as an SDES item
+    /// in every report. `id` is the number both descriptions gave
+    /// `urn:ietf:params:rtp-hdrext:sdes:mid` (RFC 8285 §5).
+    ///
+    /// `false`, and nothing announced, for an `id` of zero or a tag no header
+    /// extension can carry: empty, or longer than 255 octets (16 under the
+    /// one-byte form's numbers, 1 to 14, which then take the two-byte form).
+    pub fn announce_mid(&mut self, id: u8, mid: &str) -> bool {
+        self.mid = MidTag::new(id, mid.as_bytes());
+        self.mid.is_some()
     }
 
     /// Run this stream's RTCP as RTP/AVPF (RFC 4585) from `now` on, with what
@@ -566,6 +583,52 @@ impl RtpSession {
         }
         let room = out.len().checked_sub(overhead)?;
         out.get_mut(..room)
+    }
+
+    /// The SDES items a report carries: the CNAME, and the identification-tag
+    /// once announced, since RFC 8843 §15 asks for it "in the first few RTCP
+    /// packets ... and regularly thereafter", which every report is.
+    fn report_items(&self) -> Vec<SdesItem<'_>> {
+        let cname = SdesItem {
+            kind: CNAME,
+            text: self.cname.as_bytes(),
+        };
+        core::iter::once(cname)
+            .chain(self.mid.as_ref().map(|tag| SdesItem {
+                kind: MID,
+                text: tag.text(),
+            }))
+            .collect()
+    }
+
+    /// Build one RTP packet into `out` and protect it, with the
+    /// identification-tag's header extension while the start of the stream
+    /// lasts ([`RtpSession::announce_mid`]). Nothing is counted here.
+    fn write_rtp(
+        &mut self,
+        header: RtpHeader,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, BuildError> {
+        let mut packet = PacketBuilder::new(header, payload);
+        if let Some(extension) = self.mid.as_ref().and_then(MidTag::extension) {
+            packet = packet.extension(extension);
+        }
+        let overhead = self.rtp_overhead();
+        let need = packet.encoded_len() + overhead;
+        let offered = out.len();
+        let room =
+            Self::room(out, need, overhead).ok_or(BuildError::Short { need, got: offered })?;
+        let built = packet.write(room)?;
+        let tagged = self
+            .mid
+            .as_ref()
+            .is_some_and(|tag| tag.extension().is_some());
+        let written = self.protect_rtp(out, built)?;
+        if tagged && let Some(tag) = self.mid.as_mut() {
+            tag.carried();
+        }
+        Ok(written)
     }
 
     fn protect_rtp(&mut self, out: &mut [u8], built: usize) -> Result<usize, BuildError> {
@@ -784,13 +847,7 @@ impl RtpSession {
             timestamp: self.outbound.timestamp,
             ssrc: self.outbound.ssrc,
         };
-        let overhead = self.rtp_overhead();
-        let need = FIXED_HEADER_LEN + payload.len() + overhead;
-        let offered = out.len();
-        let room =
-            Self::room(out, need, overhead).ok_or(BuildError::Short { need, got: offered })?;
-        let built = PacketBuilder::new(header, payload).write(room)?;
-        let written = self.protect_rtp(out, built)?;
+        let written = self.write_rtp(header, payload, out)?;
         self.outbound.spurt_start = false;
         self.outbound.sequence = self.outbound.sequence.wrapping_add(1);
         self.outbound.timestamp = self.outbound.timestamp.wrapping_add(samples);
@@ -861,13 +918,7 @@ impl RtpSession {
             timestamp: event.timestamp,
             ssrc: self.outbound.ssrc,
         };
-        let overhead = self.rtp_overhead();
-        let need = FIXED_HEADER_LEN + EVENT_LEN + overhead;
-        let offered = out.len();
-        let room =
-            Self::room(out, need, overhead).ok_or(BuildError::Short { need, got: offered })?;
-        let built = PacketBuilder::new(header, &payload).write(room)?;
-        let written = self.protect_rtp(out, built)?;
+        let written = self.write_rtp(header, &payload, out)?;
         self.outbound.sequence = self.outbound.sequence.wrapping_add(1);
 
         let ended = event
@@ -1297,14 +1348,11 @@ impl RtpSession {
             .then(|| self.voip_metrics(codec))
             .flatten();
 
-        let cname_item = [SdesItem {
-            kind: CNAME,
-            text: self.cname.as_bytes(),
-        }];
+        let items = self.report_items();
         let sdes = SourceDescriptionBuilder {
             chunks: &[ChunkBuilder {
                 ssrc: self.outbound.ssrc,
-                items: &cname_item,
+                items: &items,
             }],
         };
         let report = if self.outbound.sent_since_report {
@@ -2906,6 +2954,50 @@ mod tests {
         };
         assert_eq!(sdes.cname(), Some(&b"tester@203.0.113.1"[..]));
         assert!(packets.next().is_none());
+    }
+
+    #[test]
+    fn an_announced_tag_rides_the_first_packets_and_every_report() {
+        let mut session = session();
+        assert!(!session.announce_mid(0, "0"));
+        assert!(!session.announce_mid(1, ""));
+        assert!(session.announce_mid(3, "0"));
+        let mut out = [0_u8; 256];
+        for sent in 0..crate::MID_PACKETS {
+            let n = session.send(&[0_u8; 160], 160, &mut out).expect("room");
+            let packet = RtpPacket::parse(&out[..n]).expect("a packet");
+            let extension = packet.extension().expect("the tag, early in the stream");
+            assert_eq!(extension.profile, 0xBEDE, "packet {sent}");
+            assert_eq!(extension.data, [0x30, b'0', 0, 0], "packet {sent}");
+            assert_eq!(packet.payload().len(), 160);
+        }
+        let n = session.send(&[0_u8; 160], 160, &mut out).expect("room");
+        let after = RtpPacket::parse(&out[..n]).expect("a packet");
+        assert!(
+            after.extension().is_none(),
+            "the start of the stream is over"
+        );
+        assert_eq!(n, crate::wire::FIXED_HEADER_LEN + 160);
+
+        let mut report = [0_u8; 256];
+        let (n, _) = session
+            .build_report(&mut report, Duration::ZERO, 0, 0.5, None)
+            .expect("room");
+        let compound = CompoundPacket::parse(&report[..n]).expect("a compound packet");
+        let sdes = compound
+            .packets()
+            .find_map(|packet| match packet {
+                RtcpPacket::SourceDescription(sdes) => Some(sdes),
+                _ => None,
+            })
+            .expect("an SDES");
+        let chunk = sdes.chunks().next().expect("a chunk");
+        assert_eq!(chunk.cname(), Some(&b"tester@203.0.113.1"[..]));
+        let mid = chunk
+            .items()
+            .find(|item| item.kind == crate::MID)
+            .expect("the tag's item");
+        assert_eq!(mid.text, b"0");
     }
 
     #[test]

@@ -293,6 +293,7 @@ public final class Account: @unchecked Sendable {
             }
             config.stir_attestation = security.stirAttestation.rawValue
             config.recording_in_clear = security.recordingInClear ? UInt64(SipralToggle.on.rawValue) : 0
+            config.webrtc = security.webrtc ? SipralToggle.on.rawValue : 0
             return try key.withUnsafeBufferPointer { keyBytes in
                 if !keyBytes.isEmpty {
                     config.stir_key = keyBytes.baseAddress
@@ -481,6 +482,9 @@ public final class Account: @unchecked Sendable {
 /// `SipralStack.stir` first, since a PASSporT needs the clock.
 /// `recordingInClear` allows recording encrypted calls as plain RTP;
 /// otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
+/// `webrtc` makes the account a PBX WebRTC line (Asterisk's `webrtc=yes`):
+/// its calls offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE
+/// and BUNDLE, whatever `srtp` says (`sipral_account_config_t::webrtc`).
 public struct AccountSecurity: Sendable {
     public var srtp: SipralSrtp?
     public var srtpSuites: [String]
@@ -491,6 +495,7 @@ public struct AccountSecurity: Sendable {
     public var stirOrigid: String?
     public var stirAttestation: SipralAttestation
     public var recordingInClear: Bool
+    public var webrtc: Bool
 
     public init(
         srtp: SipralSrtp? = nil,
@@ -501,7 +506,8 @@ public struct AccountSecurity: Sendable {
         stirOrig: String? = nil,
         stirOrigid: String? = nil,
         stirAttestation: SipralAttestation = .none,
-        recordingInClear: Bool = false
+        recordingInClear: Bool = false,
+        webrtc: Bool = false
     ) {
         self.srtp = srtp
         self.srtpSuites = srtpSuites
@@ -512,5 +518,6 @@ public struct AccountSecurity: Sendable {
         self.stirOrigid = stirOrigid
         self.stirAttestation = stirAttestation
         self.recordingInClear = recordingInClear
+        self.webrtc = webrtc
     }
 }

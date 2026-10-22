@@ -493,6 +493,53 @@ final class NatTests: XCTestCase {
         try await assertIceCarriesAudio(alice, bob, host: host)
     }
 
+    /// ABI 1.4: two accounts that are WebRTC lines, on stacks that set no
+    /// ICE of their own: the offer is a WebRTC line's, and the call is keyed
+    /// by a handshake on the pair ICE chose.
+    func testTwoWebRtcLinesCallEachOtherKeyedByAHandshake() async throws {
+        let host = try hostAddress()
+        let alice = try SipralStack(audio: .application, bindHost: host, codecs: "PCMU")
+        let bob = try SipralStack(audio: .application, bindHost: host, codecs: "PCMU")
+        defer { alice.close(); bob.close() }
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress,
+            security: AccountSecurity(webrtc: true)
+        )
+        _ = try bob.addAccount(
+            aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress,
+            security: AccountSecurity(webrtc: true)
+        )
+        let bobEvents = bob.events()
+        let aliceStackEvents = alice.events()
+        let aliceCall = try alice.placeCall(
+            account: aliceAccount, target: "sip:bob@\(bob.bindAddress)", mediaHost: host
+        )
+        defer { aliceCall.close() }
+
+        let incoming = await first(bobEvents) { $0.kind == .incomingCall }
+        let offer = try XCTUnwrap(
+            (incoming?.callData?.remoteSdp ?? incoming?.message).map { String(decoding: $0, as: UTF8.self) },
+            "the incoming call carried neither its offer nor its message"
+        )
+        for line in ["UDP/TLS/RTP/SAVPF", "a=group:BUNDLE 0", "a=mid:0", "a=rtcp-mux-only", "a=ice-ufrag:"] {
+            XCTAssertTrue(offer.contains(line), "\(line) is not in the offer:\n\(offer)")
+        }
+        let bobCall = try bob.takeIncomingCall(try XCTUnwrap(incoming), mediaHost: host)
+        defer { bobCall.close() }
+        try bobCall.answer()
+
+        let secured = await first(aliceStackEvents) { $0.kind == .mediaSecured }
+        XCTAssertNotNil(secured, "the handshake never finished")
+        let deadline = DispatchTime.now() + 5
+        while aliceCall.media == nil && DispatchTime.now() < deadline {
+            usleep(20_000)
+        }
+        let report = try XCTUnwrap(aliceCall.media, "the placed call never got its audio").encryption()
+        XCTAssertEqual(report.first?.keyExchange, .dtls)
+        XCTAssertEqual(report.first?.encrypted, true)
+        XCTAssertEqual(report.first?.authenticated, true, "the certificate matched the fingerprint")
+    }
+
     /// ICE-lite answering a full agent (RFC 8445 §2.5): audio both ways.
     func testALiteStackAnsweringAFullOneCarriesAudioBothWays() async throws {
         let host = try hostAddress()

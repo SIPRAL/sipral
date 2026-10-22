@@ -293,6 +293,43 @@ record! {
         pub websocket_resource: *const c_char,
         /// How many bytes of it.
         pub websocket_resource_len: usize,
+        /// A `SipralToggle`: whether the account is a PBX WebRTC line
+        /// (Asterisk's `webrtc=yes`, a gateway in front of a WebRTC
+        /// service). On, its calls offer and require DTLS-SRTP on
+        /// `UDP/TLS/RTP/SAVPF` with ICE, `a=rtcp-mux-only` and the stream in
+        /// a BUNDLE group, whatever `srtp` says, and a plain offer is refused
+        /// with 488. Zero or off: as before. On in a build without
+        /// `SIPRAL_FEATURE_DTLS_SRTP` is `SIPRAL_STATUS_NOT_SUPPORTED`.
+        /// ABI 1.4.
+        pub webrtc: Number<SipralToggle>,
+        /// Zero.
+        pub reserved_1_4: u32,
+    }
+}
+
+/// `sipral_account_config_t::webrtc` as the account's setting: `None` for
+/// zero, which keeps the stack's.
+///
+/// # Errors
+///
+/// `SIPRAL_STATUS_NOT_SUPPORTED` for on in a build without DTLS-SRTP, and
+/// `SIPRAL_STATUS_INVALID_ARGUMENT` for a value that is not a toggle.
+fn webrtc_line(value: u32) -> Result<Option<bool>, Fail> {
+    match value {
+        0 => Ok(None),
+        #[cfg(feature = "dtls")]
+        1 => Ok(Some(true)),
+        #[cfg(not(feature = "dtls"))]
+        1 => Err(fail(
+            SipralStatus::NotSupported,
+            "webrtc names a WebRTC line and this build has no DTLS-SRTP: \
+             SIPRAL_FEATURE_DTLS_SRTP is clear in sipral_capabilities",
+        )),
+        2 => Ok(Some(false)),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!("webrtc is {other}, and a setting is 0 for the default, 1 for on or 2 for off"),
+        )),
     }
 }
 
@@ -793,6 +830,7 @@ entry! {
                 false,
             )?;
             // no C switch for `sdes_signalling`: the stack's default, SDES on any transport
+            srtp.webrtc = webrtc_line(config.webrtc)?;
             srtp
         };
         let handle = with_stack(stack, |state| {
@@ -1055,6 +1093,8 @@ pub(crate) mod tests {
             websocket_host_len: 0,
             websocket_resource: std::ptr::null(),
             websocket_resource_len: 0,
+            webrtc: 0,
+            reserved_1_4: 0,
         }
     }
 

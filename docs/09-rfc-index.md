@@ -101,7 +101,7 @@ whether it is met; *in part* is followed by what is missing.
 | 5280 | X.509 v3: a self-signed certificate written, a peer's read as far as its public key | sipral-dtls | phase 2; done |
 | 5480 / 5758 / 3279 | An ECDSA P-256 key and signature in a certificate: `id-ecPublicKey` with the named curve, `ecdsa-with-SHA256`, `Ecdsa-Sig-Value` | sipral-dtls | phase 2; done |
 | 3279 §2.3.1 / 8017 | An RSA key in a peer's certificate, `rsaEncryption` with NULL parameters, and RSASSA-PKCS1-v1_5 over SHA-256, verified only — this end never signs with RSA — under a modulus of 2048 to 8192 bits (RFC 9325 §4.5) | sipral-dtls | phase 2; done — proven in the lab against FreeSWITCH's own RSA-4096 certificate |
-| 7983 | Telling DTLS, STUN and RTP apart on one socket | sipral-nat | phase 2; done — `Demux::Dtls` on the first octet, read by `MediaSession::receive` |
+| 7983 | Telling DTLS, STUN and RTP apart on one socket | sipral-nat | phase 2; done — `Demux::Dtls` on the first octet, read by `MediaSession::receive`; the one 5-tuple a WebRTC line's bundled stream runs on (1.3) |
 | 5761 | Multiplexing RTP and RTCP | sipral-rtp | phase 2 |
 | 6716 | Opus | sipral-media | phase 2 |
 | 7587 | RTP payload format for Opus | sipral-media | phase 2 |
@@ -115,6 +115,14 @@ whether it is met; *in part* is followed by what is missing.
 | 8842 | `a=setup` in re-offers | sipral | phase 2; done |
 | 4585 / 5506 | RTP/AVPF with Generic NACKs and `trr-int`, and reduced-size RTCP, offered when a call asks for them and answered whenever offered | sipral-rtp, sipral | phase 2, built |
 | 4103 / 2198 | Real-time text: T.140 on a stream of its own beside the audio, with two redundant generations | sipral-rtp, sipral | phase 2, built |
+| 5124 | RTP/SAVPF, and `UDP/TLS/RTP/SAVPF` (RFC 5764 §8): offered by a WebRTC line (`CodecCatalog::with_webrtc`) and by a call that asks for feedback, answered on the offer's profile whenever offered | sipral | 1.3; built |
+| 8843 | BUNDLE, for one audio stream: a WebRTC line offers it alone in a group (§7.2) with the MID extension (§9.1); any catalogue answers an offer that bundles with the tags back, the group of the streams it accepted in the offer's order (§7.3.1, §7.3.3), mux whatever its own setting (§9.3.1.2), the extension under the offer's number; the tag sent in the first fifty RTP packets and every RTCP report (§15) when both descriptions map it. One stream needs no shared transport of its own, so several `m=` sections in one group are not built | sipral-core, sipral, sipral-rtp | 1.3; built |
+| 5888 | `a=group` and `a=mid`, read and written for BUNDLE | sipral-core, sipral | 1.3; built |
+| 8858 | Exclusive RTP/RTCP multiplexing: `a=rtcp-mux-only` offered by a WebRTC line (§4.2), an offer carrying it answered with `a=rtcp-mux` (§4.3) | sipral | 1.3; built |
+| 8285 | RTP header extensions: the one-byte and two-byte forms written for the MID extension alone, `a=extmap` read; extensions received are skipped | sipral-rtp, sipral-core | 1.3; built |
+| 7941 | SDES items carried in an RTP header extension, for the MID item (`urn:ietf:params:rtp-hdrext:sdes:mid`, RFC 8843 §14) | sipral-rtp | 1.3; built |
+| 8830 | `a=msid`: written by a WebRTC line (§2), read past when a peer writes it | sipral | 1.3; built |
+| 5576 | `a=ssrc` with `cname`, written by a WebRTC line and on any bundled answer; a peer's read past | sipral | 1.3; built |
 
 ## NAT
 

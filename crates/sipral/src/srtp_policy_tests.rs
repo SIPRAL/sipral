@@ -561,6 +561,7 @@ fn each_account_holds_its_calls_to_its_own_policy() {
                 suites: None,
                 recording_in_clear: false,
                 sdes_signalling: None,
+                webrtc: None,
             },
         )
         .expect("a policy");
@@ -628,6 +629,7 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
                 suites: Some(vec![Suite::AesCm80]),
                 recording_in_clear: false,
                 sdes_signalling: None,
+                webrtc: None,
             },
         )
         .expect("a policy");
@@ -664,6 +666,7 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
                 suites: Some(Vec::new()),
                 recording_in_clear: false,
                 sdes_signalling: None,
+                webrtc: None,
             }
         ),
         Err(MediaError::NoSrtpSuite)

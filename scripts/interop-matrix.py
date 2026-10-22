@@ -103,6 +103,8 @@ FLOW_SECTIONS = {
         "rust",
     ),
     "FusionPBX -- its own configuration on FreeSWITCH, straight at it": ("fusionpbx", "rust"),
+    "a PBX WebRTC line -- Asterisk's webrtc=yes, over UDP and over a WebSocket": ("asterisk", "rust"),
+    "a WebRTC line through the proxy -- FreeSWITCH's echo": ("kamailio", "rust"),
 }
 # The FLOW_SECTIONS headers whose harness prints no "lab: ..." line before
 # its flows: the STIR/SHAKEN step runs two stacks of the C harness against

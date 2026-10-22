@@ -270,6 +270,7 @@ public sealed class Account
             }
             config.StirAttestation = (uint)security.StirAttestation;
             config.RecordingInClear = security.RecordingInClear ? (uint)SipralToggle.On : 0;
+            config.Webrtc = security.Webrtc ? (uint)SipralToggle.On : 0;
 
             SipralErrors.Call(() => NativeMethods.sipral_account_add(stack.Handle, config, out accountHandle), "sipral_account_add");
         }
@@ -539,7 +540,11 @@ public sealed class Account
 /// A) and <see cref="StirOrigid"/> (generated if absent). Signing needs the
 /// clock <see cref="SipralStack.Stir"/> gives, so call it first.
 /// <see cref="RecordingInClear"/> lets encrypted calls be recorded as plain
-/// RTP; otherwise copies go as SRTP or not at all (RFC 7866 §12.2).</summary>
+/// RTP; otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
+/// <see cref="Webrtc"/> makes the account a PBX WebRTC line (Asterisk's
+/// <c>webrtc=yes</c>): its calls offer and require DTLS-SRTP on
+/// <c>UDP/TLS/RTP/SAVPF</c> with ICE and BUNDLE, whatever <see cref="Srtp"/>
+/// says (<c>sipral_account_config_t::webrtc</c>).</summary>
 public sealed record AccountSecurity(
     SipralSrtp Srtp = 0,
     IReadOnlyList<string>? SrtpSuites = null,
@@ -549,4 +554,5 @@ public sealed record AccountSecurity(
     string? StirOrig = null,
     string? StirOrigid = null,
     SipralAttestation StirAttestation = SipralAttestation.None,
-    bool RecordingInClear = false);
+    bool RecordingInClear = false,
+    bool Webrtc = false);

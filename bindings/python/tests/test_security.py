@@ -28,6 +28,7 @@ from sipral.enums import (
     VerificationOutcome,
     VerificationStage,
 )
+from tests.test_nat import _routable_address
 
 #: Short, with one codec: a signed INVITE must stay under RFC 3261 Section
 #: 18.1.1's 1300 octets, as no stream transport is open.
@@ -165,6 +166,43 @@ class EachAccountHoldsItsCallsToItsOwnPolicy(_TwoStacks):
         self.assertEqual(report[0].key_exchange, KeyExchange.SDES)
         self.assertTrue(report[0].encrypted)
         self.assertFalse(report[0].authenticated, "SDES authenticates nothing")
+
+    async def test_two_webrtc_lines_call_each_other_keyed_by_a_handshake(self) -> None:
+        # ABI 1.4. A WebRTC line offers ICE, which keeps loopback out of its
+        # candidates (RFC 8445 Section 5.1.1.1): two stacks of their own, on
+        # this host's routable address, that set no ICE themselves.
+        host = _routable_address()
+        if host is None:
+            self.skipTest("no routable address on this machine for ICE to gather a host candidate from")
+        loop = asyncio.get_running_loop()
+        caller = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
+        callee = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
+        self.addAsyncCleanup(asyncio.to_thread, caller.close)
+        self.addAsyncCleanup(asyncio.to_thread, callee.close)
+        placing = caller.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address=callee.bind_address,
+            webrtc=True,
+        )
+        callee.add_account(
+            "sip:bob@sipral.invalid",
+            registrar_address=caller.bind_address,
+            webrtc=True,
+        )
+        call = caller.place_call(placing, f"sip:bob@{callee.bind_address}", media_host=host)
+        incoming = await self.next_event(callee, EventKind.INCOMING_CALL)
+        answered = callee.answer_call(incoming, media_host=host)
+        self.addAsyncCleanup(asyncio.to_thread, call.close)
+        self.addAsyncCleanup(asyncio.to_thread, answered.close)
+
+        await self.next_event(caller, EventKind.MEDIA_SECURED)
+        while call.media is None:
+            await asyncio.wait_for(call.events.get(), timeout=5)
+        report = call.media.encryption()
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0].key_exchange, KeyExchange.DTLS)
+        self.assertTrue(report[0].encrypted)
+        self.assertTrue(report[0].authenticated, "the certificate matched the fingerprint")
 
     async def test_a_suite_no_srtp_names_is_refused_where_it_is_given(self) -> None:
         from sipral import SipralError

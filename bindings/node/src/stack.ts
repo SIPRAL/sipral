@@ -338,6 +338,11 @@ export interface AccountOptions {
   /** A `SipralAttestation` value. */
   stirAttestation?: number;
   recordingInClear?: boolean;
+  /**
+   * A PBX WebRTC line (Asterisk's `webrtc=yes`): its calls offer and require
+   * DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE and BUNDLE, whatever `srtp` says.
+   */
+  webrtc?: boolean;
 }
 
 /** How a call is placed or answered. */

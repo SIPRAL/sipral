@@ -278,6 +278,10 @@ final class SipralStack {
   /// challenged with; an SBC challenging calls under its own realm needs both
   /// named. A challenge for any other realm is not answered and raises
   /// `SipralEventKind.challengeDeclined`.
+  ///
+  /// [webrtc] makes the account a PBX WebRTC line (Asterisk's `webrtc=yes`):
+  /// its calls offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE
+  /// and BUNDLE, whatever the stack's SRTP policy says.
   SipralAccount addAccount(
     String aor, {
     String? registrarAddress,
@@ -294,6 +298,7 @@ final class SipralStack {
     List<String> realms = const [],
     String? websocketHost,
     String? websocketResource,
+    bool webrtc = false,
   }) {
     _ensureOpen();
     if ((registrarAddress == null) == (serverUri == null)) {
@@ -375,7 +380,8 @@ final class SipralStack {
         ..websocketHost = websocketHostText.$1
         ..websocketHostLen = websocketHostText.$2
         ..websocketResource = websocketResourceText.$1
-        ..websocketResourceLen = websocketResourceText.$2;
+        ..websocketResourceLen = websocketResourceText.$2
+        ..webrtc = webrtc ? SipralToggle.on : 0;
       final out = arena<SipralHandle>();
       _check(
         _sipral,

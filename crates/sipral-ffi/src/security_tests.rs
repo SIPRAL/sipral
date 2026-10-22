@@ -590,6 +590,65 @@ fn an_account_that_requires_srtp_refuses_a_plain_invite_and_a_call_that_asks_for
     assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
 }
 
+/// ABI 1.4: an account that is a WebRTC line offers one, and refuses a plain
+/// INVITE as the facade does.
+#[cfg(all(feature = "dtls", feature = "ice"))]
+#[test]
+fn an_account_that_is_a_webrtc_line_offers_one_and_refuses_plain_audio() {
+    let mut observed = Observed::default();
+    let (handle, _) = media_line(&mut observed, |_| {});
+    let mut webrtc = crate::account::tests::account_config();
+    (webrtc.aor, webrtc.aor_len) = text("sip:carol@example.com");
+    (webrtc.contact, webrtc.contact_len) = text("sip:carol@192.0.2.10:5060");
+    webrtc.webrtc = 3;
+    assert_eq!(account(handle, &webrtc).0, SipralStatus::InvalidArgument);
+    webrtc.webrtc = crate::media::SipralToggle::On as u32;
+    let (status, line) = account(handle, &webrtc);
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+    let (status, _) = place(handle, line, &managed_config(), 1_000);
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    let offer = String::from_utf8_lossy(&one(handle)).into_owned();
+    for line in [
+        "m=audio ",
+        " UDP/TLS/RTP/SAVPF ",
+        "a=group:BUNDLE 0\r\n",
+        "a=mid:0\r\n",
+        "a=rtcp-mux-only\r\n",
+        "a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\n",
+        "a=fingerprint:sha-256 ",
+        "a=ice-ufrag:",
+        "a=ssrc:",
+    ] {
+        assert!(offer.contains(line), "{line:?} in {offer}");
+    }
+    assert!(!offer.contains("a=crypto:"), "{offer}");
+
+    let for_carol = String::from_utf8_lossy(&invitation())
+        .replace("sip:alice@", "sip:carol@")
+        .into_bytes();
+    deliver(handle, &for_carol, 1_100);
+    poll(handle, 1_100);
+    let call = observed
+        .named
+        .iter()
+        .zip(&observed.events)
+        .find(|(_, event)| event.1 == SipralEventKind::IncomingCall)
+        .map(|(named, _)| named.1)
+        .expect("the INVITE arrived");
+    let _ = sent(handle);
+    let (address, address_len) = text(crate::call::tests::MEDIA);
+    let status = unsafe { sipral_call_answer_media(handle, call, address, address_len, 1_200) };
+    assert_eq!(
+        status,
+        SipralStatus::SecurityPolicy,
+        "{}",
+        last_error_text()
+    );
+    assert!(one(handle).starts_with(b"SIP/2.0 488 "));
+    assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+}
+
 #[test]
 fn the_encryption_report_says_how_an_sdes_call_is_protected() {
     let credentials = credentials(&[CALLER]);
