@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The ConnectionService helper: TelecomBridge (in sipral.aar, tested on a
-// plain JVM) behind android.telecom, with a self-managed PhoneAccount, a
-// ConnectionService and a Connection per call.
+// The telecom helper: TelecomBridge (in sipral.aar, tested on a plain JVM)
+// behind android.telecom, either with a self-managed PhoneAccount, a
+// ConnectionService and a Connection per call, or through Jetpack
+// Core-Telecom's CallsManager with a CallControlScope per call.
 
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 
@@ -57,6 +58,9 @@ android {
 dependencies {
     api("org.sipral:sipral:$sipralVersion")
     api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    // CoreTelecomPlatform's CallsManager: the newest stable release on
+    // Google's Maven, checked 2026-10-22 (1.1.0 was at rc01); Apache-2.0
+    implementation("androidx.core:core-telecom:1.0.1")
     // newest stable on Maven Central, checked 2026-09-23; test only
     testImplementation("org.testng:testng:7.12.0")
 }

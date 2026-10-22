@@ -32,26 +32,22 @@ import org.sipral.telecom.TelecomDisconnect
  * [SipralCallAudio] follows all three with the call's device.
  */
 class SipralConnection internal constructor(
-    val id: String,
+    override val id: String,
     private val bridge: TelecomBridge,
-) : Connection() {
+) : Connection(), SipralCallRoutes {
     private val main = Handler(Looper.getMainLooper())
 
     private val routesFlow = MutableStateFlow<List<AudioRoute>>(emptyList())
     private val routeFlow = MutableStateFlow<AudioRoute?>(null)
     private val endpoints = HashMap<String, CallEndpoint>()
 
-    /** The routes the platform currently offers for this call. */
-    val routes: StateFlow<List<AudioRoute>> = routesFlow
+    override val routes: StateFlow<List<AudioRoute>> = routesFlow
 
-    /** The route the platform is currently using. */
-    val route: StateFlow<AudioRoute?> = routeFlow
+    override val route: StateFlow<AudioRoute?> = routeFlow
 
     private val mutedFlow = MutableStateFlow(false)
 
-    /** Whether the platform muted this call, e.g. from a Bluetooth headset or
-     * car control, which reach the call only through the framework. */
-    val muted: StateFlow<Boolean> = mutedFlow
+    override val muted: StateFlow<Boolean> = mutedFlow
 
     init {
         connectionProperties = PROPERTY_SELF_MANAGED
@@ -129,9 +125,7 @@ class SipralConnection internal constructor(
 
     // Audio routes, as the platform offers them
 
-    /** Ask the platform for [route]. The platform may refuse; [route] says
-     * what it settled on. */
-    fun requestRoute(route: AudioRoute) {
+    override fun requestRoute(route: AudioRoute) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val endpoint = endpoints[route.id] ?: return
             requestCallEndpointChange(

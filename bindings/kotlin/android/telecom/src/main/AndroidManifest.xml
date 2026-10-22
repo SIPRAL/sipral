@@ -15,6 +15,11 @@ Copyright (c) 2026 Sytek
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- androidx.core:core-telecom (CoreTelecomPlatform) merges in its own
+         ConnectionService (used below Android 14), a receiver for the
+         microphone's mute, and BLUETOOTH_CONNECT and MODIFY_AUDIO_SETTINGS:
+         BLUETOOTH_CONNECT, a runtime permission from Android 12, lets it
+         name every connected headset rather than only the active one. -->
 
     <application>
         <!-- Merged into the application that uses this library. Only the

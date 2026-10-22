@@ -19,7 +19,8 @@ import java.util.Properties
  * ```
  *
  * with the keys `aor`, `registrar_address`, `registrar`, `transport`,
- * `auth_user`, `auth_password` and `stun`. It is read once, when the
+ * `auth_user`, `auth_password`, `stun` and `telecom` (`auto`,
+ * `connection-service` or `core-telecom`). It is read once, when the
  * process starts, and deleted; the account then lives in [AccountStore],
  * its password sealed by the Keystore. The release build's
  * `AccountImport` reads nothing.
@@ -44,6 +45,7 @@ object AccountImport {
             authUser = read.getProperty("auth_user", ""),
             authPassword = read.getProperty("auth_password", ""),
             stunServer = read.getProperty("stun", ""),
+            telecom = read.getProperty("telecom", "auto"),
         )
     }
 }
