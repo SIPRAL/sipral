@@ -1473,6 +1473,31 @@ the `MID` SDES item (RFC 8843 §15.1), beside the CNAME
 (`RtpSession::announce_mid`). Incoming header extensions are skipped, as RFC
 3550 §5.3.1 has a receiver that does not know them do.
 
+**Over UDP the INVITE does not fit a datagram.** With the lines above, the
+lab's first INVITE was 1298 bytes and the one that answered Asterisk's
+challenge 1442, past RFC 3261 §18.1.1's 1300, so the stack moves it to a stream
+(`UaEvent::TransportWanted`). A PBX hands such lines out over a WebSocket,
+where nothing of this arises; on a UDP line the account needs TCP to the same
+server, or `DatagramLimit::without_stream_bytes` (the C ABI's
+`datagram_without_stream_bytes`) for a server that takes UDP alone.
+
+**Proven in the lab** (`scripts/lab.sh webrtc`, 22 October 2026; Asterisk
+22.10.1, FreeSWITCH 1.10.12 behind Kamailio 6.1.4). An account set as a
+WebRTC line registered at Asterisk's `webrtc=yes` endpoints over UDP and over
+a WebSocket, called the echo, and was called back by Asterisk into the echo:
+on all four calls Asterisk's own description was `UDP/TLS/RTP/SAVPF` with ICE,
+`a=rtcp-mux`, `a=msid` and a BUNDLE group — answering ours as `BUNDLE 0` with
+`a=mid:0`, offering its own as `BUNDLE audio-0` with `a=mid:audio-0` — and
+each was keyed by DTLS-SRTP (`AES_CM_128_HMAC_SHA1_80`), carried on the pair
+ICE chose, and had about 115 of its 150 frames of tone back from the echo.
+Asterisk wrote no MID extension, so the tag never rode the packets there.
+The same account called FreeSWITCH's echo through Kamailio and was answered
+with DTLS-SRTP and ICE and no BUNDLE group, which a single stream needs none
+of; FreeSWITCH drops every ICE candidate in a private range unless its
+profile's `apply-candidate-acl` says otherwise, and the lab's says
+`rfc1918.auto`. FreeSWITCH's WebSocket bindings, what a browser reaches, are
+not in the lab.
+
 **What it is not.** Video, data channels, several streams in one group and
 SFU or simulcast lines are out: this is a SIP stack carrying audio. Trickled
 candidates are the 1.4 item beside this one (`docs/10-roadmap.md`, Phase 7).

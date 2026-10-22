@@ -46,5 +46,11 @@ every start, so a new name is the only mount that survives.
          MESSAGE_WAITING goes out to it as a NOTIFY -->
     <param name="manage-presence" value="true"/>
     <param name="tls" value="false"/>
+
+    <!-- the ICE candidates an offer may name: the private ranges the lab
+         network is in. Unset, FreeSWITCH takes wan.auto and drops every
+         candidate a WebRTC line's offer carries here, which is all of them
+         (scripts/lab.sh webrtc) -->
+    <param name="apply-candidate-acl" value="rfc1918.auto"/>
   </settings>
 </profile>

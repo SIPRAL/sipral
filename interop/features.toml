@@ -378,6 +378,16 @@ unit_tested = true
 flows = ["SIP over a WebSocket", "SIP over a secure WebSocket"]
 
 [[feature]]
+name = "A PBX WebRTC line: UDP/TLS/RTP/SAVPF, DTLS-SRTP, ICE and BUNDLE (RFC 8843)"
+implemented = true
+unit_tested = true
+flows = [
+  "a call each way on Asterisk's WebRTC line, over UDP",
+  "a call each way on Asterisk's WebRTC line, over a WebSocket",
+  "a call on a WebRTC line to FreeSWITCH",
+]
+
+[[feature]]
 name = "A PBX line bridged to a voice agent that answers SIP"
 implemented = true
 unit_tested = true

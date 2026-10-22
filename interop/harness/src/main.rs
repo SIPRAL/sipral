@@ -64,6 +64,7 @@ mod scale;
 mod volume;
 #[cfg(all(feature = "wasapi", target_os = "windows"))]
 mod wasapi;
+mod webrtc;
 mod websocket;
 
 use std::collections::HashMap;
@@ -723,6 +724,51 @@ fn extra_flows(
             Ok(said) => println!("  pass  SIP over a secure WebSocket the stack opened{said}"),
             Err(why) => {
                 println!("  FAIL  SIP over a secure WebSocket the stack opened — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // a call each way on a PBX WebRTC line, Asterisk's `webrtc=yes`
+    // endpoint, over UDP as interop/asterisk's `labuser-webrtc` and over a
+    // WebSocket on 8088 as `labuser-webrtc-ws`, each only when named: see
+    // `webrtc`
+    // -- and FreeSWITCH's echo behind Kamailio as `labuser`, named
+    // `webrtcfs`, the call placed alone
+    for (name, at, over_websocket) in [
+        ("webrtc", "asterisk", false),
+        ("webrtcws", "asterisk", true),
+        ("webrtcfs", "kamailio", false),
+    ] {
+        if server != at || !wanted.split(',').any(|named| named.trim() == name) {
+            continue;
+        }
+        let (variable, default_user) = match name {
+            "webrtcws" => ("SIPRAL_USER_WEBRTC_WS", "labuser-webrtc-ws"),
+            "webrtc" => ("SIPRAL_USER_WEBRTC", "labuser-webrtc"),
+            _ => ("SIPRAL_USER", "labuser"),
+        };
+        let line_user = env::var(variable).unwrap_or_else(|_| default_user.to_owned());
+        let port = env::var("SIPRAL_WS_PORT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(8088);
+        let lab = webrtc::Lab {
+            server,
+            remote,
+            websocket: over_websocket.then(|| SocketAddr::new(remote.ip(), port)),
+            call_back: at == "asterisk",
+            user: &line_user,
+            pass,
+        };
+        let what = match name {
+            "webrtc" => "a call each way on Asterisk's WebRTC line, over UDP",
+            "webrtcws" => "a call each way on Asterisk's WebRTC line, over a WebSocket",
+            _ => "a call on a WebRTC line to FreeSWITCH",
+        };
+        match webrtc::run(&lab) {
+            Ok(said) => println!("  pass  {what}{said}"),
+            Err(why) => {
+                println!("  FAIL  {what} — {why}");
                 failures += 1;
             }
         }
@@ -3529,6 +3575,10 @@ mod tests {
             moved::MEDIA_SEED => crate::moved::MEDIA_SEED,
             websocket::SEED => crate::websocket::SEED,
             websocket::MEDIA_SEED => crate::websocket::MEDIA_SEED,
+            webrtc::SEED => crate::webrtc::SEED,
+            webrtc::MEDIA_SEED => crate::webrtc::MEDIA_SEED,
+            webrtc::WS_SEED => crate::webrtc::WS_SEED,
+            webrtc::WS_MEDIA_SEED => crate::webrtc::WS_MEDIA_SEED,
             inband::INBAND_SEED => crate::inband::INBAND_SEED,
             inband::INBAND_MEDIA_SEED => crate::inband::INBAND_MEDIA_SEED,
             inband::AMD_SEED => crate::inband::AMD_SEED,

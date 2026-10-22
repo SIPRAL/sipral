@@ -727,7 +727,11 @@ reason that did not exist when they went in.
   underneath are already here — DTLS-SRTP, ICE in both roles, `rtcp-mux`,
   Opus, SIP over WebSocket — so what is missing is the description, not the
   media path. A client that refuses such a line is refused by the PBX, and the
-  application blames the stack.
+  application blames the stack. *Built*: the line per account
+  (`AccountSrtp::webrtc`, ABI 1.4's `sipral_account_config_t::webrtc`) and
+  the answer to any offer that bundles, a call each way on Asterisk's
+  `webrtc=yes` over UDP and over a WebSocket and one to FreeSWITCH in the lab
+  (`docs/05-media.md`, "A WebRTC line").
 - **A browser at the other end (1.4).** A browser's SIP client registers over
   a WebSocket and offers its candidates as it finds them; a call to it has to
   take trickled candidates (RFC 8838, carried in SIP by RFC 8840's INFO
