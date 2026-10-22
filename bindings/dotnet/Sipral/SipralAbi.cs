@@ -2172,6 +2172,29 @@ public enum SipralIdentityText : uint
     /// Why it did not verify, in words, for a log.
     /// </summary>
     VerificationDetail = 15,
+    /// <summary>
+    /// The calling party number of the ISUP IAM a carrier gateway carried
+    /// beside the offer (SIP-T, SIP-I): `+` and the digits for an
+    /// international number, the digits alone for any other. One entry,
+    /// or none. Its presentation, restricted or not, is in the privacy
+    /// bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+    /// </summary>
+    IsupCalling = 16,
+    /// <summary>
+    /// Each additional calling party number of that IAM (a generic
+    /// number): what a caller with a special arrangement presents. ABI 1.4.
+    /// </summary>
+    IsupAdditionalCalling = 17,
+    /// <summary>
+    /// The IAM's original called number: who the call was first placed
+    /// to. One entry, or none. ABI 1.4.
+    /// </summary>
+    IsupOriginalCalled = 18,
+    /// <summary>
+    /// The IAM's redirecting number: who the call was last diverted from.
+    /// One entry, or none. ABI 1.4.
+    /// </summary>
+    IsupRedirecting = 19,
 }
 
 /// <summary>
@@ -3210,6 +3233,48 @@ public enum SipralIceTrickle : uint
     /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
     /// </summary>
     Full = 3,
+}
+
+/// <summary>
+/// Which number of an ISUP message sipral_isup_number writes out.
+/// </summary>
+public enum SipralIsupNumber : uint
+{
+    /// <summary>
+    /// Never asked for.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// The calling party number (Q.763 §3.10).
+    /// </summary>
+    Calling = 1,
+    /// <summary>
+    /// The called party number of an IAM (§3.9).
+    /// </summary>
+    Called = 2,
+    /// <summary>
+    /// The original called number (§3.39): who the call was first placed
+    /// to.
+    /// </summary>
+    OriginalCalled = 3,
+    /// <summary>
+    /// The redirecting number (§3.44): who it was last diverted from.
+    /// </summary>
+    Redirecting = 4,
+    /// <summary>
+    /// The redirection number (§3.46): where an ACM, a CPG or an ANM says
+    /// it is diverted to.
+    /// </summary>
+    Redirection = 5,
+    /// <summary>
+    /// The connected number (§3.16) of an ANM, a CON or a CPG.
+    /// </summary>
+    Connected = 6,
+    /// <summary>
+    /// The first generic number qualified as an additional calling party
+    /// number (§3.26).
+    /// </summary>
+    AdditionalCalling = 7,
 }
 
 /// <summary>
@@ -8222,6 +8287,114 @@ public struct SipralNetworkTestConfig
 }
 
 /// <summary>
+/// What one ISUP message says, as far as an endpoint reads it (ITU-T
+/// Q.763), filled by sipral_isup_read. ABI 1.4.
+///
+/// Every value is the Recommendation's own number for it, so its tables
+/// name them; a member whose parameter the message did not carry is zero,
+/// with a `has_` member beside the ones where zero is a value.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralIsup
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The message type code (Table 4): 1 IAM, 6 ACM, 44 CPG, 9 ANM, 7
+    /// CON, 12 REL, 16 RLC. Any other is recognised and not read further.
+    /// </summary>
+    public uint MessageType;
+    /// <summary>
+    /// Whether the message carried cause indicators.
+    /// </summary>
+    public uint HasCause;
+    /// <summary>
+    /// The Q.850 cause value: 16 normal call clearing, 17 user busy.
+    /// </summary>
+    public uint CauseValue;
+    /// <summary>
+    /// Where it arose (Q.850 Table 1): 0 the user, 2 the public network
+    /// serving the local user, 3 a transit network, 4 the public network
+    /// serving the remote user, 7 international, 10 beyond an
+    /// interworking point.
+    /// </summary>
+    public uint CauseLocation;
+    /// <summary>
+    /// The event a CPG reports (§3.21): 1 alerting, 2 progress, 3 in-band
+    /// information available, 4 to 6 forwarded on busy, on no reply,
+    /// unconditionally. Zero for any other message.
+    /// </summary>
+    public uint Event;
+    /// <summary>
+    /// The called party's status in the backward call indicators (§3.5,
+    /// bits DC) of an ACM, a CON, or an ANM or CPG that carries them: 1
+    /// subscriber free, 2 connect when free; zero for no indication.
+    /// </summary>
+    public uint CalledStatus;
+    /// <summary>
+    /// Whether the message carried a calling party number.
+    /// </summary>
+    public uint HasCalling;
+    /// <summary>
+    /// Its nature of address (§3.10 b): 1 subscriber, 2 unknown, 3
+    /// national, 4 international.
+    /// </summary>
+    public uint CallingNature;
+    /// <summary>
+    /// Its presentation (§3.10 e): 0 allowed, 1 restricted, 2 not
+    /// available, 3 restricted by the network.
+    /// </summary>
+    public uint CallingPresentation;
+    /// <summary>
+    /// Its screening (§3.10 f): 0 user provided and not verified, 1 user
+    /// provided, verified and passed, 2 verified and failed, 3 network
+    /// provided.
+    /// </summary>
+    public uint CallingScreening;
+    /// <summary>
+    /// Whether the message carried redirection information.
+    /// </summary>
+    public uint HasRedirection;
+    /// <summary>
+    /// Its redirecting indicator (§3.45, bits CBA): 3 call diverted, 4
+    /// diverted with all redirection information restricted.
+    /// </summary>
+    public uint RedirectingIndicator;
+    /// <summary>
+    /// How many times the call has been redirected, 1 to 5; zero when the
+    /// parameter's second octet was not there.
+    /// </summary>
+    public uint RedirectionCounter;
+    /// <summary>
+    /// Why it was last redirected (bits PONM): 0 unknown, 1 user busy, 2
+    /// no reply, 3 unconditional, 4 deflection during alerting, 5
+    /// deflection immediate response, 6 mobile subscriber not reachable.
+    /// </summary>
+    public uint RedirectingReason;
+    /// <summary>
+    /// Why it was first redirected (bits HGFE), the same numbers.
+    /// </summary>
+    public uint OriginalRedirectingReason;
+    /// <summary>
+    /// The calling party's category of an IAM (§3.11): 10 an ordinary
+    /// subscriber, 15 a payphone, 13 a test call; zero for any other
+    /// message, which is also the category "unknown".
+    /// </summary>
+    public uint CallingCategory;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralIsup Sized()
+    {
+        var value = default(SipralIsup);
+        value.Size = (nuint)Marshal.SizeOf<SipralIsup>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -8930,6 +9103,15 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_audio_call_level(ulong stack, ulong call, uint direction, out uint peak);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_message_isup(byte[] message, nuint messageLen, out nuint offset, out nuint len);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_isup_read(byte[] body, nuint bodyLen, ref SipralIsup outIsup);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_isup_number(byte[] body, nuint bodyLen, uint which, sbyte[] buffer, nuint capacity, out nuint needed);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -9405,6 +9587,7 @@ public static partial class Sipral
         ("sipral_local_conference_member_t", Marshal.SizeOf<SipralLocalConferenceMember>(), 40, 36, 40),
         ("sipral_pinned_certificate_t", Marshal.SizeOf<SipralPinnedCertificate>(), 40, 36, 40),
         ("sipral_network_test_config_t", Marshal.SizeOf<SipralNetworkTestConfig>(), 48, 36, 40),
+        ("sipral_isup_t", Marshal.SizeOf<SipralIsup>(), 72, 68, 68),
     };
 
     /// <summary>The calling thread's last error, or an empty string
@@ -13235,6 +13418,69 @@ public static partial class Sipral
     {
         Check(NativeMethods.sipral_audio_call_level(stack, call, direction, out var peak));
         return peak;
+    }
+
+    /// <summary>
+    /// Where the ISUP body of a whole SIP message is (RFC 3204), as an offset
+    /// into `message` and a length. ABI 1.4.
+    ///
+    /// The body itself when it is `application/ISUP`, else the first such part
+    /// of a multipart body. A message that carries none is a length of zero,
+    /// not a failure, as an absent header field counts zero. Hand the bytes
+    /// found to `sipral_isup_read`.
+    ///
+    /// Safety
+    ///
+    /// `message` must be readable for `message_len` bytes, and `out_offset`
+    /// and `out_len` must each point at one `size_t`.
+    /// </summary>
+    public static (nuint Offset, nuint Len) MessageIsup(byte[] message)
+    {
+        Check(NativeMethods.sipral_message_isup(message, (nuint)message.Length, out var offset, out var len));
+        return (offset, len);
+    }
+
+    /// <summary>
+    /// Read one ISUP message, from its message type code on (ITU-T Q.763),
+    /// into `out_isup`. ABI 1.4.
+    ///
+    /// A message that does not fit what its type lays out is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, the last error saying where it ends.
+    /// A type other than the seven `sipral_isup_t::message_type` names is
+    /// read for its code alone.
+    ///
+    /// Safety
+    ///
+    /// `body` must be readable for `body_len` bytes, and `out_isup` must point
+    /// at a `sipral_isup_t` whose `size` member says how long it is.
+    /// </summary>
+    public static SipralIsup IsupRead(byte[] body)
+    {
+        var isup = SipralIsup.Sized();
+        Check(NativeMethods.sipral_isup_read(body, (nuint)body.Length, ref isup));
+        return isup;
+    }
+
+    /// <summary>
+    /// One number of an ISUP message as text, copied into the caller's buffer
+    /// with a trailing NUL. ABI 1.4.
+    ///
+    /// `+` and the digits for an international number, the digits alone for
+    /// any other; the operator codes 11 and 12 are `B` and `C`, the end of
+    /// pulsing signal `F`. A number the message does not carry is just the
+    /// NUL. `out_needed` always receives the bytes needed including the NUL;
+    /// too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
+    ///
+    /// Safety
+    ///
+    /// `body` must be readable for `body_len` bytes, `buffer` writable for
+    /// `capacity` bytes or null with a capacity of zero, and `out_needed`
+    /// must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint IsupNumber(byte[] body, uint which, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_isup_number(body, (nuint)body.Length, which, buffer, (nuint)buffer.Length, out var needed));
+        return needed;
     }
 
 }

@@ -2368,6 +2368,29 @@ enum class SipralIdentityText(val value: Int) {
      * Why it did not verify, in words, for a log.
      */
     VERIFICATION_DETAIL(15),
+    /**
+     * The calling party number of the ISUP IAM a carrier gateway carried
+     * beside the offer (SIP-T, SIP-I): `+` and the digits for an
+     * international number, the digits alone for any other. One entry,
+     * or none. Its presentation, restricted or not, is in the privacy
+     * bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+     */
+    ISUP_CALLING(16),
+    /**
+     * Each additional calling party number of that IAM (a generic
+     * number): what a caller with a special arrangement presents. ABI 1.4.
+     */
+    ISUP_ADDITIONAL_CALLING(17),
+    /**
+     * The IAM's original called number: who the call was first placed
+     * to. One entry, or none. ABI 1.4.
+     */
+    ISUP_ORIGINAL_CALLED(18),
+    /**
+     * The IAM's redirecting number: who the call was last diverted from.
+     * One entry, or none. ABI 1.4.
+     */
+    ISUP_REDIRECTING(19),
     ;
 
     companion object {
@@ -3562,6 +3585,52 @@ enum class SipralIceTrickle(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralIceTrickle? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which number of an ISUP message sipral_isup_number writes out.
+ */
+enum class SipralIsupNumber(val value: Int) {
+    /**
+     * Never asked for.
+     */
+    UNKNOWN(0),
+    /**
+     * The calling party number (Q.763 §3.10).
+     */
+    CALLING(1),
+    /**
+     * The called party number of an IAM (§3.9).
+     */
+    CALLED(2),
+    /**
+     * The original called number (§3.39): who the call was first placed
+     * to.
+     */
+    ORIGINAL_CALLED(3),
+    /**
+     * The redirecting number (§3.44): who it was last diverted from.
+     */
+    REDIRECTING(4),
+    /**
+     * The redirection number (§3.46): where an ACM, a CPG or an ANM says
+     * it is diverted to.
+     */
+    REDIRECTION(5),
+    /**
+     * The connected number (§3.16) of an ANM, a CON or a CPG.
+     */
+    CONNECTED(6),
+    /**
+     * The first generic number qualified as an additional calling party
+     * number (§3.26).
+     */
+    ADDITIONAL_CALLING(7),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralIsupNumber? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -5062,6 +5131,127 @@ data class SipralPinnedCertificate(
             slots[4],
             slots[5],
             slots[6],
+        )
+    }
+}
+
+/**
+ * What one ISUP message says, as far as an endpoint reads it (ITU-T
+ * Q.763), filled by sipral_isup_read. ABI 1.4.
+ *
+ * Every value is the Recommendation's own number for it, so its tables
+ * name them; a member whose parameter the message did not carry is zero,
+ * with a `has_` member beside the ones where zero is a value.
+ */
+data class SipralIsup(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The message type code (Table 4): 1 IAM, 6 ACM, 44 CPG, 9 ANM, 7
+     * CON, 12 REL, 16 RLC. Any other is recognised and not read further.
+     */
+    val messageType: Long,
+    /**
+     * Whether the message carried cause indicators.
+     */
+    val hasCause: Long,
+    /**
+     * The Q.850 cause value: 16 normal call clearing, 17 user busy.
+     */
+    val causeValue: Long,
+    /**
+     * Where it arose (Q.850 Table 1): 0 the user, 2 the public network
+     * serving the local user, 3 a transit network, 4 the public network
+     * serving the remote user, 7 international, 10 beyond an
+     * interworking point.
+     */
+    val causeLocation: Long,
+    /**
+     * The event a CPG reports (§3.21): 1 alerting, 2 progress, 3 in-band
+     * information available, 4 to 6 forwarded on busy, on no reply,
+     * unconditionally. Zero for any other message.
+     */
+    val event: Long,
+    /**
+     * The called party's status in the backward call indicators (§3.5,
+     * bits DC) of an ACM, a CON, or an ANM or CPG that carries them: 1
+     * subscriber free, 2 connect when free; zero for no indication.
+     */
+    val calledStatus: Long,
+    /**
+     * Whether the message carried a calling party number.
+     */
+    val hasCalling: Long,
+    /**
+     * Its nature of address (§3.10 b): 1 subscriber, 2 unknown, 3
+     * national, 4 international.
+     */
+    val callingNature: Long,
+    /**
+     * Its presentation (§3.10 e): 0 allowed, 1 restricted, 2 not
+     * available, 3 restricted by the network.
+     */
+    val callingPresentation: Long,
+    /**
+     * Its screening (§3.10 f): 0 user provided and not verified, 1 user
+     * provided, verified and passed, 2 verified and failed, 3 network
+     * provided.
+     */
+    val callingScreening: Long,
+    /**
+     * Whether the message carried redirection information.
+     */
+    val hasRedirection: Long,
+    /**
+     * Its redirecting indicator (§3.45, bits CBA): 3 call diverted, 4
+     * diverted with all redirection information restricted.
+     */
+    val redirectingIndicator: Long,
+    /**
+     * How many times the call has been redirected, 1 to 5; zero when the
+     * parameter's second octet was not there.
+     */
+    val redirectionCounter: Long,
+    /**
+     * Why it was last redirected (bits PONM): 0 unknown, 1 user busy, 2
+     * no reply, 3 unconditional, 4 deflection during alerting, 5
+     * deflection immediate response, 6 mobile subscriber not reachable.
+     */
+    val redirectingReason: Long,
+    /**
+     * Why it was first redirected (bits HGFE), the same numbers.
+     */
+    val originalRedirectingReason: Long,
+    /**
+     * The calling party's category of an IAM (§3.11): 10 an ordinary
+     * subscriber, 15 a payphone, 13 a test call; zero for any other
+     * message, which is also the category "unknown".
+     */
+    val callingCategory: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 17
+
+        fun of(slots: LongArray): SipralIsup = SipralIsup(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+            slots[4],
+            slots[5],
+            slots[6],
+            slots[7],
+            slots[8],
+            slots[9],
+            slots[10],
+            slots[11],
+            slots[12],
+            slots[13],
+            slots[14],
+            slots[15],
+            slots[16],
         )
     }
 }
@@ -8697,6 +8887,9 @@ internal object SipralNative {
     external fun sipral_audio_call_set_muted(stack: Long, call: Long, direction: Long, muted: Long): Int
     external fun sipral_audio_call_muted(stack: Long, call: Long, direction: Long, muted: LongArray): Int
     external fun sipral_audio_call_level(stack: Long, call: Long, direction: Long, peak: LongArray): Int
+    external fun sipral_message_isup(message: ByteArray, offset: LongArray, len: LongArray): Int
+    external fun sipral_isup_read(body: ByteArray, isup: LongArray): Int
+    external fun sipral_isup_number(body: ByteArray, which: Long, buffer: ByteArray, needed: LongArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -9141,6 +9334,7 @@ object Sipral {
         "sipral_local_conference_member_t" to intArrayOf(40, 36, 40),
         "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
         "sipral_network_test_config_t" to intArrayOf(48, 36, 40),
+        "sipral_isup_t" to intArrayOf(72, 68, 68),
     )
 
     /**
@@ -12847,6 +13041,69 @@ object Sipral {
         val peakSlot = LongArray(1)
         check(SipralNative.sipral_audio_call_level(stack, call, direction, peakSlot))
         return peakSlot[0]
+    }
+
+    /**
+     * Where the ISUP body of a whole SIP message is (RFC 3204), as an offset
+     * into `message` and a length. ABI 1.4.
+     *
+     * The body itself when it is `application/ISUP`, else the first such part
+     * of a multipart body. A message that carries none is a length of zero,
+     * not a failure, as an absent header field counts zero. Hand the bytes
+     * found to `sipral_isup_read`.
+     *
+     * Safety
+     *
+     * `message` must be readable for `message_len` bytes, and `out_offset`
+     * and `out_len` must each point at one `size_t`.
+     */
+    fun messageIsup(message: ByteArray): Pair<Long, Long> {
+        val offsetSlot = LongArray(1)
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_message_isup(message, offsetSlot, lenSlot))
+        return Pair(offsetSlot[0], lenSlot[0])
+    }
+
+    /**
+     * Read one ISUP message, from its message type code on (ITU-T Q.763),
+     * into `out_isup`. ABI 1.4.
+     *
+     * A message that does not fit what its type lays out is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, the last error saying where it ends.
+     * A type other than the seven `sipral_isup_t::message_type` names is
+     * read for its code alone.
+     *
+     * Safety
+     *
+     * `body` must be readable for `body_len` bytes, and `out_isup` must point
+     * at a `sipral_isup_t` whose `size` member says how long it is.
+     */
+    fun isupRead(body: ByteArray): SipralIsup {
+        val isupSlots = LongArray(SipralIsup.SLOTS)
+        check(SipralNative.sipral_isup_read(body, isupSlots))
+        return SipralIsup.of(isupSlots)
+    }
+
+    /**
+     * One number of an ISUP message as text, copied into the caller's buffer
+     * with a trailing NUL. ABI 1.4.
+     *
+     * `+` and the digits for an international number, the digits alone for
+     * any other; the operator codes 11 and 12 are `B` and `C`, the end of
+     * pulsing signal `F`. A number the message does not carry is just the
+     * NUL. `out_needed` always receives the bytes needed including the NUL;
+     * too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
+     *
+     * Safety
+     *
+     * `body` must be readable for `body_len` bytes, `buffer` writable for
+     * `capacity` bytes or null with a capacity of zero, and `out_needed`
+     * must point at one `size_t` or be null.
+     */
+    fun isupNumber(body: ByteArray, which: Long, buffer: ByteArray): Long {
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_isup_number(body, which, buffer, neededSlot))
+        return neededSlot[0]
     }
 
 }

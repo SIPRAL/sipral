@@ -1695,6 +1695,25 @@ abstract final class SipralIdentityText {
 
   /// Why it did not verify, in words, for a log.
   static const int verificationDetail = 15;
+
+  /// The calling party number of the ISUP IAM a carrier gateway carried
+  /// beside the offer (SIP-T, SIP-I): `+` and the digits for an
+  /// international number, the digits alone for any other. One entry,
+  /// or none. Its presentation, restricted or not, is in the privacy
+  /// bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+  static const int isupCalling = 16;
+
+  /// Each additional calling party number of that IAM (a generic
+  /// number): what a caller with a special arrangement presents. ABI 1.4.
+  static const int isupAdditionalCalling = 17;
+
+  /// The IAM's original called number: who the call was first placed
+  /// to. One entry, or none. ABI 1.4.
+  static const int isupOriginalCalled = 18;
+
+  /// The IAM's redirecting number: who the call was last diverted from.
+  /// One entry, or none. ABI 1.4.
+  static const int isupRedirecting = 19;
 }
 
 /// How an account's calls ask for a session timer (RFC 4028). Names for
@@ -2410,6 +2429,36 @@ abstract final class SipralIceTrickle {
   ///
   /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
   static const int full = 3;
+}
+
+/// Which number of an ISUP message sipral_isup_number writes out.
+abstract final class SipralIsupNumber {
+  /// Never asked for.
+  static const int unknown = 0;
+
+  /// The calling party number (Q.763 §3.10).
+  static const int calling = 1;
+
+  /// The called party number of an IAM (§3.9).
+  static const int called = 2;
+
+  /// The original called number (§3.39): who the call was first placed
+  /// to.
+  static const int originalCalled = 3;
+
+  /// The redirecting number (§3.44): who it was last diverted from.
+  static const int redirecting = 4;
+
+  /// The redirection number (§3.46): where an ACM, a CPG or an ANM says
+  /// it is diverted to.
+  static const int redirection = 5;
+
+  /// The connected number (§3.16) of an ANM, a CON or a CPG.
+  static const int connected = 6;
+
+  /// The first generic number qualified as an additional calling party
+  /// number (§3.26).
+  static const int additionalCalling = 7;
 }
 
 /// The version of the ABI this library provides.
@@ -6436,6 +6485,100 @@ final class SipralNetworkTestConfig extends ffi.Struct {
   external int timeoutMs;
 }
 
+/// What one ISUP message says, as far as an endpoint reads it (ITU-T
+/// Q.763), filled by sipral_isup_read. ABI 1.4.
+///
+/// Every value is the Recommendation's own number for it, so its tables
+/// name them; a member whose parameter the message did not carry is zero,
+/// with a `has_` member beside the ones where zero is a value.
+final class SipralIsup extends ffi.Struct {
+  /// How many bytes of this struct the library filled in.
+  @ffi.Size()
+  external int size;
+
+  /// The message type code (Table 4): 1 IAM, 6 ACM, 44 CPG, 9 ANM, 7
+  /// CON, 12 REL, 16 RLC. Any other is recognised and not read further.
+  @ffi.Uint32()
+  external int messageType;
+
+  /// Whether the message carried cause indicators.
+  @ffi.Uint32()
+  external int hasCause;
+
+  /// The Q.850 cause value: 16 normal call clearing, 17 user busy.
+  @ffi.Uint32()
+  external int causeValue;
+
+  /// Where it arose (Q.850 Table 1): 0 the user, 2 the public network
+  /// serving the local user, 3 a transit network, 4 the public network
+  /// serving the remote user, 7 international, 10 beyond an
+  /// interworking point.
+  @ffi.Uint32()
+  external int causeLocation;
+
+  /// The event a CPG reports (§3.21): 1 alerting, 2 progress, 3 in-band
+  /// information available, 4 to 6 forwarded on busy, on no reply,
+  /// unconditionally. Zero for any other message.
+  @ffi.Uint32()
+  external int event;
+
+  /// The called party's status in the backward call indicators (§3.5,
+  /// bits DC) of an ACM, a CON, or an ANM or CPG that carries them: 1
+  /// subscriber free, 2 connect when free; zero for no indication.
+  @ffi.Uint32()
+  external int calledStatus;
+
+  /// Whether the message carried a calling party number.
+  @ffi.Uint32()
+  external int hasCalling;
+
+  /// Its nature of address (§3.10 b): 1 subscriber, 2 unknown, 3
+  /// national, 4 international.
+  @ffi.Uint32()
+  external int callingNature;
+
+  /// Its presentation (§3.10 e): 0 allowed, 1 restricted, 2 not
+  /// available, 3 restricted by the network.
+  @ffi.Uint32()
+  external int callingPresentation;
+
+  /// Its screening (§3.10 f): 0 user provided and not verified, 1 user
+  /// provided, verified and passed, 2 verified and failed, 3 network
+  /// provided.
+  @ffi.Uint32()
+  external int callingScreening;
+
+  /// Whether the message carried redirection information.
+  @ffi.Uint32()
+  external int hasRedirection;
+
+  /// Its redirecting indicator (§3.45, bits CBA): 3 call diverted, 4
+  /// diverted with all redirection information restricted.
+  @ffi.Uint32()
+  external int redirectingIndicator;
+
+  /// How many times the call has been redirected, 1 to 5; zero when the
+  /// parameter's second octet was not there.
+  @ffi.Uint32()
+  external int redirectionCounter;
+
+  /// Why it was last redirected (bits PONM): 0 unknown, 1 user busy, 2
+  /// no reply, 3 unconditional, 4 deflection during alerting, 5
+  /// deflection immediate response, 6 mobile subscriber not reachable.
+  @ffi.Uint32()
+  external int redirectingReason;
+
+  /// Why it was first redirected (bits HGFE), the same numbers.
+  @ffi.Uint32()
+  external int originalRedirectingReason;
+
+  /// The calling party's category of an IAM (§3.11): 10 an ordinary
+  /// subscriber, 15 a payphone, 13 a test call; zero for any other
+  /// message, which is also the category "unknown".
+  @ffi.Uint32()
+  external int callingCategory;
+}
+
 /// Why the library could not be opened, or cannot serve this binding.
 final class SipralLoadError extends Error {
   SipralLoadError(this.message);
@@ -6840,6 +6983,7 @@ final class Sipral {
         'sipral_local_conference_member_t': [ffi.sizeOf<SipralLocalConferenceMember>(), 40, 36, 40],
         'sipral_pinned_certificate_t': [ffi.sizeOf<SipralPinnedCertificate>(), 40, 36, 40],
         'sipral_network_test_config_t': [ffi.sizeOf<SipralNetworkTestConfig>(), 48, 36, 40],
+        'sipral_isup_t': [ffi.sizeOf<SipralIsup>(), 72, 68, 68],
       };
 
   /// Copy the calling thread's last error message into `buffer`.
@@ -9794,4 +9938,54 @@ final class Sipral {
   late final int Function(int stack, int call, int direction, ffi.Pointer<ffi.Uint32> outPeak) audioCallLevel = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 direction, ffi.Pointer<ffi.Uint32> outPeak),
       int Function(int stack, int call, int direction, ffi.Pointer<ffi.Uint32> outPeak)>('sipral_audio_call_level');
+
+  /// Where the ISUP body of a whole SIP message is (RFC 3204), as an offset
+  /// into `message` and a length. ABI 1.4.
+  ///
+  /// The body itself when it is `application/ISUP`, else the first such part
+  /// of a multipart body. A message that carries none is a length of zero,
+  /// not a failure, as an absent header field counts zero. Hand the bytes
+  /// found to `sipral_isup_read`.
+  ///
+  /// Safety
+  ///
+  /// `message` must be readable for `message_len` bytes, and `out_offset`
+  /// and `out_len` must each point at one `size_t`.
+  late final int Function(ffi.Pointer<ffi.Uint8> message, int messageLen, ffi.Pointer<ffi.Size> outOffset, ffi.Pointer<ffi.Size> outLen) messageIsup = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8> message, ffi.Size messageLen, ffi.Pointer<ffi.Size> outOffset, ffi.Pointer<ffi.Size> outLen),
+      int Function(ffi.Pointer<ffi.Uint8> message, int messageLen, ffi.Pointer<ffi.Size> outOffset, ffi.Pointer<ffi.Size> outLen)>('sipral_message_isup');
+
+  /// Read one ISUP message, from its message type code on (ITU-T Q.763),
+  /// into `out_isup`. ABI 1.4.
+  ///
+  /// A message that does not fit what its type lays out is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`, the last error saying where it ends.
+  /// A type other than the seven `sipral_isup_t::message_type` names is
+  /// read for its code alone.
+  ///
+  /// Safety
+  ///
+  /// `body` must be readable for `body_len` bytes, and `out_isup` must point
+  /// at a `sipral_isup_t` whose `size` member says how long it is.
+  late final int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, ffi.Pointer<SipralIsup> outIsup) isupRead = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8> body, ffi.Size bodyLen, ffi.Pointer<SipralIsup> outIsup),
+      int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, ffi.Pointer<SipralIsup> outIsup)>('sipral_isup_read');
+
+  /// One number of an ISUP message as text, copied into the caller's buffer
+  /// with a trailing NUL. ABI 1.4.
+  ///
+  /// `+` and the digits for an international number, the digits alone for
+  /// any other; the operator codes 11 and 12 are `B` and `C`, the end of
+  /// pulsing signal `F`. A number the message does not carry is just the
+  /// NUL. `out_needed` always receives the bytes needed including the NUL;
+  /// too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
+  ///
+  /// Safety
+  ///
+  /// `body` must be readable for `body_len` bytes, `buffer` writable for
+  /// `capacity` bytes or null with a capacity of zero, and `out_needed`
+  /// must point at one `size_t` or be null.
+  late final int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) isupNumber = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8> body, ffi.Size bodyLen, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_isup_number');
 }

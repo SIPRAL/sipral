@@ -184,7 +184,10 @@ class Abi29SpacesHaveNames(unittest.TestCase):
         self.assertEqual(int(enums.Feature.AUDIO_DEVICE), lib.SIPRAL_FEATURE_AUDIO_DEVICE)
         self.assertEqual(int(enums.Feature.CALL_READDRESS), lib.SIPRAL_FEATURE_CALL_READDRESS)
         self.assertEqual(len(enums.AudioChange), 6)
-        self.assertEqual(len(enums.IdentityText), 16)
+        # ABI 1.4 appended the four ISUP numbers, 16 to 19
+        self.assertEqual(len(enums.IdentityText), 20)
+        self.assertEqual(int(enums.IdentityText.ISUP_CALLING), 16)
+        self.assertEqual(int(enums.IdentityText.ISUP_REDIRECTING), 19)
 
     def test_this_build_says_what_it_has(self) -> None:
         from sipral import features

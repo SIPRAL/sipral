@@ -2557,6 +2557,29 @@ export const SipralIdentityText = Object.freeze({
    * Why it did not verify, in words, for a log.
    */
   VerificationDetail: 15,
+  /**
+   * The calling party number of the ISUP IAM a carrier gateway carried
+   * beside the offer (SIP-T, SIP-I): `+` and the digits for an
+   * international number, the digits alone for any other. One entry,
+   * or none. Its presentation, restricted or not, is in the privacy
+   * bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+   */
+  IsupCalling: 16,
+  /**
+   * Each additional calling party number of that IAM (a generic
+   * number): what a caller with a special arrangement presents. ABI 1.4.
+   */
+  IsupAdditionalCalling: 17,
+  /**
+   * The IAM's original called number: who the call was first placed
+   * to. One entry, or none. ABI 1.4.
+   */
+  IsupOriginalCalled: 18,
+  /**
+   * The IAM's redirecting number: who the call was last diverted from.
+   * One entry, or none. ABI 1.4.
+   */
+  IsupRedirecting: 19,
 } as const);
 koffi.alias('sipral_identity_text_t', 'uint32_t');
 
@@ -3597,6 +3620,48 @@ export const SipralIceTrickle = Object.freeze({
   Full: 3,
 } as const);
 koffi.alias('sipral_ice_trickle_t', 'uint32_t');
+
+/**
+ * Which number of an ISUP message sipral_isup_number writes out.
+ */
+export const SipralIsupNumber = Object.freeze({
+  /**
+   * Never asked for.
+   */
+  Unknown: 0,
+  /**
+   * The calling party number (Q.763 §3.10).
+   */
+  Calling: 1,
+  /**
+   * The called party number of an IAM (§3.9).
+   */
+  Called: 2,
+  /**
+   * The original called number (§3.39): who the call was first placed
+   * to.
+   */
+  OriginalCalled: 3,
+  /**
+   * The redirecting number (§3.44): who it was last diverted from.
+   */
+  Redirecting: 4,
+  /**
+   * The redirection number (§3.46): where an ACM, a CPG or an ANM says
+   * it is diverted to.
+   */
+  Redirection: 5,
+  /**
+   * The connected number (§3.16) of an ANM, a CON or a CPG.
+   */
+  Connected: 6,
+  /**
+   * The first generic number qualified as an additional calling party
+   * number (§3.26).
+   */
+  AdditionalCalling: 7,
+} as const);
+koffi.alias('sipral_isup_number_t', 'uint32_t');
 
 /**
  * The version of the ABI this library provides.
@@ -8975,6 +9040,122 @@ koffi.struct('sipral_network_test_config_t', {
 });
 
 /**
+ * What one ISUP message says, as far as an endpoint reads it (ITU-T
+ * Q.763), filled by sipral_isup_read. ABI 1.4.
+ *
+ * Every value is the Recommendation's own number for it, so its tables
+ * name them; a member whose parameter the message did not carry is zero,
+ * with a `has_` member beside the ones where zero is a value.
+ */
+export interface SipralIsup {
+  /**
+   * How many bytes of this struct the library filled in.
+   */
+  size: number;
+  /**
+   * The message type code (Table 4): 1 IAM, 6 ACM, 44 CPG, 9 ANM, 7
+   * CON, 12 REL, 16 RLC. Any other is recognised and not read further.
+   */
+  message_type: number;
+  /**
+   * Whether the message carried cause indicators.
+   */
+  has_cause: number;
+  /**
+   * The Q.850 cause value: 16 normal call clearing, 17 user busy.
+   */
+  cause_value: number;
+  /**
+   * Where it arose (Q.850 Table 1): 0 the user, 2 the public network
+   * serving the local user, 3 a transit network, 4 the public network
+   * serving the remote user, 7 international, 10 beyond an
+   * interworking point.
+   */
+  cause_location: number;
+  /**
+   * The event a CPG reports (§3.21): 1 alerting, 2 progress, 3 in-band
+   * information available, 4 to 6 forwarded on busy, on no reply,
+   * unconditionally. Zero for any other message.
+   */
+  event: number;
+  /**
+   * The called party's status in the backward call indicators (§3.5,
+   * bits DC) of an ACM, a CON, or an ANM or CPG that carries them: 1
+   * subscriber free, 2 connect when free; zero for no indication.
+   */
+  called_status: number;
+  /**
+   * Whether the message carried a calling party number.
+   */
+  has_calling: number;
+  /**
+   * Its nature of address (§3.10 b): 1 subscriber, 2 unknown, 3
+   * national, 4 international.
+   */
+  calling_nature: number;
+  /**
+   * Its presentation (§3.10 e): 0 allowed, 1 restricted, 2 not
+   * available, 3 restricted by the network.
+   */
+  calling_presentation: number;
+  /**
+   * Its screening (§3.10 f): 0 user provided and not verified, 1 user
+   * provided, verified and passed, 2 verified and failed, 3 network
+   * provided.
+   */
+  calling_screening: number;
+  /**
+   * Whether the message carried redirection information.
+   */
+  has_redirection: number;
+  /**
+   * Its redirecting indicator (§3.45, bits CBA): 3 call diverted, 4
+   * diverted with all redirection information restricted.
+   */
+  redirecting_indicator: number;
+  /**
+   * How many times the call has been redirected, 1 to 5; zero when the
+   * parameter's second octet was not there.
+   */
+  redirection_counter: number;
+  /**
+   * Why it was last redirected (bits PONM): 0 unknown, 1 user busy, 2
+   * no reply, 3 unconditional, 4 deflection during alerting, 5
+   * deflection immediate response, 6 mobile subscriber not reachable.
+   */
+  redirecting_reason: number;
+  /**
+   * Why it was first redirected (bits HGFE), the same numbers.
+   */
+  original_redirecting_reason: number;
+  /**
+   * The calling party's category of an IAM (§3.11): 10 an ordinary
+   * subscriber, 15 a payphone, 13 a test call; zero for any other
+   * message, which is also the category "unknown".
+   */
+  calling_category: number;
+}
+koffi.struct('sipral_isup_t', {
+  size: 'size_t',
+  message_type: 'uint32_t',
+  has_cause: 'uint32_t',
+  cause_value: 'uint32_t',
+  cause_location: 'uint32_t',
+  event: 'uint32_t',
+  called_status: 'uint32_t',
+  has_calling: 'uint32_t',
+  calling_nature: 'uint32_t',
+  calling_presentation: 'uint32_t',
+  calling_screening: 'uint32_t',
+  has_redirection: 'uint32_t',
+  redirecting_indicator: 'uint32_t',
+  redirection_counter: 'uint32_t',
+  redirecting_reason: 'uint32_t',
+  original_redirecting_reason: 'uint32_t',
+  calling_category: 'uint32_t',
+});
+
+/**
  * The one callback a stack has.
  *
  * Called inside `sipral_stack_poll` on its thread, never concurrently
@@ -12060,6 +12241,56 @@ export class Sipral {
    */
   readonly sipral_audio_call_level: (stack: Wide, call: Wide, direction: number, out_peak: Pointer) => number;
 
+  /**
+   * Where the ISUP body of a whole SIP message is (RFC 3204), as an offset
+   * into `message` and a length. ABI 1.4.
+   *
+   * The body itself when it is `application/ISUP`, else the first such part
+   * of a multipart body. A message that carries none is a length of zero,
+   * not a failure, as an absent header field counts zero. Hand the bytes
+   * found to `sipral_isup_read`.
+   *
+   * Safety
+   *
+   * `message` must be readable for `message_len` bytes, and `out_offset`
+   * and `out_len` must each point at one `size_t`.
+   */
+  readonly sipral_message_isup: (message: Pointer, message_len: number, out_offset: Pointer, out_len: Pointer) => number;
+
+  /**
+   * Read one ISUP message, from its message type code on (ITU-T Q.763),
+   * into `out_isup`. ABI 1.4.
+   *
+   * A message that does not fit what its type lays out is
+   * `SIPRAL_STATUS_INVALID_ARGUMENT`, the last error saying where it ends.
+   * A type other than the seven `sipral_isup_t::message_type` names is
+   * read for its code alone.
+   *
+   * Safety
+   *
+   * `body` must be readable for `body_len` bytes, and `out_isup` must point
+   * at a `sipral_isup_t` whose `size` member says how long it is.
+   */
+  readonly sipral_isup_read: (body: Pointer, body_len: number, out_isup: Pointer) => number;
+
+  /**
+   * One number of an ISUP message as text, copied into the caller's buffer
+   * with a trailing NUL. ABI 1.4.
+   *
+   * `+` and the digits for an international number, the digits alone for
+   * any other; the operator codes 11 and 12 are `B` and `C`, the end of
+   * pulsing signal `F`. A number the message does not carry is just the
+   * NUL. `out_needed` always receives the bytes needed including the NUL;
+   * too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
+   *
+   * Safety
+   *
+   * `body` must be readable for `body_len` bytes, `buffer` writable for
+   * `capacity` bytes or null with a capacity of zero, and `out_needed`
+   * must point at one `size_t` or be null.
+   */
+  readonly sipral_isup_number: (body: Pointer, body_len: number, which: number, buffer: Pointer, capacity: number, out_needed: Pointer) => number;
+
   private constructor(library: ReturnType<typeof koffi.load>, path: string) {
     this.path = path;
     this.sipral_last_error_message = library.func('sipral_status_t sipral_last_error_message(char *buffer, size_t capacity, size_t *out_needed)');
@@ -12256,6 +12487,9 @@ export class Sipral {
     this.sipral_audio_call_set_muted = library.func('sipral_status_t sipral_audio_call_set_muted(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t muted)');
     this.sipral_audio_call_muted = library.func('sipral_status_t sipral_audio_call_muted(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t *out_muted)');
     this.sipral_audio_call_level = library.func('sipral_status_t sipral_audio_call_level(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t *out_peak)');
+    this.sipral_message_isup = library.func('sipral_status_t sipral_message_isup(const uint8_t *message, size_t message_len, size_t *out_offset, size_t *out_len)');
+    this.sipral_isup_read = library.func('sipral_status_t sipral_isup_read(const uint8_t *body, size_t body_len, sipral_isup_t *out_isup)');
+    this.sipral_isup_number = library.func('sipral_status_t sipral_isup_number(const uint8_t *body, size_t body_len, sipral_isup_number_t which, char *buffer, size_t capacity, size_t *out_needed)');
   }
 }
 
@@ -12339,4 +12573,5 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_local_conference_member_t: [40, 36, 40],
   sipral_pinned_certificate_t: [40, 36, 40],
   sipral_network_test_config_t: [48, 36, 40],
+  sipral_isup_t: [72, 68, 68],
 };

@@ -123,7 +123,7 @@ reason phrase names the field (`Bad <field>`, RFC 3261 §8.2.x), and the
 refusal is noted in the diagnostic record. An ACK that fails it is dropped,
 since nothing answers an ACK.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Thirty-six
+**Fuzzing covers the doors an attacker's bytes come through.** Thirty-seven
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
@@ -144,7 +144,8 @@ what came with caller verification, recording sessions, text and RTCP
 feedback: an `Identity` header and a certificate chain through the whole of
 STIR verification (`stir_identity`), multipart bodies with recording
 metadata (`multipart`), real-time text (`rtt`) and the RTCP feedback readers
-(`rtcp_fb`). The exit gate is 24 hours per target with no crash and no hang,
+(`rtcp_fb`), and one for the ISUP a carrier gateway carries beside the
+offer (`isup`). The exit gate is 24 hours per target with no crash and no hang,
 and every target before those four has had it run (theirs is not recorded
 yet): the first eighteen on 21 and 22 September 2026, about 37 billion
 executions, the eight media ones before `media_g729` on 23 September, about
@@ -155,7 +156,7 @@ G.729 decoder — speech frames, Annex B's SID frames, frames not sent and
 frames lost — the payload reader and an encoder with Annex B's DTX; it
 decodes and re-encodes every input, so its 24 hours came to about 0.67
 million executions, the thinnest coverage of any target. `scripts/check.sh`
-builds all thirty-seven on every run so none of them rots uncompiled between
+builds all thirty-eight on every run so none of them rots uncompiled between
 releases.
 
 `ice` covers the one seam that is open to anybody before a

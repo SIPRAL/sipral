@@ -19,8 +19,8 @@ use crate::agent::UserAgent;
 use crate::reliable::UNDERSTOOD;
 use crate::renegotiate::ALLOW;
 
-/// The body types this end accepts: SDP only.
-const ACCEPT: &[u8] = b"application/sdp";
+/// The body types this end accepts: those a 415 lists.
+const ACCEPT: &[u8] = crate::admission::ACCEPT;
 
 impl UserAgent {
     /// `None` when this was an OPTIONS and has been answered; the event back

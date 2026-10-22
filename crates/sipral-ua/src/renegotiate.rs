@@ -698,7 +698,7 @@ impl UserAgent {
                 };
                 // an empty ACK, resent for every 2xx retransmission (§13.2.2.4)
                 self.ack_reinvite_by_itself(invite, dialog, now);
-                let answer = response.as_raw().body().to_vec();
+                let answer = response.as_raw().session_body().to_vec();
                 self.on_offer_taken(call, id, &answer);
                 None
             }
@@ -1000,7 +1000,7 @@ impl UserAgent {
             return;
         }
         if status.is_success() {
-            self.on_offer_taken(call, id, response.as_raw().body());
+            self.on_offer_taken(call, id, response.as_raw().session_body());
             return;
         }
         if status == StatusCode::REQUEST_PENDING {
@@ -1262,7 +1262,7 @@ impl UserAgent {
         // cleared even if the answer is missing or bad: only this ACK may
         // carry it (§13.2.2.4), and a stuck flag would block every change
         held.session.answer_owed = false;
-        let body = request.as_raw().body();
+        let body = request.as_raw().session_body();
         if body.is_empty() {
             return;
         }
@@ -1282,19 +1282,16 @@ enum Arriving {
 }
 
 fn arriving(request: &RawMessage<'_>, limits: sdp::Limits) -> Arriving {
-    let body = request.body();
-    if body.is_empty() {
+    // the SDP part of a multipart body is the offer; a body with none, an
+    // optional one (RFC 3261 §20.11) or ISUP alone, is answered as if there
+    // were none (RFC 3204 §6)
+    let described = request.session_body();
+    if described.is_empty() || request.content_type().is_err() {
         return Arriving::Nothing;
     }
-    match request.content_type() {
-        Ok(kind) if kind.is("application", "sdp") => sdp::parse_with_limits(body, limits)
-            .map_or(Arriving::Unreadable, |offer| {
-                Arriving::Offer(Box::new(offer))
-            }),
-        // an optional body (RFC 3261 §20.11) is ignored (RFC 3204 §6): the
-        // request is answered as if it had none
-        _ => Arriving::Nothing,
-    }
+    sdp::parse_with_limits(described, limits).map_or(Arriving::Unreadable, |offer| {
+        Arriving::Offer(Box::new(offer))
+    })
 }
 
 /// The glare wait (§14.1, RFC 3311 §5.3). The caller and callee draw from

@@ -286,6 +286,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "isup"
+path = "fuzz_targets/isup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "stir_identity"
 path = "fuzz_targets/stir_identity.rs"
 test = false

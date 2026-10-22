@@ -5644,3 +5644,89 @@ Java_org_sipral_SipralNative_sipral_1audio_1call_1level(JNIEnv *env, jobject sel
     return (jint)status;
 }
 
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1message_1isup(JNIEnv *env, jobject self, jbyteArray message, jlongArray offset, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *message_data = message ? (*env)->GetByteArrayElements(env, message, NULL) : NULL;
+    jsize message_size = message ? (*env)->GetArrayLength(env, message) : 0;
+    size_t offset_value = 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_message_isup((const uint8_t *)message_data, (size_t)message_size, &offset_value, &len_value);
+    if (message) {
+        (*env)->ReleaseByteArrayElements(env, message, message_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)offset_value;
+        (*env)->SetLongArrayRegion(env, offset, 0, 1, &slot);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1isup_1read(JNIEnv *env, jobject self, jbyteArray body, jlongArray isup)
+{
+    (void)env;
+    (void)self;
+    jbyte *body_data = body ? (*env)->GetByteArrayElements(env, body, NULL) : NULL;
+    jsize body_size = body ? (*env)->GetArrayLength(env, body) : 0;
+    sipral_isup_t isup_value;
+    memset(&isup_value, 0, sizeof isup_value);
+    isup_value.size = sizeof isup_value;
+    sipral_status_t status = sipral_isup_read((const uint8_t *)body_data, (size_t)body_size, &isup_value);
+    if (body) {
+        (*env)->ReleaseByteArrayElements(env, body, body_data, JNI_ABORT);
+    }
+    {
+        jlong slots[17];
+        slots[0] = (jlong)isup_value.size;
+        slots[1] = (jlong)isup_value.message_type;
+        slots[2] = (jlong)isup_value.has_cause;
+        slots[3] = (jlong)isup_value.cause_value;
+        slots[4] = (jlong)isup_value.cause_location;
+        slots[5] = (jlong)isup_value.event;
+        slots[6] = (jlong)isup_value.called_status;
+        slots[7] = (jlong)isup_value.has_calling;
+        slots[8] = (jlong)isup_value.calling_nature;
+        slots[9] = (jlong)isup_value.calling_presentation;
+        slots[10] = (jlong)isup_value.calling_screening;
+        slots[11] = (jlong)isup_value.has_redirection;
+        slots[12] = (jlong)isup_value.redirecting_indicator;
+        slots[13] = (jlong)isup_value.redirection_counter;
+        slots[14] = (jlong)isup_value.redirecting_reason;
+        slots[15] = (jlong)isup_value.original_redirecting_reason;
+        slots[16] = (jlong)isup_value.calling_category;
+        (*env)->SetLongArrayRegion(env, isup, 0, 17, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1isup_1number(JNIEnv *env, jobject self, jbyteArray body, jlong which, jbyteArray buffer, jlongArray needed)
+{
+    (void)env;
+    (void)self;
+    jbyte *body_data = body ? (*env)->GetByteArrayElements(env, body, NULL) : NULL;
+    jsize body_size = body ? (*env)->GetArrayLength(env, body) : 0;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t needed_value = 0;
+    sipral_status_t status = sipral_isup_number((const uint8_t *)body_data, (size_t)body_size, (sipral_isup_number_t)which, (char *)buffer_data, (size_t)buffer_size, &needed_value);
+    if (body) {
+        (*env)->ReleaseByteArrayElements(env, body, body_data, JNI_ABORT);
+    }
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)needed_value;
+        (*env)->SetLongArrayRegion(env, needed, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+

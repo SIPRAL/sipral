@@ -7674,9 +7674,13 @@ fn carrying(request: &[u8], content_type: &str, extra: &str, body: &str) -> Vec<
     .into_bytes()
 }
 
-/// A body of a type this agent does not read: the ISDN User Part message a
-/// SIP-T gateway sends beside, or instead of, a session description.
-const ISUP: &str = "\u{1}\u{2}\u{3}";
+/// A body of a type this agent does not read: the QSIG message a PBX gateway
+/// carries in SIP (RFC 3204 §3.2), beside or instead of a session
+/// description. Its sibling `application/ISUP` is read (`isup_tests`).
+const QSIG: &str = "\u{8}\u{2}\u{3}";
+
+/// What a 415 lists in `Accept`: every body a call's requests are read for.
+pub(crate) const ACCEPTED: &[u8] = b"application/sdp, application/isup, multipart/mixed";
 
 #[test]
 fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_acknowledges_nothing() {
@@ -7702,9 +7706,9 @@ fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_acknowledges_no
     let rseq = String::from_utf8_lossy(&header(&progress, HeaderName::RSeq)).into_owned();
     let prack = carrying(
         &in_dialog(&progress, "PRACK", "rel415prack", 2),
-        "application/isup",
+        "application/QSIG",
         &format!("RAck: {rseq} 1 INVITE\r\n"),
-        ISUP,
+        QSIG,
     );
     deliver(&mut agent, &prack, t0);
     let written = transmits(&mut agent);
@@ -7717,7 +7721,7 @@ fn a_prack_with_a_body_this_agent_cannot_read_is_refused_415_and_acknowledges_no
         "{}",
         String::from_utf8_lossy(refusal)
     );
-    assert_eq!(header(refusal, HeaderName::Accept), b"application/sdp");
+    assert_eq!(header(refusal, HeaderName::Accept), ACCEPTED);
     assert!(
         !written
             .iter()
@@ -8095,10 +8099,10 @@ fn a_reinvite_or_update_with_a_body_this_agent_cannot_read_is_refused_415() {
         let (call, ack) = call_up(&mut agent, id, t0);
         let before = agent.hold_state(call);
         let request = carrying(
-            &reversed(&ack, method, "isup", 2, None),
-            "application/isup",
+            &reversed(&ack, method, "qsig", 2, None),
+            "application/QSIG",
             "Session-Expires: 1800;refresher=uas\r\n",
-            ISUP,
+            QSIG,
         );
         deliver(&mut agent, &request, t0);
         let answer = last(&mut agent);
@@ -8107,7 +8111,7 @@ fn a_reinvite_or_update_with_a_body_this_agent_cannot_read_is_refused_415() {
             "{method}: {}",
             String::from_utf8_lossy(&answer)
         );
-        assert_eq!(header(&answer, HeaderName::Accept), b"application/sdp");
+        assert_eq!(header(&answer, HeaderName::Accept), ACCEPTED);
         let said = events(&mut agent);
         assert!(
             !said.iter().any(|event| matches!(
@@ -8149,9 +8153,9 @@ fn a_body_its_sender_marked_optional_is_ignored_rather_than_refused() {
         let (_, ack) = call_up(&mut agent, id, t0);
         let request = carrying(
             &reversed(&ack, method, "optional", 2, None),
-            "application/isup",
+            "application/QSIG",
             "Content-Disposition: signal;handling=optional\r\n",
-            ISUP,
+            QSIG,
         );
         deliver(&mut agent, &request, t0);
         let answer = last(&mut agent);
@@ -14451,7 +14455,7 @@ fn an_info_that_is_not_dtmf_is_answered_by_the_info_framework() {
     let (_call, ack) = call_up(&mut agent, id, t0);
 
     // legacy usage with a body this agent cannot read: 415, and the Accept
-    // names the two forms it does
+    // names the two forms it does and the ISUP a gateway sends mid-call
     deliver(
         &mut agent,
         &incoming_info(
@@ -14471,7 +14475,7 @@ fn an_info_that_is_not_dtmf_is_answered_by_the_info_framework() {
     );
     assert_eq!(
         header(&answer, HeaderName::Accept),
-        b"application/dtmf-relay, application/dtmf"
+        b"application/dtmf-relay, application/dtmf, application/isup"
     );
 
     // no body at all, which some equipment sends to see the call is there:

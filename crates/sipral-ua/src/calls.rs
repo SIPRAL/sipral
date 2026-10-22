@@ -1093,6 +1093,10 @@ impl UserAgent {
         {
             causes = Reason::all_in(&refusal.as_raw());
         }
+        // a carrier gateway's REL beside the BYE, CANCEL or refusal says the
+        // Q.850 cause when no Reason did (RFC 3398 §7.2.3)
+        let causes =
+            crate::isup::with_release_cause(causes, request.as_ref().or(response.as_ref()));
         self.events.push_back(UaEvent::CallEnded {
             call,
             reason,
@@ -1513,7 +1517,7 @@ impl UserAgent {
     ) {
         // §5: an offer here is answered in the PRACK by the application;
         // anything else is PRACKed at once (§4)
-        let offered = !response.as_raw().body().is_empty()
+        let offered = !response.as_raw().session_body().is_empty()
             && self
                 .calls
                 .get(&call)
@@ -1591,14 +1595,15 @@ impl UserAgent {
         true
     }
 
-    /// The session description an INVITE offers: its body, or the SDP part
+    /// The session description an INVITE offers: its body, the SDP part of
+    /// a multipart one (a carrier gateway's, beside ISUP), or the SDP part
     /// of a recording session's to an agent that takes them.
     fn offer_in(&self, request: &RawMessage<'_>) -> Option<sdp::SessionDescription> {
         let described = self
             .recording_server
             .then(|| crate::siprec::session_part(request))
             .flatten()
-            .unwrap_or(request.body());
+            .unwrap_or(request.session_body());
         sdp::parse_with_limits(described, self.sdp_limits).ok()
     }
 
@@ -1825,7 +1830,7 @@ impl UserAgent {
     fn note_session(&mut self, call: CallHandle, response: &OwnedMessage) {
         let raw = response.as_raw();
         self.note_far_end(call, &raw);
-        if let Ok(described) = sdp::parse_with_limits(raw.body(), self.sdp_limits)
+        if let Ok(described) = sdp::parse_with_limits(raw.session_body(), self.sdp_limits)
             && let Some(held) = self.calls.get_mut(&call)
         {
             held.session.set_remote(described);
@@ -1972,7 +1977,7 @@ impl UserAgent {
         now: Instant,
     ) {
         self.note_session(call, response);
-        let early = !response.as_raw().body().is_empty();
+        let early = !response.as_raw().session_body().is_empty();
         let state = if early {
             CallState::EarlyMedia
         } else if status.get() >= 180 {

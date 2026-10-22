@@ -4779,6 +4779,117 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// `message` with its body replaced by `body` under `content_type`.
+    fn carrying_body(message: &[u8], content_type: &str, body: &[u8]) -> Vec<u8> {
+        let end = message
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("a header section");
+        let mut head = String::new();
+        for line in String::from_utf8_lossy(&message[..end]).split("\r\n") {
+            if !line.starts_with("Content-Type:") && !line.starts_with("Content-Length:") {
+                head.push_str(line);
+                head.push_str("\r\n");
+            }
+        }
+        let mut out = format!(
+            "{head}Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// SIP-T and SIP-I across the boundary (ABI 1.4): a carrier gateway's
+    /// INVITE with the IAM beside the offer is rung, the caller's number,
+    /// its withholding and the diversion reach the event and the identity
+    /// lists, and the REL on the gateway's CANCEL is the end's Q.850 cause.
+    #[test]
+    fn a_carrier_gateways_call_reads_the_caller_and_the_cause_from_its_isup() {
+        use sipral_core::isup::{
+            Cause, ForwardCall, IsupBuilder, Location, Nature, NatureOfConnection,
+            Number as IsupNumber, Presentation, RedirectReason, Redirection, Screening,
+        };
+        use sipral_core::msg::{MultipartBuilder, Part};
+
+        let iam = IsupBuilder::initial_address(
+            NatureOfConnection::default(),
+            ForwardCall::default(),
+            0x0a,
+            3,
+            &IsupNumber::new(Nature::National, "5555550102"),
+        )
+        .calling_party(
+            &IsupNumber::new(Nature::International, "15555550100")
+                .presented(Presentation::Restricted)
+                .screened(Screening::Network),
+        )
+        .redirecting(&IsupNumber::new(Nature::International, "15555550101"))
+        .redirection(Redirection::diverted(
+            RedirectReason::NoReply,
+            RedirectReason::NoReply,
+            1,
+        ))
+        .build()
+        .expect("an IAM");
+        let both = MultipartBuilder::mixed()
+            .part(Part::new("application/sdp", ANSWER))
+            .part(
+                Part::new("application/ISUP;version=itu-t92+", &iam)
+                    .disposition("signal;handling=required"),
+            )
+            .build()
+            .expect("a multipart body");
+
+        let mut observed = Observed::default();
+        let (handle, _) = tuned_line(&mut observed, |config| {
+            (config.trusted_peers, config.trusted_peers_len) = as_text("203.0.113.5");
+        });
+        let invite = carrying_body(&invitation(), both.content_type(), both.body());
+        deliver(handle, &invite, 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let seen = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::IncomingCall)
+            .expect("the incoming call was reported");
+        assert_eq!(seen.asserted_uri, b"tel:+15555550100");
+        assert_eq!(seen.privacy, crate::identity::SIPRAL_PRIVACY_ID);
+        assert_eq!(seen.diverted_from, b"tel:+15555550101");
+        assert_eq!(seen.diversion_reason, b"no-answer");
+        let calling = crate::identity::SipralIdentityText::IsupCalling as u32;
+        assert_eq!(identity_text(handle, call, calling, 0), "+15555550100");
+        let redirecting = crate::identity::SipralIdentityText::IsupRedirecting as u32;
+        assert_eq!(identity_text(handle, call, redirecting, 0), "+15555550101");
+        let mut count = usize::MAX;
+        let original = crate::identity::SipralIdentityText::IsupOriginalCalled as u32;
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_identity_count(handle, call, original, &raw mut count)
+            },
+            SipralStatus::Ok
+        );
+        assert_eq!(count, 0, "the IAM carried no original called number");
+        let _ = sent(handle);
+
+        let rel = IsupBuilder::release(Cause::new(31, Location::Transit))
+            .build()
+            .expect("a REL");
+        let cancel = carrying_body(&cancellation(), "application/ISUP;version=itu-t92+", &rel);
+        deliver(handle, &cancel, 1_100);
+        poll(handle, 1_100);
+        let ended = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::CallEnded)
+            .expect("the call ended");
+        assert_eq!((ended.cause_sip, ended.cause_q850), (0, 31));
+        assert_eq!(ended.cause_text, b"Normal, unspecified");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     #[test]
     fn a_call_cancelled_because_another_phone_answered_says_so_on_its_end() {
         let mut observed = Observed::default();

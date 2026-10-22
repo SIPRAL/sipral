@@ -4,7 +4,8 @@
 //! Sans-I/O SIP protocol core.
 //!
 //! Message parsing and serialization, the transaction layer (RFC 3261 timers
-//! A through K), dialogs, SDP offer/answer and digest authentication.
+//! A through K), dialogs, SDP offer/answer, digest authentication, and the
+//! ISUP a carrier gateway carries beside the SDP ([`isup`], ITU-T Q.763).
 //!
 //! Nothing here opens a socket, spawns a thread or reads a clock. The caller
 //! feeds bytes and the current time and gets back bytes and events, so every
@@ -32,6 +33,7 @@ pub mod auth;
 pub mod diag;
 pub mod dialog;
 pub mod endpoint;
+pub mod isup;
 pub mod msg;
 pub mod pin;
 pub mod replay;

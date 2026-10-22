@@ -60,6 +60,12 @@ mod event;
 mod flow;
 mod headers;
 mod identity;
+/// SIP-T and SIP-I (RFC 3372, ITU-T Q.1912.5): the ISUP a carrier gateway
+/// carries, read with `sipral-core`'s codec. Its own path, since `Number`,
+/// `Cause` and `Location` are ISUP's vocabulary.
+pub mod isup;
+#[cfg(test)]
+mod isup_tests;
 /// Keeping a UDP registration reachable through a NAT, and the interval
 /// bounds a binding checks against.
 pub mod keepalive;

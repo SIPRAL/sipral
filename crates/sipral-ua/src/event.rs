@@ -401,7 +401,8 @@ pub enum UaEvent {
     /// The far end offered a change this layer has no policy for (codec swap,
     /// added stream). A body that is not a session description never arrives
     /// here: it is refused 415, or ignored if marked optional (RFC 3261
-    /// §8.2.3).
+    /// §8.2.3) or if it is ISUP alone ([`crate::isup`]); the SDP part of a
+    /// multipart body is the offer.
     ///
     /// The transaction is held open. Answer with
     /// [`UserAgent::accept_reoffer`](crate::UserAgent::accept_reoffer) or
@@ -695,7 +696,9 @@ pub enum UaEvent {
         /// (RFC 6432), one per protocol, in order; empty when none. A forking
         /// proxy's CANCEL of a losing branch carries
         /// [`Reason::is_completed_elsewhere`](crate::Reason::is_completed_elsewhere):
-        /// answered on another phone, not missed.
+        /// answered on another phone, not missed. A carrier gateway's ISUP
+        /// REL in that message adds its Q.850 cause, named as Q.850 names
+        /// it, when no value gave one ([`crate::isup`]).
         causes: Box<[crate::Reason]>,
     },
     /// An INFO sent for [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info)

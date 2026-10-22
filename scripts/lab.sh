@@ -175,6 +175,17 @@
 #                               P-Asserted-Identity sent and received, a
 #                               Diversion on a diverted call, a 302 followed
 #                               (part of a run that names nothing too)
+#   scripts/lab.sh isup         only a carrier gateway's calls, SIP-I both
+#                               ways, in one container (interop/isup/run.sh):
+#                               interop/isup/gateway.py writes the ISUP of
+#                               each call from ITU-T Q.763 itself, beside the
+#                               SDP, and `harness-c isup` is the line it
+#                               serves -- the caller, the diversion and the
+#                               REL's cause read from an IAM call, a required
+#                               ANSI body refused 415, a call placed through
+#                               ACM, CPG and ANM ended by a REL, one refused
+#                               486 with a REL (part of a run that names
+#                               nothing too)
 #   scripts/lab.sh dtls-interop only DTLS-SRTP against OpenSSL, no SIP: the
 #                               Rust harness as client and as server facing
 #                               `openssl s_server`/`s_client -dtls1_2
@@ -1179,6 +1190,23 @@ stir_flow() {
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/interop/stir:/stir:ro" \
         debian:trixie-slim sh /stir/run.sh
+}
+
+# A carrier gateway's calls in one container: interop/isup/run.sh starts the
+# gateway script on the container's loopback and runs `harness-c isup`
+# against it -- four calls, the gateway's two and the harness's two.
+isup_flow() {
+    local beside
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    lab_run "a carrier gateway's calls, in C" $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/interop/isup:/isup:ro" \
+        debian:trixie-slim sh /isup/run.sh
 }
 
 # The Python binding's example agent, run exactly as its own docstring says to
@@ -5044,6 +5072,19 @@ if [ "$WANT" = all ] || [ "$WANT" = identity ]; then
         fail "the identity flows: there is no libsipral_ffi for the Python layer to load"
     else
         printf '  note  no libsipral_ffi, so the identity flows are skipped with the other C flows\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = isup ]; then
+    step "a carrier gateway's calls, the ISUP beside the SDP -- SIP-I both ways, in C"
+    if [ -n "$HARNESS_C" ]; then
+        isup_flow \
+            && pass "the IAM's caller, withheld number and diversion read, the REL's causes 16, 31 and 17 reported, ACM, CPG and ANM read off the progress, a required ANSI body refused 415" \
+            || fail "a carrier gateway's calls"
+    elif [ "$WANT" = isup ]; then
+        fail "the isup step: there is no C harness to run it with"
+    else
+        printf '  note  no C harness, so the isup step is skipped with the other C flows\n'
     fi
 fi
 

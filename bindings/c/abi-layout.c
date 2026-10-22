@@ -1052,3 +1052,23 @@ _Static_assert(offsetof(sipral_network_test_config_t, echo_ms) == SIPRAL_LAYOUT(
 _Static_assert(offsetof(sipral_network_test_config_t, timeout_ms) == SIPRAL_LAYOUT(44, 32, 36), "sipral_network_test_config_t::timeout_ms");
 _Static_assert(offsetof(sipral_network_test_config_t, timeout_ms) + sizeof(((sipral_network_test_config_t *)0)->timeout_ms) == SIPRAL_LAYOUT(48, 36, 40), "sipral_network_test_config_t is pinned through timeout_ms");
 
+_Static_assert(sizeof(sipral_isup_t) == SIPRAL_LAYOUT(72, 68, 68), "sipral_isup_t");
+_Static_assert(offsetof(sipral_isup_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_isup_t::size");
+_Static_assert(offsetof(sipral_isup_t, message_type) == SIPRAL_LAYOUT(8, 4, 4), "sipral_isup_t::message_type");
+_Static_assert(offsetof(sipral_isup_t, has_cause) == SIPRAL_LAYOUT(12, 8, 8), "sipral_isup_t::has_cause");
+_Static_assert(offsetof(sipral_isup_t, cause_value) == SIPRAL_LAYOUT(16, 12, 12), "sipral_isup_t::cause_value");
+_Static_assert(offsetof(sipral_isup_t, cause_location) == SIPRAL_LAYOUT(20, 16, 16), "sipral_isup_t::cause_location");
+_Static_assert(offsetof(sipral_isup_t, event) == SIPRAL_LAYOUT(24, 20, 20), "sipral_isup_t::event");
+_Static_assert(offsetof(sipral_isup_t, called_status) == SIPRAL_LAYOUT(28, 24, 24), "sipral_isup_t::called_status");
+_Static_assert(offsetof(sipral_isup_t, has_calling) == SIPRAL_LAYOUT(32, 28, 28), "sipral_isup_t::has_calling");
+_Static_assert(offsetof(sipral_isup_t, calling_nature) == SIPRAL_LAYOUT(36, 32, 32), "sipral_isup_t::calling_nature");
+_Static_assert(offsetof(sipral_isup_t, calling_presentation) == SIPRAL_LAYOUT(40, 36, 36), "sipral_isup_t::calling_presentation");
+_Static_assert(offsetof(sipral_isup_t, calling_screening) == SIPRAL_LAYOUT(44, 40, 40), "sipral_isup_t::calling_screening");
+_Static_assert(offsetof(sipral_isup_t, has_redirection) == SIPRAL_LAYOUT(48, 44, 44), "sipral_isup_t::has_redirection");
+_Static_assert(offsetof(sipral_isup_t, redirecting_indicator) == SIPRAL_LAYOUT(52, 48, 48), "sipral_isup_t::redirecting_indicator");
+_Static_assert(offsetof(sipral_isup_t, redirection_counter) == SIPRAL_LAYOUT(56, 52, 52), "sipral_isup_t::redirection_counter");
+_Static_assert(offsetof(sipral_isup_t, redirecting_reason) == SIPRAL_LAYOUT(60, 56, 56), "sipral_isup_t::redirecting_reason");
+_Static_assert(offsetof(sipral_isup_t, original_redirecting_reason) == SIPRAL_LAYOUT(64, 60, 60), "sipral_isup_t::original_redirecting_reason");
+_Static_assert(offsetof(sipral_isup_t, calling_category) == SIPRAL_LAYOUT(68, 64, 64), "sipral_isup_t::calling_category");
+_Static_assert(offsetof(sipral_isup_t, calling_category) + sizeof(((sipral_isup_t *)0)->calling_category) == SIPRAL_LAYOUT(72, 68, 68), "sipral_isup_t is pinned through calling_category");
+

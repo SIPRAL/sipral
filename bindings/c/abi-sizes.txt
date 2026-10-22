@@ -24,6 +24,7 @@ sipral_conference_user_t reserved 24 24 20 20 20 20
 sipral_consent_tone_t local 32 32 28 28 28 28
 sipral_counters_t requests_refused_at_limit 232 232 228 228 232 232
 sipral_event_t - - 384 - 248 - 264
+sipral_isup_t calling_category 72 72 68 68 68 68
 sipral_local_conference_config_t reserved 24 24 20 20 20 20
 sipral_local_conference_info_t packets_dropped 56 56 48 48 48 48
 sipral_local_conference_member_t reserved 40 40 36 36 40 40

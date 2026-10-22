@@ -4025,3 +4025,71 @@ the catalogue (`CodecCatalog::with_ice_trickle`) and
 `UserAgent::accept_trickle_ice`; every printed binding has the type, and the
 Python, Swift, .NET and Kotlin layers take it on the stack and on a call they
 place (and, in .NET, on one they answer with options).
+
+### The ISUP a carrier gateway carries (SIP-T, SIP-I)
+
+Three entry points, one versioned struct, one enumeration, and four values
+appended to `sipral_identity_text_t`. No event kind: what a call needs from
+the ISUP reaches the events that already exist. `docs/04-ua.md`, "SIP-T and
+SIP-I", has the mapping and its reasons.
+
+**What a call gets without asking.** An incoming call whose INVITE carries an
+ISUP IAM beside the offer has its caller's identity filled in from it where
+the SIP headers said less: `asserted_uri` is `tel:+` and the calling party
+number when the gateway is a trusted peer, no `P-Asserted-Identity` or
+`Remote-Party-ID` was sent, the number is international and the network
+provided or verified it; `privacy` carries `SIPRAL_PRIVACY_ID` when the
+number's presentation is restricted, whatever `From` said; `diverted_from`,
+`diversion_reason` and the `Diversion` lists are the redirecting and original
+called numbers, with the redirection information's reasons, when no
+`Diversion` or `History-Info` was sent. A call that ends with a REL in its
+BYE, its CANCEL or its refusal has that REL's cause in `cause_q850` and
+Q.850's name for it in `cause_text`, unless a `Reason` gave a Q.850 cause,
+which RFC 3398 §7.2.3 prefers. The four new `sipral_identity_text_t` values
+read the IAM's own numbers as text — `+` and the digits for an international
+one, the digits alone for any other, so a national number no URI can carry
+is still there:
+
+| Value | Entries |
+|---|---|
+| `SIPRAL_IDENTITY_TEXT_ISUP_CALLING` (16) | the calling party number, one or none |
+| `SIPRAL_IDENTITY_TEXT_ISUP_ADDITIONAL_CALLING` (17) | every additional calling party number (a generic number) |
+| `SIPRAL_IDENTITY_TEXT_ISUP_ORIGINAL_CALLED` (18) | the original called number, one or none |
+| `SIPRAL_IDENTITY_TEXT_ISUP_REDIRECTING` (19) | the redirecting number, one or none |
+
+**The message itself, for an application that wants more.** Every event that
+carries a SIP message carries it whole, and three entry points read the ISUP
+out of it with no stack:
+
+- `sipral_message_isup(message, message_len, out_offset, out_len)`: where the
+  `application/ISUP` body is inside a whole SIP message — the body, or the
+  first such part of a multipart one — as an offset and a length, the way
+  `sipral_message_header` answers; a message with none is a length of zero.
+- `sipral_isup_read(body, body_len, out_isup)`: one ISUP message (ITU-T
+  Q.763), from its message type code on, into `sipral_isup_t`: the message
+  type code, the cause value and location, the CPG event, the called party's
+  status from the backward call indicators, the calling party number's
+  nature, presentation and screening, the redirection information's
+  indicator, counter and both reasons, and the calling party's category, each
+  as the Recommendation numbers it, with `has_` members where zero is a
+  value. A message that does not fit what its type lays out is
+  `SIPRAL_STATUS_INVALID_ARGUMENT`; a type other than IAM, ACM, CPG, ANM,
+  CON, REL and RLC is read for its code alone.
+- `sipral_isup_number(body, body_len, which, buffer, capacity, out_needed)`:
+  one of its numbers as text, `which` a `sipral_isup_number_t` (calling,
+  called, original called, redirecting, redirection, connected, additional
+  calling), copied out with its NUL the way `sipral_call_identity_text`
+  copies.
+
+**What this end sends.** No ISUP. RFC 3372 §4.1 makes generating it the
+gateway's work and "not the responsibility of an IP endpoint like a SIP
+phone"; the gateway at the far end writes the REL for a BYE itself (RFC 3398
+§10.1). A 415 now lists `application/sdp, application/isup, multipart/mixed` in
+`Accept`, and an INFO's 415 adds `application/isup`.
+
+A binding printed at 1.3 loads against a 1.4 library and works as it did; one
+printed at 1.4 is refused by a 1.3 library. The Swift and Kotlin layers carry
+the numbers as `CallerIdentity.isup` (`IsupCaller`) and
+`SipralCallerIdentity.isup` (`SipralIsupCaller`); .NET, Python, Dart and
+Node.js read them through their identity lists with the printed values.
+`bindings/c/smoke.c` finds a REL in a BYE and reads it.

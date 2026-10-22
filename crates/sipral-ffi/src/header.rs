@@ -153,7 +153,10 @@ unsafe fn asked<'a>(
 }
 
 /// Lenient, as on receive: what the stack let in is not refused when read back.
-fn parsed<'a>(whole: &'a [u8], scratch: &'a mut ParseScratch) -> Result<RawMessage<'a>, Fail> {
+pub(crate) fn parsed<'a>(
+    whole: &'a [u8],
+    scratch: &'a mut ParseScratch,
+) -> Result<RawMessage<'a>, Fail> {
     parse(whole, scratch, ParseMode::Lenient).map_err(|error| {
         fail(
             SipralStatus::InvalidArgument,
@@ -200,7 +203,7 @@ fn span_in(
 
 /// Where a slice of `within` starts inside it. Checked so a parser change can
 /// never yield an offset outside the caller's bytes.
-fn offset_in(within: &[u8], part: &[u8]) -> Result<usize, Fail> {
+pub(crate) fn offset_in(within: &[u8], part: &[u8]) -> Result<usize, Fail> {
     part.as_ptr()
         .addr()
         .checked_sub(within.as_ptr().addr())

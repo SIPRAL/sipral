@@ -549,6 +549,7 @@ typedef struct sipral_local_conference_info sipral_local_conference_info_t;
 typedef struct sipral_local_conference_member sipral_local_conference_member_t;
 typedef struct sipral_pinned_certificate sipral_pinned_certificate_t;
 typedef struct sipral_network_test_config sipral_network_test_config_t;
+typedef struct sipral_isup sipral_isup_t;
 
 /**
  * The result of a call across the C ABI.
@@ -2712,6 +2713,29 @@ enum {
      * Why it did not verify, in words, for a log.
      */
     SIPRAL_IDENTITY_TEXT_VERIFICATION_DETAIL = 15,
+    /**
+     * The calling party number of the ISUP IAM a carrier gateway carried
+     * beside the offer (SIP-T, SIP-I): `+` and the digits for an
+     * international number, the digits alone for any other. One entry,
+     * or none. Its presentation, restricted or not, is in the privacy
+     * bits already (`SIPRAL_PRIVACY_ID`). ABI 1.4.
+     */
+    SIPRAL_IDENTITY_TEXT_ISUP_CALLING = 16,
+    /**
+     * Each additional calling party number of that IAM (a generic
+     * number): what a caller with a special arrangement presents. ABI 1.4.
+     */
+    SIPRAL_IDENTITY_TEXT_ISUP_ADDITIONAL_CALLING = 17,
+    /**
+     * The IAM's original called number: who the call was first placed
+     * to. One entry, or none. ABI 1.4.
+     */
+    SIPRAL_IDENTITY_TEXT_ISUP_ORIGINAL_CALLED = 18,
+    /**
+     * The IAM's redirecting number: who the call was last diverted from.
+     * One entry, or none. ABI 1.4.
+     */
+    SIPRAL_IDENTITY_TEXT_ISUP_REDIRECTING = 19,
 };
 
 /**
@@ -3750,6 +3774,48 @@ enum {
      * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without `SIPRAL_FEATURE_ICE`.
      */
     SIPRAL_ICE_TRICKLE_FULL = 3,
+};
+
+/**
+ * Which number of an ISUP message sipral_isup_number writes out.
+ */
+typedef uint32_t sipral_isup_number_t;
+enum {
+    /**
+     * Never asked for.
+     */
+    SIPRAL_ISUP_NUMBER_UNKNOWN = 0,
+    /**
+     * The calling party number (Q.763 §3.10).
+     */
+    SIPRAL_ISUP_NUMBER_CALLING = 1,
+    /**
+     * The called party number of an IAM (§3.9).
+     */
+    SIPRAL_ISUP_NUMBER_CALLED = 2,
+    /**
+     * The original called number (§3.39): who the call was first placed
+     * to.
+     */
+    SIPRAL_ISUP_NUMBER_ORIGINAL_CALLED = 3,
+    /**
+     * The redirecting number (§3.44): who it was last diverted from.
+     */
+    SIPRAL_ISUP_NUMBER_REDIRECTING = 4,
+    /**
+     * The redirection number (§3.46): where an ACM, a CPG or an ANM says
+     * it is diverted to.
+     */
+    SIPRAL_ISUP_NUMBER_REDIRECTION = 5,
+    /**
+     * The connected number (§3.16) of an ANM, a CON or a CPG.
+     */
+    SIPRAL_ISUP_NUMBER_CONNECTED = 6,
+    /**
+     * The first generic number qualified as an additional calling party
+     * number (§3.26).
+     */
+    SIPRAL_ISUP_NUMBER_ADDITIONAL_CALLING = 7,
 };
 
 /**
@@ -8206,6 +8272,103 @@ struct sipral_network_test_config {
 };
 
 /**
+ * What one ISUP message says, as far as an endpoint reads it (ITU-T
+ * Q.763), filled by sipral_isup_read. ABI 1.4.
+ *
+ * Every value is the Recommendation's own number for it, so its tables
+ * name them; a member whose parameter the message did not carry is zero,
+ * with a `has_` member beside the ones where zero is a value.
+ */
+struct sipral_isup {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The message type code (Table 4): 1 IAM, 6 ACM, 44 CPG, 9 ANM, 7
+     * CON, 12 REL, 16 RLC. Any other is recognised and not read further.
+     */
+    uint32_t message_type;
+    /**
+     * Whether the message carried cause indicators.
+     */
+    uint32_t has_cause;
+    /**
+     * The Q.850 cause value: 16 normal call clearing, 17 user busy.
+     */
+    uint32_t cause_value;
+    /**
+     * Where it arose (Q.850 Table 1): 0 the user, 2 the public network
+     * serving the local user, 3 a transit network, 4 the public network
+     * serving the remote user, 7 international, 10 beyond an
+     * interworking point.
+     */
+    uint32_t cause_location;
+    /**
+     * The event a CPG reports (§3.21): 1 alerting, 2 progress, 3 in-band
+     * information available, 4 to 6 forwarded on busy, on no reply,
+     * unconditionally. Zero for any other message.
+     */
+    uint32_t event;
+    /**
+     * The called party's status in the backward call indicators (§3.5,
+     * bits DC) of an ACM, a CON, or an ANM or CPG that carries them: 1
+     * subscriber free, 2 connect when free; zero for no indication.
+     */
+    uint32_t called_status;
+    /**
+     * Whether the message carried a calling party number.
+     */
+    uint32_t has_calling;
+    /**
+     * Its nature of address (§3.10 b): 1 subscriber, 2 unknown, 3
+     * national, 4 international.
+     */
+    uint32_t calling_nature;
+    /**
+     * Its presentation (§3.10 e): 0 allowed, 1 restricted, 2 not
+     * available, 3 restricted by the network.
+     */
+    uint32_t calling_presentation;
+    /**
+     * Its screening (§3.10 f): 0 user provided and not verified, 1 user
+     * provided, verified and passed, 2 verified and failed, 3 network
+     * provided.
+     */
+    uint32_t calling_screening;
+    /**
+     * Whether the message carried redirection information.
+     */
+    uint32_t has_redirection;
+    /**
+     * Its redirecting indicator (§3.45, bits CBA): 3 call diverted, 4
+     * diverted with all redirection information restricted.
+     */
+    uint32_t redirecting_indicator;
+    /**
+     * How many times the call has been redirected, 1 to 5; zero when the
+     * parameter's second octet was not there.
+     */
+    uint32_t redirection_counter;
+    /**
+     * Why it was last redirected (bits PONM): 0 unknown, 1 user busy, 2
+     * no reply, 3 unconditional, 4 deflection during alerting, 5
+     * deflection immediate response, 6 mobile subscriber not reachable.
+     */
+    uint32_t redirecting_reason;
+    /**
+     * Why it was first redirected (bits HGFE), the same numbers.
+     */
+    uint32_t original_redirecting_reason;
+    /**
+     * The calling party's category of an IAM (§3.11): 10 an ordinary
+     * subscriber, 15 a payphone, 13 a test call; zero for any other
+     * message, which is also the category "unknown".
+     */
+    uint32_t calling_category;
+};
+
+/**
  * Copy the calling thread's last error message into `buffer`.
  *
  * UTF-8 with a trailing NUL. `out_needed`, when not null, always receives
@@ -11157,6 +11320,56 @@ sipral_status_t sipral_audio_call_muted(sipral_handle_t stack, sipral_handle_t c
  * `out_peak` must point at one `uint32_t`.
  */
 sipral_status_t sipral_audio_call_level(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t *out_peak);
+
+/**
+ * Where the ISUP body of a whole SIP message is (RFC 3204), as an offset
+ * into `message` and a length. ABI 1.4.
+ *
+ * The body itself when it is `application/ISUP`, else the first such part
+ * of a multipart body. A message that carries none is a length of zero,
+ * not a failure, as an absent header field counts zero. Hand the bytes
+ * found to `sipral_isup_read`.
+ *
+ * Safety
+ *
+ * `message` must be readable for `message_len` bytes, and `out_offset`
+ * and `out_len` must each point at one `size_t`.
+ */
+sipral_status_t sipral_message_isup(const uint8_t *message, size_t message_len, size_t *out_offset, size_t *out_len);
+
+/**
+ * Read one ISUP message, from its message type code on (ITU-T Q.763),
+ * into `out_isup`. ABI 1.4.
+ *
+ * A message that does not fit what its type lays out is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT`, the last error saying where it ends.
+ * A type other than the seven `sipral_isup_t::message_type` names is
+ * read for its code alone.
+ *
+ * Safety
+ *
+ * `body` must be readable for `body_len` bytes, and `out_isup` must point
+ * at a `sipral_isup_t` whose `size` member says how long it is.
+ */
+sipral_status_t sipral_isup_read(const uint8_t *body, size_t body_len, sipral_isup_t *out_isup);
+
+/**
+ * One number of an ISUP message as text, copied into the caller's buffer
+ * with a trailing NUL. ABI 1.4.
+ *
+ * `+` and the digits for an international number, the digits alone for
+ * any other; the operator codes 11 and 12 are `B` and `C`, the end of
+ * pulsing signal `F`. A number the message does not carry is just the
+ * NUL. `out_needed` always receives the bytes needed including the NUL;
+ * too small is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written.
+ *
+ * Safety
+ *
+ * `body` must be readable for `body_len` bytes, `buffer` writable for
+ * `capacity` bytes or null with a capacity of zero, and `out_needed`
+ * must point at one `size_t` or be null.
+ */
+sipral_status_t sipral_isup_number(const uint8_t *body, size_t body_len, sipral_isup_number_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 #ifdef __cplusplus
 } /* extern "C" */

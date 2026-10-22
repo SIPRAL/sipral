@@ -182,6 +182,9 @@ impl<'a> RawMessage<'a> {
     pub fn max_forwards(&self) -> Result<Digits, HeaderError>;
     pub fn content_length(&self) -> Result<Digits, HeaderError>;
     pub fn content_type(&self) -> Result<MediaTypeRef<'a>, HeaderError>;
+    // the SDP a body carries: the body, the first application/sdp part of a
+    // multipart one, or nothing for another type (ISUP alone among them)
+    pub fn session_body(&self) -> &'a [u8];
     pub fn expires(&self) -> Result<Digits, HeaderError>;
     pub fn rseq(&self) -> Result<u32, HeaderError>;
     pub fn rack(&self) -> Result<RAck<'a>, HeaderError>;

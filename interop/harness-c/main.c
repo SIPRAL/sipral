@@ -40,7 +40,12 @@
  *
  *     harness-c push <gateway> [port]
  *
- * which the comment above `run_push` describes.
+ * which the comment above `run_push` describes, and one that is the line a
+ * carrier gateway serves, its calls carrying ISUP:
+ *
+ *     harness-c isup <gateway> [port]
+ *
+ * which the comment above `ISUP_MARKER` describes.
  *
  * The lab passes no credentials in the environment -- it calls the harness
  * with three arguments and nothing else -- so the account names below are the
@@ -6362,6 +6367,544 @@ static int run_robust(const char *peer_name, uint16_t port)
     return failed;
 }
 
+/* -- `harness-c isup`: a carrier gateway's calls (SIP-T, SIP-I) ---------- */
+
+/* `harness-c isup <gateway> [port]`: the stack as the line a carrier gateway
+ * serves, against interop/isup/gateway.py, which writes the ISUP of each
+ * call from ITU-T Q.763 itself and carries it beside the SDP (RFC 3204).
+ * Registered at the gateway, and trusting it as RFC 3325's trust domain:
+ *
+ *   in      the gateway's call: an anonymous From, the IAM beside the offer.
+ *           What the event and the identity lists say about the caller has
+ *           to be what the IAM said -- the number asserted, withheld, the
+ *           diversion and its reason, the IAM's own numbers as text -- and
+ *           `sipral_message_isup` and `sipral_isup_read` have to find and
+ *           read the IAM in the INVITE. Answered; the gateway's BYE carries
+ *           a REL and no Reason, and the end's Q.850 cause is the REL's.
+ *   out     a call placed to the gateway: the 180 carries an ACM, the 183
+ *           a CPG beside its SDP, the 200 an ANM beside its SDP, each read
+ *           off the event's message; the gateway's BYE carries a REL.
+ *   busy    a second call, refused 486 with a REL: the cause is the REL's.
+ *
+ * Between `in` and `out` the gateway sends an INVITE whose ISUP is ANSI and
+ * required, which the stack refuses 415 by itself and which never reaches
+ * here: gateway.py judges that one. Every line starts `  isup`; a failure
+ * is `isup: <why>`. */
+
+#define ISUP_MARKER 0x15C0DEu
+#define ISUP_PATIENCE_MS 20000u
+#define ISUP_PROGRESSES 8u
+
+struct isup_seen {
+    unsigned marker;
+    uint32_t registration;
+    sipral_handle_t incoming;
+    uint32_t trusted;
+    uint32_t privacy;
+    char asserted[128];
+    char diverted[128];
+    char diversion_reason[32];
+    uint8_t invite[8192];
+    size_t invite_len;
+    /* every provisional of the call placed: its state, the ISUP message type
+     * its body carried (zero for none), and what that message said -- an
+     * ACM's called party's status, a CPG's event */
+    uint32_t progress_state[ISUP_PROGRESSES];
+    uint32_t progress_status[ISUP_PROGRESSES];
+    uint32_t progress_isup[ISUP_PROGRESSES];
+    uint32_t progress_detail[ISUP_PROGRESSES];
+    unsigned progresses;
+    int confirmed;
+    uint32_t confirmed_isup;
+    int ended;
+    uint32_t status_code;
+    uint32_t cause_q850;
+    char cause_text[96];
+};
+
+/* The ISUP message a whole SIP message carries, read into `read`: its
+ * message type code, or zero when it carries none that reads. */
+static uint32_t isup_in(const uint8_t *message, size_t len, sipral_isup_t *read)
+{
+    size_t offset = 0;
+    size_t found = 0;
+    memset(read, 0, sizeof *read);
+    read->size = sizeof *read;
+    if (message == NULL || len == 0
+        || sipral_message_isup(message, len, &offset, &found) != SIPRAL_STATUS_OK || found == 0
+        || sipral_isup_read(message + offset, found, read) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    return read->message_type;
+}
+
+static void isup_on_event(const sipral_event_t *event, void *user_data)
+{
+    struct isup_seen *seen = (struct isup_seen *)user_data;
+    sipral_isup_t read;
+    if (seen == NULL || seen->marker != ISUP_MARKER || event == NULL) {
+        return;
+    }
+    switch (event->kind) {
+    case SIPRAL_EVENT_KIND_REGISTRATION_CHANGED:
+        seen->registration = event->payload.registration.state;
+        break;
+    case SIPRAL_EVENT_KIND_INCOMING_CALL:
+        if (seen->incoming == SIPRAL_HANDLE_NONE) {
+            const sipral_call_event_t *call = &event->payload.call;
+            seen->incoming = event->call;
+            seen->trusted = call->identity_trusted;
+            seen->privacy = call->privacy;
+            keep(seen->asserted, sizeof seen->asserted, call->asserted_uri, call->asserted_uri_len);
+            keep(seen->diverted, sizeof seen->diverted, call->diverted_from,
+                 call->diverted_from_len);
+            keep(seen->diversion_reason, sizeof seen->diversion_reason, call->diversion_reason,
+                 call->diversion_reason_len);
+            seen->invite_len = event->message_len < sizeof seen->invite ? event->message_len : 0;
+            if (seen->invite_len > 0) {
+                memcpy(seen->invite, event->message, seen->invite_len);
+            }
+        }
+        break;
+    case SIPRAL_EVENT_KIND_CALL_PROGRESS:
+        if (seen->progresses < ISUP_PROGRESSES) {
+            unsigned at = seen->progresses++;
+            seen->progress_state[at] = event->payload.call.state;
+            seen->progress_status[at] = event->payload.call.status_code;
+            seen->progress_isup[at] = isup_in(event->message, event->message_len, &read);
+            seen->progress_detail[at] = read.message_type == 6u ? read.called_status : read.event;
+        }
+        break;
+    case SIPRAL_EVENT_KIND_CALL_CONFIRMED:
+        seen->confirmed = 1;
+        seen->confirmed_isup = isup_in(event->message, event->message_len, &read);
+        break;
+    case SIPRAL_EVENT_KIND_CALL_ENDED:
+        seen->ended = 1;
+        seen->status_code = event->payload.call.status_code;
+        seen->cause_q850 = event->payload.call.cause_q850;
+        keep(seen->cause_text, sizeof seen->cause_text, event->payload.call.cause_text,
+             event->payload.call.cause_text_len);
+        break;
+    default:
+        break;
+    }
+}
+
+struct isup_end {
+    sipral_handle_t stack;
+    sipral_handle_t account;
+    int sip_fd;
+    int rtp_fd;
+    char sip_address[SIPRAL_ADDRESS_BYTES];
+    char rtp_address[SIPRAL_ADDRESS_BYTES];
+    char gateway[SIPRAL_ADDRESS_BYTES];
+    struct isup_seen seen;
+};
+
+static void isup_close(struct isup_end *end)
+{
+    if (end->stack != SIPRAL_HANDLE_NONE) {
+        (void)sipral_stack_destroy(end->stack);
+        end->stack = SIPRAL_HANDLE_NONE;
+    }
+    if (end->sip_fd >= 0) {
+        (void)close(end->sip_fd);
+        end->sip_fd = -1;
+    }
+    if (end->rtp_fd >= 0) {
+        (void)close(end->rtp_fd);
+        end->rtp_fd = -1;
+    }
+}
+
+static int isup_says(const char *why)
+{
+    printf("isup: %s\n", why);
+    (void)fflush(stdout);
+    return 1;
+}
+
+/* A stack whose one account registers at the gateway and trusts it. */
+static int isup_open(struct isup_end *end, const struct sockaddr_in *gateway)
+{
+    sipral_stack_config_t config;
+    sipral_account_config_t account;
+    struct sockaddr_in local;
+    char host[INET_ADDRSTRLEN];
+    char trusted[INET_ADDRSTRLEN];
+    char aor[128];
+    char registrar[128];
+    char contact[128];
+    uint8_t signalling_seed[32];
+    uint8_t media_seed[32];
+    sipral_status_t status;
+
+    memset(end, 0, sizeof *end);
+    end->sip_fd = -1;
+    end->rtp_fd = -1;
+    end->stack = SIPRAL_HANDLE_NONE;
+    end->seen.marker = ISUP_MARKER;
+    end->seen.incoming = SIPRAL_HANDLE_NONE;
+    if (route_to(gateway, host, sizeof host) != 0
+        || address_text(gateway, end->gateway, sizeof end->gateway) != 0
+        || inet_ntop(AF_INET, &gateway->sin_addr, trusted, sizeof trusted) == NULL) {
+        return isup_says("no route to the gateway");
+    }
+    end->sip_fd = bind_udp(&local);
+    if (end->sip_fd < 0) {
+        return isup_says("cannot bind the signalling socket");
+    }
+    (void)snprintf(end->sip_address, sizeof end->sip_address, "%s:%u", host,
+                   (unsigned)ntohs(local.sin_port));
+    end->rtp_fd = bind_udp(&local);
+    if (end->rtp_fd < 0) {
+        isup_close(end);
+        return isup_says("cannot bind the media socket");
+    }
+    (void)snprintf(end->rtp_address, sizeof end->rtp_address, "%s:%u", host,
+                   (unsigned)ntohs(local.sin_port));
+
+    seeds_for(70u, signalling_seed, media_seed);
+    memset(&config, 0, sizeof config);
+    config.size = sizeof config;
+    config.event_callback = isup_on_event;
+    config.event_user_data = &end->seen;
+    config.transport = SIPRAL_TRANSPORT_UDP;
+    config.bind_address = end->sip_address;
+    config.bind_address_len = strlen(end->sip_address);
+    config.entropy = signalling_seed;
+    config.entropy_len = sizeof signalling_seed;
+    config.media_seed = media_seed;
+    config.media_seed_len = sizeof media_seed;
+    config.codecs = "PCMU,PCMA";
+    config.codecs_len = strlen("PCMU,PCMA");
+    config.media_clock_unix_seconds = (uint64_t)time(NULL);
+    status = sipral_stack_create(&config, &end->stack);
+    if (status != SIPRAL_STATUS_OK) {
+        isup_close(end);
+        return isup_says("the stack would not start");
+    }
+
+    (void)snprintf(aor, sizeof aor, "sip:alice@%s", end->gateway);
+    (void)snprintf(registrar, sizeof registrar, "sip:%s", end->gateway);
+    (void)snprintf(contact, sizeof contact, "sip:alice@%s", end->sip_address);
+    memset(&account, 0, sizeof account);
+    account.size = sizeof account;
+    account.aor = aor;
+    account.aor_len = strlen(aor);
+    account.registrar = registrar;
+    account.registrar_len = strlen(registrar);
+    account.registrar_address = end->gateway;
+    account.registrar_address_len = strlen(end->gateway);
+    account.contact = contact;
+    account.contact_len = strlen(contact);
+    account.expires_seconds = 300u;
+    account.trusted_peers = trusted;
+    account.trusted_peers_len = strlen(trusted);
+    status = sipral_account_add(end->stack, &account, &end->account);
+    if (status != SIPRAL_STATUS_OK) {
+        isup_close(end);
+        return isup_says("the account would not be added");
+    }
+    return 0;
+}
+
+/* One turn: the timers, what the stack wants written, what came back. */
+static void isup_pump(struct isup_end *end)
+{
+    static uint8_t buffer[DATAGRAM];
+    static char destination[SIPRAL_ADDRESS_BYTES];
+    sipral_poll_result_t result;
+    uint64_t now = now_ms();
+    memset(&result, 0, sizeof result);
+    result.size = sizeof result;
+    (void)sipral_stack_poll(end->stack, now, &result);
+    for (;;) {
+        struct sockaddr_in from;
+        socklen_t length = sizeof from;
+        char from_text[SIPRAL_ADDRESS_BYTES];
+        ssize_t got = recvfrom(end->sip_fd, buffer, sizeof buffer, 0, (struct sockaddr *)&from,
+                               &length);
+        if (got <= 0 || address_text(&from, from_text, sizeof from_text) != 0) {
+            break;
+        }
+        (void)sipral_stack_receive_datagram(end->stack, SIPRAL_TRANSPORT_MAIN, buffer, (size_t)got,
+                                            from_text, strlen(from_text), end->sip_address,
+                                            strlen(end->sip_address), now);
+    }
+    for (;;) {
+        sipral_transmit_t message;
+        struct sockaddr_in to;
+        memset(&message, 0, sizeof message);
+        message.size = sizeof message;
+        message.data = buffer;
+        message.capacity = sizeof buffer;
+        message.destination = destination;
+        message.destination_capacity = sizeof destination;
+        if (sipral_stack_poll_transmit(end->stack, &message) != SIPRAL_STATUS_OK
+            || message.len == 0) {
+            break;
+        }
+        if (address_of(destination, &to) == 0) {
+            (void)sendto(end->sip_fd, buffer, message.len, 0, (const struct sockaddr *)&to,
+                         sizeof to);
+        }
+    }
+}
+
+/* Turn the loop until `done` says so or `patience_ms` is spent. */
+static int isup_until(struct isup_end *end, int (*done)(const struct isup_seen *),
+                      unsigned patience_ms)
+{
+    uint64_t deadline = now_ms() + patience_ms;
+    while (now_ms() < deadline) {
+        isup_pump(end);
+        if (done != NULL && done(&end->seen)) {
+            return 1;
+        }
+        sleep_ms(5);
+    }
+    return 0;
+}
+
+static int isup_registered(const struct isup_seen *seen)
+{
+    return seen->registration == SIPRAL_REGISTRATION_STATE_REGISTERED;
+}
+
+static int isup_unregistered(const struct isup_seen *seen)
+{
+    return seen->registration == SIPRAL_REGISTRATION_STATE_UNREGISTERED;
+}
+
+static int isup_called(const struct isup_seen *seen)
+{
+    return seen->incoming != SIPRAL_HANDLE_NONE;
+}
+
+static int isup_ended(const struct isup_seen *seen)
+{
+    return seen->ended;
+}
+
+/* One entry of one of the incoming call's identity lists, or "" for none. */
+static void isup_identity(const struct isup_end *end, uint32_t which, char *out, size_t room)
+{
+    size_t count = 0;
+    size_t needed = 0;
+    out[0] = '\0';
+    if (sipral_call_identity_count(end->stack, end->seen.incoming, which, &count)
+            != SIPRAL_STATUS_OK
+        || count == 0) {
+        return;
+    }
+    if (sipral_call_identity_text(end->stack, end->seen.incoming, 0, which, out, room, &needed)
+        != SIPRAL_STATUS_OK) {
+        out[0] = '\0';
+    }
+}
+
+/* What the gateway's call said about its caller, and how it ended. */
+static int isup_incoming(struct isup_end *end)
+{
+    struct isup_seen *seen = &end->seen;
+    sipral_isup_t read;
+    char calling[64];
+    char additional[64];
+    char original[64];
+    char redirecting[64];
+    char called[64];
+    size_t offset = 0;
+    size_t len = 0;
+    size_t needed = 0;
+    int failed = 0;
+
+    if (!isup_until(end, isup_called, ISUP_PATIENCE_MS)) {
+        return isup_says("the gateway's call never came in");
+    }
+    printf("  isup  in: asserted %s, privacy %s, diverted from %s (%s)\n",
+           seen->asserted[0] != '\0' ? seen->asserted : "(none)",
+           (seen->privacy & SIPRAL_PRIVACY_ID) != 0u ? "id" : "(none)",
+           seen->diverted[0] != '\0' ? seen->diverted : "(none)", seen->diversion_reason);
+    if (seen->trusted != 1u || strcmp(seen->asserted, "tel:+15555550100") != 0
+        || (seen->privacy & SIPRAL_PRIVACY_ID) == 0u
+        || strcmp(seen->diverted, "tel:+15555550101") != 0
+        || strcmp(seen->diversion_reason, "no-answer") != 0) {
+        failed = isup_says("the caller the event names is not the one the IAM gave");
+    }
+    isup_identity(end, SIPRAL_IDENTITY_TEXT_ISUP_CALLING, calling, sizeof calling);
+    isup_identity(end, SIPRAL_IDENTITY_TEXT_ISUP_ADDITIONAL_CALLING, additional,
+                  sizeof additional);
+    isup_identity(end, SIPRAL_IDENTITY_TEXT_ISUP_ORIGINAL_CALLED, original, sizeof original);
+    isup_identity(end, SIPRAL_IDENTITY_TEXT_ISUP_REDIRECTING, redirecting, sizeof redirecting);
+    printf("  isup  in: the IAM's numbers: calling %s, additional %s, original called %s, "
+           "redirecting %s\n",
+           calling, additional, original, redirecting);
+    if (strcmp(calling, "+15555550100") != 0 || strcmp(additional, "+15555550199") != 0
+        || strcmp(original, "+15555550103") != 0 || strcmp(redirecting, "+15555550101") != 0) {
+        failed = isup_says("the identity lists do not carry the IAM's numbers");
+    }
+    if (isup_in(seen->invite, seen->invite_len, &read) != 1u
+        || sipral_message_isup(seen->invite, seen->invite_len, &offset, &len) != SIPRAL_STATUS_OK
+        || sipral_isup_number(seen->invite + offset, len, SIPRAL_ISUP_NUMBER_CALLED, called,
+                              sizeof called, &needed)
+               != SIPRAL_STATUS_OK) {
+        failed = isup_says("the INVITE's IAM could not be found and read through the ABI");
+    } else {
+        printf("  isup  in: read from the INVITE: IAM to %s, calling presentation %u "
+               "screening %u, redirection counter %u, reasons %u and %u, category %u\n",
+               called, (unsigned)read.calling_presentation, (unsigned)read.calling_screening,
+               (unsigned)read.redirection_counter, (unsigned)read.redirecting_reason,
+               (unsigned)read.original_redirecting_reason, (unsigned)read.calling_category);
+        if (strcmp(called, "5555550102") != 0 || read.calling_presentation != 1u
+            || read.calling_screening != 3u || read.redirection_counter != 2u
+            || read.redirecting_reason != 2u || read.original_redirecting_reason != 3u
+            || read.calling_category != 10u) {
+            failed = isup_says("the IAM read through the ABI is not the one the gateway wrote");
+        }
+    }
+    (void)fflush(stdout);
+    if (sipral_call_answer_media(end->stack, seen->incoming, end->rtp_address,
+                                 strlen(end->rtp_address), now_ms())
+        != SIPRAL_STATUS_OK) {
+        return isup_says("the gateway's call could not be answered");
+    }
+    if (!isup_until(end, isup_ended, ISUP_PATIENCE_MS)) {
+        return isup_says("the gateway never hung up");
+    }
+    printf("  isup  in: ended by the gateway's BYE: Q.850 %u (%s)\n", (unsigned)seen->cause_q850,
+           seen->cause_text);
+    (void)fflush(stdout);
+    if (seen->cause_q850 != 16u || strcmp(seen->cause_text, "Normal call clearing") != 0) {
+        failed = isup_says("the end's cause is not the REL's");
+    }
+    return failed;
+}
+
+/* Place a call to the gateway and turn the loop until it ends. */
+static int isup_place(struct isup_end *end, const char *number)
+{
+    sipral_call_config_t call;
+    sipral_handle_t placed = SIPRAL_HANDLE_NONE;
+    char target[128];
+    memset(&end->seen.progress_state, 0, sizeof end->seen.progress_state);
+    end->seen.progresses = 0;
+    end->seen.confirmed = 0;
+    end->seen.confirmed_isup = 0;
+    end->seen.ended = 0;
+    end->seen.cause_q850 = 0;
+    end->seen.status_code = 0;
+    end->seen.cause_text[0] = '\0';
+    (void)snprintf(target, sizeof target, "sip:%s@%s", number, end->gateway);
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.target = target;
+    call.target_len = strlen(target);
+    call.media_address = end->rtp_address;
+    call.media_address_len = strlen(end->rtp_address);
+    if (sipral_call_place(end->stack, end->account, &call, &placed, now_ms())
+        != SIPRAL_STATUS_OK) {
+        return isup_says("the call could not be placed");
+    }
+    if (!isup_until(end, isup_ended, ISUP_PATIENCE_MS)) {
+        return isup_says("the call placed never ended");
+    }
+    return 0;
+}
+
+/* The call placed and answered: what each response carried. */
+static int isup_outgoing(struct isup_end *end)
+{
+    struct isup_seen *seen = &end->seen;
+    int rung = 0;
+    int early = 0;
+    int failed = 0;
+    unsigned at;
+    if (isup_place(end, "+15555550199") != 0) {
+        return 1;
+    }
+    for (at = 0; at < seen->progresses; at++) {
+        printf("  isup  out: %u, state %u, ISUP message type %u (%u)\n",
+               (unsigned)seen->progress_status[at], (unsigned)seen->progress_state[at],
+               (unsigned)seen->progress_isup[at], (unsigned)seen->progress_detail[at]);
+        if (seen->progress_state[at] == SIPRAL_CALL_STATE_RINGING && seen->progress_isup[at] == 6u
+            && seen->progress_detail[at] == 1u) {
+            rung = 1;
+        }
+        if (seen->progress_state[at] == SIPRAL_CALL_STATE_EARLY_MEDIA
+            && seen->progress_isup[at] == 44u && seen->progress_detail[at] == 3u) {
+            early = 1;
+        }
+    }
+    printf("  isup  out: answered with ISUP %u, ended by the gateway's BYE: Q.850 %u (%s)\n",
+           (unsigned)seen->confirmed_isup, (unsigned)seen->cause_q850, seen->cause_text);
+    (void)fflush(stdout);
+    if (!rung) {
+        failed = isup_says("no 180 rang with an ACM saying the subscriber was free");
+    }
+    if (!early) {
+        failed = isup_says("no 183 brought early media beside a CPG");
+    }
+    if (!seen->confirmed || seen->confirmed_isup != 9u) {
+        failed = isup_says("the call was not answered by a 200 carrying an ANM");
+    }
+    if (seen->cause_q850 != 31u || strcmp(seen->cause_text, "Normal, unspecified") != 0) {
+        failed = isup_says("the end's cause is not the REL's");
+    }
+    return failed;
+}
+
+/* The call refused 486 with a REL. */
+static int isup_busy(struct isup_end *end)
+{
+    struct isup_seen *seen = &end->seen;
+    if (isup_place(end, "+15555550198") != 0) {
+        return 1;
+    }
+    printf("  isup  busy: refused %u: Q.850 %u (%s)\n", (unsigned)seen->status_code,
+           (unsigned)seen->cause_q850, seen->cause_text);
+    (void)fflush(stdout);
+    if (seen->status_code != 486u || seen->cause_q850 != 17u
+        || strcmp(seen->cause_text, "User busy") != 0) {
+        return isup_says("the refusal's cause is not the REL's");
+    }
+    return 0;
+}
+
+static int run_isup(const char *gateway_name, uint16_t port)
+{
+    struct sockaddr_in gateway;
+    struct isup_end end;
+    int failed = 0;
+    if (resolve(gateway_name, port, &gateway) != 0) {
+        printf("cannot resolve %s:%u\n", gateway_name, (unsigned)port);
+        return 1;
+    }
+    if (isup_open(&end, &gateway) != 0) {
+        return 1;
+    }
+    if (sipral_account_register(end.stack, end.account, now_ms()) != SIPRAL_STATUS_OK
+        || !isup_until(&end, isup_registered, ISUP_PATIENCE_MS)) {
+        isup_close(&end);
+        return isup_says("the gateway never took the registration");
+    }
+    printf("  isup  registered at the gateway %s from %s\n", end.gateway, end.sip_address);
+    (void)fflush(stdout);
+    failed |= isup_incoming(&end);
+    failed |= isup_outgoing(&end);
+    failed |= isup_busy(&end);
+    if (sipral_account_unregister(end.stack, end.account, now_ms()) == SIPRAL_STATUS_OK) {
+        (void)isup_until(&end, isup_unregistered, 5000u);
+    }
+    isup_close(&end);
+    if (!failed) {
+        printf("  isup  the caller, the progress and the cause came from the ISUP\n");
+    }
+    (void)fflush(stdout);
+    return failed;
+}
+
 int main(int argc, char **argv)
 {
     const char *server = argc > 1 ? argv[1] : "kamailio";
@@ -6407,7 +6950,8 @@ int main(int argc, char **argv)
     listening = strcmp(server, "listen") == 0;
     robust = strcmp(server, "robust") == 0;
     server_for_this_run = server;
-    if (!listening && !robust && strcmp(server, "stir") != 0 && strcmp(server, "push") != 0) {
+    if (!listening && !robust && strcmp(server, "stir") != 0 && strcmp(server, "push") != 0
+        && strcmp(server, "isup") != 0) {
         if (resolve(server, port, &remote) != 0
             || address_text(&remote, remote_text, sizeof remote_text) != 0) {
             printf("cannot resolve %s:%u\n", server, (unsigned)port);
@@ -6448,6 +6992,12 @@ int main(int argc, char **argv)
     if (robust) {
         uint16_t peer_port = (uint16_t)(argc > 3 ? atoi(argv[3]) : 5060);
         return run_robust(argc > 2 ? argv[2] : "listener", peer_port == 0 ? 5060u : peer_port);
+    }
+
+    /* `harness-c isup <gateway> [port]`: the same */
+    if (strcmp(server, "isup") == 0) {
+        uint16_t gateway_port = (uint16_t)(argc > 3 ? atoi(argv[3]) : 5070);
+        return run_isup(argc > 2 ? argv[2] : "127.0.0.1", gateway_port == 0 ? 5070u : gateway_port);
     }
 
     /* `harness-c push <gateway> [port]`: the same */
