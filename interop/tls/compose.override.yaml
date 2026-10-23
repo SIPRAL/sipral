@@ -12,7 +12,10 @@
 # The certificates are made for each run by lab.sh's own tls_certificates,
 # into the directory SIPRAL_TLS_CERTS names: a lab authority, a certificate
 # it signed for asterisk.lab.sipral.test, one for wrong.lab.sipral.test and
-# one for the right name that expired in 2020.
+# one for the right name that expired in 2020; and for the listeners that
+# take only a client with a certificate, the lab authority's own list,
+# clients' certificates it signed (one current, one expired) and one a
+# second authority signed.
 services:
   asterisk:
     volumes:
