@@ -565,6 +565,73 @@ protocol, and a connection that closes is opened again and the account
 registered again. Until it is open a call the account places throws with
 `TRANSPORT_DOWN`.
 
+### A client certificate
+
+A server that asks who is connecting gets the certificate in
+`clientCertificate`, with its private key left where the platform keeps it:
+`javax.net.ssl` is handed the key store's own `PrivateKey` object and every
+signature of the handshake is made by the key store.
+
+```kotlin
+// Android: a P-256 key made in the Android Keystore (TEE or StrongBox),
+// its chain stored under the same alias once the authority signed it
+val client = SipralClient.open(
+    signalling = SipralTransport.TLS,
+    signallingServer = "198.51.100.10:5061",
+    tlsServerName = "pbx.example.com",
+    clientCertificate = SipralClientCertificate.androidKeystore("sip-line"),
+)
+
+// a desktop JVM: any KeyStore the application loaded, a PKCS#12 file here
+val store = KeyStore.getInstance("PKCS12").apply { File("alice.p12").inputStream().use { load(it, password) } }
+val desktop = SipralClient.open(
+    signalling = SipralTransport.TLS,
+    signallingServer = "198.51.100.10:5061",
+    clientCertificate = SipralClientCertificate.keyStore(store, "alice", password),
+)
+```
+
+It is presented on the signalling connection, on an account's own TLS or
+WSS connection (`addAccount(..., clientCertificate = ...)` names one for
+that account alone, the client's otherwise), and on TURN over TLS
+(`SipralTurnServer(..., clientCertificate = ...)`; a TURN server given its
+own `sslSocketFactory` carries its key managers in it, and the two are not
+taken together). The entry is read again before every connection, so a
+certificate renewed under the same alias is used from the next one on.
+Why a connection failed on this end's side arrives in
+`SIPRAL_EVENT_KIND_TRANSPORT_FAILED` as its own `SipralTlsFailure`:
+
+| `tls` | When |
+|---|---|
+| `CLIENT_KEY_UNAVAILABLE` | no key under the alias, a key that cannot be recovered with the password, or a key store that would not open, found before connecting (`error` `OTHER`, nothing sent); or the key store refusing to sign during the handshake (`UserNotAuthenticatedException`, `KeyPermanentlyInvalidatedException`, any `InvalidKeyException`, `SignatureException` or `KeyStoreException` under it) |
+| `CLIENT_CERTIFICATE_EXPIRED` | the certificate is outside its dates, found before connecting (`error` `OTHER`); or the server's `certificate_expired` alert |
+| `CLIENT_CERTIFICATE_REQUIRED` | the server wanted a certificate and none was given: its `certificate_required` alert (TLS 1.3), a certificate alert, or `handshake_failure` after it asked |
+| `CLIENT_CERTIFICATE_REFUSED` | the server refused the certificate given: `bad_certificate`, `unsupported_certificate`, `certificate_revoked`, `certificate_unknown`, `unknown_ca` or `access_denied` |
+
+A server that asks for a certificate and resets the connection on the
+flight that answers it often takes its alert with it: this end's own
+handshake messages, still being written, meet the reset, and the platform
+says only `Broken pipe` or `Connection reset`. That case is read as the
+last two rows, by whether a certificate was given, and the `detail` says no
+alert reached this end.
+
+The alert is read from the platform's sentence, `Received fatal alert:
+bad_certificate` from the JVM's TLS and `SSLV3_ALERT_BAD_CERTIFICATE` from
+Android's. A TLS 1.3 server judges the certificate after this end's
+handshake is over, so its alert comes a round trip later, and a request
+written in between meets a connection the server has already reset, which
+loses the alert. So when a TLS 1.3 server asked for a certificate, the
+layer listens before handing the connection to the stack, for twice as
+long as the handshake took (a quarter of a second to three seconds): an
+alert in that time fails the connection with its reason, anything the
+server sent is kept for the stack, and silence is the server accepting. An
+alert later than that is still read and reported, on the transport it came
+on, when the connection's reads meet it. The JVM path is
+proven by `TlsSignallingCheck.kt` against a registrar on loopback that
+requires a certificate, at TLS 1.3 and 1.2; the Android Keystore path is
+the same key manager over `KeyStore.getInstance("AndroidKeyStore")` and is
+not run by those checks, which have no Android device.
+
 `client.settings()` reads back what the stack runs with, every default
 filled in (`SipralSettings`): the timers, the codecs' count, the SRTP
 suites its calls offer in order, whether a pseudonym salt was given,

@@ -18,7 +18,6 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -74,6 +73,14 @@ private const val FIRST_LINK = 64L
 
 /** The protocols an account on a connection of its own may speak. */
 private val STREAMS = setOf(SipralTransport.TCP, SipralTransport.TLS, SipralTransport.WS, SipralTransport.WSS)
+
+/** The reasons a TLS failure gives about this end's own certificate. */
+private val CLIENT_CERTIFICATE_REASONS = setOf(
+    org.sipral.SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED,
+    org.sipral.SipralTlsFailure.CLIENT_CERTIFICATE_REFUSED,
+    org.sipral.SipralTlsFailure.CLIENT_KEY_UNAVAILABLE,
+    org.sipral.SipralTlsFailure.CLIENT_CERTIFICATE_EXPIRED,
+)
 
 internal fun formatAddress(host: String, port: Int): String = "$host:$port"
 
@@ -276,7 +283,13 @@ class SipralClient private constructor(
          * (`host:port`), shared by every account and call. Over TLS the
          * certificate is checked against [tlsServerName] (default: the host of
          * [signallingServer]) with [tlsTrust] (`docs/22-tls.md`); the check
-         * cannot be turned off.
+         * cannot be turned off. [clientCertificate] is presented when the
+         * server asks for one, on that connection and on every account's own
+         * TLS or WSS connection that names none of its own; its key stays in
+         * the Android Keystore or the [java.security.KeyStore] it came from.
+         * A server that wanted a certificate, refused the one given or found
+         * it expired, and a key that could not be used, each arrive as their
+         * own `SipralTlsFailure` in `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
          *
          * The first connection is made before this returns. When it fails or
          * breaks, `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` ([transportFailedOf]) says
@@ -366,6 +379,7 @@ class SipralClient private constructor(
             signallingServer: String? = null,
             tlsServerName: String? = null,
             tlsTrust: SipralTlsTrust = SipralTlsTrust.Platform,
+            clientCertificate: SipralClientCertificate? = null,
             inviteLimit: SipralInviteLimit? = null,
             streamFallback: Boolean = true,
             streamServer: String? = null,
@@ -401,7 +415,7 @@ class SipralClient private constructor(
                 val server = signallingServer!!
                 SignallingLink(
                     signalling, parseHostPort(server),
-                    tlsServerName ?: server.substring(0, server.lastIndexOf(':')), tlsTrust,
+                    tlsServerName ?: server.substring(0, server.lastIndexOf(':')), tlsTrust, clientCertificate,
                 ).also { made ->
                     made.bindHost = bindHost
                     try {
@@ -423,6 +437,7 @@ class SipralClient private constructor(
             client.streamFallback = streamFallback
             client.streamServer = streamServer
             client.streamTlsTrust = tlsTrust
+            client.streamClientCertificate = clientCertificate
             client.givenTlsServerName = tlsServerName
             client.routes = bindHost == null
             client.routeChosen = bindHost != null || streamed || streamServer != null
@@ -1012,7 +1027,9 @@ class SipralClient private constructor(
      * closed connection is reopened; until it is open a call throws
      * `TRANSPORT_DOWN`. Only on a client signalling over UDP. WS/WSS run a
      * WebSocket (RFC 7118) asking for [websocketResource] (`/ws`) with
-     * [websocketHost] as `Host` (the server's address).
+     * [websocketHost] as `Host` (the server's address). [clientCertificate]
+     * is what a TLS or WSS connection of its own presents when the server
+     * asks, in place of [open]'s.
      */
     fun addAccount(
         aor: String,
@@ -1036,6 +1053,7 @@ class SipralClient private constructor(
         realms: List<String> = emptyList(),
         websocketHost: String? = null,
         websocketResource: String? = null,
+        clientCertificate: SipralClientCertificate? = null,
     ): SipralAccount {
         require((registrarAddress == null) != (serverUri == null)) {
             "an account names its server by registrarAddress or by serverUri, one of the two"
@@ -1054,7 +1072,7 @@ class SipralClient private constructor(
             registrarAddress = registrarAddress,
             location = SipralAccount.Location(
                 serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
-                websocketHost, websocketResource,
+                websocketHost, websocketResource, clientCertificate,
             ),
             registrar = registrar,
             contact = contact,
@@ -1518,6 +1536,10 @@ class SipralClient private constructor(
     private var streamTlsTrust: SipralTlsTrust = SipralTlsTrust.Platform
     private var givenTlsServerName: String? = null
 
+    /** The certificate an account's own TLS connection presents when the
+     * account names none: [open]'s `clientCertificate`. */
+    private var streamClientCertificate: SipralClientCertificate? = null
+
     /** Transport ids `TRANSPORT_FAILED` named during the same poll. */
     private val streamsLetGo = java.util.concurrent.ConcurrentLinkedQueue<Long>()
 
@@ -1592,6 +1614,18 @@ class SipralClient private constructor(
         return pinned?.tlsPin?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
     }
 
+    /** What a TLS connection to [destination] presents: the certificate of
+     * an account on its own connection there, else the client's. */
+    private fun streamCertificate(destination: String): SipralClientCertificate? {
+        val named = synchronized(movingLock) {
+            accounts.values.firstOrNull {
+                (it.streamProtocol == SipralTransport.TLS || it.streamProtocol == SipralTransport.WSS) &&
+                    it.registrarAddress == destination && it.clientCertificate != null
+            }
+        }
+        return named?.clientCertificate ?: streamClientCertificate
+    }
+
     /** Connect over TCP or TLS to [destination] (or `streamServer` for TCP),
      * bind it under [id] as [bound] (WS/WSS for a WebSocket) and read it
      * until it closes. A failed connection is reported under the same id,
@@ -1605,12 +1639,14 @@ class SipralClient private constructor(
         val tls = over == SipralTransport.TLS
         val server = if (tls) destination else streamServer ?: destination
         val socket: Socket
+        var secured: SignallingLink? = null
         try {
             socket = if (tls) {
                 SignallingLink(
                     SipralTransport.TLS, parseHostPort(destination),
                     givenTlsServerName ?: destination.substringBeforeLast(':'), streamTrust(destination),
-                ).connect(currentHost).first
+                    streamCertificate(destination),
+                ).also { secured = it }.connect(currentHost).first
             } else {
                 Socket().also { plain ->
                     try {
@@ -1651,7 +1687,16 @@ class SipralClient private constructor(
             )
             return
         }
-        readStreamLink(id, socket)
+        secured?.takeEarly()?.let { bytes ->
+            try {
+                retryBusy(deadlineMs = 5_000) { Sipral.stackReceiveStream(handle, id, bytes, nowMs()) }
+            } catch (_: SipralException) {
+                // the framing is lost: the stack retired the transport itself
+                loseStreamLink(id, tell = false)
+                return
+            }
+        }
+        readStreamLink(id, socket, secured)
     }
 
     /** `sipral_stack_transport_failed_with` for a connection not made; never
@@ -1705,8 +1750,10 @@ class SipralClient private constructor(
     }
 
     /** Feed the connection's bytes, in order, to `sipral_stack_receive_stream`;
-     * the far end closing it is `sipral_stack_stream_closed`. */
-    private fun readStreamLink(id: Long, socket: Socket) {
+     * the far end closing it is `sipral_stack_stream_closed`. On a TLS
+     * connection ([secured]) a read the server ended with an alert about
+     * the client certificate is told with that reason instead. */
+    private fun readStreamLink(id: Long, socket: Socket, secured: SignallingLink? = null) {
         val buffer = ByteArray(TRANSMIT_BYTES)
         val input = try {
             socket.getInputStream()
@@ -1717,7 +1764,16 @@ class SipralClient private constructor(
         while (!closed.get()) {
             val read = try {
                 input.read(buffer)
-            } catch (_: Exception) {
+            } catch (broken: Exception) {
+                val said = secured?.classifyHere(broken, handshaking = false)
+                if (said != null && said.tls in CLIENT_CERTIFICATE_REASONS) {
+                    val destination = streamLinks[id]?.first ?: "the server"
+                    loseStreamLink(id, tell = false)
+                    if (!closed.get()) {
+                        sayNoStream(id, said.error, "to $destination ${verdict(said.error)}: ${said.detail}", SipralTransport.TLS, said.tls)
+                    }
+                    return
+                }
                 -1
             }
             if (read < 0) {
@@ -1980,12 +2036,14 @@ class SipralClient private constructor(
     private fun openTurnStream(local: String, server: String, protocol: Long) {
         val turn = turn ?: return
         val stream = try {
+            // the client certificate is read before connecting, so a key that
+            // cannot be used costs no connection
+            val factory = if (protocol == SipralTransport.TLS.value.toLong()) turn.socketFactory() else null
             val raw = Socket()
             raw.connect(parseHostPort(server), 5_000)
             raw.tcpNoDelay = true
-            val socket = if (protocol == SipralTransport.TLS.value.toLong()) {
+            val socket = if (factory != null) {
                 val name = turn.serverName ?: server.substring(0, server.lastIndexOf(':'))
-                val factory = turn.sslSocketFactory ?: SSLSocketFactory.getDefault() as SSLSocketFactory
                 (factory.createSocket(raw, name, raw.port, true) as SSLSocket).apply {
                     sslParameters = sslParameters.apply {
                         endpointIdentificationAlgorithm = "HTTPS"

@@ -14,11 +14,14 @@
 //
 // SIPRAL_SIGNALLING is udp (default), tcp or tls; over TLS the certificate
 // is checked against SIPRAL_TLS_SERVER_NAME (default: the address's host)
-// with SIPRAL_TLS_CA as the only authority (default: the platform's). A
-// failed connection prints "transport failed error=<...> tls=<...>" and is
-// retried. SIPRAL_INVITE_LIMIT=voice-agent lifts the default INVITE rate
-// limit for a trunk. SIPRAL_TEXT=echo prints real-time text as
-// "text <...>" and types it back.
+// with SIPRAL_TLS_CA as the only authority (default: the platform's), and
+// SIPRAL_TLS_CLIENT_P12 (with SIPRAL_TLS_CLIENT_P12_PASSWORD) names a
+// PKCS#12 file whose key and certificate are presented when the server asks
+// for a client certificate. A failed connection prints
+// "transport failed error=<...> tls=<...>" and is retried.
+// SIPRAL_INVITE_LIMIT=voice-agent lifts the default INVITE rate limit for a
+// trunk. SIPRAL_TEXT=echo prints real-time text as "text <...>" and types it
+// back.
 
 package org.sipral.examples
 
@@ -51,6 +54,7 @@ import org.sipral.SipralTransportError
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralClientCertificate
 import org.sipral.idiomatic.SipralInviteLimit
 import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.SipralTurnServer
@@ -309,6 +313,17 @@ private fun authority(path: String): X509Certificate =
         CertificateFactory.getInstance("X.509").generateCertificate(input) as X509Certificate
     }
 
+/** The key entry of the PKCS#12 file at `path`, presented when the server
+ * asks for a client certificate. */
+private fun clientCertificate(path: String, password: String): SipralClientCertificate {
+    val store = KeyStore.getInstance("PKCS12").apply {
+        File(path).inputStream().use { load(it, password.toCharArray()) }
+    }
+    val alias = store.aliases().toList().firstOrNull { store.isKeyEntry(it) }
+        ?: error("$path holds no key")
+    return SipralClientCertificate.keyStore(store, alias, password.toCharArray())
+}
+
 /** A socket factory trusting only the certificates in the PEM file at
  * `path`: the lab's per-run coturn certificate. */
 private fun trusting(path: String): SSLSocketFactory {
@@ -349,6 +364,9 @@ fun main() = runBlocking {
         tlsServerName = System.getenv("SIPRAL_TLS_SERVER_NAME"),
         tlsTrust = System.getenv("SIPRAL_TLS_CA")?.let { SipralTlsTrust.OnlyAuthority(authority(it)) }
             ?: SipralTlsTrust.Platform,
+        clientCertificate = System.getenv("SIPRAL_TLS_CLIENT_P12")?.let {
+            clientCertificate(it, System.getenv("SIPRAL_TLS_CLIENT_P12_PASSWORD") ?: "")
+        },
         inviteLimit = if (System.getenv("SIPRAL_INVITE_LIMIT") == "voice-agent") SipralInviteLimit.VOICE_AGENT else null,
     )
     val account = client.addAccount(
