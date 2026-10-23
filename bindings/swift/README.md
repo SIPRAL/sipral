@@ -703,6 +703,61 @@ and every request of its calls go over it, its `Contact` names the protocol,
 and a connection that closes is opened again and the account registered
 again. Until it is open, a call the account places throws `.transportDown`.
 
+### A client certificate
+
+A server that admits only clients with a certificate its own authority
+issued (Asterisk's `verify_client` and `require_client_cert`, an SBC's
+mutual TLS) is given a `ClientIdentity`. Its private key stays with the
+platform and signs inside it; the layer hands Network.framework the
+identity and never reads the key:
+
+```swift
+// once, when the phone is enrolled: a P-256 key made in the Secure Enclave,
+// and a certification request for the authority that issues the certificate
+let key = try ClientIdentity.secureEnclaveKey(tag: Array("org.example.sip".utf8))
+let request = try ClientIdentity.certificateRequest(commonName: "alice@example.com", privateKey: key)
+// ... the authority signs `request`; keep its answer, DER, in the Keychain:
+let certificate = SecCertificateCreateWithData(nil, Data(issuedDER) as CFData)!
+let identity = try ClientIdentity(certificate: certificate, privateKey: key)
+
+let stack = try SipralStack(
+    signalling: .tls, signallingServer: "198.51.100.10:5061", tlsServerName: "pbx.example.com",
+    tlsTrust: .onlyAuthority(pbxAuthorityDER), tlsClientIdentity: identity
+)
+```
+
+`ClientIdentity(identity:intermediates:)` takes a `SecIdentity` the
+application already holds, `ClientIdentity(certificate:privateKey:)` joins
+a certificate and a `SecKey` (`SecIdentityCreate`), and
+`ClientIdentity.keychain(label:)` looks the identity up in the data
+protection Keychain by its certificate's label before every connection, so
+that a phone woken while locked finds it or says why it cannot. Intermediates
+are sent after the leaf. The stack's identity is presented on its own
+connection and on every account's own TLS or WSS connection, unless
+`addAccount(tlsClientIdentity:)` names another for that account;
+`TurnServer(clientIdentity:)` presents one to a TURN server over TLS.
+
+`secureEnclaveKey` makes the key so that it signs after the first unlock,
+which a push that wakes a locked phone needs; an access control that asks
+for the user's presence makes every connection wait for them. With `tag`
+the key is kept in the Keychain, which takes the application's keychain
+entitlement; without, it lasts as long as the reference. The simulator has
+no Secure Enclave: there, use a software key the same way.
+
+What can go wrong arrives as `transportFailed`, each as its own `tls`:
+
+| `tls` | When |
+|---|---|
+| `.clientKeyUnavailable` | before connecting: no such identity in the Keychain, no key, a key that cannot sign; or during the handshake, a key that would not sign (`errSSLHandshakeFail` after the server asked, or a Keychain status) |
+| `.clientCertificateExpired` | before connecting, the certificate is out of its dates, so nothing is sent; or the server's `certificate_expired` alert |
+| `.clientCertificateRequired` | the server asked and there was no identity to present: `certificate_required`, any other certificate alert, or `handshake_failure` once the server's request was seen |
+| `.clientCertificateRefused` | the server refused the one presented: `bad_certificate`, `unknown_ca`, `certificate_unknown`, `access_denied` and the like |
+
+A TLS 1.3 server says no after this end's handshake is over, so the refusal
+can arrive as the connection's first read rather than as the handshake's
+failure; it is told the same way. A TURN server that refuses the
+certificate is a relay that is not made, as any refused connection is.
+
 `stack.settings()` reads back what the stack runs with, every default filled
 in: the timers, the codecs' count, the SRTP suites its calls offer in order,
 whether a pseudonym salt was given, whether the diagnostic trace is whole

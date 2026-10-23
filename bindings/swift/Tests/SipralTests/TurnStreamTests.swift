@@ -34,13 +34,29 @@ final class FakeTurnOverStream: @unchecked Sendable {
     private var connections = 0
     let port: UInt16
 
-    init(credential: (username: String, password: String), identity: SecIdentity? = nil) throws {
+    /// Over TLS when given an identity; with `clientAnchors`, only for a
+    /// client whose certificate one of them signed.
+    init(
+        credential: (username: String, password: String), identity: SecIdentity? = nil,
+        clientAnchors: [SecCertificate] = []
+    ) throws {
         self.credential = credential
         let tcp = NWProtocolTCP.Options()
         let parameters: NWParameters
         if let identity {
             let tls = NWProtocolTLS.Options()
-            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, sec_identity_create(identity)!)
+            let security = tls.securityProtocolOptions
+            sec_protocol_options_set_local_identity(security, sec_identity_create(identity)!)
+            if !clientAnchors.isEmpty {
+                sec_protocol_options_set_peer_authentication_required(security, true)
+                sec_protocol_options_set_verify_block(security, { _, trust, complete in
+                    let evaluated = sec_trust_copy_ref(trust).takeRetainedValue()
+                    SecTrustSetPolicies(evaluated, SecPolicyCreateSSL(false, nil))
+                    SecTrustSetAnchorCertificates(evaluated, clientAnchors as CFArray)
+                    SecTrustSetAnchorCertificatesOnly(evaluated, true)
+                    complete(SecTrustEvaluateWithError(evaluated, nil))
+                }, DispatchQueue(label: "org.sipral.test.turn.trust"))
+            }
             parameters = NWParameters(tls: tls, tcp: tcp)
         } else {
             parameters = NWParameters(tls: nil, tcp: tcp)
@@ -262,6 +278,47 @@ final class TurnStreamTests: XCTestCase {
         defer { alice.close(); bob.close() }
         XCTAssertEqual(relay.outcome, .allocated, "relay failed: \(relay.code) \(relay.reason ?? "")")
         XCTAssertEqual(server.allocations, [1])
+    }
+
+    func testATurnServerThatRequiresAClientCertificateRelaysForTheOnePresented() async throws {
+        let (identity, certificate) = try Self.selfSigned()
+        let clients = try TestPki.Authority("Sipral test TURN clients")
+        let key = try TestPki.softwareKey()
+        let presented = try ClientIdentity(certificate: try clients.issue("alice-turn", for: key), privateKey: key)
+        let stun = try FakeStunServer()
+        defer { stun.stop() }
+        let server = try FakeTurnOverStream(
+            credential: ("alice-turn", password), identity: identity, clientAnchors: [clients.certificate]
+        )
+        defer { server.stop() }
+        let turn = TurnServer(
+            address: server.address, username: "alice-turn", password: password, transport: .tls,
+            serverName: Self.serverName, trustedCertificates: [certificate], clientIdentity: presented
+        )
+        let (relay, alice, bob, _, _) = try await call(through: turn, stun: stun)
+        defer { alice.close(); bob.close() }
+        XCTAssertEqual(relay.outcome, .allocated, "relay failed: \(relay.code) \(relay.reason ?? "")")
+        XCTAssertEqual(server.allocations, [1])
+    }
+
+    func testWithoutTheClientCertificateItAsksForThereIsNoRelayAndTheCallGoesOn() async throws {
+        let (identity, certificate) = try Self.selfSigned()
+        let clients = try TestPki.Authority("Sipral test TURN clients")
+        let stun = try FakeStunServer()
+        defer { stun.stop() }
+        let server = try FakeTurnOverStream(
+            credential: ("alice-turn", password), identity: identity, clientAnchors: [clients.certificate]
+        )
+        defer { server.stop() }
+        let turn = TurnServer(
+            address: server.address, username: "alice-turn", password: password, transport: .tls,
+            serverName: Self.serverName, trustedCertificates: [certificate]
+        )
+        let (relay, alice, bob, aliceCall, _) = try await call(through: turn, stun: stun)
+        defer { alice.close(); bob.close() }
+        XCTAssertEqual(relay.outcome, .failed)
+        XCTAssertTrue(server.allocations.isEmpty, "nothing was allocated for a client it did not admit")
+        XCTAssertFalse(aliceCall.ended, "the call went ahead without a relay")
     }
 
     func testACertificateNobodyVouchesForIsNoRelayAndTheCallGoesOn() async throws {

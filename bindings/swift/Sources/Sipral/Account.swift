@@ -38,6 +38,8 @@ public final class Account: @unchecked Sendable {
     public let streamProtocol: SipralTransport?
     /// The certificate pin its own TLS connection is held to.
     let tlsPin: String?
+    /// The client certificate its own TLS connection presents.
+    let tlsClientIdentity: ClientIdentity?
 
     private let stateQueue = DispatchQueue(label: "org.sipral.account.state")
     /// The application's `Contact`, or `nil` when derived from the socket.
@@ -49,7 +51,8 @@ public final class Account: @unchecked Sendable {
 
     init(
         stack: SipralStack, handle: SipralHandle, aor: String, registrarAddress: String, serverUri: String?,
-        contact: String, given: String?, streamProtocol: SipralTransport? = nil, tlsPin: String? = nil
+        contact: String, given: String?, streamProtocol: SipralTransport? = nil, tlsPin: String? = nil,
+        tlsClientIdentity: ClientIdentity? = nil
     ) {
         self.stack = stack
         self.handle = handle
@@ -58,6 +61,7 @@ public final class Account: @unchecked Sendable {
         self.serverUri = serverUri
         self.streamProtocol = streamProtocol
         self.tlsPin = tlsPin
+        self.tlsClientIdentity = tlsClientIdentity
         self._contact = contact
         self.givenContact = given
     }
@@ -172,6 +176,7 @@ public final class Account: @unchecked Sendable {
         serverNaptr: Bool,
         keepaliveMs: UInt64,
         tlsPin: String?,
+        tlsClientIdentity: ClientIdentity? = nil,
         streamProtocol: SipralTransport?,
         websocketHost: String? = nil,
         websocketResource: String? = nil,
@@ -306,7 +311,8 @@ public final class Account: @unchecked Sendable {
         }
         return Account(
             stack: stack, handle: handle, aor: aor, registrarAddress: registrarAddress ?? "", serverUri: serverUri,
-            contact: contact, given: given, streamProtocol: streamProtocol, tlsPin: tlsPin
+            contact: contact, given: given, streamProtocol: streamProtocol, tlsPin: tlsPin,
+            tlsClientIdentity: tlsClientIdentity
         )
     }
 
