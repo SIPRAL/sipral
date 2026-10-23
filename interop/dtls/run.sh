@@ -100,10 +100,10 @@ pair() {
         sleep 1
         # -mtu: OpenSSL asks the socket for the path MTU, and where it gets
         # no answer -- macOS -- it falls back to 256 octets and fragments
-        # its second ClientHello. A server answering with a stateless
-        # cookie exchange reads only an unfragmented one, by design (RFC
-        # 6347 Section 4.2.1; crates/sipral-dtls/src/connection/mod.rs),
-        # as OpenSSL's own DTLSv1_listen does
+        # its second ClientHello. The harness's server puts a fragmented
+        # ClientHello together (crates/sipral-dtls/src/connection/mod.rs),
+        # but the step pins the MTU so what it measures does not depend on
+        # the host
         # shellcheck disable=SC2086
         (sleep 5 | timeout 30 openssl s_client $common -mtu 1200 -connect "127.0.0.1:$PORT") \
             >openssl.out 2>&1 &

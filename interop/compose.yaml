@@ -48,7 +48,7 @@ services:
     profiles: [opensips]
     # no command: the image's own entrypoint is already `opensips -F`, the
     # foreground flag that keeps this from being the same daemonize-and-exit
-    # trap kamailio.cfg's own fork=no comment describes
+    # trap kamailio.cfg's own fork comment describes
     volumes:
       - ./opensips/opensips.cfg:/etc/opensips/opensips.cfg:ro
     networks: [lab]

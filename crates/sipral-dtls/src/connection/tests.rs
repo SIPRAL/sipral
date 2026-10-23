@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::handshake::{
-    ClientHello, EcPointFormat, Extension, ExtensionType, Extensions, FragmentHeader,
-    HelloVerifyRequest, ServerHello, SignatureAndHash, UseSrtp, encode_message, fragments,
+    CipherSuite, ClientHello, EcPointFormat, Extension, ExtensionType, Extensions, Fragment,
+    FragmentHeader, HelloVerifyRequest, NamedGroup, ServerHello, SignatureAndHash, UseSrtp,
+    encode_message, fragments,
 };
 use crate::random::testing::Counter;
 use crate::record::{MAX_SEQUENCE, RecordHeader, encode_plaintext, records};
@@ -466,6 +467,140 @@ fn a_lossy_duplicating_reordering_path_that_fragments_the_certificate_still_comp
             "seed {seed}"
         );
     }
+}
+
+/// A ClientHello longer than the client's datagrams travels in fragments, as
+/// a browser's does: the server puts it together before anything is decided,
+/// with the cookie exchange and without, and the handshake completes on it.
+#[test]
+fn a_client_hello_in_fragments_is_put_together_by_the_server() {
+    let (one, other) = (identity(1), identity(2));
+    for cookie_exchange in [true, false] {
+        let mut configs = pair_configs(Role::Client, &one, &other);
+        configs[0].max_datagram = 96;
+        for config in &mut configs {
+            config.cookie_exchange = cookie_exchange;
+        }
+        let mut pair = Pair::new(configs, Path::CLEAN, 5);
+        pair.run(Duration::from_secs(5));
+
+        assert!(pair.fragmented(0, HandshakeType::CLIENT_HELLO));
+        let first = keyed(&pair.events[0]);
+        let second = keyed(&pair.events[1]);
+        assert_keyed_alike(first, second);
+        assert_eq!(pair.elapsed(), Duration::ZERO, "cookie {cookie_exchange}");
+    }
+}
+
+/// `hello` as message `message_seq` in two records of two datagrams, cut at
+/// `cut` octets of its body, the way Chromium sent its own: 1175 and 238.
+fn in_two_fragments(hello: &ClientHello, message_seq: u16, cut: usize) -> Vec<Vec<u8>> {
+    let mut body = Vec::new();
+    hello.encode(&mut body).unwrap();
+    let length = u32::try_from(body.len()).unwrap();
+    [(0, cut), (cut, body.len())]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (from, to))| {
+            let mut payload = Vec::new();
+            Fragment {
+                header: FragmentHeader {
+                    msg_type: HandshakeType::CLIENT_HELLO,
+                    length,
+                    message_seq,
+                    fragment_offset: u32::try_from(from).unwrap(),
+                    fragment_length: u32::try_from(to - from).unwrap(),
+                },
+                body: &body[from..to],
+            }
+            .encode(&mut payload)
+            .unwrap();
+            let mut datagram = Vec::new();
+            encode_plaintext(
+                ContentType::HANDSHAKE,
+                ProtocolVersion::DTLS_1_0,
+                0,
+                u64::from(message_seq) * 2 + u64::try_from(index).unwrap(),
+                &payload,
+                &mut datagram,
+            )
+            .unwrap();
+            datagram
+        })
+        .collect()
+}
+
+/// What Chromium 156 offers a DTLS-SRTP server, besides what this crate's own
+/// client does: DTLS 1.3 beside 1.2 in `supported_versions`, the hybrid
+/// X25519MLKEM768 group first with its 1258-octet `key_share`, PSK modes and
+/// the TLS 1.3 suites. Its ClientHello is 1413 octets and comes in two
+/// fragments. The server reads it as a DTLS 1.2 ClientHello -- RFC 8446
+/// §4.2.1 has a server that does not do 1.3 ignore `supported_versions` --
+/// answers it with a HelloVerifyRequest, and the one with the cookie with
+/// its flight at DTLS 1.2, on the suite and group this crate does.
+#[test]
+fn a_browser_s_client_hello_offering_dtls_1_3_in_two_fragments_is_answered_at_1_2() {
+    let (one, other) = (identity(1), identity(2));
+    let [client_config, server_config] = pair_configs(Role::Client, &one, &other);
+    let start = Instant::now();
+    let mut client = Connection::new(client_config, &mut Counter::new(41), start).unwrap();
+    let mut server = Connection::new(server_config, &mut Counter::new(42), start).unwrap();
+    let ours = drain(&mut client)
+        .iter()
+        .flat_map(|datagram| plaintext_fragments(datagram))
+        .find(|(_, header, _)| header.msg_type == HandshakeType::CLIENT_HELLO)
+        .map(|(_, _, body)| body)
+        .unwrap();
+    let mut hello = ClientHello::parse(&ours).unwrap();
+    hello
+        .cipher_suites
+        .splice(0..0, [0x1301, 0x1302, 0x1303].map(CipherSuite));
+    let mut extensions = Extensions::new();
+    let unknown = |code: u16, data: Vec<u8>| Extension::Unknown {
+        extension_type: ExtensionType(code),
+        data,
+    };
+    let mut share = vec![0x04, 0xE8, 0x11, 0xEC, 0x04, 0xC0];
+    share.resize(1258, 0x5A);
+    extensions.push(unknown(45, vec![0x01, 0x01])).unwrap();
+    extensions
+        .push(unknown(43, vec![0x04, 0xFE, 0xFC, 0xFE, 0xFD]))
+        .unwrap();
+    extensions.push(unknown(51, share)).unwrap();
+    for extension in hello.extensions.as_ref().unwrap().iter() {
+        let extension = match extension {
+            Extension::SupportedGroups(groups) => {
+                let mut groups = groups.clone();
+                groups.insert(0, NamedGroup(0x11EC));
+                Extension::SupportedGroups(groups)
+            }
+            other => other.clone(),
+        };
+        extensions.push(extension).unwrap();
+    }
+    hello.extensions = Some(extensions);
+
+    deliver(&mut server, &in_two_fragments(&hello, 0, 1175), start);
+    let answered = drain(&mut server);
+    let cookie = answered
+        .iter()
+        .flat_map(|datagram| plaintext_fragments(datagram))
+        .find(|(_, header, _)| header.msg_type == HandshakeType::HELLO_VERIFY_REQUEST)
+        .map(|(_, _, body)| HelloVerifyRequest::parse(&body).unwrap().cookie)
+        .expect("a HelloVerifyRequest for the ClientHello in two fragments");
+
+    hello.cookie = cookie;
+    deliver(&mut server, &in_two_fragments(&hello, 1, 1175), start);
+    let flight = drain(&mut server);
+    let server_hello = flight
+        .iter()
+        .flat_map(|datagram| plaintext_fragments(datagram))
+        .find(|(_, header, _)| header.msg_type == HandshakeType::SERVER_HELLO)
+        .map(|(_, _, body)| ServerHello::parse(&body).unwrap())
+        .expect("flight 4 for the ClientHello with the cookie");
+    assert_eq!(server_hello.server_version, ProtocolVersion::DTLS_1_2);
+    assert_eq!(server_hello.cipher_suite, SUITE);
+    assert!(events(&mut server).is_empty());
 }
 
 #[test]

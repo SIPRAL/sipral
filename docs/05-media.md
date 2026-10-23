@@ -1498,6 +1498,51 @@ profile's `apply-candidate-acl` says otherwise, and the lab's says
 `rfc1918.auto`. FreeSWITCH's WebSocket bindings, what a browser reaches, are
 not in the lab.
 
+### A browser at the other end
+
+A browser's SIP client registers over a WebSocket and describes its audio as
+the WebRTC line above does; the difference is the far end's media stack, which
+is now Chromium's own and not a PBX's. `scripts/lab.sh browser`
+(`docs/11-testing.md`) puts a headless Chromium with JsSIP in the page on
+both of the lab's WebSocket servers, and the stack's WebRTC line beside it.
+Two things in the stack did not hold against it, and both are fixed:
+
+- **Its ClientHello does not fit a datagram.** Chromium 156 offers DTLS 1.3
+  beside 1.2 (`supported_versions`), with the hybrid X25519MLKEM768 group and
+  a 1258-octet `key_share`: a 1413-octet ClientHello, sent in two fragments of
+  1175 and 238 octets. The server of `sipral-dtls` read only a ClientHello
+  that came whole while its cookie exchange was listening, so the browser's
+  went unanswered and every call where the stack was the DTLS server stayed
+  silent. It now puts one fragmented ClientHello together first (at most 8
+  KiB, one message), then answers it as before; a server that does not do
+  DTLS 1.3 ignores `supported_versions` (RFC 8446 §4.2.1), so the handshake
+  is DTLS 1.2 on `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, with Chromium as
+  the client and as the server alike.
+- **`0.0.0.0` is not a hold when ICE carries the stream.** A browser that
+  trickles writes `c=IN IP4 0.0.0.0` and port 9 into a description with no
+  candidate in it yet (RFC 8840 §4.1.1), and the stack read that as RFC 3264
+  §8.4's old hold: the call came up, ICE chose a pair, DTLS keyed it, and
+  this end sent nothing. On a stream with `a=ice-ufrag` the address now says
+  nothing about direction (`SessionDescription::holds_by_address`, used by
+  the media plan and by the user agent's hold state).
+
+What else the browser sends is taken as it was. Its host candidates are
+random `.local` names (mDNS) unless the page is told otherwise; a candidate
+that names a host is dropped (RFC 8839 §5.1) and the browser is found by the
+checks it sends, as a peer-reflexive candidate, which is how the stack's
+calls came up with Chromium's defaults. The lab writes the addresses
+instead (`--disable-features=WebRtcHideLocalIpsWithMdns`), since Asterisk 22
+tries to send to the name and never completes ICE, and so that what is
+trickled is a candidate either end pairs. Its STUN checks carry
+`GOOG-NETWORK-INFO` (0xC057), comprehension-optional and passed over. Its
+offer lists Opus, RED, G.722, G.711, CN and telephone-event with
+`transport-cc` feedback, `a=extmap-allow-mixed`, `a=rtcp-xr:rcvr-rtt=all`
+and four header extensions; the lab's catalogue answers G.711 with CN and
+telephone-event and, of the extensions, the MID one alone, under the offer's
+number. Each SRTP profile it offers is
+taken: `AEAD_AES_256_GCM` where the stack is the DTLS server and chooses,
+`AES_CM_128_HMAC_SHA1_80` where Chromium is and does.
+
 **What it is not.** Video, data channels, several streams in one group and
 SFU or simulcast lines are out: this is a SIP stack carrying audio. Trickled
 candidates are the 1.4 item beside this one (`docs/10-roadmap.md`, Phase 7).

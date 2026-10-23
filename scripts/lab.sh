@@ -76,6 +76,22 @@
 #                               the connection secured by a socat that checks
 #                               the lab authority, registered as labuser-wss
 #                               with the Host and /ws the account names
+#   scripts/lab.sh browser      only a browser's calls: a headless Chromium
+#                               driven by Playwright (interop/browser/), its
+#                               page a phone made of JsSIP and the browser's
+#                               own WebRTC, and the Rust harness's WebRTC
+#                               line beside it (interop/harness/src/
+#                               browser.rs); a call each way, each end
+#                               hearing the other's tone and the two
+#                               hangups from either end. First through
+#                               Asterisk, the page on the secure WebSocket of
+#                               `wss` above, Asterisk carrying the media of
+#                               both WebRTC legs; then through Kamailio's
+#                               WebSocket on 8080, the proxy carrying the
+#                               signalling only and the media going end to
+#                               end, with trickle ICE both ways. The image is
+#                               built on the first run (part of a run that
+#                               names nothing too)
 #   scripts/lab.sh icelite     only the call that requires ICE placed at a
 #                               C ABI stack answering as ICE-lite (part of
 #                               the ice run too)
@@ -4811,6 +4827,81 @@ if [ "$WANT" = all ] || [ "$WANT" = wss ]; then
         wait_for asterisk "Asterisk Ready" >/dev/null || true
         rm -rf "$SIPRAL_TLS_CERTS"
         unset SIPRAL_TLS_CERTS
+    fi
+fi
+
+# A browser's calls (interop/browser/, interop/harness/src/browser.rs). The
+# page's container starts first and comes up on its own time -- Chromium
+# launched, the page registered -- while the harness, started beside it,
+# places its call again until the page answers; then the page calls the
+# harness. Each side prints its own lines and judges its own end, and the
+# step passes when both exit 0. `$1` is the server; `$2`, for the secure
+# WebSocket only, the base64 SHA-256 of the key Chromium is to accept
+# Asterisk's certificate by, the run's own, and no other.
+BROWSER_IMAGE=sipral-lab-browser
+browser_flow() {
+    local server="$1" spki="${2:-}" name harness browser
+    name="${COMPOSE_PROJECT_NAME:-sipral-interop}-browser-$$"
+    docker rm -f "$name" >/dev/null 2>&1
+    docker run -d --name "$name" --network "$LAB_NETWORK" --shm-size 256m \
+        ${spki:+-e SIPRAL_BROWSER_SPKI="$spki"} \
+        "$BROWSER_IMAGE" "$server" >/dev/null \
+        || { printf '  the browser container did not start\n'; return 1; }
+    lab_run "the harness's calls with the browser through $server" \
+        $((LAB_START_APT_S + 4 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_FLOWS=browser \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
+            tcpdump -i any -s 0 -U -w /pcap/browser-$server.pcap 2>/dev/null &
+            sleep 2
+            /harness $server 5060 9000
+            status=\$?
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+    harness=$?
+    browser=$(timeout "$LAB_CALL_S" docker wait "$name" 2>/dev/null) || browser=1
+    printf '  the browser, %s:\n' "$server"
+    docker logs "$name" 2>&1 | sed 's/^/  /'
+    docker rm -f "$name" >/dev/null 2>&1
+    [ "$harness" -eq 0 ] && [ "${browser:-1}" -eq 0 ]
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = browser ]; then
+    step "a browser's calls -- its image"
+    if docker build -q -t "$BROWSER_IMAGE" interop/browser >/dev/null 2>&1; then
+        pass "built: Playwright's Chromium, JsSIP in the page (interop/browser/package-lock.json)"
+        step "a browser's calls through Asterisk -- JsSIP over a secure WebSocket, the media through Asterisk"
+        if ! tls_certificates; then
+            fail "a browser's calls through Asterisk: the certificates"
+        else
+            ( cd interop && docker compose -f compose.yaml -f wss/compose.override.yaml up -d asterisk ) \
+                >/dev/null 2>&1 || fail "could not restart Asterisk with the WebSocket TLS listener"
+            if wait_for asterisk "Asterisk Ready"; then
+                spki=$(openssl x509 -in "$SIPRAL_TLS_CERTS/asterisk.pem" -pubkey -noout \
+                    | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)
+                browser_flow asterisk "$spki" \
+                    && pass "a call each way between the WebRTC line and Chromium, each leg Asterisk's, heard both ways" \
+                    || fail "a browser's calls through Asterisk"
+            fi
+            ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+            wait_for asterisk "Asterisk Ready" >/dev/null || true
+            rm -rf "$SIPRAL_TLS_CERTS"
+            unset SIPRAL_TLS_CERTS
+        fi
+        step "a browser's calls through Kamailio -- JsSIP over a WebSocket, the media end to end, trickle ICE"
+        browser_flow kamailio \
+            && pass "a call each way between the WebRTC line and Chromium, end to end, trickled both ways, heard both ways" \
+            || fail "a browser's calls through Kamailio"
+    else
+        fail "docker build interop/browser"
     fi
 fi
 

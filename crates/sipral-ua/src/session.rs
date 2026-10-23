@@ -9,8 +9,7 @@
 //! started `recvonly` resumes as `recvonly`, not `sendrecv`.
 
 use sipral_core::sdp::{
-    AcceptedStream, Attribute, Connection, Direction, MediaDescription, SessionDescription,
-    StreamAnswer,
+    AcceptedStream, Attribute, Direction, MediaDescription, SessionDescription, StreamAnswer,
 };
 
 /// Which way a call is held (RFC 3264 §8.4).
@@ -355,8 +354,10 @@ const fn receives(direction: Direction) -> bool {
 /// Whether a description the far end wrote refuses what this end sends.
 ///
 /// `sendonly`, `inactive`, or the old RFC 2543 `0.0.0.0` address, which
-/// §8.4 still requires us to accept. Every live stream must say it: that is
-/// §8.4's "held SDP". Per-stream hold waits for video.
+/// §8.4 still requires us to accept -- but not on a stream ICE carries, where
+/// `0.0.0.0` is a trickling description with no candidate yet
+/// (`SessionDescription::holds_by_address`). Every live stream must say it:
+/// that is §8.4's "held SDP". Per-stream hold waits for video.
 fn holds_us(description: &SessionDescription) -> bool {
     let mut any = false;
     for media in description
@@ -368,9 +369,7 @@ fn holds_us(description: &SessionDescription) -> bool {
         let refused = matches!(
             description.direction_of(media),
             Direction::SendOnly | Direction::Inactive
-        ) || description
-            .connection_of(media)
-            .is_some_and(Connection::is_black_hole);
+        ) || description.holds_by_address(media);
         if !refused {
             return false;
         }
@@ -410,6 +409,27 @@ mod tests {
         set_direction(&mut media, Direction::SendRecv);
         description.media.push(media);
         description
+    }
+
+    /// RFC 3264 §8.4's old hold is `0.0.0.0` on a stream without ICE; the
+    /// same address on a stream with ICE is a browser's trickling description
+    /// that has no candidate in it yet (RFC 8840 §4.1.1), and holds nobody.
+    #[test]
+    fn zero_address_holds_only_without_ice() {
+        let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let mut old = description(9, Vec::new());
+        old.connection = Some(Connection::new(unspecified));
+        assert!(super::holds_us(&old));
+        let mut trickling = description(
+            9,
+            vec![
+                Attribute::with_value("ice-ufrag", "P18v"),
+                Attribute::with_value("ice-pwd", "VHdx75N2HQdyDdLVVH2YQWMG"),
+                Attribute::with_value("ice-options", "trickle"),
+            ],
+        );
+        trickling.connection = Some(Connection::new(unspecified));
+        assert!(!super::holds_us(&trickling));
     }
 
     fn crypto() -> Vec<Attribute> {

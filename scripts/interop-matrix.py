@@ -105,6 +105,14 @@ FLOW_SECTIONS = {
     "FusionPBX -- its own configuration on FreeSWITCH, straight at it": ("fusionpbx", "rust"),
     "a PBX WebRTC line -- Asterisk's webrtc=yes, over UDP and over a WebSocket": ("asterisk", "rust"),
     "a WebRTC line through the proxy -- FreeSWITCH's echo": ("kamailio", "rust"),
+    "a browser's calls through Asterisk -- JsSIP over a secure WebSocket, the media through Asterisk": (
+        "browser_asterisk",
+        "rust",
+    ),
+    "a browser's calls through Kamailio -- JsSIP over a WebSocket, the media end to end, trickle ICE": (
+        "browser_kamailio",
+        "rust",
+    ),
 }
 # The FLOW_SECTIONS headers whose harness prints no "lab: ..." line before
 # its flows: the STIR/SHAKEN step runs two stacks of the C harness against
@@ -291,6 +299,7 @@ SETUP_SECTIONS = {
     "the Swift binding's lab agent",
     "the lab",
     "waiting for the servers to listen",
+    "a browser's calls -- its image",
 }
 NETEM_SECTION = "the same call, over a bad network"
 TURN_RELAY_SECTION = "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
@@ -316,6 +325,8 @@ PEER_LABELS = {
     "openssl_dtls": "OpenSSL (DTLS-SRTP alone, no SIP)",
     "vitalpbx_live": "VitalPBX, live (a test tenant, over the internet)",
     "vicibox_live": "ViciBox (VICIdial), on the LAN",
+    "browser_asterisk": "Chromium with JsSIP, through Asterisk (secure WebSocket)",
+    "browser_kamailio": "Chromium with JsSIP, through Kamailio (WebSocket, media end to end)",
 }
 
 # Every peer worth an eventual row that this lab cannot reach yet, because
@@ -820,6 +831,11 @@ def read_versions(root: Path) -> dict[str, str]:
     m = re.search(r"FUSIONPBX_VERSION=([0-9]+(?:\.[0-9]+){1,3})", fusionpbx)
     versions["fusionpbx"] = m.group(1) if m else ""
 
+    browser = (root / "interop/browser/package.json").read_text(encoding="utf-8")
+    for package in ("playwright", "jssip"):
+        m = re.search(rf'"{package}":\s*"([0-9]+(?:\.[0-9]+){{1,3}})"', browser)
+        versions[package] = m.group(1) if m else ""
+
     return versions
 
 
@@ -837,6 +853,11 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         return f"{v('fusionpbx')} (FusionPBX) / {v('freeswitch')} (FreeSWITCH)"
     if peer_key == "baresip":
         return f"{v('baresip')} (baresip) / {v('kamailio')} (proxy)"
+    if peer_key == "browser_asterisk":
+        # Playwright's release pins the Chromium build it drives
+        return f"Playwright {v('playwright')}, JsSIP {v('jssip')} / {v('asterisk')} (Asterisk)"
+    if peer_key == "browser_kamailio":
+        return f"Playwright {v('playwright')}, JsSIP {v('jssip')} / {v('kamailio')} (proxy)"
     if peer_key == "nat_stun":
         return v("asterisk")
     if peer_key in ("ice_lite", "full_ice"):

@@ -11,7 +11,7 @@ use super::{Core, Failure, SUITE};
 use crate::handshake::{
     self, COMPRESSION_NULL, CertificateRequest, CipherSuite, ClientHello, CookieSecret,
     DigitallySigned, EcPointFormat, Extension, Extensions, Finished, Fragment, HandshakeMessage,
-    HandshakeType, HelloVerifyRequest, Message, NamedGroup, Reassembler, ServerHello,
+    HandshakeType, HelloVerifyRequest, Limits, Message, NamedGroup, Reassembler, ServerHello,
     ServerKeyExchange, SignatureAndHash, SrtpProtectionProfile, Transcript, UseSrtp,
 };
 use crate::keys::{CertifiedKey, EphemeralKey};
@@ -22,6 +22,16 @@ use crate::{Error, Random, Role};
 /// The highest ClientHello record sequence number this server starts its own
 /// epoch 0 at: 2^47, leaving 2^47 numbers above it.
 const MAX_INITIAL_SEQUENCE: u64 = 1 << 47;
+
+/// What a listening server holds of a ClientHello that came in fragments: one
+/// message, of at most 8 KiB in at most 16 pieces. A browser's ClientHello
+/// with a post-quantum key share is about 1400 octets in two.
+const HELLO_LIMITS: Limits = Limits {
+    max_message_len: 8 * 1024,
+    max_pieces: 16,
+    max_future_messages: 1,
+    max_buffered: 8 * 1024,
+};
 
 /// The message the server is waiting for, with what it has learned so far.
 enum Step {
@@ -63,6 +73,8 @@ pub(super) struct Server {
     ephemeral: Option<EphemeralKey>,
     cookie: CookieSecret,
     step: Step,
+    /// A ClientHello still arriving in fragments, while listening.
+    hello: Option<Reassembler>,
 }
 
 impl Server {
@@ -75,6 +87,7 @@ impl Server {
             ephemeral: Some(ephemeral),
             cookie: CookieSecret::generate(random),
             step: Step::Listening,
+            hello: None,
         })
     }
 
@@ -90,10 +103,15 @@ impl Server {
 
     /// A fragment arriving before any ClientHello has been accepted.
     ///
-    /// Nothing is kept for it unless it is a whole ClientHello that parses and,
-    /// with the cookie exchange on, carries the cookie this server made for it.
-    /// Anything else is discarded or answered statelessly, so no error comes
-    /// out of here until a ClientHello has been accepted.
+    /// Nothing is kept for it unless it is part of a ClientHello. A ClientHello
+    /// longer than one datagram arrives in fragments (RFC 6347 §4.2.3) and is
+    /// put back together first: a browser offering DTLS 1.3 beside 1.2 with a
+    /// post-quantum key share writes one of about 1400 octets. What that holds
+    /// is one message within [`HELLO_LIMITS`], dropped when a ClientHello of
+    /// another number begins. A whole ClientHello is then accepted only if it
+    /// parses and, with the cookie exchange on, carries the cookie this server
+    /// made for it; anything else is discarded or answered statelessly, so no
+    /// error comes out of here until a ClientHello has been accepted.
     pub(super) fn listen(
         &mut self,
         core: &mut Core,
@@ -102,20 +120,64 @@ impl Server {
         now: Instant,
     ) -> Result<(), Failure> {
         let header = fragment.header;
-        if header.msg_type != HandshakeType::CLIENT_HELLO
-            || header.fragment_offset != 0
-            || header.fragment_length != header.length
-        {
+        if header.msg_type != HandshakeType::CLIENT_HELLO {
             return Ok(());
         }
-        let Ok(hello) = ClientHello::parse(fragment.body) else {
+        if header.fragment_offset == 0 && header.fragment_length == header.length {
+            self.hello = None;
+            return self.take_hello(
+                core,
+                record_sequence,
+                header.message_seq,
+                fragment.body,
+                now,
+            );
+        }
+        if self
+            .hello
+            .as_ref()
+            .is_none_or(|parts| parts.next_message_seq() != u32::from(header.message_seq))
+        {
+            self.hello = Some(Reassembler::expecting(HELLO_LIMITS, header.message_seq));
+        }
+        let Some(parts) = self.hello.as_mut() else {
+            return Ok(());
+        };
+        if parts.offer(fragment).is_err() {
+            return Ok(());
+        }
+        let Some(message) = parts.next_message() else {
+            return Ok(());
+        };
+        self.hello = None;
+        self.take_hello(
+            core,
+            record_sequence,
+            message.message_seq,
+            &message.body,
+            now,
+        )
+    }
+
+    /// A whole ClientHello, numbered `message_seq`, whose last record was
+    /// `record_sequence`: answered with a HelloVerifyRequest, or accepted and
+    /// answered with flight 4.
+    fn take_hello(
+        &mut self,
+        core: &mut Core,
+        record_sequence: u64,
+        message_seq: u16,
+        body: &[u8],
+        now: Instant,
+    ) -> Result<(), Failure> {
+        let Ok(hello) = ClientHello::parse(body) else {
             return Ok(());
         };
         if core.settings.cookie_exchange && !self.cookie.verify(&[], &hello) {
-            self.hello_verify_request(core, record_sequence, header.message_seq, &hello);
+            self.hello_verify_request(core, record_sequence, message_seq, &hello);
             return Ok(());
         }
-        let Some(next) = header.message_seq.checked_add(1) else {
+        let Some(next) = message_seq.checked_add(1) else {
             return Ok(());
         };
 
@@ -123,7 +185,7 @@ impl Server {
         core.reassembler = Reassembler::expecting(core.settings.limits, next);
         // RFC 6347 §4.2.2's example: the server's first message after a cookie
         // exchange is numbered as the ClientHello that carried the cookie
-        core.send_seq = header.message_seq;
+        core.send_seq = message_seq;
         // §4.2.1: "the server MUST use the record sequence number in the
         // ClientHello as the record sequence number in its initial
         // ServerHello". The client picks that number, and one near the top
@@ -136,11 +198,7 @@ impl Server {
         core.writer.epoch0 = WriteEpoch::starting_at(record_sequence).map_err(Failure::Internal)?;
         core.transcript = Transcript::new();
         core.transcript
-            .add(
-                HandshakeType::CLIENT_HELLO,
-                header.message_seq,
-                fragment.body,
-            )
+            .add(HandshakeType::CLIENT_HELLO, message_seq, body)
             .map_err(Failure::Internal)?;
         let answer = Self::negotiate(core, &hello)?;
         self.hello_flight(core, &hello, &answer, now)

@@ -94,10 +94,13 @@
 //!
 //! With [`Config::cookie_exchange`] (the default) a server answers a
 //! cookieless ClientHello with HelloVerifyRequest and keeps nothing (RFC
-//! 6347 §4.2.1). Until a cookie returns it reads only unfragmented
-//! ClientHellos (a DTLS-SRTP one is a few hundred octets), silently drops
-//! unparsable ones, alerts and protected records, so no single forged
-//! datagram can end it.
+//! 6347 §4.2.1). Until a cookie returns it keeps nothing but the pieces of
+//! one ClientHello arriving in fragments, at most 8 KiB, put together before
+//! anything is decided: this crate's own client writes a few hundred octets,
+//! but a browser offering DTLS 1.3 beside 1.2 with a post-quantum key share
+//! writes about 1400, in two datagrams. It silently drops unparsable
+//! ClientHellos, alerts and protected records, so no single forged datagram
+//! can end it.
 //!
 //! The cookie has no client address: the caller decides where datagrams go,
 //! so a returned cookie already proves the client reads that destination.

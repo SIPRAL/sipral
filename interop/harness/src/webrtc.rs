@@ -115,7 +115,7 @@ enum Stage {
 /// What the server's description of one call said, as the report puts it:
 /// refused unless it is a WebRTC line's, `UDP/TLS/RTP/SAVPF` multiplexed and
 /// keyed by a fingerprint.
-fn described(far: &SessionDescription) -> Result<String, String> {
+pub(crate) fn described(far: &SessionDescription) -> Result<String, String> {
     let Some(stream) = far
         .media
         .iter()
@@ -158,7 +158,7 @@ fn described(far: &SessionDescription) -> Result<String, String> {
 }
 
 /// The description in a message's body.
-fn body(message: &OwnedMessage) -> Option<SessionDescription> {
+pub(crate) fn body(message: &OwnedMessage) -> Option<SessionDescription> {
     parse(message.as_raw().body()).ok()
 }
 

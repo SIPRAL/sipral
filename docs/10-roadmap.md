@@ -739,7 +739,13 @@ reason that did not exist when they went in.
   a WebSocket and offers its candidates as it finds them; a call to it has to
   take trickled candidates (RFC 8838, carried in SIP by RFC 8840's INFO
   package) and can send its own the same way, so the call is up before the
-  last relay answers.
+  last relay answers. *Built*: the two things a browser showed the stack
+  doing wrong are fixed — its DTLS server now reads a ClientHello that comes
+  in fragments, as Chromium's does, and `0.0.0.0` on a stream ICE carries is
+  no hold (`docs/05-media.md`, "A browser at the other end") — and the lab
+  step, a headless Chromium with JsSIP through Asterisk's secure WebSocket
+  and through Kamailio's, media end to end and trickled both ways there
+  (`scripts/lab.sh browser`, `docs/11-testing.md`), awaits its first run.
 - **SIP-T and SIP-I (1.4).** A carrier gateway carries the ISUP of the call
   inside SIP (RFC 3204's `application/ISUP` body, RFC 3372's SIP-T, ITU-T
   Q.1912.5's SIP-I). An endpoint on such a trunk reads the calling number,

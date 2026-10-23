@@ -27,6 +27,7 @@ use sipral::{
     LocalConference, LocalConferenceConfig, MediaConfig, Member, OutgoingCall, UaEvent,
 };
 
+use crate::audio::level_at;
 use crate::{Endpoint, place_call, run_folded, uri};
 
 /// How long the flow may take before it is a failure.
@@ -80,21 +81,6 @@ fn sine(len: usize, rate: u32, hz: f64, phase: &mut usize) -> Vec<i16> {
             sample
         })
         .collect()
-}
-
-/// The amplitude of the component at `hz`, by Goertzel.
-fn level_at(samples: &[i16], rate: u32, hz: f64) -> f64 {
-    let coefficient = 2.0 * (core::f64::consts::TAU * hz / f64::from(rate)).cos();
-    let (mut before, mut last) = (0.0_f64, 0.0_f64);
-    for sample in samples {
-        let next = f64::from(*sample) + coefficient * last - before;
-        before = last;
-        last = next;
-    }
-    let power = before.mul_add(before, last * last) - coefficient * before * last;
-    #[allow(clippy::cast_precision_loss)]
-    let length = samples.len().max(1) as f64;
-    2.0 * power.max(0.0).sqrt() / length
 }
 
 /// One of the three far ends.
