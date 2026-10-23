@@ -172,6 +172,12 @@ class ClientCertificateUnusable(OSError):
         self.tls = tls
 
 
+class ClosedAfterHandshake(ConnectionAbortedError):
+    """The server closed a TLS 1.3 connection cleanly while :func:`settle`
+    waited, with no alert and nothing said: Asterisk's way of refusing a
+    client certificate its authority did not sign."""
+
+
 class TlsClientCertificate:
     """A client certificate this end presents on SIP over TLS (RFC 5246
     Section 7.4.6, RFC 8446 Section 4.4.2), from PEM files.
@@ -361,6 +367,12 @@ def classify(error: BaseException, presented: bool = False) -> tuple[int, int, s
     detail = _sentence(error)
     if isinstance(error, ClientCertificateUnusable):
         return lib.SIPRAL_TRANSPORT_ERROR_OTHER, error.tls, detail
+    if presented and isinstance(error, ClosedAfterHandshake):
+        return (
+            lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET,
+            lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED,
+            f"{detail}, no alert reaching this end",
+        )
     if isinstance(error, ssl.SSLError) and not isinstance(error, ssl.SSLCertVerificationError):
         reason = getattr(error, "reason", None) or ""
         if presented and reason == _CLIENT_CERTIFICATE_EXPIRED_ALERT:
@@ -440,7 +452,7 @@ def settle(sock: socket.socket, seconds: float = SETTLE_LEAST_SECONDS) -> bytes:
                 # a session ticket: the certificate was taken
                 return b""
             if not data:
-                raise ConnectionAbortedError("the server closed the connection after the handshake")
+                raise ClosedAfterHandshake("the server closed the connection after the handshake")
             return data
     finally:
         sock.settimeout(patience)

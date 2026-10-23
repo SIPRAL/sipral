@@ -69,7 +69,8 @@ static int entropy(uint8_t *out, size_t len)
 static void on_tls_info(const SSL *tls, int where, int value)
 {
     (void)tls;
-    if (where & SSL_CB_READ_ALERT) {
+    /* close_notify (0) says the connection ended, not why */
+    if ((where & SSL_CB_READ_ALERT) && (value & 0xff) != 0) {
         alert_received = value & 0xff;
     }
 }
@@ -101,6 +102,19 @@ static sipral_tls_failure_t client_refusal(int presented)
         return SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED;
     }
     return SIPRAL_TLS_FAILURE_NONE;
+}
+
+/* A server that asked for a certificate, finished the handshake and then
+ * closed before answering anything, with no alert: Asterisk does this at
+ * TLS 1.2 for a certificate its authority did not sign. Read as the Kotlin
+ * layer reads it, by whether one was presented. */
+static sipral_tls_failure_t silent_refusal(int presented, int heard)
+{
+    if (!certificate_asked || heard || alert_received >= 0) {
+        return SIPRAL_TLS_FAILURE_NONE;
+    }
+    return presented ? SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED
+                     : SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED;
 }
 
 /* What OpenSSL's check of the server's certificate said, when it refused. */
@@ -388,6 +402,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    int heard = 0;
     uint64_t deadline = now_ms() + 20000;
     while (!line.registered && !line.failed && now_ms() < deadline) {
         sipral_poll_result_t polled;
@@ -400,6 +415,9 @@ int main(int argc, char **argv)
             uint8_t rest[256];
             SSL_read(tls, rest, sizeof rest);
             sipral_tls_failure_t said = client_refusal(presented);
+            if (said == SIPRAL_TLS_FAILURE_NONE) {
+                said = silent_refusal(presented, heard);
+            }
             report(stack, SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET, said, reason("the connection broke"));
             break;
         }
@@ -413,11 +431,20 @@ int main(int argc, char **argv)
         uint8_t in[4096];
         int got = SSL_read(tls, in, sizeof in);
         if (got > 0) {
+            heard = 1;
             sipral_stack_receive_stream(stack, SIPRAL_TRANSPORT_MAIN, in, (size_t)got, now_ms());
         } else if (SSL_get_error(tls, got) != SSL_ERROR_WANT_READ) {
             /* a TLS 1.3 server refuses the certificate here, after this
              * end's handshake is over */
             sipral_tls_failure_t said = client_refusal(presented);
+            if (said == SIPRAL_TLS_FAILURE_NONE) {
+                said = silent_refusal(presented, heard);
+                if (said != SIPRAL_TLS_FAILURE_NONE) {
+                    report(stack, SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET, said,
+                           "the server closed the connection before answering, and no alert came");
+                    break;
+                }
+            }
             if (SSL_get_error(tls, got) == SSL_ERROR_ZERO_RETURN && said == SIPRAL_TLS_FAILURE_NONE) {
                 sipral_stack_stream_closed(stack, SIPRAL_TRANSPORT_MAIN, now_ms());
                 sipral_stack_poll(stack, now_ms(), NULL);

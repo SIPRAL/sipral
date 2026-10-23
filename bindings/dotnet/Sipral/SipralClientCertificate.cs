@@ -197,8 +197,17 @@ internal sealed class ClientCertificateUse
         }
         if (first.IsCompletedSuccessfully && first.Result == 0)
         {
-            throw new SignallingRefusedException(SipralTransportError.ConnectionReset, SipralTlsFailure.None,
-                "the server closed the connection as the handshake ended");
+            // Asterisk's way of refusing a certificate its authority did not
+            // sign: a clean close and no alert, read as the Kotlin layer
+            // reads it. A certificate that went out was asked for; with none
+            // configured, the selection callback says whether one was.
+            var silent = tls.LocalCertificate is not null ? SipralTlsFailure.ClientCertificateRefused
+                : Asked ? SipralTlsFailure.ClientCertificateRequired
+                : SipralTlsFailure.None;
+            throw new SignallingRefusedException(SipralTransportError.ConnectionReset, silent,
+                silent == SipralTlsFailure.None
+                    ? "the server closed the connection as the handshake ended"
+                    : "the server asked for a client certificate and closed the connection as the handshake ended, no alert reaching this end");
         }
         return (first, buffer);
     }

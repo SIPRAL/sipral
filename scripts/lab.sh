@@ -4574,11 +4574,22 @@ tls_agent_start() {
         "$image" sh -c "
             $prepare
             address=\$(getent hosts asterisk | cut -d' ' -f1)
+            # Stopped at its first refusal: left to retry, a probe could get
+            # in on a later attempt and take the call meant for the agent.
             probe() {
                 env SIPRAL_REGISTRAR_ADDRESS=\"\$address:\$1\" \${2:+SIPRAL_TLS_CA=\$2} \
                     \${3:+SIPRAL_TLS_CLIENT_CERT=/lab-tls/\$3.pem SIPRAL_TLS_CLIENT_KEY=/lab-tls/\$3.key} \
                     \${3:+SIPRAL_TLS_CLIENT_P12=/lab-tls/\$3.p12} \
-                    timeout 20 $agent 2>&1 | grep -m1 '^transport failed' | sed \"s/^/probe \$1\${3:+ \$3}: /\"
+                    $agent > /tmp/probe.log 2>&1 &
+                probing=\$!
+                waited=0
+                until grep -q '^transport failed' /tmp/probe.log || [ \$waited -ge 40 ]; do
+                    sleep 0.5
+                    waited=\$((waited + 1))
+                done
+                kill \$probing 2>/dev/null
+                wait \$probing 2>/dev/null
+                grep -m1 '^transport failed' /tmp/probe.log | sed \"s/^/probe \$1\${3:+ \$3}: /\"
             }
             if [ '$over' = tls ]; then
                 probe 5061 ''
@@ -4649,7 +4660,7 @@ tls_agent_call() {
             || { printf '  the expired certificate was not refused as expired\n'; return 1; }
     fi
     printf '%s\n' "$log" | found '^answered ' \
-        || { printf '  it never answered\n'; return 1; }
+        || { printf '  it never answered; what it said last:\n'; printf '%s\n' "$log" | tail -30 | sed 's/^/    /'; return 1; }
     printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" | grep '^ended ' | found -E "packets_received'?[:=] ?[1-9]" \

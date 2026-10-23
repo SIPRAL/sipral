@@ -2999,10 +2999,26 @@ pub(crate) mod tests {
         let mut observed = Observed::default();
         let handle = speaking(&mut observed, SipralTransport::Tls);
         let reasons = [
-            (SipralTlsFailure::ClientCertificateRequired, 5, "tlsv13 alert certificate required"),
-            (SipralTlsFailure::ClientCertificateRefused, 6, "sslv3 alert bad certificate"),
-            (SipralTlsFailure::ClientKeyUnavailable, 7, "the key is locked with the device"),
-            (SipralTlsFailure::ClientCertificateExpired, 8, "the certificate expired"),
+            (
+                SipralTlsFailure::ClientCertificateRequired,
+                5,
+                "tlsv13 alert certificate required",
+            ),
+            (
+                SipralTlsFailure::ClientCertificateRefused,
+                6,
+                "sslv3 alert bad certificate",
+            ),
+            (
+                SipralTlsFailure::ClientKeyUnavailable,
+                7,
+                "the key is locked with the device",
+            ),
+            (
+                SipralTlsFailure::ClientCertificateExpired,
+                8,
+                "the certificate expired",
+            ),
         ];
         let mut at = 1_000;
         for (reason, number, said) in reasons {

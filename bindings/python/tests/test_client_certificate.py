@@ -25,7 +25,7 @@ import unittest
 
 from sipral import Stack, TlsClientCertificate, TlsTrust
 from sipral.enums import AudioMode, EventKind, RegistrationState, TlsFailure, Transport, TransportError
-from sipral.signalling import ClientCertificateUnusable, certificate_validity, classify
+from sipral.signalling import ClientCertificateUnusable, ClosedAfterHandshake, certificate_validity, classify
 
 from .test_signalling import _SERVER_NAME, _certificate, _Registrar
 
@@ -269,6 +269,14 @@ class TheAlertsAreRead(unittest.TestCase):
     def test_a_certificate_that_cannot_be_presented_is_its_own_reason(self) -> None:
         error, tls, detail = classify(ClientCertificateUnusable(TlsFailure.CLIENT_KEY_UNAVAILABLE, "locked"))
         self.assertEqual((error, tls, detail), (TransportError.OTHER, TlsFailure.CLIENT_KEY_UNAVAILABLE, "locked"))
+
+    def test_a_silent_close_after_the_handshake_refuses_only_a_presented_certificate(self) -> None:
+        # Asterisk refuses a certificate its authority did not sign this way
+        closed = ClosedAfterHandshake("the server closed the connection after the handshake")
+        error, tls, detail = classify(closed, True)
+        self.assertEqual((error, tls), (TransportError.CONNECTION_RESET, TlsFailure.CLIENT_CERTIFICATE_REFUSED))
+        self.assertIn("no alert", detail)
+        self.assertEqual(classify(closed, False)[1], TlsFailure.NONE)
 
     def test_both_kinds_of_date_are_read(self) -> None:
         # RFC 5280 Section 4.1.2.5: UTCTime through 2049, GeneralizedTime from 2050.

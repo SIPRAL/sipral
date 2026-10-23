@@ -1191,11 +1191,17 @@ callback, C through `SSL_CTX_set_cert_cb`. Python's `ssl`, Dart's
 `SecureSocket` and Node.js's `tls` show no such step, so there a TLS 1.2
 server that ends the handshake with `handshake_failure` for a missing
 certificate is `HANDSHAKE_REFUSED`. TLS 1.3's `certificate_required` is
-read everywhere. The Kotlin layer goes one step further: a server that
-asked for a certificate and then dropped the connection with no alert
-reaching this end is read as `CLIENT_CERTIFICATE_REQUIRED` or
-`CLIENT_CERTIFICATE_REFUSED`, by whether one was presented, with `detail`
-saying that no alert came.
+read everywhere.
+
+**Refused in silence.** Asterisk refuses a certificate its authority did
+not sign without saying so: it finishes the handshake, then closes the
+connection cleanly, with no alert and before answering anything. Kotlin,
+.NET and the C program read a server that asked for a certificate and then
+closed that way as `CLIENT_CERTIFICATE_REQUIRED` or
+`CLIENT_CERTIFICATE_REFUSED`, by whether one was presented; Python, which
+cannot see the request, reads a close before any answer on a connection
+that presented one as `CLIENT_CERTIFICATE_REFUSED`. Either way `detail`
+says that no alert came.
 
 How each platform says it:
 
