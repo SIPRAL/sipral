@@ -70,6 +70,7 @@ public sealed partial class SipralStack : IDisposable
     private readonly SipralTransport _turnTransport;
     private readonly string? _turnServerName;
     private readonly X509Certificate2Collection? _turnTrustedCertificates;
+    private readonly SipralClientCertificate? _turnClientCertificate;
 
     // By the media socket's host:port.
     private readonly ConcurrentDictionary<string, TurnStream> _turnStreams = new();
@@ -180,7 +181,9 @@ public sealed partial class SipralStack : IDisposable
     /// <paramref name="turnServerName"/> (default: the host of
     /// <paramref name="turnServer"/>) with the platform's trust, or only with
     /// <paramref name="turnTrustedCertificates"/> when given. Checking cannot
-    /// be turned off.
+    /// be turned off. <paramref name="turnClientCertificate"/> is presented to
+    /// a TURN server over TLS that asks for one; a certificate that cannot be
+    /// presented, or that the server refuses, is a relay not made.
     ///
     /// <paramref name="audio"/> is who pumps the calls' audio.
     /// <see cref="SipralAudio.Device"/>: the library runs every call through
@@ -233,6 +236,15 @@ public sealed partial class SipralStack : IDisposable
     /// the certificate is checked against <paramref name="tlsServerName"/>
     /// (default: the server's host) with <paramref name="tlsTrust"/>
     /// (<c>docs/22-tls.md</c>); the check cannot be turned off.
+    /// <paramref name="tlsClientCertificate"/> is the certificate presented
+    /// when the server asks for one, on that connection and on every
+    /// account's own TLS or WSS connection that names none of its own: its
+    /// dates and key are checked before each attempt
+    /// (<see cref="SipralTlsFailure.ClientCertificateExpired"/>,
+    /// <see cref="SipralTlsFailure.ClientKeyUnavailable"/>), and the server's
+    /// refusal of it is <see cref="SipralTlsFailure.ClientCertificateRefused"/>;
+    /// without one, a server that requires one is
+    /// <see cref="SipralTlsFailure.ClientCertificateRequired"/>.
     ///
     /// The first connection is made before this returns. When it fails or
     /// breaks, <see cref="SipralEventKind.TransportFailed"/> says why, and
@@ -353,7 +365,9 @@ public sealed partial class SipralStack : IDisposable
         SipralResolver? resolver = null,
         bool? systemEchoCancellation = null,
         SipralHeldAudio heldAudio = SipralHeldAudio.Default,
-        SipralIceTrickle iceTrickle = 0)
+        SipralIceTrickle iceTrickle = 0,
+        SipralClientCertificate? tlsClientCertificate = null,
+        SipralClientCertificate? turnClientCertificate = null)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _chosenPort = bindPort;
@@ -364,10 +378,12 @@ public sealed partial class SipralStack : IDisposable
         _turnTransport = turnTransport;
         _turnServerName = turnServerName ?? (turnServer is null ? null : ParseAddress(turnServer).Host);
         _turnTrustedCertificates = turnTrustedCertificates;
+        _turnClientCertificate = turnClientCertificate;
         NativeLibraryLoader.EnsureRegistered();
 
         _resolver = resolver ?? SipralDns.Platform;
-        var (firstLink, firstRefusal) = PrepareSignalling(signalling, bindHost, signallingServer, tlsServerName, tlsTrust);
+        var (firstLink, firstRefusal) = PrepareSignalling(
+            signalling, bindHost, signallingServer, tlsServerName, tlsTrust, tlsClientCertificate);
         _routes = bindHost is null;
         _routeChosen = bindHost is not null || Streamed || streamServer is not null;
         if (Streamed)
@@ -829,7 +845,9 @@ public sealed partial class SipralStack : IDisposable
     /// opens it on <see cref="SipralEventKind.TransportWanted"/> regardless of
     /// <c>streamFallback</c>, and reopens it if it closes. TLS is checked
     /// against <paramref name="tlsPin"/> if set, else the stack's
-    /// <c>tlsTrust</c>. Until open, placing a call throws with
+    /// <c>tlsTrust</c>, and presents <paramref name="tlsClientCertificate"/>
+    /// to a server that asks for one, else the stack's
+    /// <c>tlsClientCertificate</c>. Until open, placing a call throws with
     /// <see cref="SipralStatus.TransportDown"/>. UDP stacks only. WS/WSS run a
     /// WebSocket (RFC 7118) asking for <paramref name="websocketResource"/>
     /// (<c>/ws</c>) with <paramref name="websocketHost"/> as <c>Host</c> (the
@@ -861,7 +879,8 @@ public sealed partial class SipralStack : IDisposable
         SipralTransport streamProtocol = 0,
         IEnumerable<string>? realms = null,
         string? websocketHost = null,
-        string? websocketResource = null)
+        string? websocketResource = null,
+        SipralClientCertificate? tlsClientCertificate = null)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
@@ -881,7 +900,7 @@ public sealed partial class SipralStack : IDisposable
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
             sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
             new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
-                websocketHost, websocketResource));
+                websocketHost, websocketResource, tlsClientCertificate));
         lock (_accounts)
         {
             _accounts.Add(account);
@@ -1874,6 +1893,9 @@ public sealed partial class SipralStack : IDisposable
         TurnStream stream;
         try
         {
+            // a client certificate that cannot be presented is a relay not
+            // made, with no connection tried
+            var use = protocol == SipralTransport.Tls ? ClientCertificateUse.Prepare(_turnClientCertificate) : null;
             var (host, port) = ParseAddress(server);
             var client = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
             if (!client.ConnectAsync(IPAddress.Parse(host), port).Wait(TimeSpan.FromSeconds(5)))
@@ -1886,6 +1908,7 @@ public sealed partial class SipralStack : IDisposable
             {
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
                 var options = new SslClientAuthenticationOptions { TargetHost = _turnServerName };
+                use!.Apply(options);
                 if (_turnTrustedCertificates is { Count: > 0 } roots)
                 {
                     // SslStream's default; a custom policy would start from
@@ -1905,7 +1928,7 @@ public sealed partial class SipralStack : IDisposable
         }
         catch (Exception ex) when (ex is IOException or SocketException or AggregateException
                                        or System.Security.Authentication.AuthenticationException
-                                       or FormatException)
+                                       or FormatException or SignallingRefusedException)
         {
             SayTurn(local, closed: true);
             return;

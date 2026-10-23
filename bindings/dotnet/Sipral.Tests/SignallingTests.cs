@@ -180,7 +180,7 @@ public sealed class SignallingTests
             client.Dispose();
         }
 
-        private static string Ok(string request)
+        internal static string Ok(string request)
         {
             var lines = new List<string> { "SIP/2.0 200 OK" };
             foreach (var name in new[] { "Via", "From", "To", "Call-ID", "CSeq" })
