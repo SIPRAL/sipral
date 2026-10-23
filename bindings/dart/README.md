@@ -96,6 +96,41 @@ and a connection that closes is opened again and the account registered
 again. A TLS one with a `tlsPin` trusts that certificate alone, by the
 library's own verdict (`checkCertificate`); without one, the platform's
 authorities under `SipralStack.open(tlsServerName:)` or the server's host.
+
+A server that requires a client certificate (mutual TLS) is given one as
+`clientCertificate`, on the account or, for every account that names none,
+on `SipralStack.open`: `SipralClientCertificate.files(chainPath, keyPath)`,
+read again for every connection so a certificate renewed on disk is
+presented on the next, or `SipralClientCertificate.pem(chain, key)` from
+bytes, each with `password:` for an encrypted key. Both are PEM, the leaf
+first in the chain. Dart's TLS signs with the key in this process: a key
+that stays in a hardware module or the operating system's keystore needs
+the Swift, Kotlin or .NET layer. A refusal is
+`SipralEventKind.transportFailed`, and `SipralStackEvent.tlsFailure` says
+which:
+
+| What happened | `tlsFailure` | `transportError` |
+|---|---|---|
+| no certificate given, and the server required one (`certificate_required`, or any alert about the client's certificate) | `clientCertificateRequired` | `connectionReset` |
+| the server refused the one presented (`bad_certificate`, `unknown_ca`, `certificate_unknown`, `unsupported_certificate`, `certificate_revoked`, `access_denied`) | `clientCertificateRefused` | `connectionReset` |
+| the server said it has expired (`certificate_expired`) | `clientCertificateExpired` | `connectionReset` |
+| the leaf is out of its dates, found before connecting | `clientCertificateExpired` | `other` |
+| a file is missing, or the key does not load or belong to the leaf | `clientKeyUnavailable` | `other` |
+
+The last two are found before anything reaches the server. Under TLS 1.3
+the server's verdict comes a round trip after this end's handshake has
+finished, and a REGISTER written in that time would make a server that
+refused reset the connection and lose the alert; so a TLS connection is
+handed to the stack only once twice the handshake's time has passed quietly
+(250 ms at least, 3 s at most), and an alert in that time is named as
+above. Dart says neither the version negotiated nor whether the server
+asked for a certificate, so every TLS connection this layer opens waits so.
+A bare `handshake_failure` is not
+read as one, since Dart does not say whether the server had asked for a
+certificate; a TLS 1.2 server refusing a missing one sends just that. A
+server on Dart's own `SecureServerSocket` refuses a client without
+sending any alert, so a client of one sees only the connection closed.
+
 A request on the UDP socket that outgrows a datagram is another matter: the
 other idiomatic layers open a TCP connection for it, and this one does not,
 so such a request (most often the answer to a challenge on a call offering
@@ -177,7 +212,12 @@ and a failing call's error text.
 `test/account_stream_test.dart` registers an account over TLS and one over
 UDP with two loopback registrars and places a call through each, opens an
 account's TCP connection again when its registrar drops it, and reads the
-settings back. `test/reachability_test.dart` covers the advertised address,
+settings back. `test/client_certificate_test.dart` presents a client
+certificate to a registrar requiring one and registers, and has OpenSSL's
+own `s_server` require one where none is given and refuse one another
+authority signed, at TLS 1.3 and 1.2, and again through a slow relay where
+the REGISTER would otherwise overtake the verdict; an expired certificate
+and a key that cannot be used reach no server. `test/reachability_test.dart` covers the advertised address,
 the loopback refusal, RFC 3263 location over an SRV answer and the platform
 lookup, the keep-alive and best-effort SRTP; `test/forms_test.dart` reads
 every certificate pin form in `bindings/fixtures/pin-forms.txt`.

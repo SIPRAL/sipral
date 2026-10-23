@@ -96,6 +96,48 @@ a TCP or TLS connection of its own (`streamProtocol`), and a request too
 large for a datagram goes on a TCP connection the stack opens, to
 `streamServer` when the server takes TCP on another port.
 
+### A client certificate
+
+A server that requires one (mutual TLS) is given the certificate in
+`clientCertificate`, read from files by the application: `{ cert, key }` in
+PEM, the leaf first in `cert` and then any intermediates, or `{ pfx }`, a
+PKCS#12 holding both, with `passphrase` for an encrypted key or the PKCS#12.
+
+```ts
+const stack = await Stack.open({
+  signalling: SipralTransport.Tls,
+  signallingServer: 'pbx.example.com:5061',
+  clientCertificate: { cert: readFileSync('phone.pem'), key: readFileSync('phone.key') },
+});
+```
+
+It is presented on the signalling connection and on every TLS or WSS
+connection of an account's own; an account's own `clientCertificate` takes
+its place there, and `turnClientCertificate` is the TURN server's. Node's TLS
+signs with the key in this process: a key that stays in a hardware module or
+the operating system's keystore needs the Swift, Kotlin or .NET layer. Each
+refusal is a `TransportFailed` with its own `fields.tls`:
+
+| What happened | `fields.tls` | `fields.error` |
+|---|---|---|
+| no certificate given, and the server required one (`certificate_required`, or any alert about the client's certificate) | `ClientCertificateRequired` | `ConnectionReset` |
+| the server refused the one presented (`bad_certificate`, `unknown_ca`, `certificate_unknown`, `unsupported_certificate`, `certificate_revoked`, `access_denied`) | `ClientCertificateRefused` | `ConnectionReset` |
+| the server said it has expired (`certificate_expired`) | `ClientCertificateExpired` | `ConnectionReset` |
+| the leaf is out of its dates, found before connecting | `ClientCertificateExpired` | `Other` |
+| the key does not load, does not belong to the leaf, or its password is wrong, found before connecting | `ClientKeyUnavailable` | `Other` |
+
+The last two are found before anything is sent, and the connection is tried
+again on the usual back-off. A server under TLS 1.3 says what it made of the
+certificate a round trip after this end's handshake has finished, and a
+REGISTER written in that time would make a server that refused reset the
+connection and lose the alert; so a TLS 1.3 connection is handed to the
+stack only once twice the handshake's time has passed quietly (250 ms at
+least, 3 s at most), and an alert in that time is named as above. Node does
+not say whether the server asked for a certificate, so every TLS 1.3
+connection waits so, with or without one. A bare `handshake_failure`
+stays `HandshakeRefused`: Node does not say whether the server had asked for
+a certificate, which a TLS 1.2 server refusing a missing one sends.
+
 ## Device mode
 
 ```ts
@@ -146,7 +188,10 @@ npm test
 They run against the library, on loopback: calls between stacks, with audio,
 digits, text, redirects, transfers, recording and three-way mixing; TLS and
 TCP against this test's own registrar, with certificates made by the
-`openssl` command; presence, dialogs, a conference's picture, MESSAGE, an
+`openssl` command, and a client certificate presented to it, required by it
+and refused by OpenSSL's own `s_server` at TLS 1.3 and 1.2, and again
+through a slow relay where a REGISTER would otherwise overtake the verdict;
+presence, dialogs, a conference's picture, MESSAGE, an
 OAuth 2.0 token, the network test, lookups, STUN and TURN; a local
 conference; and device mode where the build has an audio backend, opening no
 device. `scripts/check.sh --only node` runs them as part of the gate.

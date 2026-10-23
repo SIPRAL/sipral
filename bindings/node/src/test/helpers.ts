@@ -7,13 +7,14 @@
 // two stacks calling each other on loopback.
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { type Socket as DatagramSocket, createSocket } from 'node:dgram';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { type Server, type Socket, createServer } from 'node:net';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { type Server, type Socket, connect as connectTcp, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer as createTlsServer } from 'node:tls';
+import { TLSSocket, type TlsOptions, createServer as createTlsServer } from 'node:tls';
 
 import { type Call, SipralEventKind, type Stack, type StackEvent } from '../index.js';
 
@@ -207,18 +208,26 @@ export function framer(deliver: (message: string) => void): (data: Buffer) => vo
 export class StreamServer {
   readonly messages: [number, string][] = [];
   readonly connections: Socket[] = [];
+  /** The subject CN of the certificate each TLS client presented, in order; empty for none. */
+  readonly peers: string[] = [];
   address = '';
   /** How many connections it took, the dropped ones counted. */
   accepted = 0;
+  /** How many TCP connections reached it, a TLS handshake that failed counted. */
+  reached = 0;
   private server: Server | null = null;
 
   /** What to answer a request with, beside the REGISTER's 200: null for nothing. */
   responder: ((message: string, socket: Socket) => string | null) | null = null;
 
-  static async open(certificate?: { cert: Buffer; key: Buffer }): Promise<StreamServer> {
+  /** Over TLS given a certificate, with any other server option beside it (`requestCert`, `ca`, versions). */
+  static async open(certificate?: TlsOptions & { cert: Buffer; key: Buffer }): Promise<StreamServer> {
     const made = new StreamServer();
     const serve = (socket: Socket): void => made.serve(socket);
     made.server = certificate === undefined ? createServer(serve) : createTlsServer({ ...certificate }, serve);
+    made.server.on('connection', () => {
+      made.reached += 1;
+    });
     made.server.on('tlsClientError', () => undefined);
     await new Promise<void>((resolve) => made.server?.listen(0, '127.0.0.1', resolve));
     const bound = made.server.address();
@@ -247,6 +256,10 @@ export class StreamServer {
     this.connections.push(socket);
     this.accepted += 1;
     const connection = this.accepted;
+    if (socket instanceof TLSSocket) {
+      const presented = socket.getPeerCertificate(false);
+      this.peers.push(typeof presented?.subject?.CN === 'string' ? presented.subject.CN : '');
+    }
     socket.on('error', () => undefined);
     socket.on(
       'data',
@@ -307,6 +320,190 @@ export function certificates(): { good: { cert: Buffer; key: Buffer }; expired: 
     return null;
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A client certificate and the authority that signed it, as PEM, with the key's password where it has one. */
+export interface ClientCertificates {
+  /** The authority a server requiring client certificates trusts. */
+  authority: Buffer;
+  /** A certificate it signed for `CLIENT_NAME`, with `clientAuth`, and its key. */
+  good: { cert: Buffer; key: Buffer };
+  /** The same certificate and key in one PKCS#12, and its password. */
+  pfx: { pfx: Buffer; passphrase: string };
+  /** One another authority signed. */
+  stranger: { cert: Buffer; key: Buffer };
+  /** One the authority signed that expired in 2020. */
+  expired: { cert: Buffer; key: Buffer };
+  /** The good certificate with the stranger's key. */
+  mismatched: { cert: Buffer; key: Buffer };
+}
+
+/** The subject CN of every client certificate made here. */
+export const CLIENT_NAME = 'alice-phone.sipral.test';
+
+/** Client certificates made with the `openssl` command, or null without one. */
+export function clientCertificates(): ClientCertificates | null {
+  const directory = mkdtempSync(join(tmpdir(), 'sipral-client-tls-'));
+  const at = (name: string): string => join(directory, name);
+  const run = (...args: string[]): void => {
+    execFileSync('openssl', args, { stdio: 'ignore' });
+  };
+  try {
+    const authority = (name: string, cn: string): void =>
+      run(
+        'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1',
+        '-subj', `/CN=${cn}`,
+        '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign',
+        '-keyout', at(`${name}.key`), '-out', at(`${name}.pem`),
+      );
+    authority('ca', 'Sipral test client authority');
+    authority('other', 'Another authority');
+    writeFileSync(at('client.ext'), 'extendedKeyUsage=clientAuth\n');
+    const signed = (name: string, by: string, dates: string[]): void => {
+      run(
+        'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-subj', `/CN=${CLIENT_NAME}`,
+        '-keyout', at(`${name}.key`), '-out', at(`${name}.csr`),
+      );
+      run(
+        'x509', '-req', '-in', at(`${name}.csr`), '-CA', at(`${by}.pem`), '-CAkey', at(`${by}.key`), '-CAcreateserial',
+        '-extfile', at('client.ext'), ...dates, '-out', at(`${name}.pem`),
+      );
+    };
+    signed('good', 'ca', ['-days', '1']);
+    signed('stranger', 'other', ['-days', '1']);
+    signed('expired', 'ca', ['-not_before', '20200101000000Z', '-not_after', '20200102000000Z']);
+    const passphrase = randomBytes(12).toString('hex');
+    run('pkcs12', '-export', '-in', at('good.pem'), '-inkey', at('good.key'), '-out', at('good.p12'), '-passout', `pass:${passphrase}`);
+    const pair = (name: string): { cert: Buffer; key: Buffer } => ({ cert: readFileSync(at(`${name}.pem`)), key: readFileSync(at(`${name}.key`)) });
+    return {
+      authority: readFileSync(at('ca.pem')),
+      good: pair('good'),
+      pfx: { pfx: readFileSync(at('good.p12')), passphrase },
+      stranger: pair('stranger'),
+      expired: pair('expired'),
+      mismatched: { cert: readFileSync(at('good.pem')), key: readFileSync(at('stranger.key')) },
+    };
+  } catch {
+    return null;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * OpenSSL's own TLS server, `openssl s_server`, requiring a client
+ * certificate `authority` signed: unlike Node's, which resets the
+ * connection, it refuses a certificate with the alert TLS defines for why.
+ * It answers nothing; `close` ends it.
+ */
+export class OpenSslServer {
+  address = '';
+  private child: ChildProcess | null = null;
+  private directory = '';
+
+  static async open(served: { cert: Buffer; key: Buffer }, authority: Buffer, version: '-tls1_2' | '-tls1_3'): Promise<OpenSslServer> {
+    const made = new OpenSslServer();
+    made.directory = mkdtempSync(join(tmpdir(), 'sipral-s-server-'));
+    const at = (name: string): string => join(made.directory, name);
+    writeFileSync(at('server.pem'), served.cert);
+    writeFileSync(at('server.key'), served.key);
+    writeFileSync(at('ca.pem'), authority);
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    const child = spawn(
+      'openssl',
+      [
+        's_server', '-accept', `127.0.0.1:${port}`, version, '-Verify', '1', '-verify_return_error',
+        '-CAfile', at('ca.pem'), '-cert', at('server.pem'), '-key', at('server.key'),
+      ],
+      { stdio: ['pipe', 'pipe', 'ignore'] },
+    );
+    made.child = child;
+    await new Promise<void>((resolve, reject) => {
+      let said = '';
+      child.stdout?.on('data', (data: Buffer) => {
+        said += data.toString();
+        if (said.includes('ACCEPT')) {
+          resolve();
+        }
+      });
+      child.once('exit', () => reject(new Error('openssl s_server ended before it listened')));
+    });
+    made.address = `127.0.0.1:${port}`;
+    return made;
+  }
+
+  async close(): Promise<void> {
+    const child = this.child;
+    this.child = null;
+    if (child !== null && child.exitCode === null) {
+      await new Promise<void>((resolve) => {
+        child.once('exit', () => resolve());
+        child.kill();
+      });
+    }
+    rmSync(this.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A TCP relay to `target` that holds what each end sends for `delayMs`
+ * before passing it on, as a long path would, each later segment from the
+ * client 20 ms longer than the one before, as a path whose queue is filling
+ * holds it. Bytes that reach a server
+ * which has closed its end are answered the way its kernel answers them,
+ * with a reset, and the reset is passed on at once, dropping whatever the
+ * server sent that has not arrived yet -- as a client's kernel drops what
+ * it held unread when the reset comes. What a client wrote before the
+ * server's delayed answer reached it then loses it that answer.
+ */
+export class SlowPath {
+  address = '';
+  private server: Server | null = null;
+  private readonly sockets: Socket[] = [];
+
+  static async open(target: string, delayMs: number): Promise<SlowPath> {
+    const made = new SlowPath();
+    const [host, port] = [target.slice(0, target.lastIndexOf(':')), Number(target.slice(target.lastIndexOf(':') + 1))];
+    made.server = createServer((client) => {
+      const upstream = connectTcp({ host, port });
+      made.sockets.push(client, upstream);
+      client.on('error', () => undefined);
+      upstream.on('error', () => client.resetAndDestroy());
+      let segments = 0;
+      client.on('data', (data: Buffer) => {
+        setTimeout(() => {
+          if (upstream.readableEnded) {
+            upstream.destroy();
+            client.resetAndDestroy();
+          } else if (!upstream.destroyed) {
+            upstream.write(data);
+          }
+        }, delayMs + 20 * segments++);
+      });
+      client.on('close', () => upstream.destroy());
+      upstream.on('data', (data: Buffer) => {
+        setTimeout(() => {
+          if (!client.destroyed) {
+            client.write(data);
+          }
+        }, delayMs);
+      });
+      upstream.on('end', () => setTimeout(() => client.end(), delayMs));
+    });
+    await new Promise<void>((resolve) => made.server?.listen(0, '127.0.0.1', resolve));
+    made.address = `127.0.0.1:${(made.server.address() as { port: number }).port}`;
+    return made;
+  }
+
+  async close(): Promise<void> {
+    for (const socket of this.sockets.splice(0)) {
+      socket.destroy();
+    }
+    await new Promise<void>((resolve) => this.server?.close(() => resolve()));
   }
 }
 

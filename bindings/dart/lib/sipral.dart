@@ -12,6 +12,7 @@ export 'src/idiomatic.dart'
     show
         SipralAccount,
         SipralCall,
+        SipralClientCertificate,
         SipralException,
         SipralDns,
         SipralLookup,
@@ -46,6 +47,8 @@ export 'src/sipral_abi.dart'
         SipralSrtp,
         SipralSrtpSuite,
         SipralStatus,
+        SipralTlsFailure,
         SipralToggle,
         SipralTokenError,
-        SipralTransport;
+        SipralTransport,
+        SipralTransportError;

@@ -12,8 +12,16 @@
 // application as `TransportFailed`.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { type Socket, connect as connectTcp, isIP } from 'node:net';
-import { type ConnectionOptions, type PeerCertificate, type TLSSocket, checkServerIdentity, connect as connectTls, rootCertificates } from 'node:tls';
+import { Socket, connect as connectTcp, isIP } from 'node:net';
+import {
+  type ConnectionOptions,
+  type PeerCertificate,
+  TLSSocket,
+  checkServerIdentity,
+  connect as connectTls,
+  createSecureContext,
+  rootCertificates,
+} from 'node:tls';
 
 import { SIPRAL_TRANSPORT_DETAIL_BYTES, SipralTlsFailure, SipralTransportError } from './sipral_abi.js';
 
@@ -123,6 +131,77 @@ class PinRefused extends Error {
   }
 }
 
+/**
+ * The certificate this end presents to a server that asks for one (mutual
+ * TLS), as files read by the application: `cert` and `key` in PEM -- the
+ * leaf first in `cert`, then any intermediates -- or both in one PKCS#12
+ * `pfx`. `passphrase` opens an encrypted key or the PKCS#12. Node's TLS
+ * signs with the key in this process; a key held by a hardware module or the
+ * operating system needs the Swift, Kotlin or .NET layer.
+ */
+export interface ClientCertificate {
+  /** The certificate chain in PEM, the leaf first. */
+  readonly cert?: string | Buffer;
+  /** The leaf's private key in PEM. */
+  readonly key?: string | Buffer;
+  /** The certificate chain and its key in one PKCS#12, instead of `cert` and `key`. */
+  readonly pfx?: Buffer;
+  /** The password of an encrypted `key` or of `pfx`. */
+  readonly passphrase?: string;
+}
+
+/** A client certificate that cannot be used, found before connecting. */
+class ClientCertificateUnusable extends Error {
+  readonly code: 'CLIENT_KEY_UNAVAILABLE' | 'CLIENT_CERTIFICATE_EXPIRED';
+
+  constructor(code: 'CLIENT_KEY_UNAVAILABLE' | 'CLIENT_CERTIFICATE_EXPIRED', message: string) {
+    super(message);
+    this.name = 'ClientCertificateUnusable';
+    this.code = code;
+  }
+}
+
+/**
+ * The TLS options that present `certificate`, once it is shown usable now:
+ * its key loads and belongs to its leaf, and the leaf is within its dates.
+ * Throws a {@link ClientCertificateUnusable} otherwise, which
+ * {@link classify} names `ClientKeyUnavailable` or `ClientCertificateExpired`.
+ */
+export function presenting(certificate: ClientCertificate, now: Date = new Date()): ConnectionOptions {
+  const { cert, key, pfx, passphrase } = certificate;
+  if (pfx === undefined && (cert === undefined || key === undefined)) {
+    throw new ClientCertificateUnusable('CLIENT_KEY_UNAVAILABLE', 'a client certificate needs cert and key, or pfx');
+  }
+  const options: ConnectionOptions = pfx === undefined ? { cert, key } : { pfx };
+  if (passphrase !== undefined) {
+    options.passphrase = passphrase;
+  }
+  let leaf: ReturnType<TLSSocket['getCertificate']>;
+  try {
+    // the key is checked against the leaf as the context takes them both
+    const holder = new TLSSocket(new Socket(), { secureContext: createSecureContext(options) });
+    leaf = holder.getCertificate();
+    holder.destroy();
+  } catch (error) {
+    throw new ClientCertificateUnusable(
+      'CLIENT_KEY_UNAVAILABLE',
+      `the client certificate's key cannot be used: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (leaf === null || !('valid_to' in leaf)) {
+    throw new ClientCertificateUnusable('CLIENT_KEY_UNAVAILABLE', 'the client certificate holds no certificate');
+  }
+  const from = Date.parse(leaf.valid_from);
+  const to = Date.parse(leaf.valid_to);
+  if (now.getTime() < from || now.getTime() > to) {
+    throw new ClientCertificateUnusable(
+      'CLIENT_CERTIFICATE_EXPIRED',
+      `the client certificate is valid from ${leaf.valid_from} to ${leaf.valid_to}`,
+    );
+  }
+  return options;
+}
+
 /** What a failed connection was, as the stack names it. */
 export interface Refusal {
   /** A `SipralTransportError` value. */
@@ -153,6 +232,25 @@ const UNTRUSTED = new Set([
   'INVALID_CA',
 ]);
 
+/**
+ * The alerts a server sends about the client's certificate, as OpenSSL
+ * codes them: certificate_required (116), bad_certificate (42),
+ * unsupported_certificate (43), certificate_revoked (44),
+ * certificate_unknown (46), unknown_ca (48) and access_denied (49).
+ */
+const CLIENT_CERTIFICATE_ALERTS = new Set([
+  'ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED',
+  'ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE',
+  'ERR_SSL_SSLV3_ALERT_UNSUPPORTED_CERTIFICATE',
+  'ERR_SSL_SSLV3_ALERT_CERTIFICATE_REVOKED',
+  'ERR_SSL_SSLV3_ALERT_CERTIFICATE_UNKNOWN',
+  'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA',
+  'ERR_SSL_TLSV1_ALERT_ACCESS_DENIED',
+]);
+
+/** certificate_expired (45), which a server sends about the client's certificate. */
+const CLIENT_CERTIFICATE_EXPIRED_ALERT = 'ERR_SSL_SSLV3_ALERT_CERTIFICATE_EXPIRED';
+
 /** One line of at most `SIPRAL_TRANSPORT_DETAIL_BYTES` bytes of UTF-8. */
 export function oneLine(sentence: string): string {
   const flat = [...sentence].map((ch) => (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f ? ' ' : ch)).join('');
@@ -169,11 +267,32 @@ export function oneLine(sentence: string): string {
  * a name mismatch or expired by its code; any other TLS error is a
  * handshake refused. A server nothing answered for is refused, a network
  * with no way through unreachable, silence timed out.
+ *
+ * `presented` says whether this end offered a client certificate: a server
+ * alert about the client's certificate is then that certificate refused, or
+ * expired, and without one a certificate the server required. These alerts
+ * come during the handshake under TLS 1.2 and on the first read after it
+ * under TLS 1.3, so the same reading serves a connection that failed later.
+ * A bare handshake_failure stays a handshake refused: Node does not say
+ * whether the server had asked for a certificate.
  */
-export function classify(failure: unknown): Refusal {
+export function classify(failure: unknown, presented = false): Refusal {
   const error = failure instanceof Error ? failure : new Error(String(failure));
   const code = (error as NodeJS.ErrnoException).code ?? '';
   const detail = oneLine(code && !error.message.includes(code) ? `${code}: ${error.message}` : error.message);
+  if (code === 'CLIENT_KEY_UNAVAILABLE') {
+    return { error: SipralTransportError.Other, tls: SipralTlsFailure.ClientKeyUnavailable, detail };
+  }
+  if (code === 'CLIENT_CERTIFICATE_EXPIRED') {
+    return { error: SipralTransportError.Other, tls: SipralTlsFailure.ClientCertificateExpired, detail };
+  }
+  if (CLIENT_CERTIFICATE_ALERTS.has(code)) {
+    const tls = presented ? SipralTlsFailure.ClientCertificateRefused : SipralTlsFailure.ClientCertificateRequired;
+    return { error: SipralTransportError.ConnectionReset, tls, detail };
+  }
+  if (code === CLIENT_CERTIFICATE_EXPIRED_ALERT && presented) {
+    return { error: SipralTransportError.ConnectionReset, tls: SipralTlsFailure.ClientCertificateExpired, detail };
+  }
   if (EXPIRED.has(code)) {
     return { error: SipralTransportError.ConnectionReset, tls: SipralTlsFailure.Expired, detail };
   }
@@ -213,16 +332,28 @@ export interface ConnectOptions {
   trust?: TlsTrust | null | undefined;
   /** The name the certificate must carry; the host's when left out. */
   serverName?: string | undefined;
+  /** Over TLS, the certificate this end presents when the server asks; none when left out. */
+  clientCertificate?: ClientCertificate | null | undefined;
   /** How long the connection and its handshake may take. */
   timeoutMs?: number;
 }
 
 /**
  * One connection to `host:port`, over TLS when `trust` is given; rejects
- * with what refused it, which {@link classify} names.
+ * with what refused it, which {@link classify} names. A client certificate
+ * that cannot be used now rejects before anything is sent.
  */
 export function openStream(host: string, port: number, options: ConnectOptions = {}): Promise<Socket> {
   const timeoutMs = options.timeoutMs ?? 5000;
+  let presented: ConnectionOptions = {};
+  const trusted = options.trust !== null && options.trust !== undefined;
+  if (trusted && options.clientCertificate !== null && options.clientCertificate !== undefined) {
+    try {
+      presented = presenting(options.clientCertificate);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
   return new Promise<Socket>((resolve, reject) => {
     let settled = false;
     let socket: Socket;
@@ -259,6 +390,7 @@ export function openStream(host: string, port: number, options: ConnectOptions =
     const name = options.serverName ?? host;
     const tlsOptions: ConnectionOptions = {
       ...trust.connectionOptions(),
+      ...presented,
       host,
       port,
       ...local,
@@ -268,6 +400,7 @@ export function openStream(host: string, port: number, options: ConnectOptions =
       tlsOptions.checkServerIdentity = (_host: string, certificate: PeerCertificate) =>
         checkServerIdentity(name, certificate);
     }
+    const began = Date.now();
     const secure: TLSSocket = connectTls(tlsOptions, () => {
       if (trust.pin !== null) {
         const leaf = secure.getPeerCertificate(false);
@@ -277,7 +410,32 @@ export function openStream(host: string, port: number, options: ConnectOptions =
           return;
         }
       }
-      done();
+      if (secure.getProtocol() !== 'TLSv1.3') {
+        done();
+        return;
+      }
+      // Under TLS 1.3 the server's verdict on the client's certificate --
+      // or on its having none -- comes a round trip after this end's
+      // handshake. Something written meanwhile reaches a server that has
+      // already refused, which then resets the connection with it unread,
+      // and the reset loses the alert that said why. So nothing is handed
+      // over to write on until twice the handshake's time has passed
+      // quietly (at least 250 ms, at most 3 s): an alert in that time fails
+      // the connection with its reason, and what arrived stays unread in
+      // the socket for whoever reads it next. Node does not say whether the
+      // server asked for a certificate, so every TLS 1.3 connection waits.
+      const quietMs = Math.min(3000, Math.max(250, 2 * (Date.now() - began)));
+      clearTimeout(timer);
+      const closed = (): void => {
+        const error = new Error('the server closed the connection just after the TLS handshake') as NodeJS.ErrnoException;
+        error.code = 'ECONNRESET';
+        fail(error);
+      };
+      secure.once('close', closed);
+      setTimeout(() => {
+        secure.off('close', closed);
+        done();
+      }, quietMs).unref();
     });
     socket = secure;
     secure.once('error', fail);
