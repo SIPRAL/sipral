@@ -259,6 +259,25 @@ public enum SipralTlsFailure : uint
     /// The handshake failed: no common version or cipher, a server alert, or no TLS there.
     /// </summary>
     HandshakeRefused = 4,
+    /// <summary>
+    /// The server asked for a client certificate and this end had none to present.
+    /// </summary>
+    ClientCertificateRequired = 5,
+    /// <summary>
+    /// The server refused the client certificate this end presented: an authority it does
+    /// not trust, a revoked certificate, or one it does not accept for this account.
+    /// </summary>
+    ClientCertificateRefused = 6,
+    /// <summary>
+    /// The client certificate's private key could not be used: not found, locked with the
+    /// device, its use refused by the user, or invalidated by the platform.
+    /// </summary>
+    ClientKeyUnavailable = 7,
+    /// <summary>
+    /// The client certificate has expired or is not valid yet, as this end read its dates
+    /// before connecting or as the server's alert said.
+    /// </summary>
+    ClientCertificateExpired = 8,
 }
 
 /// <summary>

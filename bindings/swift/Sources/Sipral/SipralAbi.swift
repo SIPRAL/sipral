@@ -168,6 +168,17 @@ public enum SipralTlsFailure: UInt32, Sendable {
     case expired = 3
     /// The handshake failed: no common version or cipher, a server alert, or no TLS there.
     case handshakeRefused = 4
+    /// The server asked for a client certificate and this end had none to present.
+    case clientCertificateRequired = 5
+    /// The server refused the client certificate this end presented: an authority it does
+    /// not trust, a revoked certificate, or one it does not accept for this account.
+    case clientCertificateRefused = 6
+    /// The client certificate's private key could not be used: not found, locked with the
+    /// device, its use refused by the user, or invalidated by the platform.
+    case clientKeyUnavailable = 7
+    /// The client certificate has expired or is not valid yet, as this end read its dates
+    /// before connecting or as the server's alert said.
+    case clientCertificateExpired = 8
 }
 
 /// The three answers a setting can give in a struct that starts out zeroed.

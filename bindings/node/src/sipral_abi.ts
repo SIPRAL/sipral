@@ -643,6 +643,25 @@ export const SipralTlsFailure = Object.freeze({
    * The handshake failed: no common version or cipher, a server alert, or no TLS there.
    */
   HandshakeRefused: 4,
+  /**
+   * The server asked for a client certificate and this end had none to present.
+   */
+  ClientCertificateRequired: 5,
+  /**
+   * The server refused the client certificate this end presented: an authority it does
+   * not trust, a revoked certificate, or one it does not accept for this account.
+   */
+  ClientCertificateRefused: 6,
+  /**
+   * The client certificate's private key could not be used: not found, locked with the
+   * device, its use refused by the user, or invalidated by the platform.
+   */
+  ClientKeyUnavailable: 7,
+  /**
+   * The client certificate has expired or is not valid yet, as this end read its dates
+   * before connecting or as the server's alert said.
+   */
+  ClientCertificateExpired: 8,
 } as const);
 koffi.alias('sipral_tls_failure_t', 'uint32_t');
 
