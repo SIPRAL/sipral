@@ -3540,7 +3540,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ----------------------------------
-ctutils 0.4.3 -- Apache-2.0 OR MIT
+ctutils 0.4.5 -- Apache-2.0 OR MIT
 ----------------------------------
 
 [LICENSE-APACHE]

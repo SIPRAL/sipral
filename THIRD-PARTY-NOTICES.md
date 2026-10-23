@@ -236,7 +236,7 @@ beside it.
 | `block-buffer` 0.12.1 | the block buffering of the hashes | MIT OR Apache-2.0 |
 | `const-oid` 0.10.2 | object identifiers the hash traits carry | Apache-2.0 OR MIT |
 | `cfg-if` 1.0.5 | compile-time selection inside `sha2` | MIT OR Apache-2.0 |
-| `ctutils` 0.4.3 | constant-time comparison and selection | Apache-2.0 OR MIT |
+| `ctutils` 0.4.5 | constant-time comparison and selection | Apache-2.0 OR MIT |
 | `cmov` 0.5.4 | constant-time conditional moves `ctutils` uses | Apache-2.0 OR MIT |
 | `rsa` 0.10.0-rc.19 | RSA public keys and RSASSA-PKCS1-v1_5 verification; its signing and decryption are never called | MIT OR Apache-2.0 |
 | `crypto-primes` 0.7.2 | prime generation, arriving with `rsa`; unused here, since no key is generated | Apache-2.0 OR MIT |
