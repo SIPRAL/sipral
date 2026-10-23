@@ -382,6 +382,29 @@ final class ClientCertificateTests: XCTestCase {
         }
     }
 
+    /// TLS 1.3: the server answers the certificate after this end's
+    /// handshake, and a REGISTER sent at once must not hide that answer.
+    func testTheRefusalIsToldEvenWhenTheAccountRegistersAtOnce() async throws {
+        let stranger = try TestPki.Authority("Sipral test stranger")
+        for (presented, expected) in [(nil, SipralTlsFailure.clientCertificateRequired),
+                                      (try identity("mallory", by: stranger), .clientCertificateRefused)] {
+            let registrar = try registrar(.TLSv13)
+            defer { registrar.stop() }
+            let stack = try stack(registrar, presented)
+            defer { stack.close() }
+            let events = stack.events()
+            let account = try stack.addAccount(
+                aor: "sip:alice@\(CertificateRegistrar.serverName)", registrarAddress: registrar.address,
+                registrar: "sip:\(CertificateRegistrar.serverName)"
+            )
+            try account.register()
+            let event = await firstOne(of: events, within: 10) { $0.kind == .transportFailed }
+            let failed = try XCTUnwrap(event?.transportFailedData, "no reason was given")
+            XCTAssertEqual(failed.tls, expected, failed.detail ?? "")
+            XCTAssertTrue(registrar.registers.isEmpty)
+        }
+    }
+
     func testACertificateTheServerDoesNotTrustIsRefused() async throws {
         let stranger = try TestPki.Authority("Sipral test stranger")
         for version in [tls_protocol_version_t.TLSv13, .TLSv12] {

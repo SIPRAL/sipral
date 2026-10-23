@@ -260,10 +260,20 @@ final class SignallingConnection: @unchecked Sendable {
         }
         let settled = DispatchSemaphore(value: 0)
         let outcome = SignallingOutcome()
+        let began = DispatchTime.now()
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                let hold = self.verdictWaitMs(since: began)
+                guard hold == 0 else {
+                    // the server's word on the certificate is due; a failure
+                    // meanwhile settles the outcome first
+                    self.queue.asyncAfter(deadline: .now() + .milliseconds(hold)) {
+                        if outcome.settle(nil) { settled.signal() }
+                    }
+                    return
+                }
                 if outcome.settle(nil) {
                     settled.signal()
                 } else {
@@ -480,6 +490,21 @@ final class SignallingConnection: @unchecked Sendable {
         default: .untrusted
         }
         return SignallingRefusal(error: .connectionReset, tls: tls, detail: detail)
+    }
+
+    /// How long a ready connection is held before it is handed over, in
+    /// milliseconds: under TLS 1.3 a server that asked for a client
+    /// certificate answers it one round trip after this end's handshake is
+    /// over, and a REGISTER written before then is lost with the alert
+    /// behind it when the server closes on unread data. Twice the time the
+    /// handshake took, within 250 ms and 3 s; zero when nothing is due.
+    private func verdictWaitMs(since began: DispatchTime) -> Int {
+        guard verdict.asked || presents,
+              let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
+              sec_protocol_metadata_get_negotiated_tls_protocol_version(tls.securityProtocolMetadata) == .TLSv13
+        else { return 0 }
+        let tookMs = Int((DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000)
+        return min(max(2 * tookMs, 250), 3000)
     }
 
     /// What the server said about this end's certificate, when the failure
