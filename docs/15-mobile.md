@@ -1914,6 +1914,72 @@ on the phone.
     the REGISTER that proved the binding. Send: the log and both
     percentages.
 
+## A client certificate whose key never leaves the phone
+
+Some PBXs and SBCs admit a phone only when it presents a certificate their
+own authority issued for it, on SIP over TLS (`docs/22-tls.md`, "A client
+certificate"). On a phone the private key of that certificate is made by
+the platform's key store and never read out of it: the Secure Enclave on
+iOS, Android Keystore (the TEE, or StrongBox where the phone has one). The
+binding hands the platform an identity and the platform signs the
+handshake; nothing in Sipral sees the key.
+
+**Enrolling once.** The key is made on the phone, the authority signs a
+certificate for its public half, and the certificate is kept next to the
+key:
+
+- iOS: `ClientIdentity.secureEnclaveKey(tag:)` makes a P-256 key in the
+  Secure Enclave, kept in the Keychain under the tag (which takes the
+  application's keychain entitlement);
+  `ClientIdentity.certificateRequest(commonName:privateKey:)` is the PKCS#10
+  request for it, signed by the enclave. The certificate the authority
+  returns goes into the Keychain with `SecItemAdd`, labelled, and
+  `ClientIdentity.keychain(label:)` finds the identity they make together
+  before each connection; or `ClientIdentity(certificate:privateKey:)` joins
+  them in memory.
+- Android: a key made by `KeyPairGenerator` in `"AndroidKeyStore"` under an
+  alias, for signing, P-256 with SHA-256; the authority's chain is stored
+  over it with `KeyStore.setKeyEntry(alias, key, null, chain)`.
+  `SipralClientCertificate.androidKeystore(alias)` presents it, its
+  `PrivateKey` the Keystore's handle.
+
+**A phone woken while locked.** The registration a push brings back is made
+before the user has touched the phone, so the key has to sign then:
+
+- iOS: `secureEnclaveKey` makes the key usable after the first unlock
+  (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`); keep the
+  certificate's Keychain item at the same accessibility. A key whose access
+  control asks for the user's presence cannot sign in the background.
+- Android: a key that requires user authentication cannot sign until the
+  user has authenticated within its validity window.
+
+Either way the binding says so rather than failing silently:
+`transportFailed` with `clientKeyUnavailable` (Swift) or
+`CLIENT_KEY_UNAVAILABLE`, and the connection is tried again on the usual
+back-off, so the account registers once the key can sign.
+
+**Renewal.** A certificate out of its dates is never presented: the binding
+reads them before connecting and reports `CLIENT_CERTIFICATE_EXPIRED`, with
+nothing sent. The application renews it — the same key, a new request — and
+the next attempt presents the new one. A server that refuses a valid
+certificate, because it was revoked or another authority issued it, is
+`CLIENT_CERTIFICATE_REFUSED`; one that wanted a certificate and got none is
+`CLIENT_CERTIFICATE_REQUIRED`.
+
+**What has run.** The Swift tests make the key in the Secure Enclave on an
+Apple silicon Mac, sign the request with it, and register with it through a
+Network.framework registrar that requires a client certificate, at TLS 1.3
+and 1.2; a Secure Enclave key that needs the user's presence, on a context
+not allowed to ask, is told as the key unavailable. The iOS simulator has no
+Secure Enclave, so the same tests use a software key there. The Kotlin
+layer's tests run on a JVM, through a `KeyStore` `keytool` makes at test
+time: the
+Android Keystore path is the same key manager with the Keystore's handle in
+it, and has not yet been run on an emulator or a phone, nor has the iOS
+path on a real iPhone. `scripts/lab.sh tls` runs the same outcomes against
+Asterisk from the Python, Kotlin and .NET agents and through the C ABI
+(`docs/22-tls.md`, "A client certificate").
+
 ## .NET MAUI
 
 `bindings/dotnet/Sipral.Maui` is the .NET binding compiled for

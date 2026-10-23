@@ -1119,6 +1119,139 @@ contact for it read `;transport=tls`, and the call Asterisk placed to it
 was answered and carried the dialplan's `#` and audio both ways. The Swift
 agent did the same over TCP.
 
+## A client certificate
+
+A server can admit only clients that present a certificate its own
+authority issued: Asterisk with `verify_client=yes` and
+`require_client_cert=yes` on a TLS transport, an SBC or a carrier's proxy
+doing mutual TLS (RFC 8446 §4.3.2 and §4.4.2, RFC 5246 §7.4.4 and §7.4.6).
+The certificate is the TLS library's to present, as the server's is its to
+check, so it is presented by whoever opens the connection — the C
+application, or the binding — and its private key stays wherever the
+platform keeps keys and signs with them there:
+
+| Layer | Takes | Where the key is | Presented on |
+|---|---|---|---|
+| C | whatever its TLS library loads; `interop/tls/client-cert.c` with OpenSSL | a file, or a token or TPM through an OpenSSL provider | the connections the application opens |
+| Swift (iOS, macOS) | `ClientIdentity`: a `SecIdentity`, a certificate with a `SecKey` (`SecIdentityCreate`), or a Keychain label looked up before each connection | the Secure Enclave or the Keychain | `SipralStack(tlsClientIdentity:)`, `addAccount(tlsClientIdentity:)`, `TurnServer(clientIdentity:)` |
+| Kotlin (Android, JVM) | `SipralClientCertificate.androidKeystore(alias)`, or `.keyStore(store, alias, password)` for any `KeyStore` | Android Keystore (TEE or StrongBox), or the JVM's `KeyStore` | `clientCertificate` on `SipralClient.open`, `addAccount` and `SipralTurnServer` |
+| .NET | `SipralClientCertificate` over an `X509Certificate2` and its intermediates, or `SipralClientCertificate.FromPemFiles` | CNG on Windows (a persisted key: SChannel cannot sign with an ephemeral one), the Keychain on macOS, a file on Linux | `tlsClientCertificate` on the stack and `AddAccount`, `turnClientCertificate` |
+| Python | `TlsClientCertificate(certfile, keyfile, password)` | PEM files | `tls_client_certificate` on the stack and `add_account`, `turn_tls_client_certificate` |
+| Dart | `SipralClientCertificate.pem(chain, key)` or `.files(chainPath, keyPath)` | PEM | `addAccount(clientCertificate:)`, or `SipralStack.open(clientCertificate:)` for every account that names none: Dart opens TLS only on an account's own connection |
+| Node.js | `ClientCertificate`: `{ cert, key, passphrase }` or `{ pfx, passphrase }` | PEM or PKCS#12 | `clientCertificate` on the stack and the account, `turnClientCertificate` |
+
+Python, Dart and Node.js take files because their TLS libraries take
+nothing else; their READMEs say so. Every layer presents the certificate
+when the server asks for one and only then, sends the intermediates after
+the leaf, and never turns the server's own check off for it.
+
+**What can go wrong, and how it is told.** Each binding checks the
+certificate before every attempt and reads what the server says about it
+after; each outcome reaches the stack through
+`sipral_stack_transport_failed_with` as its own `SipralTlsFailure`, and
+arrives as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` (`08-ffi.md`, "A client
+certificate"):
+
+| `tls` | When | The connection |
+|---|---|---|
+| `CLIENT_KEY_UNAVAILABLE` (7) | the key cannot be found, read or used — no such identity or alias, a file that does not load, a key that is not the certificate's, the Keychain or the Keystore refusing while the device is locked, a key that would not sign during the handshake | not made, when it is known before; `error` `OTHER` |
+| `CLIENT_CERTIFICATE_EXPIRED` (8) | the certificate is out of its dates, read before connecting; or the server's `certificate_expired` (45) | not made, when known before; `error` `OTHER` |
+| `CLIENT_CERTIFICATE_REQUIRED` (5) | no certificate was presented and the server said so: `certificate_required` (116), any other certificate alert, or `handshake_failure` (40) once its CertificateRequest was seen | made and refused; `error` `CONNECTION_RESET` |
+| `CLIENT_CERTIFICATE_REFUSED` (6) | the one presented was refused: `bad_certificate` (42), `unsupported_certificate` (43), `certificate_revoked` (44), `certificate_unknown` (46), `unknown_ca` (48), `access_denied` (49) | made and refused; `error` `CONNECTION_RESET` |
+
+The server's own certificate keeps its reasons: `EXPIRED` (3) is the
+server's certificate out of its dates as this end checked it, and
+`CLIENT_CERTIFICATE_EXPIRED` is this end's as the server or this end read
+it; a binding never confuses the local check with an alert it received.
+
+**TLS 1.3 says no late.** At TLS 1.2 the server's verdict on a client
+certificate ends the handshake. At TLS 1.3 the client sends its
+certificate with its Finished and its handshake is over at once; the
+server's alert comes one round trip after, as the first thing read on what
+looked like an open connection. Worse, a REGISTER written in between reaches
+a server that closes with it unread, which resets the connection, and the
+alert behind it is lost: what the client sees is a broken pipe. So at TLS
+1.3 a layer holds a new connection before handing it to the stack — when the
+server asked for a certificate or one is presented (Swift, Kotlin, .NET),
+after every TLS 1.3 handshake (Python and Node.js, which cannot see the
+request), or after every TLS handshake (Dart, which cannot see the version
+either) — for
+twice the time the handshake took, at least 250 ms and at most 3 s; an alert
+in that window fails the connection with its reason, anything else that
+arrives is kept for the stack, and silence is acceptance. An alert later
+still is read off the connection's first failure and told the same way. The
+C program reads once more after a failed write, because OpenSSL sees an
+alert only when it reads it.
+
+**Seeing the server ask.** `handshake_failure` alone means nothing about
+certificates; it is read as `CLIENT_CERTIFICATE_REQUIRED` only by a layer
+that saw the server's CertificateRequest — Swift through Network.framework's
+challenge block, Kotlin through its key manager, .NET through its selection
+callback, C through `SSL_CTX_set_cert_cb`. Python's `ssl`, Dart's
+`SecureSocket` and Node.js's `tls` show no such step, so there a TLS 1.2
+server that ends the handshake with `handshake_failure` for a missing
+certificate is `HANDSHAKE_REFUSED`. TLS 1.3's `certificate_required` is
+read everywhere. The Kotlin layer goes one step further: a server that
+asked for a certificate and then dropped the connection with no alert
+reaching this end is read as `CLIENT_CERTIFICATE_REQUIRED` or
+`CLIENT_CERTIFICATE_REFUSED`, by whether one was presented, with `detail`
+saying that no alert came.
+
+How each platform says it:
+
+| | OpenSSL (C, Python, Node.js; .NET on Linux) | Apple (Swift; .NET on macOS) | JSSE and Conscrypt (Kotlin) |
+|---|---|---|---|
+| an alert received | `SSL_CB_READ_ALERT` in the info callback (C); the reason, such as `TLSV13_ALERT_CERTIFICATE_REQUIRED`, `SSLV3_ALERT_BAD_CERTIFICATE`, `TLSV1_ALERT_UNKNOWN_CA` (Python's `SSLError.reason`, Node's `ERR_SSL_*` code, .NET's message) | `NWError.tls` with `errSSLPeerBadCert` (-9825), `errSSLPeerCertUnknown` (-9829), `errSSLPeerUnknownCA` (-9831), `errSSLPeerAccessDenied` (-9832), `errSSLCertificateRequired` (-9863), `errSSLPeerCertExpired` (-9828), `errSSLPeerHandshakeFail` (-9824) | `Received fatal alert: certificate_required` and the like (JSSE); `TLSV13_ALERT_CERTIFICATE_REQUIRED` and the like (Conscrypt, on Android) |
+| a key that would not sign | the key does not load, or does not match (`SSL_CTX_check_private_key`) | `errSSLHandshakeFail` (-9858) on this end once the server had asked, or a Keychain status such as `errSecInteractionNotAllowed` | `UserNotAuthenticatedException`, `KeyPermanentlyInvalidatedException`, `InvalidKeyException` or `SignatureException` in the cause |
+
+What a Network.framework server on this Mac sent, as the Swift tests saw
+it: with no certificate, `certificate_unknown` (-9829) at TLS 1.3 and
+`handshake_failure` (-9824) at TLS 1.2, after its CertificateRequest; with a
+certificate another authority signed, `bad_certificate` (-9825) at both. An
+OpenSSL server sent `certificate_required` at TLS 1.3, `handshake_failure`
+at TLS 1.2, and `unknown_ca` for the other authority's. .NET on macOS speaks
+TLS 1.2 at most and read those as -9824, -9831 and, for an expired one the
+server judged, -9828. SChannel's codes on Windows — `SEC_E_CERT_EXPIRED`,
+`SEC_E_CERT_UNKNOWN`, `SEC_E_ILLEGAL_MESSAGE` once the server asked,
+`SEC_E_NO_CREDENTIALS` for the key — are mapped from Microsoft's
+documentation and have not been run.
+
+**TURN over TLS.** The Swift, Kotlin, .NET, Python and Node.js layers present their
+client certificate to a TURN server over TLS too. The relay's outcome keeps
+its reason (`the connection to the server closed`): a TURN server that
+refuses the certificate is a relay that is not made, as any refused
+connection is, and the call goes on without it.
+
+**In the lab.** `scripts/lab.sh tls` gives Asterisk two more listeners
+(`interop/tls/pjsip_local.conf`), both presenting 5061's certificate and
+both with `verify_client=yes`, `require_client_cert=yes` and the lab
+authority as `ca_list_file`: 5064 at TLS 1.3 and 5065 at TLS 1.2. The run
+makes, beside the server's certificates, a client certificate the lab
+authority signs, one it signs that expired in 2020, and one a second
+authority signs. The Python, Kotlin and .NET agents are run against 5064
+with no certificate, the second authority's and the expired one, and say
+which each was; then they register with the lab's and Asterisk calls them.
+`interop/tls/client-cert.c` does the same against 5065 through the C ABI,
+and with a key that is not the certificate's.
+
+Run on macOS against a registrar of Python's `ssl` that required a
+certificate the lab's way of making them signed, at TLS 1.3 and then 1.2
+(OpenSSL 4.0 on both ends), the program printed, from the event the stack
+raised each time:
+
+```text
+TLS 1.3, none:     transport failed error=connection_reset tls=client_certificate_required: tlsv13 alert certificate required
+TLS 1.3, client:   registered
+TLS 1.3, stranger: transport failed error=connection_reset tls=client_certificate_refused: tlsv1 alert unknown ca
+TLS 1.3, expired:  transport failed error=other tls=client_certificate_expired: the client certificate is out of its dates
+TLS 1.3, wrong:    transport failed error=other tls=client_key_unavailable: key values mismatch
+TLS 1.2, none:     transport failed error=connection_reset tls=client_certificate_required: ssl/tls alert handshake failure
+TLS 1.2, client:   registered
+TLS 1.2, stranger: transport failed error=connection_reset tls=client_certificate_refused: tlsv1 alert unknown ca
+TLS 1.2, expired:  transport failed error=other tls=client_certificate_expired: the client certificate is out of its dates
+TLS 1.2, wrong:    transport failed error=other tls=client_key_unavailable: key values mismatch
+```
+
 ## What the application sees when TLS fails
 
 | What went wrong | SIP over TLS (the C sample) | SIP over TLS (every binding) | TURN over TLS (every binding) |
@@ -1130,6 +1263,9 @@ agent did the same over TCP.
 | Nothing listens there | `connect` refused | the same event, `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` and no TLS reason | outcome failed, code 0 |
 | A wildcard certificate for a SIP domain | refused by the RFC 5922 check | accepted: the HTTPS rules | accepted: HTTPS rules apply to a TURN server |
 | Trusting only another authority | as "no trusted authority" | as "no trusted authority" | as "no trusted authority" |
+| The server requires a client certificate and none is set | `interop/tls/client-cert.c`: the alert, told to the stack | `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED`; tried again | outcome failed, code 0 |
+| The server refuses the client certificate | the same, `CLIENT_CERTIFICATE_REFUSED` | the same event, `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED` | outcome failed, code 0 |
+| The client certificate has expired, or its key cannot be used | found before connecting; `CLIENT_CERTIFICATE_EXPIRED` or `CLIENT_KEY_UNAVAILABLE` | the same event, `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED` or `SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE`, nothing connected; tried again | no relay, nothing connected |
 | The TURN credential is wrong | — | — | outcome failed, code 401, reason `the server refused the credentials` |
 | The connection drops later | `sipral_stack_transport_failed` or `sipral_stack_stream_closed`; a registration goes to retrying, failure unreachable | the same, told by the binding and raised as the event with `SIPRAL_TRANSPORT_ERROR_CLOSED` or the reset; connected again and registered again | a relay still being made fails as above; a call that had one keeps the paths that need none (`sipral_stack_turn_closed`) |
 | The server never answers | the transaction times out after 64·T1 (32 seconds); retrying, unreachable | the connection times out after five seconds: `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`, tried again | outcome failed, code 0 |
