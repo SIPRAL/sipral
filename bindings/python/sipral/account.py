@@ -85,6 +85,9 @@ class Account:
         self.stream_protocol = stream_protocol
         #: Certificate pin for its own TLS connection.
         self.tls_pin = tls_pin
+        #: The :class:`sipral.signalling.TlsClientCertificate` its own TLS
+        #: connection presents, or ``None`` for the stack's.
+        self.tls_client_certificate = None
         self.handle = handle
         self.aor = aor
         #: Where requests go (``host:port``); with ``server_uri``, the last

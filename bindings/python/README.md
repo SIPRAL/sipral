@@ -576,6 +576,64 @@ names the protocol, and a connection that closes is opened again and the
 account registered again. Until it is open a call the account places
 raises `SIPRAL_STATUS_TRANSPORT_DOWN`.
 
+### A client certificate
+
+A PBX or proxy that admits only devices it issued a certificate to asks
+for one in the TLS handshake. `TlsClientCertificate(certfile, keyfile=None,
+password=None)` is that certificate and its key, from PEM files: `certfile`
+the certificate, then any intermediates the server needs; `keyfile` its
+private key, or nothing when `certfile` holds it too; `password` for an
+encrypted key, as `ssl.SSLContext.load_cert_chain` takes it.
+
+```python
+from sipral import Stack, TlsClientCertificate, TlsTrust
+
+stack = Stack(
+    signalling=Transport.TLS,
+    signalling_server="198.51.100.10:5061",
+    tls_server_name="pbx.example.com",
+    tls_trust=TlsTrust.only_authority("pbx-ca.pem"),
+    tls_client_certificate=TlsClientCertificate("alice.pem", "alice.key"),
+)
+```
+
+The stack presents it on its connection and on every account's own TLS
+connection that names none of its own (`add_account(...,
+tls_client_certificate=...)`); `turn_tls_client_certificate` presents one to
+a TURN server over TLS. The files are read again before every connection,
+so a certificate renewed on disk is the one the next connection presents.
+Python's `ssl` takes keys from files only: the key sits in a file this
+process can read, and a key that has to stay in a platform key store (the
+Secure Enclave, Android Keystore, the Keychain, CNG) is for the Swift,
+Kotlin and .NET layers.
+
+Why a certificate was not taken arrives as `EventKind.TRANSPORT_FAILED`,
+and the stack tries again as it does for any refusal:
+
+| `fields["tls"]` | When |
+|---|---|
+| `TlsFailure.CLIENT_CERTIFICATE_REQUIRED` | none was configured, and the server's alert says it wanted one (`certificate_required`, or `bad_certificate`, `unknown_ca` and the like with nothing presented) |
+| `TlsFailure.CLIENT_CERTIFICATE_REFUSED` | the server's alert refuses the one presented: `bad_certificate`, `unsupported_certificate`, `certificate_revoked`, `certificate_unknown`, `unknown_ca`, `access_denied` |
+| `TlsFailure.CLIENT_KEY_UNAVAILABLE` | before connecting: a file that cannot be read, a key that does not decrypt or does not match the certificate; `fields["error"]` is `TransportError.OTHER` and nothing reached the server |
+| `TlsFailure.CLIENT_CERTIFICATE_EXPIRED` | before connecting, the certificate's dates do not cover now (`fields["error"]` `OTHER`, nothing sent); or the server's `certificate_expired` alert |
+
+Under TLS 1.3 the server reads the client's certificate after the client's
+handshake is over (RFC 8446 Section 4.4.2) and refuses it with an alert
+after it, so after a TLS 1.3 handshake this package waits for the server's
+first records, for twice what connecting took (a quarter of a second at
+least, three seconds at most), before any request goes out, whether or not
+a certificate is configured (Python's `ssl` cannot tell whether the server
+asked for one): the session tickets of a server
+that took the certificate end the wait at once, and the alert of one that
+did not is reported as above. What Python's
+`ssl` cannot say is whether the server asked for a certificate: a TLS 1.2
+server that wanted one and got none usually answers `handshake_failure`,
+which stays `TlsFailure.HANDSHAKE_REFUSED`, with OpenSSL's sentence in
+`fields["detail"]`. A certificate loaded into a `TlsTrust.from_context`
+context of the application's own is presented, but the package does not
+know of it, so a refusal of it reads as `CLIENT_CERTIFICATE_REQUIRED`; pass
+it as `tls_client_certificate` instead.
+
 `stack.settings()` reads back what the stack runs with, every default
 filled in (`sipral.Settings`): the timers, the codecs' count, the SRTP
 suites its calls offer in order, whether a pseudonym salt was given, whether

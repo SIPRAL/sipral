@@ -10,16 +10,28 @@ stack and reaches the application as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
 
 from __future__ import annotations
 
+import datetime
 import errno
 import hashlib
 import hmac
+import os
+import select
 import socket
 import ssl
-from typing import Callable
+import time
+from typing import Callable, Union
 
 from ._sipral_cffi import lib
 
-__all__ = ["InviteLimit", "PinRefused", "TlsTrust", "classify", "parse_pin"]
+__all__ = [
+    "ClientCertificateUnusable",
+    "InviteLimit",
+    "PinRefused",
+    "TlsClientCertificate",
+    "TlsTrust",
+    "classify",
+    "parse_pin",
+]
 
 #: OpenSSL codes for expired/not-yet-valid (9, 10) and host/IP mismatch
 #: (62, 64); any other verification failure counts as untrusted.
@@ -131,6 +143,169 @@ def parse_pin(fingerprint: str) -> bytes:
     return bytes.fromhex(digits)
 
 
+#: The `reason` OpenSSL gives a fatal alert from the server that says no to
+#: this end's certificate, or to its absence.
+_CLIENT_CERTIFICATE_ALERTS = frozenset(
+    {
+        "TLSV13_ALERT_CERTIFICATE_REQUIRED",
+        "SSLV3_ALERT_BAD_CERTIFICATE",
+        "SSLV3_ALERT_UNSUPPORTED_CERTIFICATE",
+        "SSLV3_ALERT_CERTIFICATE_REVOKED",
+        "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+        "TLSV1_ALERT_UNKNOWN_CA",
+        "TLSV1_ALERT_ACCESS_DENIED",
+    }
+)
+_CLIENT_CERTIFICATE_EXPIRED_ALERT = "SSLV3_ALERT_CERTIFICATE_EXPIRED"
+
+#: What a password for an encrypted key file may be, as `load_cert_chain` takes it.
+_Password = Union[str, bytes, bytearray, Callable[[], Union[str, bytes, bytearray]], None]
+
+
+class ClientCertificateUnusable(OSError):
+    """This end's client certificate could not be presented: the key cannot
+    be used, or the certificate is out of its dates. :attr:`tls` is the
+    `SipralTlsFailure` it is reported as; no connection was made."""
+
+    def __init__(self, tls: int, sentence: str) -> None:
+        super().__init__(sentence)
+        self.tls = tls
+
+
+class TlsClientCertificate:
+    """A client certificate this end presents on SIP over TLS (RFC 5246
+    Section 7.4.6, RFC 8446 Section 4.4.2), from PEM files.
+
+    ``certfile`` holds the certificate, leaf first, then any intermediates
+    the server needs; ``keyfile`` its private key (PKCS #8 or the
+    algorithm's own PEM), or ``None`` when ``certfile`` holds it too;
+    ``password`` decrypts an encrypted key, as
+    :meth:`ssl.SSLContext.load_cert_chain` takes it. Python's ``ssl`` reads
+    keys from files only, so the key lives in a file this process can read;
+    a key held by a platform key store needs the Swift, Kotlin or .NET layer.
+
+    The files are read again before every connection, so a certificate
+    renewed on disk is presented on the next one. Before connecting, a key
+    that does not load, does not decrypt or does not match the certificate
+    is `SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE`, and a certificate out
+    of its dates `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED`; neither
+    reaches the server.
+    """
+
+    def __init__(self, certfile: str, keyfile: str | None = None, password: _Password = None) -> None:
+        self.certfile = os.fspath(certfile)
+        self.keyfile = os.fspath(keyfile) if keyfile is not None else None
+        self._password = password
+
+    def __repr__(self) -> str:
+        return f"TlsClientCertificate({self.certfile!r}, {self.keyfile!r})"
+
+    def present_with(self, context: ssl.SSLContext, now: datetime.datetime | None = None) -> None:
+        """Load the certificate and its key into ``context``, after checking
+        both; raises :class:`ClientCertificateUnusable` when they cannot be
+        presented."""
+        try:
+            context.load_cert_chain(self.certfile, self.keyfile, self._password)
+        except (OSError, ssl.SSLError, ValueError, TypeError) as refused:
+            raise ClientCertificateUnusable(
+                lib.SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE,
+                f"the client certificate's key cannot be used: {_one_line(refused)}",
+            ) from refused
+        not_before, not_after = self.validity()
+        moment = now or datetime.datetime.now(datetime.timezone.utc)
+        if moment < not_before:
+            raise ClientCertificateUnusable(
+                lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED,
+                f"the client certificate is not valid until {not_before:%Y-%m-%d %H:%M:%S} UTC",
+            )
+        if moment > not_after:
+            raise ClientCertificateUnusable(
+                lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED,
+                f"the client certificate expired on {not_after:%Y-%m-%d %H:%M:%S} UTC",
+            )
+
+    def validity(self) -> tuple[datetime.datetime, datetime.datetime]:
+        """The leaf's notBefore and notAfter (RFC 5280 Section 4.1.2.5), in UTC."""
+        with open(self.certfile, encoding="ascii", errors="replace") as source:
+            text = source.read()
+        begin = text.find("-----BEGIN CERTIFICATE-----")
+        end = text.find("-----END CERTIFICATE-----", begin)
+        if begin < 0 or end < 0:
+            raise ClientCertificateUnusable(
+                lib.SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE,
+                f"{self.certfile} holds no PEM certificate",
+            )
+        try:
+            der = ssl.PEM_cert_to_DER_cert(text[begin : end + len("-----END CERTIFICATE-----")])
+            return certificate_validity(der)
+        except ValueError as unreadable:
+            raise ClientCertificateUnusable(
+                lib.SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE,
+                f"the client certificate in {self.certfile} cannot be read: {unreadable}",
+            ) from unreadable
+
+
+def _der_item(data: bytes, at: int) -> tuple[int, int, int]:
+    """One DER element at ``at``: (tag, where its contents start, where it ends)."""
+    if at + 2 > len(data):
+        raise ValueError("the certificate ends inside an element")
+    tag = data[at]
+    length = data[at + 1]
+    start = at + 2
+    if length & 0x80:
+        octets = length & 0x7F
+        if octets == 0 or octets > 4 or start + octets > len(data):
+            raise ValueError("an element's length is not one DER allows")
+        length = int.from_bytes(data[start : start + octets], "big")
+        start += octets
+    end = start + length
+    if end > len(data):
+        raise ValueError("an element runs past the end of the certificate")
+    return tag, start, end
+
+
+def _der_time(data: bytes, at: int) -> tuple[datetime.datetime, int]:
+    """A UTCTime or GeneralizedTime at ``at`` (RFC 5280 Section 4.1.2.5.1-2)."""
+    tag, start, end = _der_item(data, at)
+    text = data[start:end].decode("ascii")
+    if tag == 0x17 and len(text) == 13 and text.endswith("Z"):
+        year = int(text[0:2])
+        moment = datetime.datetime.strptime(f"{1900 + year if year >= 50 else 2000 + year}{text[2:12]}", "%Y%m%d%H%M%S")
+    elif tag == 0x18 and len(text) == 15 and text.endswith("Z"):
+        moment = datetime.datetime.strptime(text[:14], "%Y%m%d%H%M%S")
+    else:
+        raise ValueError("a validity date is neither UTCTime nor GeneralizedTime in UTC")
+    return moment.replace(tzinfo=datetime.timezone.utc), end
+
+
+def certificate_validity(der: bytes) -> tuple[datetime.datetime, datetime.datetime]:
+    """notBefore and notAfter of a DER certificate: Certificate, then
+    TBSCertificate, past the version, serial number, signature algorithm and
+    issuer, to the Validity sequence (RFC 5280 Section 4.1)."""
+    tag, certificate, _ = _der_item(der, 0)
+    if tag != 0x30:
+        raise ValueError("not a certificate")
+    tag, field, _ = _der_item(der, certificate)
+    if tag != 0x30:
+        raise ValueError("not a certificate")
+    tag, _, after = _der_item(der, field)
+    if tag == 0xA0:
+        field = after
+    for _skipped in ("serialNumber", "signature", "issuer"):
+        _, _, field = _der_item(der, field)
+    tag, validity, _ = _der_item(der, field)
+    if tag != 0x30:
+        raise ValueError("no validity in the certificate")
+    not_before, following = _der_time(der, validity)
+    not_after, _ = _der_time(der, following)
+    return not_before, not_after
+
+
+def _one_line(error: BaseException) -> str:
+    text = str(error) or type(error).__name__
+    return " ".join(text.split())
+
+
 class PinRefused(ssl.SSLCertVerificationError):
     """The server presented a certificate other than the pinned one."""
 
@@ -179,10 +354,28 @@ def _sentence(error: BaseException) -> str:
     return encoded.decode("utf-8", "ignore")
 
 
-def classify(error: BaseException) -> tuple[int, int, str]:
+def classify(error: BaseException, presented: bool = False) -> tuple[int, int, str]:
     """A failed connection as (`SipralTransportError`, `SipralTlsFailure`,
-    detail sentence)."""
+    detail sentence). ``presented`` says whether this end offered a client
+    certificate, which decides what a server's alert about one means."""
     detail = _sentence(error)
+    if isinstance(error, ClientCertificateUnusable):
+        return lib.SIPRAL_TRANSPORT_ERROR_OTHER, error.tls, detail
+    if isinstance(error, ssl.SSLError) and not isinstance(error, ssl.SSLCertVerificationError):
+        reason = getattr(error, "reason", None) or ""
+        if presented and reason == _CLIENT_CERTIFICATE_EXPIRED_ALERT:
+            return (
+                lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET,
+                lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED,
+                detail,
+            )
+        if reason in _CLIENT_CERTIFICATE_ALERTS:
+            tls = (
+                lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED
+                if presented
+                else lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED
+            )
+            return lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET, tls, detail
     if isinstance(error, ssl.SSLCertVerificationError):
         code = error.verify_code
         if code in _EXPIRED:
@@ -205,6 +398,54 @@ def classify(error: BaseException) -> tuple[int, int, str]:
     return lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, detail
 
 
+#: Bounds on how long a TLS 1.3 connection waits, after its handshake, for
+#: the server's first records: its session tickets, or its verdict on this
+#: end's certificate. Between them, twice what connecting took.
+SETTLE_LEAST_SECONDS = 0.25
+SETTLE_MOST_SECONDS = 3.0
+
+
+def settle_seconds(connecting: float) -> float:
+    """The wait :func:`settle` gives a connection that took ``connecting``
+    seconds to make: the server's verdict is one round trip behind its
+    handshake, and the handshake took about two."""
+    return min(max(2 * connecting, SETTLE_LEAST_SECONDS), SETTLE_MOST_SECONDS)
+
+
+def settle(sock: socket.socket, seconds: float = SETTLE_LEAST_SECONDS) -> bytes:
+    """Wait up to ``seconds`` for a TLS 1.3 server to say whether it took
+    this end's certificate, and return any SIP bytes read meanwhile.
+
+    Under TLS 1.3 the client's handshake is over before the server has read
+    the client's certificate (RFC 8446 Section 4.4.2), so a refusal arrives
+    as an alert after it, and the server closes. A request written in that
+    moment meets a reset connection that has lost the alert. A server that
+    takes the certificate sends its session tickets at that point (Section
+    4.6.1), which end the wait at once; its alert is raised here as the
+    `ssl.SSLError` it is. A connection at another version, or plain TCP,
+    returns at once."""
+    if not isinstance(sock, ssl.SSLSocket) or sock.version() != "TLSv1.3":
+        return b""
+    patience = sock.gettimeout()
+    deadline = time.monotonic() + seconds
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([sock], [], [], remaining)[0]:
+                return b""
+            sock.settimeout(0.0)
+            try:
+                data = sock.recv(65536)
+            except ssl.SSLWantReadError:
+                # a session ticket: the certificate was taken
+                return b""
+            if not data:
+                raise ConnectionAbortedError("the server closed the connection after the handshake")
+            return data
+    finally:
+        sock.settimeout(patience)
+
+
 def connect(
     server: tuple[str, int],
     *,
@@ -213,10 +454,15 @@ def connect(
     server_name: str | None,
     timeout: float,
     pin: bytes | None = None,
+    client: TlsClientCertificate | None = None,
 ) -> socket.socket:
     """Connect to ``server``, over TLS when ``context`` is given (checked
-    against ``server_name``, or ``pin`` alone). Raises the failure for
-    :func:`classify`."""
+    against ``server_name``, or ``pin`` alone), presenting ``client`` when
+    the server asks for a certificate. Raises the failure for
+    :func:`classify`; a client certificate that cannot be presented raises
+    before anything is sent."""
+    if context is not None and client is not None:
+        client.present_with(context)
     raw = socket.socket(socket.AF_INET6 if ":" in server[0] else socket.AF_INET, socket.SOCK_STREAM)
     try:
         raw.settimeout(timeout)
