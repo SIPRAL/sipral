@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -14,6 +15,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Sipral.Interop;
 using static Sipral.Interop.NativeText;
 
@@ -231,6 +233,10 @@ public sealed partial class SipralStack
         public required string Remote { get; init; }
         // over TLS: how a later failure reads for the client certificate
         public ClientCertificateUse? Use { get; init; }
+        // over TLS 1.3 with a certificate asked for: the read started while
+        // the server's verdict was awaited, and its buffer; the reader's first
+        public Task<int>? FirstRead { get; init; }
+        public byte[]? FirstBuffer { get; init; }
         public object WriteLock { get; } = new();
     }
 
@@ -326,6 +332,7 @@ public sealed partial class SipralStack
                 throw Refused(socket);
             }
             Stream carried = client.GetStream();
+            (Task<int>? First, byte[]? Buffer) first = (null, null);
             if (_signalling == SipralTransport.Tls)
             {
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
@@ -333,14 +340,21 @@ public sealed partial class SipralStack
                 var options = new SslClientAuthenticationOptions { TargetHost = _serverName };
                 _tlsTrust.Apply(options, verdict);
                 use!.Apply(options);
+                var began = Stopwatch.GetTimestamp();
                 try
                 {
                     tls.AuthenticateAsClient(options);
+                    first = use.AwaitVerdict(tls, Stopwatch.GetElapsedTime(began), TransmitBytes);
                 }
                 catch (Exception ex) when (ex is AuthenticationException or IOException)
                 {
                     tls.Dispose();
                     throw Refused(verdict, ex, use);
+                }
+                catch (SignallingRefusedException)
+                {
+                    tls.Dispose();
+                    throw;
                 }
                 carried = tls;
             }
@@ -353,6 +367,8 @@ public sealed partial class SipralStack
                 Local = FormatAddress((IPEndPoint)client.Client.LocalEndPoint!),
                 Remote = FormatAddress((IPEndPoint)client.Client.RemoteEndPoint!),
                 Use = use,
+                FirstRead = first.First,
+                FirstBuffer = first.Buffer,
             };
         }
         catch (SignallingRefusedException)
@@ -491,13 +507,15 @@ public sealed partial class SipralStack
     // never resyncs.
     private void ReadLink(Link link)
     {
-        var buffer = new byte[TransmitBytes];
+        var buffer = link.FirstBuffer ?? new byte[TransmitBytes];
+        var first = link.FirstRead;
         while (!_closed.IsSet)
         {
             int read;
             try
             {
-                read = link.Stream.Read(buffer, 0, buffer.Length);
+                read = first is not null ? first.GetAwaiter().GetResult() : link.Stream.Read(buffer, 0, buffer.Length);
+                first = null;
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
             {

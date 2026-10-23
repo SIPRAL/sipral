@@ -635,7 +635,11 @@ Each outcome arrives as `SipralEventKind.TransportFailed`, with its own
 
 The stack connects again on its usual back-off after each. Over TLS 1.3 the
 server judges the certificate after the handshake has completed on this end,
-so its refusal arrives on the first read and is reported the same way. .NET
+so its refusal arrives on the first read and is reported the same way: when
+a certificate was asked for, the layer waits for that read (twice the
+handshake's time, 250 ms to 3 s) before the stack writes anything, since a
+request written first meets a server that resets the connection and loses
+the alert. .NET
 on macOS speaks TLS 1.2 at most; Linux and Windows reach 1.3.
 
 `stack.Settings()` reads back what the stack runs with, every default

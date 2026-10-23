@@ -420,6 +420,36 @@ public sealed class ClientCertificateTests : IDisposable
         Assert.Empty(registrar.Registers());
     }
 
+    /// <summary>
+    /// TLS 1.3 judges the certificate one round trip after this end's
+    /// handshake has ended. A REGISTER written in between reaches a server
+    /// that then closes with it unread, its TCP stack resets the connection,
+    /// and the alert would be lost; the layer waits for the verdict before
+    /// the stack writes, so a registration asked for at once still reads the
+    /// reason. SslStream on macOS has no TLS 1.3, and there the verdict is
+    /// part of the handshake, as the theories above show; this runs where
+    /// TLS 1.3 is (Linux, Windows).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ARegistrationAskedAtOnceOverTls13StillReadsTheVerdict(bool presented)
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+        var mine = presented ? new SipralClientCertificate(Client(_stranger, "sipral-stranger").WithKey) : null;
+        using var registrar = new OpensslRegistrar(this, "-tls1_3");
+        using var stack = Over(registrar.Address, mine);
+        var account = stack.AddAccount($"sip:alice@{ServerName}", registrar.Address, registrar: $"sip:{ServerName}");
+        account.Register();
+        var failed = await Failed(stack);
+        Assert.Equal(presented ? SipralTlsFailure.ClientCertificateRefused : SipralTlsFailure.ClientCertificateRequired,
+            failed.Tls);
+        Assert.Empty(registrar.Registers());
+    }
+
     /// <summary>A server that listens and must not be reached.</summary>
     private sealed class Untouched : IDisposable
     {

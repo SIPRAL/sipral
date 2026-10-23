@@ -6,10 +6,12 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Net.Security;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Sipral;
 
@@ -155,6 +157,54 @@ internal sealed class ClientCertificateUse
             return null!;
         };
     }
+
+    /// <summary>
+    /// After a TLS 1.3 handshake in which a certificate was asked for, the
+    /// server's verdict on it is one round trip away: a request written
+    /// meanwhile reaches a server that then closes with it unread, its TCP
+    /// stack answers with a reset, and the alert that said why is lost. So
+    /// the first read is started here and waited for twice as long as the
+    /// handshake took, at least 250 ms and at most 3 s: an alert in that
+    /// time fails the connection with its reason (thrown as
+    /// <see cref="SignallingRefusedException"/>); bytes, or silence, accept
+    /// it, and the read, finished or still pending, is the caller's first,
+    /// into the buffer returned. Nothing to wait for in TLS 1.2, where the
+    /// verdict is part of the handshake, nor when nobody asked.
+    /// </summary>
+    internal (Task<int>? First, byte[]? Buffer) AwaitVerdict(SslStream tls, TimeSpan handshake, int bufferBytes)
+    {
+        if (tls.SslProtocol != SslProtocols.Tls13 || !(Asked || tls.LocalCertificate is not null))
+        {
+            return (null, null);
+        }
+        var window = handshake * 2;
+        window = window < MinimumWait ? MinimumWait : window > MaximumWait ? MaximumWait : window;
+        var buffer = new byte[bufferBytes];
+        var first = tls.ReadAsync(buffer, 0, buffer.Length);
+        try
+        {
+            first.Wait(window);
+        }
+        catch (AggregateException)
+        {
+            // read below, from the task
+        }
+        if (first.IsFaulted)
+        {
+            var failure = first.Exception!.GetBaseException();
+            throw Explain(failure) ?? new SignallingRefusedException(SipralTransportError.ConnectionReset,
+                SipralTlsFailure.None, failure.Message);
+        }
+        if (first.IsCompletedSuccessfully && first.Result == 0)
+        {
+            throw new SignallingRefusedException(SipralTransportError.ConnectionReset, SipralTlsFailure.None,
+                "the server closed the connection as the handshake ended");
+        }
+        return (first, buffer);
+    }
+
+    private static readonly TimeSpan MinimumWait = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MaximumWait = TimeSpan.FromSeconds(3);
 
     /// <summary>What a failed handshake, or a failed read or write on the
     /// connection it made, says about the client certificate, or
