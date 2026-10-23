@@ -167,7 +167,9 @@ deployment needs:
   the one its platform trusts. `TransportProtocol::Tls` describes a transport
   the caller has already secured, and the caller supplies the connection; the
   Swift, Kotlin, .NET, Python and Dart bindings do that with the platform's own
-  TLS.
+  TLS. A client certificate a server asks for is presented by that same TLS,
+  its key held where the platform keeps keys, and the stack hears only why a
+  connection failed (`22-tls.md`, "A client certificate").
 
 ### sipral-core
 

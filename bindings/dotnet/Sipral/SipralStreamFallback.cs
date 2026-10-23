@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -13,6 +14,7 @@ using System.Runtime.InteropServices;
 using System.Security.Authentication;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Sipral.Interop;
 using static Sipral.Interop.NativeText;
 
@@ -60,6 +62,12 @@ public sealed partial class SipralStack
         public required string Destination { get; init; }
         public required TcpClient Client { get; init; }
         public required Stream Stream { get; init; }
+        // over TLS: how a later failure reads for the client certificate
+        public ClientCertificateUse? Use { get; init; }
+        // over TLS 1.3 with a certificate asked for: the read started while
+        // the server's verdict was awaited, and its buffer; the reader's first
+        public Task<int>? FirstRead { get; init; }
+        public byte[]? FirstBuffer { get; init; }
         public object WriteLock { get; } = new();
     }
 
@@ -152,6 +160,20 @@ public sealed partial class SipralStack
         return pinned?.TlsPin is { } pin ? SipralTlsTrust.Pinned(pin) : _tlsTrust;
     }
 
+    // The client certificate of an account on that server if it has one,
+    // else tlsClientCertificate.
+    private SipralClientCertificate? StreamCertificate(string destination)
+    {
+        Account? own;
+        lock (_accounts)
+        {
+            own = _accounts.FirstOrDefault(account
+                => account.StreamProtocol is SipralTransport.Tls or SipralTransport.Wss
+                && account.RegistrarAddress == destination && account.ClientCertificate is not null);
+        }
+        return own?.ClientCertificate ?? _tlsClientCertificate;
+    }
+
     // Connects (to streamServer instead, for TCP, when given), binds it as
     // the stream to destination, as `bound` (WS/WSS for a WebSocket), and
     // reads it. A failure is reported on the same transport id, which ends
@@ -163,6 +185,9 @@ public sealed partial class SipralStack
         var server = over == SipralTransport.Tcp ? _streamServer ?? destination : destination;
         try
         {
+            // a client certificate that cannot be presented is reported
+            // before any connection is made
+            var use = over == SipralTransport.Tls ? ClientCertificateUse.Prepare(StreamCertificate(destination)) : null;
             var (host, port) = ParseAddress(server);
             var address = IPAddress.Parse(host);
             var client = new TcpClient(address.AddressFamily) { NoDelay = true };
@@ -179,21 +204,31 @@ public sealed partial class SipralStack
                 throw;
             }
             Stream carried = client.GetStream();
+            (Task<int>? First, byte[]? Buffer) first = (null, null);
             if (over == SipralTransport.Tls)
             {
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
                 var verdict = new SipralTlsTrust.Verdict();
                 var options = new SslClientAuthenticationOptions { TargetHost = _givenTlsServerName ?? host };
                 StreamTrust(destination).Apply(options, verdict);
+                use!.Apply(options);
+                var began = Stopwatch.GetTimestamp();
                 try
                 {
                     tls.AuthenticateAsClient(options);
+                    first = use.AwaitVerdict(tls, Stopwatch.GetElapsedTime(began), TransmitBytes);
                 }
                 catch (Exception handshake) when (handshake is AuthenticationException or IOException)
                 {
                     tls.Dispose();
                     client.Dispose();
-                    throw Refused(verdict, handshake);
+                    throw Refused(verdict, handshake, use);
+                }
+                catch (SignallingRefusedException)
+                {
+                    tls.Dispose();
+                    client.Dispose();
+                    throw;
                 }
                 carried = tls;
             }
@@ -203,6 +238,9 @@ public sealed partial class SipralStack
                 Destination = destination,
                 Client = client,
                 Stream = carried,
+                Use = use,
+                FirstRead = first.First,
+                FirstBuffer = first.Buffer,
             };
         }
         catch (Exception ex) when (ex is SocketException or AggregateException or FormatException
@@ -255,16 +293,22 @@ public sealed partial class SipralStack
 
     private void ReadSipStream(SipStream stream)
     {
-        var buffer = new byte[TransmitBytes];
+        var buffer = stream.FirstBuffer ?? new byte[TransmitBytes];
+        var first = stream.FirstRead;
         while (!_closed.IsSet)
         {
             int read;
             try
             {
-                read = stream.Stream.Read(buffer, 0, buffer.Length);
+                read = first is not null ? first.GetAwaiter().GetResult() : stream.Stream.Read(buffer, 0, buffer.Length);
+                first = null;
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
             {
+                if (RefusedTheCertificate(stream, ex))
+                {
+                    return;
+                }
                 read = 0;
             }
             if (read == 0)
@@ -315,8 +359,29 @@ public sealed partial class SipralStack
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
         {
-            LoseSipStream(transport, tell: true);
+            if (!RefusedTheCertificate(stream, ex))
+            {
+                LoseSipStream(transport, tell: true);
+            }
         }
+    }
+
+    // A connection the server closed over the client certificate (TLS 1.3
+    // sends that verdict after the handshake) is reported with the reason,
+    // rather than as an orderly close. Whether it was.
+    private bool RefusedTheCertificate(SipStream stream, Exception ex)
+    {
+        if (stream.Use?.Explain(ex) is not { } refused)
+        {
+            return false;
+        }
+        LoseSipStream(stream.Transport, tell: false);
+        if (!_closed.IsSet)
+        {
+            SayNoStream(stream.Transport, refused.Error, $"to {stream.Destination} {Verdict(refused.Error)}: {refused.Message}",
+                SipralTransport.Tls, refused.Tls);
+        }
+        return true;
     }
 
     private void LoseSipStream(uint transport, bool tell)

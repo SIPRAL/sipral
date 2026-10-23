@@ -14,7 +14,9 @@
 /// must be verified. The stack opens one connection per media socket. TLS
 /// checks `serverName` (default: the host of `address`) against the system
 /// roots, or only `trustedCertificates` (DER) when given. Checking cannot
-/// be turned off.
+/// be turned off. `clientIdentity` is presented when the server asks for a
+/// client certificate; one that cannot be used now is no relay for that
+/// call, as a refused connection is.
 ///
 /// The password never appears in descriptions or logs: a leaked TURN
 /// credential is a relay anyone can use.
@@ -25,10 +27,11 @@ public struct TurnServer: Sendable, CustomStringConvertible, CustomDebugStringCo
     public let transport: SipralTransport
     public let serverName: String?
     public let trustedCertificates: [[UInt8]]
+    public let clientIdentity: ClientIdentity?
 
     public init(
         address: String, username: String, password: String, transport: SipralTransport = .udp,
-        serverName: String? = nil, trustedCertificates: [[UInt8]] = []
+        serverName: String? = nil, trustedCertificates: [[UInt8]] = [], clientIdentity: ClientIdentity? = nil
     ) {
         self.address = address
         self.username = username
@@ -36,6 +39,7 @@ public struct TurnServer: Sendable, CustomStringConvertible, CustomDebugStringCo
         self.transport = transport
         self.serverName = serverName
         self.trustedCertificates = trustedCertificates
+        self.clientIdentity = clientIdentity
     }
 
     public var description: String {
@@ -48,6 +52,7 @@ public struct TurnServer: Sendable, CustomStringConvertible, CustomDebugStringCo
         Mirror(self, children: [
             "address": address, "username": username, "password": "<redacted>", "transport": transport,
             "serverName": serverName as Any, "trustedCertificates": trustedCertificates.count,
+            "clientIdentity": clientIdentity != nil,
         ])
     }
 }

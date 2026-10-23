@@ -127,7 +127,17 @@
 #                               at Kamailio and one over a pinned TLS
 #                               connection of its own at Asterisk, both
 #                               registered at once and a call up on each
-#                               (interop/lines/caller.py)
+#                               (interop/lines/caller.py); then the Python,
+#                               Kotlin and .NET agents over TLS 1.3 to a
+#                               listener that takes only a client
+#                               certificate the lab authority signed,
+#                               saying in turn that one was required, that
+#                               another authority's was refused and that
+#                               an expired one was not offered, then
+#                               registered with the lab's and called; and
+#                               the C ABI over TLS 1.2 the same way, with
+#                               OpenSSL holding the key
+#                               (interop/tls/client-cert.c)
 #   scripts/lab.sh robust      only the field failures that need a network
 #                               to show (docs/11-testing.md's table): a
 #                               link that drops IP fragments, with INVITEs
@@ -4464,16 +4474,43 @@ tls_certificate() {
             -CA "$SIPRAL_TLS_CERTS/ca.pem" -CAkey "$SIPRAL_TLS_CERTS/ca.key" -CAcreateserial \
             -extfile "$SIPRAL_TLS_CERTS/$file.ext" "$@" -out "$SIPRAL_TLS_CERTS/$file.pem" >/dev/null 2>&1
 }
+# A self-signed authority: `$1` the file, `$2` its name.
+tls_authority() {
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+        -subj "/CN=$2" \
+        -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
+        -keyout "$SIPRAL_TLS_CERTS/$1.key" -out "$SIPRAL_TLS_CERTS/$1.pem" >/dev/null 2>&1
+}
+# A client certificate for the listeners that require one: `$1` the file,
+# `$2` the name, `$3` the authority that signs it, then its dates. Beside
+# the PEM pair, the same as PKCS#12 under $SIPRAL_TLS_CLIENT_P12_PASSWORD,
+# for the JVM.
+tls_client_certificate() {
+    local file="$1" name="$2" authority="$3"
+    shift 3
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=$name" \
+        -keyout "$SIPRAL_TLS_CERTS/$file.key" -out "$SIPRAL_TLS_CERTS/$file.csr" >/dev/null 2>&1 \
+        && printf 'extendedKeyUsage=clientAuth\n' > "$SIPRAL_TLS_CERTS/$file.ext" \
+        && openssl x509 -req -in "$SIPRAL_TLS_CERTS/$file.csr" \
+            -CA "$SIPRAL_TLS_CERTS/$authority.pem" -CAkey "$SIPRAL_TLS_CERTS/$authority.key" -CAcreateserial \
+            -extfile "$SIPRAL_TLS_CERTS/$file.ext" "$@" -out "$SIPRAL_TLS_CERTS/$file.pem" >/dev/null 2>&1 \
+        && openssl pkcs12 -export -in "$SIPRAL_TLS_CERTS/$file.pem" -inkey "$SIPRAL_TLS_CERTS/$file.key" \
+            -passout env:SIPRAL_TLS_CLIENT_P12_PASSWORD -out "$SIPRAL_TLS_CERTS/$file.p12" >/dev/null 2>&1
+}
 tls_certificates() {
     SIPRAL_TLS_CERTS=$(mktemp -d)
-    export SIPRAL_TLS_CERTS
-    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
-            -subj "/CN=Sipral lab authority" \
-            -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
-            -keyout "$SIPRAL_TLS_CERTS/ca.key" -out "$SIPRAL_TLS_CERTS/ca.pem" >/dev/null 2>&1 \
+    # a throwaway for this run's PKCS#12 files, which hold throwaway keys
+    SIPRAL_TLS_CLIENT_P12_PASSWORD=$(openssl rand -hex 12)
+    export SIPRAL_TLS_CERTS SIPRAL_TLS_CLIENT_P12_PASSWORD
+    if ! tls_authority ca "Sipral lab authority" \
         || ! tls_certificate asterisk "$TLS_NAME" -days 1 \
         || ! tls_certificate wrong wrong.lab.sipral.test -days 1 \
-        || ! tls_certificate expired "$TLS_NAME" -not_before 20200101000000Z -not_after 20200102000000Z; then
+        || ! tls_certificate expired "$TLS_NAME" -not_before 20200101000000Z -not_after 20200102000000Z \
+        || ! tls_authority stranger-ca "Sipral lab stranger" \
+        || ! tls_client_certificate client "Sipral lab client" ca -days 1 \
+        || ! tls_client_certificate client-expired "Sipral lab client" ca \
+            -not_before 20200101000000Z -not_after 20200102000000Z \
+        || ! tls_client_certificate stranger "Sipral lab client" stranger-ca -days 1; then
         printf '  could not make the certificates for the TLS listeners (openssl)\n'
         rm -rf "$SIPRAL_TLS_CERTS"
         return 1
@@ -4483,15 +4520,20 @@ tls_certificates() {
 }
 
 # One layer's agent in a container of its own: `$1` the layer, `$2` the
-# account, `$3` tls or tcp, then the `docker run` arguments up to `--`, the
-# image, a shell line that prepares the agent, and the command that runs it.
-# Over TLS the agent is run three times with a ten-second limit first, once
-# against each listener it must refuse, and what it said about each is kept
-# as a "probe" line in its log; then once against 5061, trusting the lab
-# authority alone, and left to answer the call. `TLS_AGENT_NAME` is the
+# account, `$3` tls, tcp or cert, then the `docker run` arguments up to
+# `--`, the image, a shell line that prepares the agent, and the command
+# that runs it. Over TLS the agent is run three times with a ten-second
+# limit first, once against each listener it must refuse, and what it said
+# about each is kept as a "probe" line in its log; then once against 5061,
+# trusting the lab authority alone, and left to answer the call. `cert` is
+# TLS to 5064, which takes only a client certificate the lab authority
+# signed: the agent is run first with none, with one a second authority
+# signed and with one that expired, and then with the lab's own. A
+# certificate is handed over as SIPRAL_TLS_CLIENT_CERT and _KEY (PEM) and
+# as SIPRAL_TLS_CLIENT_P12 (PKCS#12, for the JVM). `TLS_AGENT_NAME` is the
 # container.
 tls_agent_start() {
-    local layer="$1" user="$2" over="$3" port=5061 run_args=() image prepare agent
+    local layer="$1" user="$2" over="$3" port=5061 signalling run_args=() image prepare agent
     shift 3
     while [ "$1" != "--" ]; do
         run_args+=("$1")
@@ -4499,28 +4541,40 @@ tls_agent_start() {
     done
     shift
     image="$1" prepare="$2" agent="$3"
+    signalling="$over"
     [ "$over" = tcp ] && port=5060
-    TLS_AGENT_NAME="sipral-lab-tls-$layer-${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    [ "$over" = cert ] && port=5064 && signalling=tls
+    TLS_AGENT_NAME="sipral-lab-tls-$layer-$over-${COMPOSE_PROJECT_NAME:-sipral-interop}"
     docker rm -f "$TLS_AGENT_NAME" >/dev/null 2>&1
     docker run -d --name "$TLS_AGENT_NAME" --network "$LAB_NETWORK" \
         -v "$SIPRAL_TLS_CERTS:/lab-tls:ro" \
         -e SIPRAL_AOR="sip:$user@asterisk" \
         -e SIPRAL_REGISTRAR=sip:asterisk \
         -e SIPRAL_AUTH_USER="$user" -e SIPRAL_AUTH_PASSWORD=labpass \
-        -e SIPRAL_SIGNALLING="$over" \
+        -e SIPRAL_SIGNALLING="$signalling" \
         -e SIPRAL_TLS_SERVER_NAME="$TLS_NAME" \
+        -e SIPRAL_TLS_CLIENT_P12_PASSWORD \
         ${run_args[@]+"${run_args[@]}"} \
         "$image" sh -c "
             $prepare
             address=\$(getent hosts asterisk | cut -d' ' -f1)
             probe() {
                 env SIPRAL_REGISTRAR_ADDRESS=\"\$address:\$1\" \${2:+SIPRAL_TLS_CA=\$2} \
-                    timeout 20 $agent 2>&1 | grep -m1 '^transport failed' | sed \"s/^/probe \$1: /\"
+                    \${3:+SIPRAL_TLS_CLIENT_CERT=/lab-tls/\$3.pem SIPRAL_TLS_CLIENT_KEY=/lab-tls/\$3.key} \
+                    \${3:+SIPRAL_TLS_CLIENT_P12=/lab-tls/\$3.p12} \
+                    timeout 20 $agent 2>&1 | grep -m1 '^transport failed' | sed \"s/^/probe \$1\${3:+ \$3}: /\"
             }
             if [ '$over' = tls ]; then
                 probe 5061 ''
                 probe 5062 /lab-tls/ca.pem
                 probe 5063 /lab-tls/ca.pem
+            fi
+            if [ '$over' = cert ]; then
+                probe 5064 /lab-tls/ca.pem
+                probe 5064 /lab-tls/ca.pem stranger
+                probe 5064 /lab-tls/ca.pem client-expired
+                export SIPRAL_TLS_CLIENT_CERT=/lab-tls/client.pem SIPRAL_TLS_CLIENT_KEY=/lab-tls/client.key
+                export SIPRAL_TLS_CLIENT_P12=/lab-tls/client.p12
             fi
             SIPRAL_REGISTRAR_ADDRESS=\"\$address:$port\" SIPRAL_TLS_CA=/lab-tls/ca.pem exec $agent" \
         >/dev/null || { printf '  could not start the %s agent container\n' "$layer"; return 1; }
@@ -4560,8 +4614,16 @@ tls_agent_call() {
     docker rm -f "$TLS_AGENT_NAME" >/dev/null 2>&1
     printf '%s\n' "$log" | grep -E '^(probe|listening|answered|dtmf|ended|transport failed|call failed)' \
         | sed 's/^/    /'
-    printf '%s\n' "$contact" | found "transport=$over" \
+    printf '%s\n' "$contact" | found "transport=${over/cert/tls}" \
         || { printf '  Asterisk holds its contact over another transport\n'; return 1; }
+    if [ "$over" = cert ]; then
+        printf '%s\n' "$log" | found '^probe 5064: transport failed .*tls=client_certificate_required' \
+            || { printf '  no certificate where one is required was not said as such\n'; return 1; }
+        printf '%s\n' "$log" | found '^probe 5064 stranger: transport failed .*tls=client_certificate_refused' \
+            || { printf '  a certificate another authority signed was not said to be refused\n'; return 1; }
+        printf '%s\n' "$log" | found '^probe 5064 client-expired: transport failed .*tls=client_certificate_expired' \
+            || { printf '  an expired client certificate was not said to be expired\n'; return 1; }
+    fi
     if [ "$over" = tls ]; then
         printf '%s\n' "$log" | found '^probe 5061: transport failed .*tls=untrusted' \
             || { printf '  the platform'"'"'s authorities alone did not refuse the lab'"'"'s certificate as untrusted\n'; return 1; }
@@ -4580,10 +4642,13 @@ tls_agent_call() {
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
+# Each layer's agent over TLS, or with `cert` over TLS to the listener that
+# requires a client certificate, as its own account.
 tls_python_agent() {
-    local beside
+    local over="${1:-tls}" user=labuser-agent-tls beside
+    [ "$over" = cert ] && user=labuser-agent-cert
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    tls_agent_start python labuser-agent-tls tls \
+    tls_agent_start python "$user" "$over" \
         -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
         -v "$beside:/lib-sipral:ro" -v "$ROOT/bindings/python:/python:ro" -- \
         debian:trixie-slim \
@@ -4591,15 +4656,16 @@ tls_python_agent() {
          apt-get -qq update >/dev/null 2>&1
          apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1' \
         'python3 -u /python/examples/agent.py' || return 1
-    tls_agent_call python labuser-agent-tls tls 60
+    tls_agent_call python "$user" "$over" 60
 }
 
 tls_kotlin_agent() {
-    local beside
+    local over="${1:-tls}" user=labuser-agent-kotlin-tls beside
+    [ "$over" = cert ] && user=labuser-agent-kotlin-cert
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
     docker build -q -t sipral-lab-kotlin interop/kotlin >/dev/null 2>&1 \
         || { printf '  could not build interop/kotlin\n'; return 1; }
-    tls_agent_start kotlin labuser-agent-kotlin-tls tls \
+    tls_agent_start kotlin "$user" "$over" \
         -v "$beside:/lib-sipral:ro" \
         -v "$ROOT/bindings/c/include:/sipral-include:ro" \
         -v "$ROOT/bindings/kotlin/sipral/src/main/jni:/sipral-jni:ro" \
@@ -4613,20 +4679,69 @@ tls_kotlin_agent() {
              -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral || exit 1' \
         'java -Djava.library.path=/tmp -cp /kotlin/sipral-kotlin.jar:/kotlin/kotlin-stdlib.jar:/kotlin/kotlinx-coroutines.jar org.sipral.examples.AgentKt' \
         || return 1
-    tls_agent_call kotlin labuser-agent-kotlin-tls tls 90
+    tls_agent_call kotlin "$user" "$over" 90
 }
 
 tls_csharp_agent() {
-    local beside
+    local over="${1:-tls}" user=labuser-agent-csharp-tls beside
+    [ "$over" = cert ] && user=labuser-agent-csharp-cert
     beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    tls_agent_start csharp labuser-agent-csharp-tls tls \
+    tls_agent_start csharp "$user" "$over" \
         -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
         -v "$beside:/lib-sipral:ro" -v "$ROOT/bindings/dotnet:/src-dotnet:ro" -- \
         mcr.microsoft.com/dotnet/sdk:10.0 \
         'cp -r /src-dotnet /dotnet
          dotnet build -c Release -o /agent /dotnet/samples/Sipral.Sample.Agent >/dev/null 2>&1 || exit 1' \
         'dotnet /agent/Sipral.Sample.Agent.dll' || return 1
-    tls_agent_call csharp labuser-agent-csharp-tls tls 150
+    tls_agent_call csharp "$user" "$over" 150
+}
+
+# The C ABI behind a client certificate (interop/tls/client-cert.c, OpenSSL
+# holding the key), against 5065, Asterisk's TLS 1.2 listener that requires
+# one: with none, with one a second authority signed, with one that
+# expired, with a key that is not the certificate's, and with the lab's own,
+# which registers. Each refusal is what the stack raised once the program
+# told it, as its own sipral_tls_failure_t.
+tls_c_client_certificate() {
+    local beside log
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    log=$(lab_run "the C ABI with a client certificate" $((LAB_START_APT_S + 120)) \
+        --network "$LAB_NETWORK" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/c/include:/sipral-include:ro" \
+        -v "$ROOT/interop/tls:/tls:ro" \
+        -v "$SIPRAL_TLS_CERTS:/lab-tls:ro" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y gcc libc6-dev libssl-dev >/dev/null 2>&1
+            cc -std=c11 -Wall -Wextra -Werror -I/sipral-include /tls/client-cert.c \
+                -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral -lssl -lcrypto -o /tmp/client-cert || exit 1
+            address=\$(getent hosts asterisk | cut -d' ' -f1)
+            run() {
+                printf '%s: ' \"\$1\"
+                shift
+                /tmp/client-cert \"\$address\" 5065 $TLS_NAME /lab-tls/ca.pem labuser-c-cert labpass \"\$@\" \
+                    | tr '\n' ' '
+                echo
+            }
+            run none
+            run stranger /lab-tls/stranger.pem /lab-tls/stranger.key
+            run expired /lab-tls/client-expired.pem /lab-tls/client-expired.key
+            run mismatched /lab-tls/client.pem /lab-tls/stranger.key
+            run client /lab-tls/client.pem /lab-tls/client.key" 2>&1)
+    printf '%s\n' "$log" | sed 's/^/    /'
+    said() { printf '%s\n' "$log" | found -E "$1"; }
+    if said '^none: transport failed error=connection_reset tls=client_certificate_required' \
+        && said '^stranger: transport failed error=connection_reset tls=client_certificate_refused' \
+        && said '^expired: transport failed error=other tls=client_certificate_expired' \
+        && said '^mismatched: transport failed error=other tls=client_key_unavailable' \
+        && said '^client: registered'; then
+        pass "the C ABI behind a client certificate, TLS 1.2 to Asterisk: none required, another authority's refused, an expired one and a mismatched key never offered, the lab's own registered"
+    else
+        fail "the C ABI behind a client certificate"
+        return 1
+    fi
 }
 
 # The SHA-256 fingerprint of a certificate's DER, as a pin is written.
@@ -4752,6 +4867,18 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
             fi
             tls_pin_flow || true
             tls_two_lines_flow || true
+            tls_python_agent cert \
+                && pass "agent.py behind a client certificate, TLS 1.3: said none was required, another authority's refused and an expired one, then registered with the lab's, answered, echoed and hung up" \
+                || fail "agent.py behind a client certificate"
+            if [ -n "${KOTLIN_AGENT_JAR:-}" ]; then
+                tls_kotlin_agent cert \
+                    && pass "Agent.kt behind a client certificate, TLS 1.3: said none was required, another authority's refused and an expired one, then registered with the lab's, answered and echoed" \
+                    || fail "Agent.kt behind a client certificate"
+            fi
+            tls_csharp_agent cert \
+                && pass "Sipral.Sample.Agent behind a client certificate, TLS 1.3: said none was required, another authority's refused and an expired one, then registered with the lab's, answered and echoed" \
+                || fail "Sipral.Sample.Agent behind a client certificate"
+            tls_c_client_certificate || true
         fi
         ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
         wait_for asterisk "Asterisk Ready" >/dev/null || true

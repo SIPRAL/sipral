@@ -22,7 +22,13 @@ drive the devices instead.
 connection to ``SIPRAL_REGISTRAR_ADDRESS``. TLS checks the certificate
 against ``SIPRAL_TLS_SERVER_NAME`` (default: the address's host) with
 ``SIPRAL_TLS_CA`` as the only trusted authority (default: the platform's).
-Failures print ``transport failed error=<...> tls=<...>`` and are retried.
+With ``SIPRAL_TLS_CLIENT_CERT`` (PEM, the certificate then any
+intermediates) and ``SIPRAL_TLS_CLIENT_KEY`` (its PEM private key) it
+presents that client certificate when the server asks for one.
+Failures print ``transport failed error=<...> tls=<...>`` and are retried;
+``tls=client_certificate_required`` when the server wanted a certificate
+and none was given, ``client_certificate_refused``,
+``client_key_unavailable`` or ``client_certificate_expired`` for one given.
 ``SIPRAL_INVITE_LIMIT=voice-agent`` accepts a trunk's burst of calls.
 
 ``SIPRAL_TEXT=1`` answers with real-time text (RFC 4103) when offered and
@@ -37,7 +43,7 @@ import os
 import socket
 import ssl
 
-from sipral import Call, InviteLimit, Stack, TlsTrust
+from sipral import Call, InviteLimit, Stack, TlsClientCertificate, TlsTrust
 from sipral.enums import (
     AudioMode,
     Basic,
@@ -269,6 +275,7 @@ async def main() -> None:
     over = os.environ.get("SIPRAL_SIGNALLING", "udp")
     signalling = {"udp": 0, "tcp": Transport.TCP, "tls": Transport.TLS}[over]
     trusted = os.environ.get("SIPRAL_TLS_CA")
+    client_certificate = os.environ.get("SIPRAL_TLS_CLIENT_CERT")
     stack = Stack(
         loop=loop,
         bind_host=host,
@@ -277,6 +284,11 @@ async def main() -> None:
         signalling_server=registrar_address if signalling else None,
         tls_server_name=os.environ.get("SIPRAL_TLS_SERVER_NAME"),
         tls_trust=TlsTrust.only_authority(trusted) if trusted else None,
+        tls_client_certificate=TlsClientCertificate(
+            client_certificate, os.environ.get("SIPRAL_TLS_CLIENT_KEY")
+        )
+        if client_certificate
+        else None,
         invite_limit=InviteLimit.VOICE_AGENT
         if os.environ.get("SIPRAL_INVITE_LIMIT") == "voice-agent"
         else None,

@@ -170,10 +170,26 @@ internal class SignallingRefused(
  * failure is a refused handshake. No answer is refused, no route
  * unreachable, silence timed out.
  */
-internal fun classify(failure: Throwable, handshaking: Boolean): SignallingRefused {
+internal fun classify(failure: Throwable, handshaking: Boolean, auth: ClientAuthentication? = null): SignallingRefused {
     val causes = generateSequence(failure) { it.cause }.toList()
     val detail = sentence(causes.lastOrNull { !it.message.isNullOrBlank() }?.message ?: failure.toString())
     fun tls(reason: SipralTlsFailure) = SignallingRefused(SipralTransportError.CONNECTION_RESET, reason, detail)
+    clientCertificateVerdict(causes, auth)?.let { return tls(it) }
+    if (handshaking && auth?.asked?.get() == true && receivedAlert(causes) == null &&
+        causes.any { it is SocketException || it is java.io.EOFException }) {
+        // the server asked for a certificate and dropped the connection on
+        // the flight that answered it; its alert, if it sent one, went with
+        // the reset
+        val reason = if (auth.presented.get()) {
+            SipralTlsFailure.CLIENT_CERTIFICATE_REFUSED
+        } else {
+            SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED
+        }
+        return SignallingRefused(
+            SipralTransportError.CONNECTION_RESET, reason,
+            sentence("the server asked for a client certificate and closed the connection, no alert reaching this end: $detail"),
+        )
+    }
     return when {
         causes.any { it is CertificateExpiredException || it is CertificateNotYetValidException } ->
             tls(SipralTlsFailure.EXPIRED)
@@ -188,6 +204,62 @@ internal fun classify(failure: Throwable, handshaking: Boolean): SignallingRefus
         failure is NoRouteToHostException -> SignallingRefused(SipralTransportError.UNREACHABLE, SipralTlsFailure.NONE, detail)
         failure is SocketException -> SignallingRefused(SipralTransportError.CONNECTION_RESET, SipralTlsFailure.NONE, detail)
         else -> SignallingRefused(SipralTransportError.OTHER, SipralTlsFailure.NONE, detail)
+    }
+}
+
+/**
+ * The TLS alert the server sent, as RFC 8446 §6 numbers it, read from the
+ * platform's sentence: JSSE writes `Received fatal alert: bad_certificate`,
+ * Conscrypt on Android (BoringSSL) `SSLV3_ALERT_BAD_CERTIFICATE` or
+ * `TLSV1_ALERT_CERTIFICATE_REQUIRED`. Null when no received alert is named.
+ */
+internal fun receivedAlert(causes: List<Throwable>): Int? {
+    for (cause in causes) {
+        val text = cause.message?.lowercase() ?: continue
+        val name = RECEIVED_ALERT.find(text)?.groupValues?.get(1) ?: continue
+        ALERTS[name]?.let { return it }
+    }
+    return null
+}
+
+private val RECEIVED_ALERT = Regex("(?:received fatal alert:\\s*|alert_)([a-z_]+)")
+
+private val ALERTS = mapOf(
+    "handshake_failure" to 40,
+    "bad_certificate" to 42,
+    "unsupported_certificate" to 43,
+    "certificate_revoked" to 44,
+    "certificate_expired" to 45,
+    "certificate_unknown" to 46,
+    "unknown_ca" to 48,
+    "access_denied" to 49,
+    "certificate_required" to 116,
+)
+
+/** Alerts a server sends about the certificate it was given, or not given. */
+private val ABOUT_THE_CLIENT = setOf(42, 43, 44, 46, 48, 49, 116)
+
+/**
+ * What a failure says about this end's certificate, or null when it says
+ * nothing about it: the key could not sign (locked, the user not
+ * authenticated, invalidated by the platform), or the server's alert
+ * refused the certificate given, wanted one when none was, or found it
+ * expired. [auth] is what the handshake did; without it nothing was asked.
+ */
+private fun clientCertificateVerdict(causes: List<Throwable>, auth: ClientAuthentication?): SipralTlsFailure? {
+    val presented = auth?.presented?.get() == true
+    val asked = auth?.asked?.get() == true
+    if (presented && causes.any { it is java.security.InvalidKeyException || it is java.security.SignatureException ||
+            it is java.security.KeyStoreException || it is java.security.UnrecoverableKeyException ||
+            it is java.security.ProviderException }) {
+        return SipralTlsFailure.CLIENT_KEY_UNAVAILABLE
+    }
+    val alert = receivedAlert(causes) ?: return null
+    return when {
+        presented && alert == 45 -> SipralTlsFailure.CLIENT_CERTIFICATE_EXPIRED
+        presented && alert in ABOUT_THE_CLIENT -> SipralTlsFailure.CLIENT_CERTIFICATE_REFUSED
+        !presented && (alert in ABOUT_THE_CLIENT || (alert == 40 && asked)) -> SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED
+        else -> null
     }
 }
 
@@ -330,13 +402,29 @@ internal class SignallingLink(
     private val server: InetSocketAddress,
     private val serverName: String,
     trust: SipralTlsTrust,
+    private val clientCertificate: SipralClientCertificate? = null,
 ) {
-    private val context: SSLContext? = if (protocol == SipralTransport.TLS) {
-        val checking = if (trust is SipralTlsTrust.Pinned) PinChecking(trust.digest) else Checking(trust.trustManagers(), serverName)
-        SSLContext.getInstance("TLS").apply { init(null, arrayOf(checking), null) }
-    } else {
-        null
+    private val checking: X509ExtendedTrustManager? = when {
+        protocol != SipralTransport.TLS -> null
+        trust is SipralTlsTrust.Pinned -> PinChecking(trust.digest)
+        else -> Checking(trust.trustManagers(), serverName)
     }
+
+    /** What the last attempt's handshake did about a client certificate. */
+    private val auth = ClientAuthentication()
+
+    /** A context for one attempt: the trust, and the client certificate read
+     * again from where the platform keeps it, or the refusal to try. */
+    private fun context(): SSLContext? {
+        val trust = checking ?: return null
+        auth.reset()
+        val (key, chain) = clientCertificate?.load() ?: (null to null)
+        return SSLContext.getInstance("TLS").apply { init(arrayOf(Presenting(key, chain, auth)), arrayOf(trust), null) }
+    }
+
+    /** [classify], told what the handshake did about a client certificate. */
+    fun classifyHere(failure: Throwable, handshaking: Boolean): SignallingRefused =
+        classify(failure, handshaking, if (checking != null) auth else null)
 
     private class Open(val socket: Socket, val local: String, val remote: String) {
         val input: InputStream = socket.getInputStream()
@@ -368,6 +456,7 @@ internal class SignallingLink(
 
     /** One connection from [host], with `local` and `remote`, or the refusal. */
     fun connect(host: String?): Pair<Socket, Pair<String, String>> {
+        val context = context()
         val raw = Socket()
         var handshaking = false
         try {
@@ -383,7 +472,9 @@ internal class SignallingLink(
                     sslParameters = sslParameters.apply {
                         serverNames = listOf(SNIHostName(serverName))
                     }
+                    val started = System.nanoTime()
                     startHandshake()
+                    awaitVerdict(this, (System.nanoTime() - started) / 1_000_000)
                     soTimeout = 0
                 }
             } else {
@@ -398,8 +489,44 @@ internal class SignallingLink(
             } catch (_: Exception) {
                 // closed either way
             }
-            throw classify(refused, handshaking)
+            throw classifyHere(refused, handshaking)
         }
+    }
+
+    /** What the server sent while [awaitVerdict] listened, for the stack once
+     * the connection is bound; taken once. */
+    @Volatile
+    private var early: ByteArray? = null
+
+    /** The bytes the server sent before the connection was handed over. */
+    fun takeEarly(): ByteArray? = early.also { early = null }
+
+    /**
+     * A TLS 1.3 server judges the client certificate after this end's
+     * handshake is over (RFC 8446 §4.4.2), so a refusal comes as an alert
+     * one round trip later; a request written meanwhile meets a connection
+     * the server has already reset, and the alert is lost with it. When the
+     * server asked for a certificate, listen first, for twice as long as
+     * the handshake took (a quarter to three seconds): an alert is thrown
+     * here and classified, bytes are kept for the stack, and silence is the
+     * server accepting.
+     */
+    private fun awaitVerdict(socket: SSLSocket, handshakeMs: Long) {
+        early = null
+        if (!auth.asked.get() || socket.session.protocol != "TLSv1.3") {
+            return
+        }
+        socket.soTimeout = (handshakeMs * 2).coerceIn(VERDICT_LEAST_MS, VERDICT_MOST_MS).toInt()
+        val buffer = ByteArray(1 shl 16)
+        val read = try {
+            socket.inputStream.read(buffer)
+        } catch (_: SocketTimeoutException) {
+            return
+        }
+        if (read < 0) {
+            throw java.io.EOFException("the server closed the connection when its handshake ended")
+        }
+        early = buffer.copyOfRange(0, read)
     }
 
     /** Tell the stack a connection is open, naming both ends, and read it on
@@ -414,6 +541,15 @@ internal class SignallingLink(
         val open = Open(socket, local, remote)
         client.linkBound(local)
         current.set(open)
+        takeEarly()?.let { bytes ->
+            try {
+                retryBusy(deadlineMs = 5_000) { Sipral.stackReceiveStream(client.handle, 0, bytes, client.nowMs()) }
+            } catch (_: SipralException) {
+                // framing lost: the stack retired the transport and reported it
+                lose(open, null, tell = false)
+                return
+            }
+        }
         Thread({ read(open) }, "sipral-signalling").apply {
             isDaemon = true
             start()
@@ -449,7 +585,7 @@ internal class SignallingLink(
                 open.output.flush()
             }
         } catch (broken: Exception) {
-            lose(open, classify(broken, handshaking = false), tell = true)
+            lose(open, classifyHere(broken, handshaking = false), tell = true)
         }
     }
 
@@ -459,7 +595,9 @@ internal class SignallingLink(
             val read = try {
                 open.input.read(buffer)
             } catch (broken: Exception) {
-                lose(open, classify(broken, handshaking = false), tell = true)
+                // a TLS 1.3 server's verdict on the client certificate comes
+                // after this end's handshake finished, as the first read's alert
+                lose(open, classifyHere(broken, handshaking = false), tell = true)
                 return
             }
             if (read < 0) {
@@ -595,6 +733,10 @@ internal class SignallingLink(
     companion object {
         /** How long one attempt may take, the TLS handshake included. */
         const val PATIENCE_MS = 5_000
+        /** The bounds of the wait for a TLS 1.3 server's verdict on the
+         * client certificate. */
+        const val VERDICT_LEAST_MS = 250L
+        const val VERDICT_MOST_MS = 3_000L
         /** The wait before the first reconnect, doubled per failure up to
          * [MOST_MS]. */
         const val FIRST_MS = 1_000L

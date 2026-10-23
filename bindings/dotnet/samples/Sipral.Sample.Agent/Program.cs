@@ -14,8 +14,10 @@
 // SIPRAL_SIGNALLING is udp (default), tcp or tls: one connection to
 // SIPRAL_REGISTRAR_ADDRESS. TLS checks SIPRAL_TLS_SERVER_NAME (default: the
 // address's host) against SIPRAL_TLS_CA as the only authority (default: the
-// platform's). Failures print "transport failed error=<...> tls=<...>" and
-// are retried. SIPRAL_INVITE_LIMIT=voice-agent accepts a trunk's burst of
+// platform's). SIPRAL_TLS_CLIENT_CERT and SIPRAL_TLS_CLIENT_KEY (PEM: the
+// certificate then its intermediates, and its unencrypted key) are presented
+// to a server that asks for a client certificate. Failures print
+// "transport failed error=<...> tls=<...>" and are retried. SIPRAL_INVITE_LIMIT=voice-agent accepts a trunk's burst of
 // calls that the default limit would answer 480.
 //
 // SIPRAL_TEXT=1 answers with real-time text (RFC 4103) when offered and
@@ -365,6 +367,11 @@ var signalling = Environment.GetEnvironmentVariable("SIPRAL_SIGNALLING") switch
     var other => throw new InvalidOperationException($"SIPRAL_SIGNALLING is udp, tcp or tls, not {other}"),
 };
 var tlsCa = Environment.GetEnvironmentVariable("SIPRAL_TLS_CA");
+var clientCertificatePath = Environment.GetEnvironmentVariable("SIPRAL_TLS_CLIENT_CERT");
+var clientKeyPath = Environment.GetEnvironmentVariable("SIPRAL_TLS_CLIENT_KEY");
+var clientCertificate = string.IsNullOrEmpty(clientCertificatePath) || string.IsNullOrEmpty(clientKeyPath)
+    ? null
+    : SipralClientCertificate.FromPemFiles(clientCertificatePath, clientKeyPath);
 using var stack = new SipralStack(
     bindHost: bindHost,
     audio: SipralAudio.Application,
@@ -374,7 +381,8 @@ using var stack = new SipralStack(
     tlsTrust: tlsCa is null ? null : SipralTlsTrust.OnlyAuthority(X509Certificate2.CreateFromPem(File.ReadAllText(tlsCa))),
     inviteLimit: Environment.GetEnvironmentVariable("SIPRAL_INVITE_LIMIT") == "voice-agent"
         ? SipralInviteLimit.VoiceAgent
-        : null);
+        : null,
+    tlsClientCertificate: clientCertificate);
 
 var registrar = Environment.GetEnvironmentVariable("SIPRAL_REGISTRAR");
 var account = stack.AddAccount(

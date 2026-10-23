@@ -70,7 +70,7 @@ import {
   sipral_log_callback_t,
   sipral_screen_callback_t,
 } from './sipral_abi.js';
-import { type Refusal, TlsTrust, classify, oneLine, openStream } from './tls.js';
+import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream } from './tls.js';
 import type { EnginePacket } from './transmit-worker.js';
 
 /** How one connection attempt, the TLS handshake included, may take. */
@@ -191,6 +191,12 @@ export interface StackOptions {
   /** Which authorities a TLS connection trusts; the platform's by default. */
   tlsTrust?: TlsTrust;
   /**
+   * The certificate a TLS connection presents when its server asks for one:
+   * the signalling connection's, and that of an account on a TLS connection
+   * of its own that names none itself. None by default.
+   */
+  clientCertificate?: ClientCertificate;
+  /**
    * Over UDP, a request too large for a datagram (RFC 3261 §18.1.1) goes on
    * a TCP connection this class opens to where it was going (on by
    * default); off, the stack is told none is coming and what waited ends.
@@ -206,6 +212,8 @@ export interface StackOptions {
   turnServerName?: string;
   /** Which authorities a TLS TURN server is trusted by; the platform's by default. */
   turnTrust?: TlsTrust;
+  /** The certificate a TLS TURN connection presents when the server asks for one; none by default. */
+  turnClientCertificate?: ClientCertificate;
   /**
    * Who pumps the calls' audio, a `SipralAudio` value: `Application` (the
    * default here) leaves each call's frames to {@link Media}; `Device` has
@@ -306,6 +314,8 @@ export interface AccountOptions {
   tlsPin?: string;
   /** `SipralTransport.Tcp`, `Tls`, `Ws` or `Wss`: a connection of its own to its server, on a stack signalling over UDP; WS/WSS run a WebSocket on TCP/TLS (RFC 7118). */
   streamProtocol?: number;
+  /** The certificate its TLS or WSS connection presents when the server asks for one; the stack's `clientCertificate` when left out. */
+  clientCertificate?: ClientCertificate;
   /** The `Host` of a WS/WSS account's handshake; the server's address when left out. */
   websocketHost?: string;
   /** The resource that handshake asks for; `/ws` when left out. */
@@ -532,6 +542,7 @@ export class Stack extends EventEmitter<StackEvents> {
   private readonly server: { host: string; port: number } | null;
   private readonly serverName: string | undefined;
   private readonly tlsTrust: TlsTrust;
+  private readonly clientCertificate: ClientCertificate | null;
   private readonly givenServerName: string | undefined;
   private readonly streamFallback: boolean;
   private readonly streamServer: { host: string; port: number } | null;
@@ -543,6 +554,7 @@ export class Stack extends EventEmitter<StackEvents> {
   private readonly turn: boolean;
   private readonly turnServerName: string | undefined;
   private readonly turnTrust: TlsTrust;
+  private readonly turnClientCertificate: ClientCertificate | null;
   private readonly stunSockets = new Map<string, MappedSocket>();
   private readonly probes = new Map<number, { address: string; socket: DatagramSocket }>();
   private readonly turnStreams = new Map<string, StreamSocket>();
@@ -573,6 +585,7 @@ export class Stack extends EventEmitter<StackEvents> {
     this.serverName = options.tlsServerName ?? this.server?.host;
     this.givenServerName = options.tlsServerName;
     this.tlsTrust = options.tlsTrust ?? TlsTrust.platform();
+    this.clientCertificate = options.clientCertificate ?? null;
     this.streamFallback = options.streamFallback ?? true;
     this.streamServer = options.streamServer === undefined ? null : split(options.streamServer);
     this.resolver = options.resolver ?? systemResolver;
@@ -580,6 +593,7 @@ export class Stack extends EventEmitter<StackEvents> {
     this.turn = options.turnServer !== undefined;
     this.turnServerName = options.turnServerName ?? (options.turnServer === undefined ? undefined : split(options.turnServer).host);
     this.turnTrust = options.turnTrust ?? TlsTrust.platform();
+    this.turnClientCertificate = options.turnClientCertificate ?? null;
     const low = options.rtpPortMin ?? 0;
     const high = options.rtpPortMax ?? 0;
     this.rtpPorts = low !== 0 || high !== 0 ? [low, high] : null;
@@ -630,11 +644,12 @@ export class Stack extends EventEmitter<StackEvents> {
           bindHost: options.bindHost,
           trust: signalling === SipralTransport.Tls ? (options.tlsTrust ?? TlsTrust.platform()) : null,
           serverName: options.tlsServerName,
+          clientCertificate: options.clientCertificate,
           timeoutMs: STREAM_PATIENCE_MS,
         });
         address = formatAddress(link.localAddress ?? '127.0.0.1', link.localPort ?? 0);
       } catch (error) {
-        refused = classify(error);
+        refused = classify(error, options.clientCertificate !== undefined);
         address = formatAddress(options.bindHost ?? routeHost(options.signallingServer, sipral), options.bindPort ?? 0);
       }
     }
@@ -740,7 +755,7 @@ export class Stack extends EventEmitter<StackEvents> {
         ? this.advertiseToward(options.registrarAddress)
         : null;
     const contact = options.contact ?? this.defaultContact(aor, advertised, parameters);
-    const { headers, tlsPin, ...rest } = options;
+    const { headers, tlsPin, clientCertificate, ...rest } = options;
     const fields = headers === undefined ? { array: null, count: 0 } : headerArray(headers);
     const [pin, pinLength] = text(tlsPin);
     const made = config(
@@ -766,6 +781,7 @@ export class Stack extends EventEmitter<StackEvents> {
       advertised,
       streamProtocol,
       tlsPin: tlsPin ?? null,
+      clientCertificate: clientCertificate ?? null,
       contactParameters: parameters,
     });
     this.accounts.set(account.handle, account);
@@ -2005,6 +2021,7 @@ export class Stack extends EventEmitter<StackEvents> {
       stream = await openStream(host, port, {
         trust: protocol === SipralTransport.Tls ? this.turnTrust : null,
         serverName: this.turnServerName ?? host,
+        clientCertificate: this.turnClientCertificate,
         timeoutMs: STREAM_PATIENCE_MS,
       });
     } catch {
@@ -2320,7 +2337,7 @@ export class Stack extends EventEmitter<StackEvents> {
       if (failure === null) {
         retryingClockBehind(() => this.sipral.sipral_stack_stream_closed(this.stackHandle, SIPRAL_TRANSPORT_MAIN, this.nowMs()));
       } else {
-        this.reportFailure(SIPRAL_TRANSPORT_MAIN, classify(failure));
+        this.reportFailure(SIPRAL_TRANSPORT_MAIN, classify(failure, this.clientCertificate !== null));
       }
     }
     this.reconnectDelay = RECONNECT_FIRST_MS;
@@ -2340,6 +2357,7 @@ export class Stack extends EventEmitter<StackEvents> {
             bindHost: this.bindHost,
             trust: this.signalling === SipralTransport.Tls ? this.tlsTrust : null,
             serverName: this.serverName,
+            clientCertificate: this.clientCertificate,
             timeoutMs: STREAM_PATIENCE_MS,
           });
           this.reconnectTimer = undefined;
@@ -2352,7 +2370,7 @@ export class Stack extends EventEmitter<StackEvents> {
           this.afterReconnect();
         } catch (error) {
           this.reconnectTimer = undefined;
-          this.reportFailure(SIPRAL_TRANSPORT_MAIN, classify(error));
+          this.reportFailure(SIPRAL_TRANSPORT_MAIN, classify(error, this.clientCertificate !== null));
           this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MOST_MS);
           this.reconnectLater();
         }
@@ -2397,12 +2415,13 @@ export class Stack extends EventEmitter<StackEvents> {
         bindHost: host,
         trust: this.signalling === SipralTransport.Tls ? this.tlsTrust : null,
         serverName: this.serverName,
+        clientCertificate: this.clientCertificate,
         timeoutMs: STREAM_PATIENCE_MS,
       });
       this.installLink(link);
     } catch (error) {
       this.address = formatAddress(host, 0);
-      this.reportFailure(SIPRAL_TRANSPORT_MAIN, classify(error));
+      this.reportFailure(SIPRAL_TRANSPORT_MAIN, classify(error, this.clientCertificate !== null));
       this.reconnectLater();
     }
   }
@@ -2440,19 +2459,31 @@ export class Stack extends EventEmitter<StackEvents> {
     return this.tlsTrust;
   }
 
+  /** What a TLS connection to `destination` presents: the certificate of an account on it, else the stack's. */
+  private streamCertificate(destination: string): ClientCertificate | null {
+    for (const account of this.accounts.values()) {
+      if (account.overTls && account.registrarAddress === destination && account.clientCertificate !== null) {
+        return account.clientCertificate;
+      }
+    }
+    return this.clientCertificate;
+  }
+
   private async openSipStream(transport: number, destination: string, over: number, bound: number = over): Promise<void> {
     const tls = over === SipralTransport.Tls;
     const target = tls || this.streamServer === null ? split(destination) : this.streamServer;
+    const certificate = tls ? this.streamCertificate(destination) : null;
     let socket: StreamSocket;
     try {
       socket = await openStream(target.host, target.port, {
         trust: tls ? this.streamTrust(destination) : null,
         serverName: this.givenServerName ?? target.host,
+        clientCertificate: certificate,
         timeoutMs: STREAM_PATIENCE_MS,
       });
     } catch (error) {
       this.streamsOpening.delete(destination);
-      const refusal = classify(error);
+      const refusal = classify(error, certificate !== null);
       const server = formatAddress(target.host, target.port);
       const named = server === destination ? destination : `${server} (for ${destination})`;
       const verdict =
@@ -2499,9 +2530,18 @@ export class Stack extends EventEmitter<StackEvents> {
       }
       this.poll();
     });
-    socket.on('error', () => undefined);
+    // a TLS 1.3 server says what it made of the client's certificate after
+    // the handshake, so its refusal arrives here and is told as such
+    let refusal: Refusal | null = null;
+    socket.on('error', (error) => {
+      const named = tls ? classify(error, certificate !== null) : null;
+      refusal = named !== null && named.tls !== SipralTlsFailure.None ? named : null;
+    });
     socket.on('close', () => {
-      this.loseSipStream(transport, true);
+      this.loseSipStream(transport, refusal === null);
+      if (refusal !== null && !this.closed) {
+        this.reportFailure(transport, refusal, over);
+      }
       this.poll();
     });
     this.poll();

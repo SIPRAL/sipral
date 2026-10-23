@@ -288,6 +288,21 @@ abstract final class SipralTlsFailure {
 
   /// The handshake failed: no common version or cipher, a server alert, or no TLS there.
   static const int handshakeRefused = 4;
+
+  /// The server asked for a client certificate and this end had none to present.
+  static const int clientCertificateRequired = 5;
+
+  /// The server refused the client certificate this end presented: an authority it does
+  /// not trust, a revoked certificate, or one it does not accept for this account.
+  static const int clientCertificateRefused = 6;
+
+  /// The client certificate's private key could not be used: not found, locked with the
+  /// device, its use refused by the user, or invalidated by the platform.
+  static const int clientKeyUnavailable = 7;
+
+  /// The client certificate has expired or is not valid yet, as this end read its dates
+  /// before connecting or as the server's alert said.
+  static const int clientCertificateExpired = 8;
 }
 
 /// The three answers a setting can give in a struct that starts out zeroed.

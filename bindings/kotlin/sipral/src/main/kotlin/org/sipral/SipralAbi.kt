@@ -266,6 +266,25 @@ enum class SipralTlsFailure(val value: Int) {
      * The handshake failed: no common version or cipher, a server alert, or no TLS there.
      */
     HANDSHAKE_REFUSED(4),
+    /**
+     * The server asked for a client certificate and this end had none to present.
+     */
+    CLIENT_CERTIFICATE_REQUIRED(5),
+    /**
+     * The server refused the client certificate this end presented: an authority it does
+     * not trust, a revoked certificate, or one it does not accept for this account.
+     */
+    CLIENT_CERTIFICATE_REFUSED(6),
+    /**
+     * The client certificate's private key could not be used: not found, locked with the
+     * device, its use refused by the user, or invalidated by the platform.
+     */
+    CLIENT_KEY_UNAVAILABLE(7),
+    /**
+     * The client certificate has expired or is not valid yet, as this end read its dates
+     * before connecting or as the server's alert said.
+     */
+    CLIENT_CERTIFICATE_EXPIRED(8),
     ;
 
     companion object {

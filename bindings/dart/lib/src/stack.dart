@@ -18,6 +18,7 @@ final class SipralStack {
     this._resolver,
     this._routes,
     this._tlsServerName,
+    this._clientCertificate,
   );
 
   /// Bind a socket on [bindHost]:[bindPort] (0 for any port) and create a
@@ -41,7 +42,9 @@ final class SipralStack {
   /// a secret. [diagnosticTrace] writes whole SIP messages at trace level,
   /// credentials removed. [resolver] answers `SipralEventKind.lookupWanted`
   /// ([SipralDns.platform] by default). [tlsServerName] is checked on an
-  /// account's own TLS connection when it has no `tlsPin`. [heldAudio] is a
+  /// account's own TLS connection when it has no `tlsPin`;
+  /// [clientCertificate] is what that connection presents when the server
+  /// asks for one and the account names none of its own. [heldAudio] is a
   /// `SipralHeldAudio` value: silence by default while holding, since the
   /// frames may be a microphone's; `application` sends what the application
   /// sends (hold music, a voice agent).
@@ -64,6 +67,7 @@ final class SipralStack {
     bool? diagnosticTrace,
     SipralResolver? resolver,
     String? tlsServerName,
+    SipralClientCertificate? clientCertificate,
     int heldAudio = SipralHeldAudio.default$,
     int maxDialogs = 0,
     int maxServerTransactions = 0,
@@ -92,6 +96,7 @@ final class SipralStack {
       resolver ?? SipralDns.platform,
       bindHost == null,
       tlsServerName,
+      clientCertificate,
     );
     try {
       stack._create(
@@ -131,6 +136,8 @@ final class SipralStack {
   final SipralResolver _resolver;
 
   final String? _tlsServerName;
+
+  final SipralClientCertificate? _clientCertificate;
 
   /// Per-account stream connections, keyed by transport number.
   final Map<int, Socket> _streams = {};
@@ -282,6 +289,11 @@ final class SipralStack {
   /// [webrtc] makes the account a PBX WebRTC line (Asterisk's `webrtc=yes`):
   /// its calls offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE
   /// and BUNDLE, whatever the stack's SRTP policy says.
+  ///
+  /// [clientCertificate] is what its TLS or WSS connection presents when the
+  /// server asks for one; the stack's `clientCertificate` when null. A
+  /// refusal is `SipralEventKind.transportFailed` with
+  /// [SipralStackEvent.tlsFailure] saying why.
   SipralAccount addAccount(
     String aor, {
     String? registrarAddress,
@@ -299,6 +311,7 @@ final class SipralStack {
     String? websocketHost,
     String? websocketResource,
     bool webrtc = false,
+    SipralClientCertificate? clientCertificate,
   }) {
     _ensureOpen();
     if ((registrarAddress == null) == (serverUri == null)) {
@@ -400,6 +413,7 @@ final class SipralStack {
       advertised,
       streamProtocol,
       tlsPin,
+      clientCertificate,
     );
     _accounts[handle] = account;
     return account;
@@ -688,8 +702,33 @@ final class SipralStack {
     final id = _nextStream++;
     final tls =
         protocol == SipralTransport.tls || protocol == SipralTransport.wss;
+    final account =
+        _accounts.values
+            .where(
+              (one) =>
+                  one.streamProtocol == protocol &&
+                  one.registrarAddress == destination,
+            )
+            .firstOrNull;
+    final certificate =
+        tls ? (account?.clientCertificate ?? _clientCertificate) : null;
     Socket socket;
+    // over TLS, read from the first moment, and what came kept for the stack
+    StreamSubscription<Uint8List>? early;
+    final held = <Uint8List>[];
     try {
+      final pinned = account?._tlsPin != null;
+      // a certificate that cannot be presented now is refused here, before
+      // anything reaches the server
+      final context =
+          certificate != null
+              ? certificate._context(
+                withTrustedRoots: !pinned,
+                now: DateTime.now().toUtc(),
+              )
+              : pinned
+              ? SecurityContext(withTrustedRoots: false)
+              : null;
       final plain = await Socket.connect(
         address.$1,
         address.$2,
@@ -697,22 +736,14 @@ final class SipralStack {
       );
       plain.setOption(SocketOption.tcpNoDelay, true);
       if (tls) {
-        final account =
-            _accounts.values
-                .where(
-                  (one) =>
-                      one.streamProtocol == protocol &&
-                      one.registrarAddress == destination,
-                )
-                .firstOrNull;
-        final pinned = account?._tlsPin != null;
+        final began = DateTime.now();
         final secured = await SecureSocket.secure(
           plain,
           host: _tlsServerName ?? address.$1.address,
           // with a pin, no authority is trusted. The pin is checked below on
           // the leaf: this callback sees the failing chain certificate, so a
           // server sending the pinned one above its own leaf would pass here
-          context: pinned ? SecurityContext(withTrustedRoots: false) : null,
+          context: context,
           onBadCertificate: pinned ? (_) => true : null,
         );
         if (pinned) {
@@ -724,23 +755,76 @@ final class SipralStack {
             );
           }
         }
+        // Under TLS 1.3 the server's verdict on the client's certificate --
+        // or on its having none -- comes a round trip after this end's
+        // handshake. Something written meanwhile reaches a server that has
+        // already refused, which resets the connection with it unread, and
+        // the reset loses the alert that said why. So nothing is handed to
+        // the stack to write on until twice the handshake's time has passed
+        // quietly (at least 250 ms, at most 3 s): an alert in that time
+        // fails the connection with its reason, and what arrived is kept
+        // for the stack. Dart says neither which version was negotiated nor
+        // whether the server asked for a certificate, so every TLS
+        // connection waits.
+        final quietMs = (2 * DateTime.now().difference(began).inMilliseconds)
+            .clamp(250, 3000);
+        Object? lost;
+        var ended = false;
+        final settled = Completer<void>();
+        early = secured.listen(
+          held.add,
+          onError: (Object failed) {
+            lost = failed;
+            if (!settled.isCompleted) {
+              settled.complete();
+            }
+          },
+          onDone: () {
+            ended = true;
+            if (!settled.isCompleted) {
+              settled.complete();
+            }
+          },
+          cancelOnError: true,
+        );
+        await Future.any([
+          settled.future,
+          Future<void>.delayed(Duration(milliseconds: quietMs)),
+        ]);
+        if (lost != null || ended) {
+          secured.destroy();
+          throw lost ??
+              const SocketException(
+                'the server closed the connection just after the TLS handshake',
+              );
+        }
         socket = secured;
       } else {
         socket = plain;
       }
     } catch (refused) {
       _streamsOpening.remove(destination);
-      _sayNoStream(id, destination, tls, refused);
+      _sayNoStream(
+        id,
+        destination,
+        tls,
+        refused,
+        presented: certificate != null,
+      );
       _poll();
       return;
     }
     _streamsOpening.remove(destination);
     if (_closed) {
+      unawaited(early?.cancel());
       socket.destroy();
       return;
     }
     _streams[id] = socket;
     _streamDestinations[id] = destination;
+    // a write that fails is reported here as well as to the listener below,
+    // which is the one that acts on it
+    unawaited(socket.done.then<void>((_) {}, onError: (Object _) {}));
     using((arena) {
       final local = _text(arena, _formatAddress(socket.address, socket.port));
       final remote = _text(arena, destination);
@@ -760,12 +844,50 @@ final class SipralStack {
         ),
       );
     });
-    socket.listen(
-      (bytes) => _streamReceived(id, bytes),
-      onDone: () => _loseStream(id),
-      onError: (Object _) => _loseStream(id),
-      cancelOnError: true,
-    );
+    void received(Uint8List bytes) => _streamReceived(id, bytes);
+    void ended() => _loseStream(id);
+    // a TLS 1.3 server that takes longer than the quiet time above still
+    // says what it made of the client's certificate here, and is told so
+    void failed(Object failed) {
+      final client =
+          tls
+              ? _clientCertificateFailure(
+                failed,
+                presented: certificate != null,
+              )
+              : null;
+      if (client == null) {
+        _loseStream(id);
+      } else {
+        _streams.remove(id)?.destroy();
+        _streamDestinations.remove(id);
+        if (!_closed) {
+          _sayNoStream(
+            id,
+            destination,
+            tls,
+            failed,
+            presented: certificate != null,
+          );
+          _poll();
+        }
+      }
+    }
+
+    if (early == null) {
+      socket.listen(
+        received,
+        onDone: ended,
+        onError: failed,
+        cancelOnError: true,
+      );
+    } else {
+      early
+        ..onData(received)
+        ..onDone(ended)
+        ..onError(failed);
+      held.forEach(received);
+    }
     _poll();
   }
 
@@ -777,8 +899,18 @@ final class SipralStack {
     }
   }
 
-  void _sayNoStream(int id, String destination, bool tls, Object refused) {
+  void _sayNoStream(
+    int id,
+    String destination,
+    bool tls,
+    Object refused, {
+    bool presented = false,
+  }) {
+    final client =
+        tls ? _clientCertificateFailure(refused, presented: presented) : null;
     final error = switch (refused) {
+      _ClientCertificateUnusable() => SipralTransportError.other,
+      _ when client != null => SipralTransportError.connectionReset,
       SocketException(osError: OSError(errorCode: 61 || 111)) =>
         SipralTransportError.connectionRefused,
       SocketException(message: final said) when said.contains('timed out') =>
@@ -798,9 +930,10 @@ final class SipralStack {
         ..transport = id
         ..error = error
         ..tls =
-            refused is HandshakeException
+            client ??
+            (refused is HandshakeException
                 ? SipralTlsFailure.untrusted
-                : SipralTlsFailure.none
+                : SipralTlsFailure.none)
         ..detail = detail.$1
         ..detailLen = min(detail.$2, Sipral.transportDetailBytes);
       retryingClockBehind(

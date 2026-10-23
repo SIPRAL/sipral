@@ -1180,8 +1180,9 @@ expired.
 `sipral_stack_transport_failed` with the reason carried along. The caller fills
 in `sipral_transport_failure_t`: the transport, a `SipralTransportError`, a
 `SipralTlsFailure` — `UNTRUSTED` (1), `NAME_MISMATCH` (2), `EXPIRED` (3) or
-`HANDSHAKE_REFUSED` (4), `NONE` (0) for anything that was not TLS saying no —
-and, optionally, the TLS library's own sentence in `detail` (at most
+`HANDSHAKE_REFUSED` (4), `NONE` (0) for anything that was not TLS saying no;
+from ABI 1.4 also the four about this end's own certificate, 5 to 8 ("A
+client certificate", under "What ABI 1.4 added") — and, optionally, the TLS library's own sentence in `detail` (at most
 `SIPRAL_TRANSPORT_DETAIL_BYTES`, one line of UTF-8). A server that never
 answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with the TLS reason at
 none. A TLS reason on a transport that speaks neither TLS nor WSS is
@@ -4093,3 +4094,73 @@ the numbers as `CallerIdentity.isup` (`IsupCaller`) and
 `SipralCallerIdentity.isup` (`SipralIsupCaller`); .NET, Python, Dart and
 Node.js read them through their identity lists with the printed values.
 `bindings/c/smoke.c` finds a REL in a BYE and reads it.
+
+### A client certificate
+
+Four values appended to `sipral_tls_failure_t`, and nothing else: no entry
+point, no member, no event kind and no status, and
+`bindings/c/abi-sizes.txt` is what the rest of 1.4 left. They name why a TLS
+connection failed on this end's side, for a server that admits only clients
+presenting a certificate it trusts (`docs/22-tls.md`, "A client
+certificate"):
+
+| Value | When |
+|---|---|
+| `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED` (5) | the server asked for a certificate and this end had none to present: its `certificate_required` alert, any other certificate alert, or `handshake_failure` once its CertificateRequest was seen |
+| `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED` (6) | the server refused the one presented: `bad_certificate`, `unsupported_certificate`, `certificate_revoked`, `certificate_unknown`, `unknown_ca` or `access_denied` |
+| `SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE` (7) | the certificate's private key could not be used: not found, locked with the device, its use refused by the user, invalidated, or not the certificate's |
+| `SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED` (8) | the certificate is out of its dates, read before connecting, or the server's `certificate_expired` alert |
+
+They are passed and raised as the first four are:
+`sipral_transport_failure_t::tls` into `sipral_stack_transport_failed_with`,
+then `sipral_transport_failed_event_t::tls` in
+`SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, before the registration and call
+events the loss caused. A number past 8 is still
+`SIPRAL_STATUS_INVALID_ARGUMENT`. A binding printed at 1.3 loads against a
+1.4 library and never sends them; one printed at 1.4 is refused by a 1.3
+library at load, so no 1.3 library is ever handed one.
+
+**Why nothing more crosses the boundary.** The certificate, its key and the
+handshake belong to whoever runs the TLS, which is never this library
+(`01-architecture.md`, "Who owns the sockets, the resolver and TLS"): the C
+caller supplies the connection, and each binding opens it with the
+platform's TLS, the key held where the platform keeps it — the Secure
+Enclave or the Keychain, Android Keystore, CNG. Presenting a certificate
+changes no SIP message either: the server matches it to the account itself,
+and neither RFC 3261 §26 nor RFC 5922 carries the client's TLS identity in
+SIP. So an account member naming the identity it uses would be a field the
+library stores and never reads, and an entry point to hand the library a
+key would contradict the point, which is that the key never leaves the
+platform. What the stack could not do without help is say why a
+connection failed when the failure was this end's certificate — before
+these values every layer reported it as `HANDSHAKE_REFUSED`, or as nothing
+at all for a TLS 1.3 server, which refuses after the client's handshake is
+over and so on the connection's first read. That is the one thing the C
+caller needs, and it needs no new event: the reason travels the path event
+53 already gives it. Event kind 61 and status 27, set aside for this work,
+were not used.
+
+**From C.** `interop/tls/client-cert.c` is a complete client with OpenSSL:
+the certificate and key loaded with `SSL_CTX_use_certificate_chain_file`
+and `SSL_CTX_use_PrivateKey_file` (a key in a token or a TPM comes through
+an OpenSSL provider as an `EVP_PKEY` the same way), the key checked against
+the certificate and the certificate's dates read before the first byte is
+sent, the server's alert caught with `SSL_CTX_set_info_callback`, its
+CertificateRequest with `SSL_CTX_set_cert_cb`, and every refusal told to the
+stack and printed from the event the stack raised. `scripts/lab.sh tls`
+builds it and runs it against Asterisk with each certificate.
+
+**In the layers.** Swift `ClientIdentity` (`tlsClientIdentity` on the stack
+and the account, `TurnServer.clientIdentity`); Kotlin
+`SipralClientCertificate.androidKeystore(alias)` and `.keyStore(store,
+alias, password)` (`clientCertificate` on `SipralClient.open`, `addAccount`
+and `SipralTurnServer`); .NET `SipralClientCertificate`
+(`tlsClientCertificate` on the stack and `AddAccount`,
+`turnClientCertificate`); Python `TlsClientCertificate`
+(`tls_client_certificate` on the stack and `add_account`,
+`turn_tls_client_certificate`); Dart `SipralClientCertificate`
+(`clientCertificate` on `addAccount` and `SipralStack.open`), whose
+`SipralStackEvent` now reads event 53 as well; and Node.js
+`ClientCertificate` (`clientCertificate` on the stack and the account,
+`turnClientCertificate`). Each reports the four values the same way, and their
+READMEs have the details.

@@ -147,6 +147,17 @@ codes! {
         Expired = 3,
         /// The handshake failed: no common version or cipher, a server alert, or no TLS there.
         HandshakeRefused = 4,
+        /// The server asked for a client certificate and this end had none to present.
+        ClientCertificateRequired = 5,
+        /// The server refused the client certificate this end presented: an authority it does
+        /// not trust, a revoked certificate, or one it does not accept for this account.
+        ClientCertificateRefused = 6,
+        /// The client certificate's private key could not be used: not found, locked with the
+        /// device, its use refused by the user, or invalidated by the platform.
+        ClientKeyUnavailable = 7,
+        /// The client certificate has expired or is not valid yet, as this end read its dates
+        /// before connecting or as the server's alert said.
+        ClientCertificateExpired = 8,
     }
 }
 
@@ -947,6 +958,10 @@ fn tls_named(tls: u32) -> Result<SipralTlsFailure, Fail> {
         2 => Ok(SipralTlsFailure::NameMismatch),
         3 => Ok(SipralTlsFailure::Expired),
         4 => Ok(SipralTlsFailure::HandshakeRefused),
+        5 => Ok(SipralTlsFailure::ClientCertificateRequired),
+        6 => Ok(SipralTlsFailure::ClientCertificateRefused),
+        7 => Ok(SipralTlsFailure::ClientKeyUnavailable),
+        8 => Ok(SipralTlsFailure::ClientCertificateExpired),
         other => Err(fail(
             SipralStatus::InvalidArgument,
             format!("{other} is not a TLS failure this library names"),
@@ -2975,6 +2990,44 @@ pub(crate) mod tests {
         );
         poll(handle, 3_000);
         assert_eq!(observed.transports_lost.len(), 3);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Each reason the client certificate gives is carried to the event as it was told.
+    #[test]
+    fn a_client_certificate_reason_reaches_the_event_unchanged() {
+        let mut observed = Observed::default();
+        let handle = speaking(&mut observed, SipralTransport::Tls);
+        let reasons = [
+            (SipralTlsFailure::ClientCertificateRequired, 5, "tlsv13 alert certificate required"),
+            (SipralTlsFailure::ClientCertificateRefused, 6, "sslv3 alert bad certificate"),
+            (SipralTlsFailure::ClientKeyUnavailable, 7, "the key is locked with the device"),
+            (SipralTlsFailure::ClientCertificateExpired, 8, "the certificate expired"),
+        ];
+        let mut at = 1_000;
+        for (reason, number, said) in reasons {
+            assert_eq!(reason as u32, number, "{reason:?} keeps its number");
+            let failure = refused(SIPRAL_TRANSPORT_MAIN, reason, said);
+            assert_eq!(
+                unsafe { sipral_stack_transport_failed_with(handle, &raw const failure, at) },
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+            poll(handle, at);
+            assert_eq!(rebind(handle, at + 1), SipralStatus::Ok);
+            at += 1_000;
+        }
+        let told: Vec<(u32, String)> = observed
+            .transports_lost
+            .iter()
+            .map(|lost| (lost.3, lost.4.clone()))
+            .collect();
+        let expected: Vec<(u32, String)> = reasons
+            .iter()
+            .map(|(reason, _, said)| (*reason as u32, (*said).to_owned()))
+            .collect();
+        assert_eq!(told, expected);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

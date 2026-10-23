@@ -74,25 +74,56 @@ private class Credential(directory: File, name: String, start: String?, days: In
         certificate = store.getCertificate("registrar") as X509Certificate
     }
 
-    fun serverContext(): SSLContext {
+    /** The context a registrar serves with; with [clients], one that trusts
+     * that authority alone for the certificate a client presents. */
+    fun serverContext(clients: X509Certificate? = null): SSLContext {
         val keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         keys.init(store, "changeit".toCharArray())
-        return SSLContext.getInstance("TLS").apply { init(keys.keyManagers, null, null) }
+        val trust = clients?.let { authority ->
+            val anchors = KeyStore.getInstance("PKCS12").apply {
+                load(null, null)
+                setCertificateEntry("clients", authority)
+            }
+            javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+                .apply { init(anchors) }.trustManagers
+        }
+        return SSLContext.getInstance("TLS").apply { init(keys.keyManagers, trust, null) }
     }
 }
 
 /** A registrar on a TCP port of loopback, over TLS when given a
  * credential, answering every REGISTER 200; or, [plainToTls], one that
- * answers a TLS client in plain text. */
-private class Registrar(credential: Credential? = null, private val plainToTls: Boolean = false) : AutoCloseable {
+ * answers a TLS client in plain text. With [clients] it requires a client
+ * certificate that authority signed, over [protocol] alone, and keeps the
+ * subject of each one it accepted in [presented]. */
+private class Registrar(
+    credential: Credential? = null,
+    private val plainToTls: Boolean = false,
+    clients: X509Certificate? = null,
+    protocol: String? = null,
+) : AutoCloseable {
     private val listener: ServerSocket = if (credential != null) {
-        credential.serverContext().serverSocketFactory.createServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        credential.serverContext(clients).serverSocketFactory.createServerSocket(0, 50, InetAddress.getLoopbackAddress())
+            .also { made ->
+                made as SSLServerSocket
+                if (clients != null) {
+                    made.needClientAuth = true
+                }
+                if (protocol != null) {
+                    made.enabledProtocols = arrayOf(protocol)
+                }
+            }
     } else {
         ServerSocket(0, 50, InetAddress.getLoopbackAddress())
     }
     private val connections = AtomicInteger(0)
     private val open: MutableList<Socket> = Collections.synchronizedList(ArrayList())
     val requests: MutableList<Pair<Int, String>> = Collections.synchronizedList(ArrayList())
+    val presented: MutableList<String> = Collections.synchronizedList(ArrayList())
+
+    /** How many connections reached it, refused handshakes included. */
+    val accepted: Int
+        get() = connections.get()
 
     fun all(): List<Pair<Int, String>> = synchronized(requests) { requests.toList() }
 
@@ -139,6 +170,12 @@ private class Registrar(credential: Credential? = null, private val plainToTls: 
                 output.write("SIP/2.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n".toByteArray())
                 socket.close()
                 return
+            }
+            if (socket is javax.net.ssl.SSLSocket && socket.needClientAuth) {
+                // this end's handshake ends with the client's Finished, after
+                // its certificate was checked; a refusal throws here
+                socket.startHandshake()
+                presented += (socket.session.peerCertificates[0] as X509Certificate).subjectX500Principal.name
             }
             open.add(socket)
             var held = ""
@@ -195,12 +232,14 @@ private fun over(
     signalling: SipralTransport = SipralTransport.TLS,
     name: String? = SERVER_NAME,
     trust: SipralTlsTrust = SipralTlsTrust.Platform,
+    certificate: SipralClientCertificate? = null,
 ): SipralClient = SipralClient.open(
     audio = SipralAudioMode.Application,
     signalling = signalling,
     signallingServer = server,
     tlsServerName = name,
     tlsTrust = trust,
+    clientCertificate = certificate,
 )
 
 /** The next `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: the first failure is
@@ -628,12 +667,216 @@ private suspend fun eventually(seconds: Int = 8, what: () -> Boolean): Boolean {
     return what()
 }
 
+/** keytool, run in [directory], or the check fails with what it said. */
+private fun keytool(directory: File, vararg arguments: String) {
+    val command = listOf(File(System.getProperty("java.home"), "bin/keytool").path) + arguments
+    val made = ProcessBuilder(command).directory(directory).redirectErrorStream(true).start()
+    val said = made.inputStream.readBytes().toString(Charsets.UTF_8)
+    check(made.waitFor(60, TimeUnit.SECONDS) && made.exitValue() == 0) { "keytool ${arguments.first()}: $said" }
+}
+
+/**
+ * Client certificates for the checks, made with keytool in [directory]:
+ * an authority the registrar trusts for its clients and a P-256 key it
+ * certified for `clientAuth`; another authority and a key it certified; and
+ * a certificate that expired in 2020. Each key is in a PKCS#12 store with
+ * its chain, the way an application holds one on a desktop JVM.
+ */
+private class ClientIdentities(private val directory: File) {
+    val authority: X509Certificate = authority("clients")
+    val signed: KeyStore = certified("alice", "clients")
+    val stranger: KeyStore = run {
+        authority("strangers")
+        certified("mallory", "strangers")
+    }
+    val expired: KeyStore = run {
+        keytool(
+            directory, "-genkeypair", "-alias", "client", "-keyalg", "EC", "-groupname", "secp256r1",
+            "-dname", "CN=expired client", "-ext", "EKU=clientAuth", "-startdate", "2020/01/01 00:00:00",
+            "-validity", "1", "-storetype", "PKCS12", "-keystore", "expired.p12", "-storepass", PASSWORD,
+        )
+        opened("expired.p12")
+    }
+
+    private fun authority(name: String): X509Certificate {
+        keytool(
+            directory, "-genkeypair", "-alias", "authority", "-keyalg", "EC", "-groupname", "secp256r1",
+            "-dname", "CN=Sipral $name authority", "-ext", "bc:c", "-validity", "1",
+            "-storetype", "PKCS12", "-keystore", "$name.p12", "-storepass", PASSWORD,
+        )
+        keytool(directory, "-exportcert", "-rfc", "-alias", "authority", "-keystore", "$name.p12", "-storepass", PASSWORD, "-file", "$name.pem")
+        return opened("$name.p12").getCertificate("authority") as X509Certificate
+    }
+
+    private fun certified(who: String, by: String): KeyStore {
+        val store = "$who.p12"
+        keytool(
+            directory, "-genkeypair", "-alias", "client", "-keyalg", "EC", "-groupname", "secp256r1",
+            "-dname", "CN=$who client", "-validity", "1", "-storetype", "PKCS12", "-keystore", store, "-storepass", PASSWORD,
+        )
+        keytool(directory, "-certreq", "-alias", "client", "-keystore", store, "-storepass", PASSWORD, "-file", "$who.csr")
+        keytool(
+            directory, "-gencert", "-rfc", "-alias", "authority", "-keystore", "$by.p12", "-storepass", PASSWORD,
+            "-infile", "$who.csr", "-outfile", "$who.pem", "-ext", "EKU=clientAuth", "-validity", "1",
+        )
+        keytool(directory, "-importcert", "-noprompt", "-alias", "authority", "-file", "$by.pem", "-keystore", store, "-storepass", PASSWORD)
+        keytool(directory, "-importcert", "-alias", "client", "-file", "$who.pem", "-keystore", store, "-storepass", PASSWORD)
+        return opened(store)
+    }
+
+    private fun opened(name: String): KeyStore =
+        KeyStore.getInstance("PKCS12").apply { File(directory, name).inputStream().use { load(it, PASSWORD.toCharArray()) } }
+
+    fun of(store: KeyStore, alias: String = "client"): SipralClientCertificate =
+        SipralClientCertificate.keyStore(store, alias, PASSWORD.toCharArray())
+
+    companion object {
+        const val PASSWORD = "changeit"
+    }
+}
+
+/** A registrar that requires a client certificate over [protocol]: the one
+ * the right authority signed registers, and the server saw it. */
+private suspend fun aCertificateTheServerTrustsRegisters(good: Credential, ids: ClientIdentities, protocol: String) {
+    Registrar(good, clients = ids.authority, protocol = protocol).use { registrar ->
+        over(registrar.address, trust = SipralTlsTrust.OnlyAuthority(good.certificate), certificate = ids.of(ids.signed)).use { client ->
+            val account = client.addAccount(
+                aor = "sip:alice@$SERVER_NAME", registrarAddress = registrar.address, registrar = "sip:$SERVER_NAME",
+            )
+            account.register()
+            registered(client, account)
+            assertEquals(listOf("CN=alice client"), registrar.presented.toList())
+            assertTrue(header("Via", registrar.registers().single().second)!!.startsWith("SIP/2.0/TLS "))
+        }
+    }
+}
+
+/** What a client the registrar refuses is told, over [protocol]. */
+private suspend fun refusedFor(
+    good: Credential,
+    ids: ClientIdentities,
+    protocol: String,
+    certificate: SipralClientCertificate?,
+): Pair<org.sipral.SipralTransportFailedEvent, Int> {
+    Registrar(good, clients = ids.authority, protocol = protocol).use { registrar ->
+        over(registrar.address, trust = SipralTlsTrust.OnlyAuthority(good.certificate), certificate = certificate).use { client ->
+            val failed = refusal(client)
+            assertTrue(registrar.presented.isEmpty(), "the registrar accepted ${registrar.presented}")
+            return failed to registrar.accepted
+        }
+    }
+}
+
+private suspend fun eachClientCertificateRefusalSaysWhy(good: Credential, ids: ClientIdentities): String {
+    for (protocol in listOf("TLSv1.3", "TLSv1.2")) {
+        aCertificateTheServerTrustsRegisters(good, ids, protocol)
+        val (none, _) = refusedFor(good, ids, protocol, null)
+        assertEquals(SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED.value.toLong(), none.tls, "$protocol: ${none.detail}")
+        assertEquals(SipralTransportError.CONNECTION_RESET.value.toLong(), none.error)
+        val (stranger, _) = refusedFor(good, ids, protocol, ids.of(ids.stranger))
+        assertEquals(SipralTlsFailure.CLIENT_CERTIFICATE_REFUSED.value.toLong(), stranger.tls, "$protocol: ${stranger.detail}")
+        assertFalse(stranger.detail.isNullOrEmpty(), "the platform's own words come with it")
+    }
+    val (expired, reachedExpired) = refusedFor(good, ids, "TLSv1.3", ids.of(ids.expired))
+    assertEquals(SipralTlsFailure.CLIENT_CERTIFICATE_EXPIRED.value.toLong(), expired.tls, expired.detail ?: "")
+    assertEquals(SipralTransportError.OTHER.value.toLong(), expired.error)
+    assertEquals(0, reachedExpired, "an expired certificate is not taken to the server")
+    val (missing, reachedMissing) = refusedFor(good, ids, "TLSv1.3", ids.of(ids.signed, alias = "nobody"))
+    assertEquals(SipralTlsFailure.CLIENT_KEY_UNAVAILABLE.value.toLong(), missing.tls, missing.detail ?: "")
+    assertTrue(missing.detail?.contains("nobody") == true, missing.detail ?: "")
+    assertEquals(0, reachedMissing, "a key that cannot be used costs no connection")
+    val (wrongPassword, _) = refusedFor(
+        good, ids, "TLSv1.3", SipralClientCertificate.keyStore(ids.signed, "client", "not it".toCharArray()),
+    )
+    assertEquals(SipralTlsFailure.CLIENT_KEY_UNAVAILABLE.value.toLong(), wrongPassword.tls, wrongPassword.detail ?: "")
+    return "a client certificate the server trusts registers over TLS 1.3 and 1.2; none, a stranger's, " +
+        "an expired one and an unusable key each say so"
+}
+
+/** An account on a TLS connection of its own presents its own certificate,
+ * and one that presents none hears the server wanted one, on its own
+ * transport. */
+private suspend fun anAccountOnItsOwnConnectionPresentsItsCertificate(good: Credential, ids: ClientIdentities): String {
+    val pin = java.security.MessageDigest.getInstance("SHA-256").digest(good.certificate.encoded).joinToString("") { "%02x".format(it) }
+    Registrar(good, clients = ids.authority, protocol = "TLSv1.3").use { registrar ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            val account = client.addAccount(
+                aor = "sip:alice@$SERVER_NAME", registrarAddress = registrar.address, registrar = "sip:$SERVER_NAME",
+                tlsPin = pin, streamProtocol = SipralTransport.TLS, clientCertificate = ids.of(ids.signed),
+            )
+            account.register()
+            registered(client, account)
+            assertEquals(listOf("CN=alice client"), registrar.presented.toList())
+        }
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            val account = client.addAccount(
+                aor = "sip:bob@$SERVER_NAME", registrarAddress = registrar.address, registrar = "sip:$SERVER_NAME",
+                tlsPin = pin, streamProtocol = SipralTransport.TLS,
+            )
+            val (_, event) = client.events.awaitNext(SipralEventKind.TRANSPORT_FAILED, timeoutMs = 10_000) { account.register() }
+            val failed = assertNotNull(transportFailedOf(event))
+            assertNotEquals(Sipral.TRANSPORT_MAIN, failed.transport)
+            assertEquals(SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED.value.toLong(), failed.tls, failed.detail ?: "")
+        }
+    }
+    return "an account on its own TLS connection presents its own certificate, and one with none hears it was wanted"
+}
+
+/** The alerts as each platform words them, and a key that could not sign,
+ * read without a server: Conscrypt on Android is not on this JVM. */
+private fun thePlatformsWordsForAnAlertAreRead(): String {
+    fun alert(text: String) = receivedAlert(listOf(javax.net.ssl.SSLException(text)))
+    assertEquals(42, alert("Received fatal alert: bad_certificate"))
+    assertEquals(116, alert("Received fatal alert: certificate_required"))
+    assertEquals(
+        42,
+        alert("Read error: ssl=0x7a: Failure in SSL library, usually a protocol error\nerror:10000412:SSL routines:OPENSSL_internal:SSLV3_ALERT_BAD_CERTIFICATE (external/boringssl/src/ssl/tls_record.cc:592 alert number 42)"),
+    )
+    assertEquals(116, alert("error:1000045c:SSL routines:OPENSSL_internal:TLSV1_ALERT_CERTIFICATE_REQUIRED"))
+    assertEquals(48, alert("SSL handshake aborted: TLSV1_ALERT_UNKNOWN_CA"))
+    assertEquals(45, alert("Received fatal alert: certificate_expired"))
+    assertEquals(null, alert("PKIX path building failed: unable to find valid certification path to requested target"))
+
+    val gave = ClientAuthentication().apply {
+        asked.set(true)
+        presented.set(true)
+    }
+    val locked = javax.net.ssl.SSLHandshakeException("Cannot produce CertificateVerify signature").apply {
+        initCause(java.security.InvalidKeyException("User not authenticated"))
+    }
+    assertEquals(SipralTlsFailure.CLIENT_KEY_UNAVAILABLE, classify(locked, handshaking = true, auth = gave).tls)
+    assertEquals(
+        SipralTlsFailure.CLIENT_CERTIFICATE_EXPIRED,
+        classify(javax.net.ssl.SSLException("Received fatal alert: certificate_expired"), false, gave).tls,
+    )
+    val wanted = ClientAuthentication().apply { asked.set(true) }
+    assertEquals(
+        SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED,
+        classify(javax.net.ssl.SSLHandshakeException("Received fatal alert: handshake_failure"), true, wanted).tls,
+    )
+    assertEquals(
+        SipralTlsFailure.HANDSHAKE_REFUSED,
+        classify(javax.net.ssl.SSLHandshakeException("Received fatal alert: handshake_failure"), true, ClientAuthentication()).tls,
+        "a handshake failure with no certificate asked for is not about one",
+    )
+    val dropped = classify(java.net.SocketException("Broken pipe"), true, wanted)
+    assertEquals(SipralTlsFailure.CLIENT_CERTIFICATE_REQUIRED, dropped.tls)
+    assertTrue(dropped.detail.contains("no alert"), dropped.detail)
+    assertEquals(SipralTlsFailure.CLIENT_CERTIFICATE_REFUSED, classify(java.net.SocketException("Connection reset"), true, gave).tls)
+    assertEquals(SipralTlsFailure.NONE, classify(java.net.SocketException("Connection reset"), true, ClientAuthentication()).tls)
+    return "the platforms' words for an alert and a key that could not sign are read"
+}
+
 internal suspend fun tlsSignallingChecks(): String {
     val directory = Files.createTempDirectory("sipral-tls").toFile()
     try {
         val good = Credential(directory, "good", null, 1)
         val expired = Credential(directory, "expired", "2020/01/01 00:00:00", 1)
+        val clients = ClientIdentities(directory)
         return listOf(
+            eachClientCertificateRefusalSaysWhy(good, clients),
+            anAccountOnItsOwnConnectionPresentsItsCertificate(good, clients),
+            thePlatformsWordsForAnAlertAreRead(),
             aRegistrarWhoseAuthorityIsPinnedRegistersOverTls(good),
             aPrivateAuthorityIsTrustedBesideThePlatforms(good),
             thePinnedCertificateIsTrustedWhateverItsNameAndSigner(good),

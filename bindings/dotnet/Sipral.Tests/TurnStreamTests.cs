@@ -38,14 +38,33 @@ public sealed class TurnStreamTests
         private readonly object _lock = new();
         private readonly List<(int Connection, ushort Method, Dictionary<ushort, byte[]> Attributes)> _requests = new();
         private readonly List<int> _closed = new();
+        private readonly List<string> _clientSubjects = new();
+        private readonly bool _askClient;
         private int _connections;
 
-        public FakeTurnOverStream((string, string) credential, X509Certificate2? certificate = null)
+        // askClient: over TLS, ask for a client certificate and record the
+        // subject of each one presented.
+        public FakeTurnOverStream((string, string) credential, X509Certificate2? certificate = null,
+            bool askClient = false)
         {
             _credential = credential;
             _certificate = certificate;
+            _askClient = askClient;
             _listener.Start();
             new Thread(Accept) { IsBackground = true }.Start();
+        }
+
+        public int Connections => Volatile.Read(ref _connections);
+
+        public List<string> ClientSubjects
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return new List<string>(_clientSubjects);
+                }
+            }
         }
 
         public string Address => $"127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
@@ -111,7 +130,22 @@ public sealed class TurnStreamTests
                 if (_certificate is not null)
                 {
                     var tls = new SslStream(stream);
-                    tls.AuthenticateAsServer(_certificate);
+                    tls.AuthenticateAsServer(new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = _certificate,
+                        ClientCertificateRequired = _askClient,
+                        RemoteCertificateValidationCallback = (_, presented, _, _) =>
+                        {
+                            if (presented is not null)
+                            {
+                                lock (_lock)
+                                {
+                                    _clientSubjects.Add(presented.Subject);
+                                }
+                            }
+                            return true;
+                        },
+                    });
                     stream = tls;
                 }
                 var held = new List<byte>();
@@ -269,13 +303,15 @@ public sealed class TurnStreamTests
     /// event once media runs.</summary>
     private static async Task<SipralNatRelayEventInfo> CallThroughAsync(
         string host, NatTests.FakeStunServer stun, FakeTurnOverStream server, SipralTransport transport,
-        X509Certificate2Collection? trusted, Func<SipralNatRelayEventInfo, Task> afterward)
+        X509Certificate2Collection? trusted, Func<SipralNatRelayEventInfo, Task> afterward,
+        SipralClientCertificate? turnClientCertificate = null)
     {
         using var alice = new SipralStack(
             audio: SipralAudio.Application,bindHost: host, nat: SipralNat.Stun, ice: SipralIce.Offered, codecs: "PCMU",
             stunServer: stun.Address, turnServer: server.Address,
             turnUsername: "alice-turn", turnPassword: "turn-secret-7",
-            turnTransport: transport, turnServerName: ServerName, turnTrustedCertificates: trusted);
+            turnTransport: transport, turnServerName: ServerName, turnTrustedCertificates: trusted,
+            turnClientCertificate: turnClientCertificate);
         using var bob = new SipralStack(audio: SipralAudio.Application, bindHost: host, codecs: "PCMU");
         var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
@@ -348,6 +384,55 @@ public sealed class TurnStreamTests
                 Assert.Empty(server.Allocations);
                 return Task.CompletedTask;
             });
+        }
+    }
+
+    /// <summary>A client certificate for this end, made with its key.</summary>
+    private static X509Certificate2 ClientCertificate(DateTimeOffset from, DateTimeOffset until)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=sipral-turn-client", key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") }, critical: false));
+        using var made = request.CreateSelfSigned(from, until);
+        return X509CertificateLoader.LoadPkcs12(made.Export(X509ContentType.Pfx), null);
+    }
+
+    /// <summary>A TURN server over TLS that asks for a client certificate is
+    /// given turnClientCertificate; an expired one is a relay not made, with
+    /// no connection tried.</summary>
+    [Fact]
+    public async Task ARelayOverTlsPresentsTheClientCertificateAndAnExpiredOneIsNoRelay()
+    {
+        var host = NatTests.RoutableAddress();
+        if (host is null)
+        {
+            return; // no routable address on this machine for ICE to gather a host candidate from
+        }
+        using var certificate = SelfSigned();
+        var roots = new X509Certificate2Collection { X509CertificateLoader.LoadCertificate(certificate.Export(X509ContentType.Cert)) };
+        var now = DateTimeOffset.UtcNow;
+        using var mine = ClientCertificate(now.AddMinutes(-5), now.AddDays(1));
+        using (var stun = new NatTests.FakeStunServer("203.0.113.50", 40050))
+        using (var server = new FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate, askClient: true))
+        {
+            await CallThroughAsync(host, stun, server, SipralTransport.Tls, roots, relay =>
+            {
+                Assert.Equal(SipralNatRelay.Allocated, relay.Outcome);
+                Assert.Equal(new[] { "CN=sipral-turn-client" }, server.ClientSubjects);
+                return Task.CompletedTask;
+            }, new SipralClientCertificate(mine));
+        }
+        using var expired = ClientCertificate(now.AddDays(-20), now.AddDays(-10));
+        using (var stun = new NatTests.FakeStunServer("203.0.113.50", 40051))
+        using (var server = new FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate, askClient: true))
+        {
+            await CallThroughAsync(host, stun, server, SipralTransport.Tls, roots, relay =>
+            {
+                Assert.Equal(SipralNatRelay.Failed, relay.Outcome);
+                Assert.Equal(0, server.Connections);
+                return Task.CompletedTask;
+            }, new SipralClientCertificate(expired));
         }
     }
 }

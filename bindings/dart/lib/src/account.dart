@@ -18,6 +18,7 @@ final class SipralAccount {
     this._advertised,
     this.streamProtocol,
     this._tlsPin,
+    this.clientCertificate,
   );
 
   /// The `SipralTransport` value of the connection of its own the account's
@@ -25,6 +26,10 @@ final class SipralAccount {
   final int? streamProtocol;
 
   final String? _tlsPin;
+
+  /// The certificate its TLS connection of its own presents when the server
+  /// asks for one, or null for the stack's.
+  final SipralClientCertificate? clientCertificate;
 
   /// Where the account's requests go, `host:port`. For an account added with
   /// a [serverUri], the address it was last located at, empty until then.

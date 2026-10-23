@@ -53,11 +53,20 @@ final class TurnConnection: @unchecked Sendable {
         let (host, port) = UDPSocket.parse(server)
         #if canImport(Network)
         let parameters: NWParameters
+        // a client certificate that cannot be presented now is no relay,
+        // rather than a connection the server will refuse
+        var unusable = false
         if turn.transport == .tls {
             let tls = NWProtocolTLS.Options()
             let security = tls.securityProtocolOptions
             let name = turn.serverName ?? host
             sec_protocol_options_set_tls_server_name(security, name)
+            if let identity = turn.clientIdentity {
+                switch identity.presentable(at: Date()) {
+                case .success(let presented): sec_protocol_options_set_local_identity(security, presented)
+                case .failure: unusable = true
+                }
+            }
             let anchors = turn.trustedCertificates.compactMap {
                 SecCertificateCreateWithData(nil, Data($0) as CFData)
             }
@@ -81,7 +90,11 @@ final class TurnConnection: @unchecked Sendable {
             host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port) ?? 3478, using: parameters
         )
         connection.stateUpdateHandler = { [weak self] state in self?.changed(state) }
-        connection.start(queue: queue)
+        if unusable {
+            queue.async { [self] in finish(openedBefore: false) }
+        } else {
+            connection.start(queue: queue)
+        }
         #else
         let wantsTls = turn.transport == .tls
         queue.async { [self] in

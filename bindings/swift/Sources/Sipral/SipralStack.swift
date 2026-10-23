@@ -74,6 +74,9 @@ public final class SipralStack: @unchecked Sendable {
     private let signallingServer: String?
     private let tlsServerName: String
     private let tlsTrust: TLSTrust
+    /// Presented on every TLS connection the stack opens, unless an account
+    /// names its own.
+    private let tlsClientIdentity: ClientIdentity?
     private var linkHost: String?
     /// What a socket bound on every interface advertises; `nil` when bound
     /// at one address. Guarded by `signallingQueue`.
@@ -269,7 +272,12 @@ public final class SipralStack: @unchecked Sendable {
     /// needs Network.framework (`.notSupported` elsewhere) and checks the
     /// certificate against `tlsServerName` (default: the host of
     /// `signallingServer`) with `tlsTrust` (`docs/22-tls.md`). The check
-    /// cannot be turned off.
+    /// cannot be turned off. `tlsClientIdentity` is the certificate presented
+    /// when the server asks for one, its key signing inside the platform;
+    /// one that cannot be used is a `transportFailed` with
+    /// `.clientKeyUnavailable` or `.clientCertificateExpired` and no
+    /// connection, and the server's refusal one with
+    /// `.clientCertificateRequired` or `.clientCertificateRefused`.
     ///
     /// The first connection is made before this returns. On failure or loss
     /// the stack raises `SipralEventKind.transportFailed`, whose
@@ -357,6 +365,7 @@ public final class SipralStack: @unchecked Sendable {
         signallingServer: String? = nil,
         tlsServerName: String? = nil,
         tlsTrust: TLSTrust = .platform,
+        tlsClientIdentity: ClientIdentity? = nil,
         inviteLimit: InviteLimit? = nil,
         streamFallback: Bool = true,
         streamServer: String? = nil,
@@ -384,6 +393,7 @@ public final class SipralStack: @unchecked Sendable {
         self.givenTlsServerName = tlsServerName
         self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost ?? ""
         self.tlsTrust = tlsTrust
+        self.tlsClientIdentity = tlsClientIdentity
         self.linkHost = bindHost
         self.chosenPort = bindPort
         self.routes = bindHost == nil
@@ -398,7 +408,8 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 let made = try SignallingConnection(
                     server: signallingServer!, bindHost: bindHost, transport: signalling,
-                    serverName: self.tlsServerName, trust: tlsTrust, patienceMs: Self.patienceMs
+                    serverName: self.tlsServerName, trust: tlsTrust, identity: tlsClientIdentity,
+                    patienceMs: Self.patienceMs
                 )
                 firstLink = made
                 bound = made.local
@@ -663,7 +674,8 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 made = try SignallingConnection(
                     server: server, bindHost: signallingQueue.sync { linkHost }, transport: signalling,
-                    serverName: tlsServerName, trust: tlsTrust, patienceMs: Self.patienceMs
+                    serverName: tlsServerName, trust: tlsTrust, identity: tlsClientIdentity,
+                    patienceMs: Self.patienceMs
                 )
             } catch let refusal as SignallingRefusal {
                 report(refusal)
@@ -837,6 +849,18 @@ public final class SipralStack: @unchecked Sendable {
         return tlsTrust
     }
 
+    /// The certificate the account with its own TLS connection to that
+    /// server presents: its own if it has one, else the stack's.
+    private func streamIdentity(to destination: String) -> ClientIdentity? {
+        let own = movingQueue.sync {
+            accounts.values.first {
+                ($0.streamProtocol == .tls || $0.streamProtocol == .wss) && $0.registrarAddress == destination
+                    && $0.tlsClientIdentity != nil
+            }
+        }
+        return own?.tlsClientIdentity ?? tlsClientIdentity
+    }
+
     /// Connect (TCP, or TLS for such an account) to `destination` or to
     /// `streamServer`, and bind it under `id` as `boundAs` (`.ws`/`.wss` for
     /// a WebSocket). A failure is reported under the same id, which ends
@@ -850,7 +874,8 @@ public final class SipralStack: @unchecked Sendable {
             made = try SignallingConnection(
                 server: server, bindHost: signallingQueue.sync { linkHost }, transport: over,
                 serverName: over == .tls ? givenTlsServerName ?? UDPSocket.parse(server).host : UDPSocket.parse(server).host,
-                trust: over == .tls ? streamTrust(to: destination) : .platform, patienceMs: Self.patienceMs
+                trust: over == .tls ? streamTrust(to: destination) : .platform,
+                identity: over == .tls ? streamIdentity(to: destination) : nil, patienceMs: Self.patienceMs
             )
         } catch {
             signallingQueue.sync { _ = streamsOpening.remove(destination) }
@@ -1201,8 +1226,9 @@ public final class SipralStack: @unchecked Sendable {
     /// `streamProtocol` (`.tcp`, `.tls`, `.ws` or `.wss`) gives the account its
     /// own connection to its server, beside UDP accounts on the same stack;
     /// its REGISTER and calls go over it. TLS checks `tlsPin` if set, else the
-    /// stack's `tlsTrust`. A closed connection is reopened; until open, a
-    /// call throws `.transportDown`. Only on a UDP stack; other values throw
+    /// stack's `tlsTrust`, and presents `tlsClientIdentity` if set, else the
+    /// stack's, when the server asks for a client certificate. A closed
+    /// connection is reopened; until open, a call throws `.transportDown`. Only on a UDP stack; other values throw
     /// `.invalidArgument`. `.ws`/`.wss` run a WebSocket (RFC 7118) asking for
     /// `websocketResource` (`/ws`) with `websocketHost` as `Host` (the
     /// server's address).
@@ -1222,6 +1248,7 @@ public final class SipralStack: @unchecked Sendable {
         serverNaptr: Bool = false,
         keepaliveMs: UInt64 = 0,
         tlsPin: String? = nil,
+        tlsClientIdentity: ClientIdentity? = nil,
         streamProtocol: SipralTransport? = nil,
         websocketHost: String? = nil,
         websocketResource: String? = nil,
@@ -1264,6 +1291,7 @@ public final class SipralStack: @unchecked Sendable {
             serverNaptr: serverNaptr,
             keepaliveMs: keepaliveMs,
             tlsPin: tlsPin,
+            tlsClientIdentity: tlsClientIdentity,
             streamProtocol: streamProtocol,
             websocketHost: websocketHost,
             websocketResource: websocketResource,
@@ -1977,7 +2005,8 @@ public final class SipralStack: @unchecked Sendable {
                 do {
                     let made = try SignallingConnection(
                         server: signallingServer!, bindHost: host, transport: signalling,
-                        serverName: tlsServerName, trust: tlsTrust, patienceMs: Self.patienceMs
+                        serverName: tlsServerName, trust: tlsTrust, identity: tlsClientIdentity,
+                        patienceMs: Self.patienceMs
                     )
                     try install(made)
                     rebound = made.local

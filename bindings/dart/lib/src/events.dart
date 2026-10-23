@@ -73,6 +73,10 @@ final class SipralStackEvent {
     this.tokenScope,
     this.tokenAuthzServer,
     this.networkTest,
+    this.transport,
+    this.transportError,
+    this.tlsFailure,
+    this.transportDetail,
   });
 
   factory SipralStackEvent._read(SipralEvent event) {
@@ -94,6 +98,10 @@ final class SipralStackEvent {
         kind == SipralEventKind.tokenRequired ? event.payload.token : null;
     final tested =
         kind == SipralEventKind.networkTest ? event.payload.networkTest : null;
+    final lost =
+        kind == SipralEventKind.transportFailed
+            ? event.payload.transportFailed
+            : null;
     final record =
         kind == SipralEventKind.mediaStatistics
             ? event.payload.media.statistics
@@ -177,8 +185,32 @@ final class SipralStackEvent {
               ),
       statistics:
           record == ffi.nullptr ? null : SipralMediaStatistics._(record.ref),
+      transport: lost?.transport,
+      transportError: lost?.error,
+      tlsFailure: lost?.tls,
+      transportDetail:
+          lost == null ? null : (text(lost.detail, lost.detailLen) ?? ''),
     );
   }
+
+  /// Which transport failed, `SIPRAL_TRANSPORT_MAIN` or the number this
+  /// layer bound an account's own connection as, for
+  /// `SipralEventKind.transportFailed`.
+  final int? transport;
+
+  /// Why it failed, a `SipralTransportError` value, for
+  /// `SipralEventKind.transportFailed`.
+  final int? transportError;
+
+  /// Why TLS refused it, a `SipralTlsFailure` value -- `none` when TLS did
+  /// not -- for `SipralEventKind.transportFailed`. The client certificate's
+  /// four are `clientCertificateRequired`, `clientCertificateRefused`,
+  /// `clientKeyUnavailable` and `clientCertificateExpired`.
+  final int? tlsFailure;
+
+  /// The platform's own sentence about it, for
+  /// `SipralEventKind.transportFailed`.
+  final String? transportDetail;
 
   /// A `SipralEventKind` value.
   final int kind;

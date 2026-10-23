@@ -34,7 +34,7 @@ from .errors import call as _retry
 from .errors import SipralError, check
 from .locate import Resolver, advertised_address, lookup
 from .settings import Settings
-from .signalling import InviteLimit, TlsTrust, classify, connect
+from .signalling import InviteLimit, TlsClientCertificate, TlsTrust, classify, connect, settle, settle_seconds
 
 __all__ = ["TRACE", "Stack", "features", "route_host"]
 
@@ -93,6 +93,15 @@ _OWN_STREAMS = (
     lib.SIPRAL_TRANSPORT_TLS,
     lib.SIPRAL_TRANSPORT_WS,
     lib.SIPRAL_TRANSPORT_WSS,
+)
+#: The `SipralTlsFailure`s about this end's certificate rather than the server's.
+_CLIENT_CERTIFICATE_FAILURES = frozenset(
+    {
+        lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED,
+        lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED,
+        lib.SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE,
+        lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED,
+    }
 )
 #: Reconnect backoff, doubled per failure: quick for a restarting server,
 #: not every second for one that refuses the certificate.
@@ -179,10 +188,12 @@ class _SipStream:
     over while the poll thread may already be writing.
     """
 
-    def __init__(self, transport: int, destination: str, sock: socket.socket) -> None:
+    def __init__(self, transport: int, destination: str, sock: socket.socket, presented: bool = False) -> None:
         self.transport = transport
         self.destination = destination
         self.sock = sock
+        #: Whether this end offered a client certificate on it.
+        self.presented = presented
         self.lock = threading.Lock()
 
 
@@ -216,6 +227,7 @@ class Stack:
         turn_transport: int = 0,
         turn_server_name: str | None = None,
         turn_tls_context: ssl.SSLContext | None = None,
+        turn_tls_client_certificate: TlsClientCertificate | None = None,
         g729_annex_b: bool | None = None,
         referrals: bool | None = None,
         registrar_keepalive: bool | None = None,
@@ -235,6 +247,7 @@ class Stack:
         signalling_server: str | None = None,
         tls_server_name: str | None = None,
         tls_trust: TlsTrust | None = None,
+        tls_client_certificate: TlsClientCertificate | None = None,
         invite_limit: InviteLimit | tuple[int, int] | None = None,
         stream_fallback: bool = True,
         stream_server: str | None = None,
@@ -265,6 +278,15 @@ class Stack:
         ``signalling_server``) with ``tls_trust``
         (:class:`sipral.signalling.TlsTrust`, default the platform's
         authorities; `docs/22-tls.md`). The check cannot be turned off.
+        ``tls_client_certificate``
+        (:class:`sipral.signalling.TlsClientCertificate`) is presented when
+        the server asks for one, on that connection and on every account's
+        own TLS connection that names none of its own. Why it was not taken
+        arrives as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` with ``tls``
+        ``CLIENT_CERTIFICATE_REQUIRED`` (the server wanted one and none was
+        configured), ``CLIENT_CERTIFICATE_REFUSED``,
+        ``CLIENT_KEY_UNAVAILABLE`` or ``CLIENT_CERTIFICATE_EXPIRED``
+        (:class:`sipral.enums.TlsFailure`).
 
         The first connection is made before this returns. When it fails or
         breaks, the stack reports it as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`
@@ -339,6 +361,10 @@ class Stack:
         certificate is checked against ``turn_server_name`` (default: the host
         of ``turn_server``, so an IP certificate for an address) with
         ``turn_tls_context`` or the platform trust; checking cannot be off.
+        ``turn_tls_client_certificate`` (:class:`TlsClientCertificate`) is
+        presented to a TURN server that asks for one; with a
+        ``turn_tls_context`` of the application's own it is loaded into that
+        context. A relay it cannot be presented on fails as any other.
 
         ``rtp_port_min``/``rtp_port_max`` restrict media sockets without an
         explicit port to even ports from that range
@@ -407,6 +433,7 @@ class Stack:
             parse_address(turn_server)[0] if turn_server else None
         )
         self._turn_tls_context = turn_tls_context
+        self._turn_tls_client = turn_tls_client_certificate
         #: Every media socket's open connection to the TURN server, by the
         #: socket's `host:port`, under :attr:`_nat_lock`.
         self._turn_streams: dict[str, _TurnStream] = {}
@@ -486,17 +513,21 @@ class Stack:
         #: account pins nothing.
         self._tls_trust = tls_trust or TlsTrust.platform()
         self._given_tls_server_name = tls_server_name
+        #: The certificate presented on the signalling connection and on an
+        #: account's own TLS connection that has none of its own.
+        self._tls_client = tls_client_certificate
         self._first_failure: tuple[int, int, str] | None = None
         remote = ""
+        early = b""
         if self._streamed:
             self._socket = None
             try:
-                self._link = self._connect(bind_host)
+                self._link, early = self._connect(bind_host)
                 self.bind_address = format_address(*self._link.getsockname()[:2])
                 remote = format_address(*self._link.getpeername()[:2])
             except (OSError, ssl.SSLError, ValueError) as refused:
                 # told to the stack as soon as there is one, and tried again
-                self._first_failure = classify(refused)
+                self._first_failure = classify(refused, self._presents)
                 host = bind_host if bind_host is not None else route_host(signalling_server)
                 self.bind_address = format_address(host, bind_port)
         else:
@@ -657,7 +688,7 @@ class Stack:
                 "sipral_stack_invite_limit",
             )
         if self._link is not None:
-            self._install_link(self._link, remote)
+            self._install_link(self._link, remote, early)
         elif self._streamed:
             error, tls, detail = self._first_failure or classify(OSError("no connection"))
             self._report_failure(error, tls, detail)
@@ -760,6 +791,7 @@ class Stack:
         server_naptr: bool = False,
         keepalive_ms: int = 0,
         tls_pin: str | None = None,
+        tls_client_certificate: TlsClientCertificate | None = None,
         stream_protocol: int = 0,
         registrar: str | None = None,
         contact: str | None = None,
@@ -844,7 +876,9 @@ class Stack:
         beside UDP accounts on the same stack. This class opens it on
         `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` regardless of ``stream_fallback``
         and reopens it when it closes; TLS is checked against ``tls_pin`` or
-        the stack's ``tls_trust``. Until open, a call raises
+        the stack's ``tls_trust``, and presents ``tls_client_certificate``
+        (:class:`sipral.signalling.TlsClientCertificate`), else the stack's,
+        when the server asks for one. Until open, a call raises
         ``SIPRAL_STATUS_TRANSPORT_DOWN``. ``WS``/``WSS`` run a WebSocket (RFC
         7118) asking for ``websocket_resource`` (``/ws``) with
         ``websocket_host`` as ``Host`` (the server's address).
@@ -892,6 +926,7 @@ class Stack:
             realms=realms,
             webrtc=webrtc,
         )
+        account.tls_client_certificate = tls_client_certificate
         with self._lock:
             self._accounts.append(account)
         return account
@@ -1541,12 +1576,12 @@ class Stack:
                 pass
             old.close()
         try:
-            sock = self._connect(host)
+            sock, early = self._connect(host)
             self.bind_address = format_address(*sock.getsockname()[:2])
-            self._install_link(sock, format_address(*sock.getpeername()[:2]))
+            self._install_link(sock, format_address(*sock.getpeername()[:2]), early)
         except (OSError, ssl.SSLError, ValueError) as refused:
             self.bind_address = format_address(host, 0)
-            self._report_failure(*classify(refused))
+            self._report_failure(*classify(refused, self._presents))
             self._reconnect_later()
 
     def _signalling_socket(self, host: str) -> socket.socket:
@@ -2034,6 +2069,8 @@ class Stack:
         try:
             if protocol == lib.SIPRAL_TRANSPORT_TLS:
                 context = self._turn_tls_context or ssl.create_default_context()
+                if self._turn_tls_client is not None:
+                    self._turn_tls_client.present_with(context)
                 sock: socket.socket = context.wrap_socket(raw, server_hostname=self._turn_server_name)
             else:
                 sock = raw
@@ -2259,6 +2296,19 @@ class Stack:
                 return TlsTrust.pinned(account.tls_pin)
         return self._tls_trust
 
+    def _stream_client(self, destination: str) -> TlsClientCertificate | None:
+        """The client certificate of a TLS account on ``destination``, else the stack's."""
+        with self._lock:
+            accounts = list(self._accounts)
+        for account in accounts:
+            if (
+                account.stream_protocol in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
+                and account.registrar_address == destination
+                and account.tls_client_certificate is not None
+            ):
+                return account.tls_client_certificate
+        return self._tls_client
+
     def _open_sip_stream(
         self, transport: int, destination: str, over: int = lib.SIPRAL_TRANSPORT_TCP, bound: int | None = None
     ) -> None:
@@ -2266,10 +2316,13 @@ class Stack:
         it at ``transport`` as ``bound`` (WS/WSS for a WebSocket); a failure
         is reported on that number, ending what waited for it."""
         tls = over == lib.SIPRAL_TRANSPORT_TLS
+        client = self._stream_client(destination) if tls else None
+        early = b""
         try:
             host, port = parse_address(destination) if tls else self._stream_server or parse_address(destination)
             if tls:
                 trust = self._stream_trust(destination)
+                started = time.monotonic()
                 sock = connect(
                     (host, port),
                     bind_host=None,
@@ -2277,7 +2330,13 @@ class Stack:
                     server_name=self._given_tls_server_name or host,
                     timeout=_SIGNALLING_PATIENCE,
                     pin=trust.pin,
+                    client=client,
                 )
+                try:
+                    early = settle(sock, settle_seconds(time.monotonic() - started))
+                except BaseException:
+                    sock.close()
+                    raise
             else:
                 sock = socket.create_connection((host, port), timeout=_SIGNALLING_PATIENCE)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -2286,7 +2345,7 @@ class Stack:
         except (OSError, ValueError, ssl.SSLError) as refused:
             with self._stream_lock:
                 self._streams_opening.discard(destination)
-            error, tls_failure, said = classify(refused)
+            error, tls_failure, said = classify(refused, client is not None)
             server = format_address(*self._stream_server) if self._stream_server and not tls else destination
             target = destination if server == destination else f"{server} (for {destination})"
             why = f": {said}" if said else ""
@@ -2298,7 +2357,7 @@ class Stack:
                 tls=tls_failure if tls else lib.SIPRAL_TLS_FAILURE_NONE,
             )
             return
-        stream = _SipStream(transport, destination, sock)
+        stream = _SipStream(transport, destination, sock, presented=client is not None)
         with self._stream_lock:
             self._streams_opening.discard(destination)
             if self._closed.is_set():
@@ -2330,7 +2389,10 @@ class Stack:
                 f"to {destination} connected, and the stack would not bind it: {refused}",
             )
             return
-        # Nothing arrives before the request the bind released.
+        # Nothing arrives before the request the bind released, unless the
+        # server spoke while the connection settled.
+        if early:
+            self._feed_sip_stream(transport, early)
         self._selector.register(sock, selectors.EVENT_READ, data=("sip", transport))
 
     def _say_no_stream(
@@ -2373,8 +2435,29 @@ class Stack:
         try:
             with stream.lock:
                 stream.sock.sendall(payload)
-        except OSError:
-            self._lose_sip_stream(transport, tell=True)
+        except OSError as broken:
+            if not self._sip_stream_refused(stream, broken):
+                self._lose_sip_stream(transport, tell=True)
+
+    def _sip_stream_refused(self, stream: _SipStream, broken: OSError) -> bool:
+        """Report a connection the server closed over this end's client
+        certificate, with that reason, and say whether it was one. Under TLS
+        1.3 the server's verdict comes after the handshake, so it arrives on
+        the first read or write."""
+        if not isinstance(broken, ssl.SSLError):
+            return False
+        error, tls, said = classify(broken, stream.presented)
+        if tls not in _CLIENT_CERTIFICATE_FAILURES:
+            return False
+        self._lose_sip_stream(stream.transport, tell=False)
+        self._say_no_stream(
+            stream.transport,
+            error,
+            f"to {stream.destination} closed over the client certificate: {said}",
+            over=lib.SIPRAL_TRANSPORT_TLS,
+            tls=tls,
+        )
+        return True
 
     def _read_sip_stream(self, transport: int) -> None:
         """Feed the connection's bytes to the stack, in order; a close by the
@@ -2396,11 +2479,19 @@ class Stack:
                     stream.sock.settimeout(_SIGNALLING_PATIENCE)
         except (ssl.SSLWantReadError, BlockingIOError, socket.timeout):
             return
-        except (OSError, ssl.SSLError):
+        except ssl.SSLError as broken:
+            if self._sip_stream_refused(stream, broken):
+                return
+            data = b""
+        except OSError:
             data = b""
         if not data:
             self._lose_sip_stream(transport, tell=True)
             return
+        self._feed_sip_stream(transport, data)
+
+    def _feed_sip_stream(self, transport: int, data: bytes) -> None:
+        """Hand bytes read off an account's or a request's connection to the stack."""
         while True:
             status = lib.sipral_stack_receive_stream(
                 self.handle, transport, data, len(data), self.now_ms()
@@ -2454,21 +2545,36 @@ class Stack:
         connected."""
         return not self._streamed or self._link is not None
 
-    def _connect(self, bind_host: str | None) -> socket.socket:
-        """One connection to the signalling server; raises what refused it."""
+    def _connect(self, bind_host: str | None) -> tuple[socket.socket, bytes]:
+        """One connection to the signalling server, and the SIP bytes it
+        carried while it settled (:func:`sipral.signalling.settle`); raises
+        what refused it."""
         assert self._server is not None
-        return connect(
+        started = time.monotonic()
+        sock = connect(
             self._server,
             bind_host=bind_host,
             context=self._tls_context,
             server_name=self._server_name,
             timeout=_SIGNALLING_PATIENCE,
             pin=self._tls_pin,
+            client=self._tls_client,
         )
+        try:
+            return sock, settle(sock, settle_seconds(time.monotonic() - started))
+        except BaseException:
+            sock.close()
+            raise
 
-    def _install_link(self, sock: socket.socket, remote: str) -> None:
-        """Bind the connection in the stack and start reading it; on error
-        the socket is closed and the error raised."""
+    @property
+    def _presents(self) -> bool:
+        """Whether the signalling connection offers a client certificate."""
+        return self._tls_client is not None and self.signalling == lib.SIPRAL_TRANSPORT_TLS
+
+    def _install_link(self, sock: socket.socket, remote: str, early: bytes = b"") -> None:
+        """Bind the connection in the stack, hand it ``early`` (bytes read
+        before the bind) and start reading it; on error the socket is closed
+        and the error raised."""
         local = self.bind_address.encode("utf-8")
         far = remote.encode("utf-8")
         try:
@@ -2492,6 +2598,8 @@ class Stack:
         sock.settimeout(_SIGNALLING_PATIENCE)
         with self._link_lock:
             self._link = sock
+        if early:
+            self._feed_link(early)
         self._selector.register(sock, selectors.EVENT_READ, data="signalling")
 
     def _report_failure(self, error: int, tls: int, detail: str) -> None:
@@ -2557,18 +2665,18 @@ class Stack:
             while not self._closed.wait(delay):
                 delay = min(delay * 2, _RECONNECT_MOST)
                 try:
-                    sock = self._connect(self._bind_host)
+                    sock, early = self._connect(self._bind_host)
                     local = format_address(*sock.getsockname()[:2])
                     remote = format_address(*sock.getpeername()[:2])
                 except (OSError, ssl.SSLError, ValueError) as refused:
-                    self._report_failure(*classify(refused))
+                    self._report_failure(*classify(refused, self._presents))
                     continue
                 if self._closed.is_set():
                     sock.close()
                     return
                 self.bind_address = local
                 try:
-                    self._install_link(sock, remote)
+                    self._install_link(sock, remote, early)
                 except Exception:  # noqa: BLE001 -- tried again after the wait
                     continue
                 self._after_reconnect()
@@ -2602,7 +2710,7 @@ class Stack:
                 return
             except (OSError, ssl.SSLError) as broken:
                 failed = broken
-        self._lose_link(*classify(failed))
+        self._lose_link(*classify(failed, self._presents))
 
     def _read_link(self) -> None:
         """Feed signalling bytes to the stack in order; a busy stack is
@@ -2629,11 +2737,15 @@ class Stack:
             else:
                 failed = None
         if failed is not None:
-            self._lose_link(*classify(failed))
+            self._lose_link(*classify(failed, self._presents))
             return
         if not data:
             self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_CLOSED, lib.SIPRAL_TLS_FAILURE_NONE, "", closed=True)
             return
+        self._feed_link(data)
+
+    def _feed_link(self, data: bytes) -> None:
+        """Hand bytes read off the signalling connection to the stack."""
         while True:
             status = lib.sipral_stack_receive_stream(
                 self.handle, lib.SIPRAL_TRANSPORT_MAIN, data, len(data), self.now_ms()

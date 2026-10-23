@@ -147,6 +147,11 @@ final class SignallingConnection: @unchecked Sendable {
     private var finished = false
     private var bytes: (@Sendable ([UInt8]) -> Void)?
     private var lost: (@Sendable (SignallingRefusal?) -> Void)?
+    /// How the connection ended before `start` gave it a `lost` to tell:
+    /// `.some(nil)` for an orderly close. A TLS 1.3 server refuses a client
+    /// certificate just after this end's handshake is over, which can be
+    /// before then.
+    private var unheardEnd: SignallingRefusal??
     private(set) var local = ""
     private(set) var remote = ""
     #if canImport(Network)
@@ -154,15 +159,18 @@ final class SignallingConnection: @unchecked Sendable {
     private let queue: DispatchQueue
     /// The certificate check's refusal, for reporting the failed handshake.
     private let verdict = SignallingVerdict()
+    /// Whether a client certificate is offered when the server asks.
+    private let presents: Bool
     #else
     private var fd: Int32 = -1
     #endif
 
     /// Connect from `bindHost` (default: the route toward `server`); throws
-    /// the refusal.
+    /// the refusal. Over TLS, `identity` is presented when the server asks
+    /// for a client certificate, after it is checked usable here.
     init(
         server: String, bindHost: String?, transport: SipralTransport, serverName: String, trust: TLSTrust,
-        patienceMs: Int
+        identity: ClientIdentity? = nil, patienceMs: Int
     ) throws {
         let (host, port) = UDPSocket.parse(server)
         #if canImport(Network)
@@ -171,10 +179,23 @@ final class SignallingConnection: @unchecked Sendable {
         tcp.noDelay = true
         tcp.connectionTimeout = max(1, patienceMs / 1000)
         let parameters: NWParameters
+        var presented: sec_identity_t?
+        if transport == .tls, let identity {
+            switch identity.presentable(at: Date()) {
+            case .success(let made): presented = made
+            case .failure(let refusal): throw refusal
+            }
+        }
+        presents = presented != nil
         if transport == .tls {
             let tls = NWProtocolTLS.Options()
             let security = tls.securityProtocolOptions
             sec_protocol_options_set_tls_server_name(security, serverName)
+            let asked = verdict
+            sec_protocol_options_set_challenge_block(security, { [presented] _, complete in
+                asked.noteAsked()
+                complete(presented)
+            }, DispatchQueue(label: "org.sipral.signalling.identity"))
             let anchors: [SecCertificate]
             let only: Bool
             var pin: [UInt8]?
@@ -239,17 +260,27 @@ final class SignallingConnection: @unchecked Sendable {
         }
         let settled = DispatchSemaphore(value: 0)
         let outcome = SignallingOutcome()
+        let began = DispatchTime.now()
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                let hold = self.verdictWaitMs(since: began)
+                guard hold == 0 else {
+                    // the server's word on the certificate is due; a failure
+                    // meanwhile settles the outcome first
+                    self.queue.asyncAfter(deadline: .now() + .milliseconds(hold)) {
+                        if outcome.settle(nil) { settled.signal() }
+                    }
+                    return
+                }
                 if outcome.settle(nil) {
                     settled.signal()
                 } else {
                     return
                 }
             case .waiting(let error), .failed(let error):
-                var refusal = self.verdict.kept ?? Self.refusal(error)
+                var refusal = self.verdict.kept ?? self.classified(error)
                 if refusal.error == .connectionReset && refusal.tls == .none && !outcome.isSettled {
                     // a reset before ready means nothing listens: "refused"
                     refusal = SignallingRefusal(error: .connectionRefused, tls: .none, detail: refusal.detail)
@@ -281,7 +312,15 @@ final class SignallingConnection: @unchecked Sendable {
             throw refusal
         }
         let path = { [connection, queue] in queue.sync { connection.currentPath?.localEndpoint } }
-        guard let named = Self.localAddress(within: patienceMs, reading: path) else {
+        let ended = { [lock] in lock.withLock { self.unheardEnd } }
+        let found = Self.localAddress(within: patienceMs, until: { ended() != nil }, reading: path)
+        if let end = ended() {
+            connection.cancel()
+            throw end ?? SignallingRefusal(
+                error: .closed, tls: .none, detail: "\(server) closed the connection as it was made"
+            )
+        }
+        guard let named = found else {
             lock.withLock { finished = true }
             connection.cancel()
             throw SignallingRefusal(
@@ -343,11 +382,16 @@ final class SignallingConnection: @unchecked Sendable {
 
     /// Start delivering what arrives, and how the connection ends.
     func start(bytes: @escaping @Sendable ([UInt8]) -> Void, lost: @escaping @Sendable (SignallingRefusal?) -> Void) {
-        lock.withLock {
+        let ended = lock.withLock { () -> SignallingRefusal?? in
             self.bytes = bytes
             self.lost = lost
+            return unheardEnd
         }
         #if canImport(Network)
+        if let ended {
+            queue.async { lost(ended) }
+            return
+        }
         receive()
         #else
         let descriptor = fd
@@ -360,8 +404,8 @@ final class SignallingConnection: @unchecked Sendable {
     func send(_ payload: [UInt8]) {
         #if canImport(Network)
         connection.send(content: payload, completion: .contentProcessed { [weak self] error in
-            if let error {
-                self?.finish(Self.refusal(error))
+            if let error, let self {
+                self.finish(self.classified(error))
             }
         })
         #else
@@ -401,6 +445,9 @@ final class SignallingConnection: @unchecked Sendable {
     private func finish(_ refusal: SignallingRefusal?) {
         let (already, lost) = lock.withLock { () -> (Bool, (@Sendable (SignallingRefusal?) -> Void)?) in
             defer { finished = true }
+            if !finished && self.lost == nil {
+                unheardEnd = .some(refusal)
+            }
             return (finished, self.lost)
         }
         guard !already else { return }
@@ -421,7 +468,7 @@ final class SignallingConnection: @unchecked Sendable {
                 deliver?([UInt8](data))
             }
             if let error {
-                self.finish(Self.refusal(error))
+                self.finish(self.classified(error))
                 return
             }
             if complete {
@@ -443,6 +490,33 @@ final class SignallingConnection: @unchecked Sendable {
         default: .untrusted
         }
         return SignallingRefusal(error: .connectionReset, tls: tls, detail: detail)
+    }
+
+    /// How long a ready connection is held before it is handed over, in
+    /// milliseconds: under TLS 1.3 a server that asked for a client
+    /// certificate answers it one round trip after this end's handshake is
+    /// over, and a REGISTER written before then is lost with the alert
+    /// behind it when the server closes on unread data. Twice the time the
+    /// handshake took, within 250 ms and 3 s; zero when nothing is due.
+    private func verdictWaitMs(since began: DispatchTime) -> Int {
+        guard verdict.asked || presents,
+              let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
+              sec_protocol_metadata_get_negotiated_tls_protocol_version(tls.securityProtocolMetadata) == .TLSv13
+        else { return 0 }
+        let tookMs = Int((DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000)
+        return min(max(2 * tookMs, 250), 3000)
+    }
+
+    /// What the server said about this end's certificate, when the failure
+    /// is that; the reading below otherwise. A TLS 1.3 server says it after
+    /// this end's handshake is over, so this reads the failures of an open
+    /// connection too.
+    private func classified(_ error: NWError) -> SignallingRefusal {
+        if case .tls(let status) = error,
+           let tls = ClientIdentity.refusal(status: status, presented: presents, asked: verdict.asked) {
+            return SignallingRefusal(error: .connectionReset, tls: tls, detail: Self.sentence(error.debugDescription))
+        }
+        return Self.refusal(error)
     }
 
     /// A TLS failure the certificate check did not explain is a refused
@@ -481,14 +555,17 @@ final class SignallingConnection: @unchecked Sendable {
 
     /// The local `host:port`, or `nil` after `patienceMs`. On a loaded
     /// machine a ready connection may name its local end a moment later, and
-    /// the stack needs that address, so this waits for it.
-    static func localAddress(within patienceMs: Int, reading read: () -> NWEndpoint?) -> String? {
+    /// the stack needs that address, so this waits for it, unless `gone`
+    /// says the connection ended meanwhile.
+    static func localAddress(
+        within patienceMs: Int, until gone: () -> Bool = { false }, reading read: () -> NWEndpoint?
+    ) -> String? {
         let deadline = DispatchTime.now() + .milliseconds(patienceMs)
         while true {
             if case .hostPort(let host, let port)? = read() {
                 return "\(text(host)):\(port.rawValue)"
             }
-            guard DispatchTime.now() < deadline else { return nil }
+            guard DispatchTime.now() < deadline, !gone() else { return nil }
             usleep(1000)
         }
     }
@@ -540,12 +617,20 @@ final class SignallingConnection: @unchecked Sendable {
 private final class SignallingVerdict: @unchecked Sendable {
     private let lock = SignallingLock()
     private var refusal: SignallingRefusal?
+    private var challenged = false
 
     func keep(_ refusal: SignallingRefusal) {
         lock.withLock { self.refusal = refusal }
     }
 
     var kept: SignallingRefusal? { lock.withLock { refusal } }
+
+    /// The server asked for a client certificate.
+    func noteAsked() {
+        lock.withLock { challenged = true }
+    }
+
+    var asked: Bool { lock.withLock { challenged } }
 }
 #endif
 

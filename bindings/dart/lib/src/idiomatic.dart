@@ -24,6 +24,7 @@ import 'sipral_abi.dart';
 
 part 'account.dart';
 part 'call.dart';
+part 'client_certificate.dart';
 part 'events.dart';
 part 'locate.dart';
 part 'media.dart';

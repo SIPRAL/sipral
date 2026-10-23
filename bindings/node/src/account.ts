@@ -10,6 +10,7 @@ import { SipralError, check, checkNow, config, plain, record, text, within } fro
 import { SIPRAL_TRANSPORT_MAIN, SipralActivity, SipralRegistrationState, SipralStatus, SipralTransport } from './sipral_abi.js';
 import type { Stack } from './stack.js';
 import { Subscription } from './subscription.js';
+import type { ClientCertificate } from './tls.js';
 
 /** What an account emits. */
 export interface AccountEvents {
@@ -56,6 +57,7 @@ export interface AccountFacts {
   advertised: string | null;
   streamProtocol: number;
   tlsPin: string | null;
+  clientCertificate: ClientCertificate | null;
   contactParameters: string;
 }
 
@@ -81,6 +83,8 @@ export class Account extends EventEmitter<AccountEvents> {
   readonly streamProtocol: number;
   /** The certificate pin it was added with. */
   readonly tlsPin: string | null;
+  /** The certificate its TLS connection of its own presents, or null for the stack's. */
+  readonly clientCertificate: ClientCertificate | null;
   /** @internal What follows the address in the `Contact` this package derives for it. */
   readonly contactParameters: string;
   /** @internal The `host:port` its `Contact` names, when the stack chose it. */
@@ -99,6 +103,7 @@ export class Account extends EventEmitter<AccountEvents> {
     this.contactGiven = facts.contactGiven;
     this.streamProtocol = facts.streamProtocol;
     this.tlsPin = facts.tlsPin;
+    this.clientCertificate = facts.clientCertificate;
     this.contactParameters = facts.contactParameters;
     this.advertised = facts.advertised;
   }

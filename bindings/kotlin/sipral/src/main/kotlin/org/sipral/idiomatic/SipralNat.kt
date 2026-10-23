@@ -29,6 +29,11 @@ import org.sipral.SipralTurnStreamEvent
  * connection per media socket. TLS uses [sslSocketFactory] (platform
  * default when null; supply one for a private CA) and checks [serverName]
  * (default: the host of [address]). Checking cannot be turned off.
+ * [clientCertificate] is presented over TLS when the server asks, with the
+ * platform's trust; a factory of the application's own carries its own key
+ * managers, so the two are not taken together. A relay whose connection
+ * fails for the certificate is reported as any other connection that
+ * closed.
  */
 class SipralTurnServer(
     val address: String,
@@ -37,7 +42,25 @@ class SipralTurnServer(
     val transport: SipralTransport = SipralTransport.UDP,
     val serverName: String? = null,
     val sslSocketFactory: SSLSocketFactory? = null,
+    val clientCertificate: SipralClientCertificate? = null,
 ) {
+    init {
+        require(sslSocketFactory == null || clientCertificate == null) {
+            "a TURN server takes sslSocketFactory or clientCertificate: put the key managers in the factory"
+        }
+    }
+
+    /** The factory a TLS connection to it is made with: the application's,
+     * or the platform's trust with [clientCertificate] read again now. */
+    internal fun socketFactory(): SSLSocketFactory {
+        sslSocketFactory?.let { return it }
+        val presented = clientCertificate ?: return SSLSocketFactory.getDefault() as SSLSocketFactory
+        val (key, chain) = presented.load()
+        return javax.net.ssl.SSLContext.getInstance("TLS").apply {
+            init(arrayOf(Presenting(key, chain, ClientAuthentication())), null, null)
+        }.socketFactory
+    }
+
     override fun toString(): String =
         "SipralTurnServer(address=$address, username=$username, password=<redacted>, transport=$transport)"
 }

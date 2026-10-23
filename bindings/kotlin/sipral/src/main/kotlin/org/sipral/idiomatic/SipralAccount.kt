@@ -43,6 +43,9 @@ class SipralAccount internal constructor(
     val streamProtocol: SipralTransport? = null,
     /** The certificate pin a TLS connection of its own is held to. */
     internal val tlsPin: String? = null,
+    /** The certificate a TLS or WSS connection of its own presents, or null
+     * for the client's. */
+    internal val clientCertificate: SipralClientCertificate? = null,
 ) {
     /** Where requests go, `host:port`: the address it was added with, or for a
      * [serverUri] account the last located address (empty until then). */
@@ -98,6 +101,7 @@ class SipralAccount internal constructor(
         val realms: List<String> = emptyList(),
         val websocketHost: String? = null,
         val websocketResource: String? = null,
+        val clientCertificate: SipralClientCertificate? = null,
     )
     /** The account's current `Contact` address; after
      * [SipralClient.networkChanged], the new one. */
@@ -168,7 +172,7 @@ class SipralAccount internal constructor(
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(
                 client, accountHandle, aor, registrarAddress ?: "", written, contact, location.serverUri,
-                location.streamProtocol, location.tlsPin,
+                location.streamProtocol, location.tlsPin, location.clientCertificate,
             )
         }
     }

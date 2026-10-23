@@ -26,6 +26,10 @@ final class StreamRegistrar {
     _listener.listen((socket) {
       final number = ++_connections;
       _open.add(socket);
+      if (socket is SecureSocket) {
+        final presented = socket.peerCertificate?.subject ?? '';
+        peers.add(RegExp(r'CN=([^,/]+)').firstMatch(presented)?.group(1) ?? '');
+      }
       var held = '';
       socket.listen(
         (bytes) {
@@ -52,24 +56,33 @@ final class StreamRegistrar {
         onError: (Object _) {},
         cancelOnError: true,
       );
-    });
+      // a client this registrar refused at the handshake is no connection
+    }, onError: (Object _) {});
   }
 
-  static Future<StreamRegistrar> open([SecurityContext? context]) async =>
-      StreamRegistrar._(
-        context == null
-            ? await ServerSocket.bind(InternetAddress.loopbackIPv4, 0)
-            : await SecureServerSocket.bind(
-              InternetAddress.loopbackIPv4,
-              0,
-              context,
-            ),
-      );
+  /// Over TLS given a [context]; with [requireClientCertificate], a client
+  /// that presents none its trusted authorities signed is refused.
+  static Future<StreamRegistrar> open([
+    SecurityContext? context,
+    bool requireClientCertificate = false,
+  ]) async => StreamRegistrar._(
+    context == null
+        ? await ServerSocket.bind(InternetAddress.loopbackIPv4, 0)
+        : await SecureServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+          context,
+          requireClientCertificate: requireClientCertificate,
+        ),
+  );
 
   final Stream<Socket> _listener;
   final List<Socket> _open = [];
   int _connections = 0;
   final List<(int, String)> requests = [];
+
+  /// The subject CN of the certificate each TLS client presented, in order.
+  final List<String> peers = [];
 
   int get port => switch (_listener) {
     ServerSocket plain => plain.port,

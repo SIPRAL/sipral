@@ -721,6 +721,25 @@ enum {
      * The handshake failed: no common version or cipher, a server alert, or no TLS there.
      */
     SIPRAL_TLS_FAILURE_HANDSHAKE_REFUSED = 4,
+    /**
+     * The server asked for a client certificate and this end had none to present.
+     */
+    SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REQUIRED = 5,
+    /**
+     * The server refused the client certificate this end presented: an authority it does
+     * not trust, a revoked certificate, or one it does not accept for this account.
+     */
+    SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED = 6,
+    /**
+     * The client certificate's private key could not be used: not found, locked with the
+     * device, its use refused by the user, or invalidated by the platform.
+     */
+    SIPRAL_TLS_FAILURE_CLIENT_KEY_UNAVAILABLE = 7,
+    /**
+     * The client certificate has expired or is not valid yet, as this end read its dates
+     * before connecting or as the server's alert said.
+     */
+    SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_EXPIRED = 8,
 };
 
 /**

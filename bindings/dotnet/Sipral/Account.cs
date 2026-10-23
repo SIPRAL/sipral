@@ -16,7 +16,8 @@ public sealed record SipralPinnedCertificateInfo(ulong NotBefore, ulong NotAfter
 internal sealed record AccountLocation(
     string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised,
     SipralTransport StreamProtocol = 0, IEnumerable<string>? Realms = null,
-    string? WebsocketHost = null, string? WebsocketResource = null);
+    string? WebsocketHost = null, string? WebsocketResource = null,
+    SipralClientCertificate? ClientCertificate = null);
 
 /// <summary>
 /// One <c>sipral_account_add</c> handle. Built through
@@ -45,6 +46,10 @@ public sealed class Account
 
     internal string? TlsPin { get; }
 
+    // Presented on the account's own TLS or WSS connection, before the
+    // stack's.
+    internal SipralClientCertificate? ClientCertificate { get; }
+
     // The Contact's transport parameter (RFC 3261 §19.1.1).
     private static string ContactParametersOf(SipralStack stack, SipralTransport streamProtocol) => streamProtocol switch
     {
@@ -69,10 +74,12 @@ public sealed class Account
 
     private Account(
         SipralStack stack, ulong handle, string aor, string registrarAddress, bool contactGiven, string? serverUri,
-        string? advertised, SipralTransport streamProtocol, string? tlsPin)
+        string? advertised, SipralTransport streamProtocol, string? tlsPin,
+        SipralClientCertificate? clientCertificate)
     {
         StreamProtocol = streamProtocol;
         TlsPin = tlsPin;
+        ClientCertificate = clientCertificate;
         _stack = stack;
         _handle = new AccountSafeHandle();
         _handle.Attach(stack.Handle, handle);
@@ -279,7 +286,8 @@ public sealed class Account
         // server was known: what a later route is compared with
         return new Account(
             stack, accountHandle, aor, registrarAddress ?? string.Empty, contact is not null, location.ServerUri,
-            contact is null ? location.Advertised ?? stack.BindAddress : null, location.StreamProtocol, location.TlsPin);
+            contact is null ? location.Advertised ?? stack.BindAddress : null, location.StreamProtocol, location.TlsPin,
+            location.ClientCertificate);
     }
 
     /// <summary><c>sipral_account_rebind</c> after a network change: point

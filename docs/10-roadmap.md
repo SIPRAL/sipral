@@ -136,9 +136,9 @@ December 2026, planned.
 
 March 2027, planned.
 
-- A client certificate on SIP over TLS, signed by the platform: Secure Enclave on iOS, Android Keystore, the Keychain on macOS, CNG on Windows
-- The same certificate in the C ABI and in the Swift, Kotlin and .NET bindings
-- Proven against PBXs and proxies that require a client certificate, in the lab
+- A client certificate on SIP over TLS, signed by the platform: Secure Enclave on iOS, Android Keystore, the Keychain on macOS, CNG on Windows *(in progress)*
+- The same certificate in the C ABI and in the Swift, Kotlin and .NET bindings *(done)*
+- Proven against PBXs and proxies that require a client certificate, in the lab *(in progress)*
 
 ### 2.0 — Beyond audio
 

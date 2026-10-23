@@ -64,14 +64,31 @@ def _certificate(directory: str, name: str, *extra: str) -> tuple[str, str] | No
 class _Registrar:
     """A TCP or TLS registrar; ``plain_to_tls`` answers TLS in plain text.
 
-    :attr:`requests` holds ``(connection, message)``, connections from one.
+    ``client_authority`` (a PEM file) makes it require a client certificate
+    that authority signed; ``tls_version`` holds it to one version.
+    :attr:`requests` holds ``(connection, message)``, connections from one;
+    :attr:`client_subjects` the subject of each client certificate taken.
     """
 
-    def __init__(self, certificate: tuple[str, str] | None = None, *, plain_to_tls: bool = False) -> None:
+    def __init__(
+        self,
+        certificate: tuple[str, str] | None = None,
+        *,
+        plain_to_tls: bool = False,
+        client_authority: str | None = None,
+        tls_version: ssl.TLSVersion | None = None,
+    ) -> None:
         self._context = None
+        self.client_subjects: list[tuple] = []
         if certificate is not None:
             self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             self._context.load_cert_chain(*certificate)
+            if client_authority is not None:
+                self._context.verify_mode = ssl.CERT_REQUIRED
+                self._context.load_verify_locations(cafile=client_authority)
+            if tls_version is not None:
+                self._context.minimum_version = tls_version
+                self._context.maximum_version = tls_version
         self._plain_to_tls = plain_to_tls
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.bind(("127.0.0.1", 0))
@@ -110,6 +127,9 @@ class _Registrar:
             except (ssl.SSLError, OSError):
                 conn.close()
                 return
+            peer = conn.getpeercert()
+            if peer:
+                self.client_subjects.append(peer.get("subject", ()))
         conn.settimeout(0.05)
         self._open.append(conn)
         held = b""

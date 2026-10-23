@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -14,6 +15,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Sipral.Interop;
 using static Sipral.Interop.NativeText;
 
@@ -216,6 +218,7 @@ public sealed partial class SipralStack
     private (string Host, int Port)? _server;
     private string? _serverName;
     private SipralTlsTrust _tlsTrust = SipralTlsTrust.Platform;
+    private SipralClientCertificate? _tlsClientCertificate;
     private string? _bindHost;
     private Link? _link;
     private int _reconnecting;
@@ -228,6 +231,12 @@ public sealed partial class SipralStack
         public required Stream Stream { get; init; }
         public required string Local { get; init; }
         public required string Remote { get; init; }
+        // over TLS: how a later failure reads for the client certificate
+        public ClientCertificateUse? Use { get; init; }
+        // over TLS 1.3 with a certificate asked for: the read started while
+        // the server's verdict was awaited, and its buffer; the reader's first
+        public Task<int>? FirstRead { get; init; }
+        public byte[]? FirstBuffer { get; init; }
         public object WriteLock { get; } = new();
     }
 
@@ -250,7 +259,7 @@ public sealed partial class SipralStack
 
     private (Link? Link, SignallingRefusedException? Refused) PrepareSignalling(
         SipralTransport signalling, string? bindHost, string? signallingServer, string? tlsServerName,
-        SipralTlsTrust? tlsTrust)
+        SipralTlsTrust? tlsTrust, SipralClientCertificate? tlsClientCertificate)
     {
         _signalling = signalling == 0 ? SipralTransport.Udp : signalling;
         if (_signalling is not (SipralTransport.Udp or SipralTransport.Tcp or SipralTransport.Tls))
@@ -260,6 +269,7 @@ public sealed partial class SipralStack
         _bindHost = bindHost;
         _givenTlsServerName = tlsServerName;
         _tlsTrust = tlsTrust ?? SipralTlsTrust.Platform;
+        _tlsClientCertificate = tlsClientCertificate;
         if (!Streamed)
         {
             return (null, null);
@@ -300,6 +310,9 @@ public sealed partial class SipralStack
         TcpClient? client = null;
         try
         {
+            // a certificate that cannot be presented is reported before any
+            // connection is made
+            var use = _signalling == SipralTransport.Tls ? ClientCertificateUse.Prepare(_tlsClientCertificate) : null;
             var address = IPAddress.Parse(host);
             client = new TcpClient(address.AddressFamily) { NoDelay = true };
             if (bindHost is not null)
@@ -319,20 +332,29 @@ public sealed partial class SipralStack
                 throw Refused(socket);
             }
             Stream carried = client.GetStream();
+            (Task<int>? First, byte[]? Buffer) first = (null, null);
             if (_signalling == SipralTransport.Tls)
             {
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
                 var verdict = new SipralTlsTrust.Verdict();
                 var options = new SslClientAuthenticationOptions { TargetHost = _serverName };
                 _tlsTrust.Apply(options, verdict);
+                use!.Apply(options);
+                var began = Stopwatch.GetTimestamp();
                 try
                 {
                     tls.AuthenticateAsClient(options);
+                    first = use.AwaitVerdict(tls, Stopwatch.GetElapsedTime(began), TransmitBytes);
                 }
                 catch (Exception ex) when (ex is AuthenticationException or IOException)
                 {
                     tls.Dispose();
-                    throw Refused(verdict, ex);
+                    throw Refused(verdict, ex, use);
+                }
+                catch (SignallingRefusedException)
+                {
+                    tls.Dispose();
+                    throw;
                 }
                 carried = tls;
             }
@@ -344,6 +366,9 @@ public sealed partial class SipralStack
                 Stream = carried,
                 Local = FormatAddress((IPEndPoint)client.Client.LocalEndPoint!),
                 Remote = FormatAddress((IPEndPoint)client.Client.RemoteEndPoint!),
+                Use = use,
+                FirstRead = first.First,
+                FirstBuffer = first.Buffer,
             };
         }
         catch (SignallingRefusedException)
@@ -360,9 +385,11 @@ public sealed partial class SipralStack
         }
     }
 
-    // A refused certificate is untrusted, expired or a name mismatch; any
-    // other handshake failure is "handshake refused".
-    internal static SignallingRefusedException Refused(SipralTlsTrust.Verdict verdict, Exception ex)
+    // A refused server certificate is untrusted, expired or a name mismatch;
+    // with the server's certificate accepted, a failure the client
+    // certificate explains is that; any other is "handshake refused".
+    internal static SignallingRefusedException Refused(SipralTlsTrust.Verdict verdict, Exception ex,
+        ClientCertificateUse? use = null)
     {
         const X509ChainStatusFlags untrusted = X509ChainStatusFlags.UntrustedRoot
             | X509ChainStatusFlags.PartialChain | X509ChainStatusFlags.NotSignatureValid
@@ -370,6 +397,10 @@ public sealed partial class SipralStack
         const X509ChainStatusFlags expired = X509ChainStatusFlags.NotTimeValid | X509ChainStatusFlags.NotTimeNested;
         if (verdict.Errors is not { } errors || errors == SslPolicyErrors.None)
         {
+            if (use?.Explain(ex) is { } client)
+            {
+                return new SignallingRefusedException(client.Error, client.Tls, Sentence(client.Message));
+            }
             return new SignallingRefusedException(SipralTransportError.ConnectionReset,
                 SipralTlsFailure.HandshakeRefused, Sentence(ex.Message));
         }
@@ -476,21 +507,19 @@ public sealed partial class SipralStack
     // never resyncs.
     private void ReadLink(Link link)
     {
-        var buffer = new byte[TransmitBytes];
+        var buffer = link.FirstBuffer ?? new byte[TransmitBytes];
+        var first = link.FirstRead;
         while (!_closed.IsSet)
         {
             int read;
             try
             {
-                read = link.Stream.Read(buffer, 0, buffer.Length);
+                read = first is not null ? first.GetAwaiter().GetResult() : link.Stream.Read(buffer, 0, buffer.Length);
+                first = null;
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
             {
-                var socket = ex as SocketException ?? ex.InnerException as SocketException;
-                LoseLink(link, socket is not null
-                    ? Refused(socket)
-                    : new SignallingRefusedException(SipralTransportError.ConnectionReset, SipralTlsFailure.None,
-                        Sentence(ex.Message)));
+                LoseLink(link, Broken(link, ex));
                 return;
             }
             if (read == 0)
@@ -537,12 +566,23 @@ public sealed partial class SipralStack
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
         {
-            var socket = ex as SocketException ?? ex.InnerException as SocketException;
-            LoseLink(link, socket is not null
-                ? Refused(socket)
-                : new SignallingRefusedException(SipralTransportError.ConnectionReset, SipralTlsFailure.None,
-                    Sentence(ex.Message)));
+            LoseLink(link, Broken(link, ex));
         }
+    }
+
+    // Why an open connection failed: the client certificate, when the
+    // server's alert is about it, else the socket's error or a reset.
+    private static SignallingRefusedException Broken(Link link, Exception ex)
+    {
+        if (link.Use?.Explain(ex) is { } client)
+        {
+            return new SignallingRefusedException(client.Error, client.Tls, Sentence(client.Message));
+        }
+        var socket = ex as SocketException ?? ex.InnerException as SocketException;
+        return socket is not null
+            ? Refused(socket)
+            : new SignallingRefusedException(SipralTransportError.ConnectionReset, SipralTlsFailure.None,
+                Sentence(ex.Message));
     }
 
     // Closes the link if still current, reports stream_closed (refused

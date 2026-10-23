@@ -76,6 +76,10 @@ end by hand for the caller's identity behind the trust gate, Answer-Mode and
 Alert-Info, `Reason` read and written, a 302 and the per-account options;
 `MoveTests.cs` moves a call from loopback to this host's routable address and
 hears it both ways after, and reads the suite a DTLS-SRTP call settled on.
+`ClientCertificateTests.cs` puts the registrar behind `openssl s_server`
+requiring a client certificate its own authority signed, so the alerts read
+are OpenSSL's, as a PBX sends them; it needs the `openssl` command (Homebrew's
+or the system's) and fails without it.
 
 ## Use
 
@@ -557,8 +561,8 @@ checks the certificate against `tlsServerName` (the server's host when
 `PrivateAuthority(cert)` beside it, or `OnlyAuthority(cert)` alone. The
 first connection is made in the constructor. One that fails, or breaks
 later, arrives as `SipralEventKind.TransportFailed` with
-`args.TransportFailed` — `Tls` `Untrusted`, `NameMismatch`, `Expired` or
-`HandshakeRefused`, the `Error`, and `SslStream`'s own `Detail` — and the
+`args.TransportFailed` — `Tls` `Untrusted`, `NameMismatch`, `Expired`,
+`HandshakeRefused` or one of the client certificate's four (below), the `Error`, and `SslStream`'s own `Detail` — and the
 stack connects again, one second later and up to thirty seconds apart,
 registering every account again once it is back. `stack.Connected` says
 whether it is up; `Account.Register()` asked meanwhile is kept for then.
@@ -584,6 +588,59 @@ account's REGISTER and every request of its calls go over it, its `Contact`
 names the protocol, and a connection that closes is opened again and the
 account registered again. Until it is open a call the account places throws
 with `SipralStatus.TransportDown`.
+
+### A client certificate
+
+A PBX or proxy that admits only devices it issued a certificate to asks for
+one in the TLS handshake. `tlsClientCertificate` is what this end presents,
+on the stack's connection and on every account's own TLS or WSS connection
+that has none of its own (`AddAccount(..., tlsClientCertificate: ...)`);
+`turnClientCertificate` is the same for a TURN server over TLS. Each is a
+`SipralClientCertificate`: an `X509Certificate2` with its private key, and
+the intermediates to send after it. The key is used where the platform keeps
+it and is never exported by this package:
+
+- **Windows**: a certificate from the store whose key is a persisted CNG key
+  (or a smart card's), as `X509Store` returns it. SChannel cannot sign with an
+  ephemeral key, so a certificate built in memory has to be imported from
+  PKCS#12 first; `SipralClientCertificate.FromPemFiles` does that.
+- **macOS**: a certificate whose key is in the Keychain, as `X509Store` or a
+  PKCS#12 import returns it.
+- **Linux**: `SipralClientCertificate.FromPemFiles(chain, key)`, the PEM
+  certificate (then its intermediates) and its unencrypted PKCS#8 or SEC 1
+  key, or any `X509Certificate2` with its key.
+
+```csharp
+using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+store.Open(OpenFlags.ReadOnly);
+var mine = store.Certificates.Find(X509FindType.FindBySubjectName, "alice", validOnly: false)[0];
+using var stack = new SipralStack(
+    signalling: SipralTransport.Tls,
+    signallingServer: "198.51.100.10:5061",
+    tlsServerName: "pbx.example.com",
+    tlsClientCertificate: new SipralClientCertificate(mine));
+```
+
+Each outcome arrives as `SipralEventKind.TransportFailed`, with its own
+`Tls`:
+
+- `ClientCertificateExpired` and `ClientKeyUnavailable`, before any
+  connection is made: the certificate is outside its dates, or it has no
+  private key or the platform will not open it. The server's own
+  `certificate_expired` alert is also `ClientCertificateExpired`.
+- `ClientCertificateRefused`: the server refused the certificate presented
+  (an authority it does not trust, revoked, or not one it accepts).
+- `ClientCertificateRequired`: the server wants a certificate and the stack
+  was given none.
+
+The stack connects again on its usual back-off after each. Over TLS 1.3 the
+server judges the certificate after the handshake has completed on this end,
+so its refusal arrives on the first read and is reported the same way: when
+a certificate was asked for, the layer waits for that read (twice the
+handshake's time, 250 ms to 3 s) before the stack writes anything, since a
+request written first meets a server that resets the connection and loses
+the alert. .NET
+on macOS speaks TLS 1.2 at most; Linux and Windows reach 1.3.
 
 `stack.Settings()` reads back what the stack runs with, every default
 filled in (`SipralSettings`): the timers, the codecs' count, the SRTP suites

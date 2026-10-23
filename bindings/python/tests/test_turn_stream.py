@@ -28,8 +28,10 @@ import tempfile
 import threading
 import unittest
 
-from sipral import Stack
+from sipral import Stack, TlsClientCertificate
 from sipral.enums import AudioMode, EventKind, Ice, Nat, NatRelay, Transport
+
+from tests.test_client_certificate import _CLIENT_NAME, _authority, _client
 
 from tests.test_nat import (
     _ALLOCATE_ERROR,
@@ -73,12 +75,22 @@ class _FakeTurnOverStream:
     NONCE = "fedcba9876543210"
     RELAY_HOST = "198.51.100.19"
 
-    def __init__(self, credential: tuple[str, str], certificate: tuple[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        credential: tuple[str, str],
+        certificate: tuple[str, str] | None = None,
+        client_authority: str | None = None,
+    ) -> None:
         self._credential = credential
         self._context = None
+        #: The subject of each client certificate taken.
+        self.client_subjects: list[tuple] = []
         if certificate is not None:
             self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             self._context.load_cert_chain(*certificate)
+            if client_authority is not None:
+                self._context.verify_mode = ssl.CERT_REQUIRED
+                self._context.load_verify_locations(cafile=client_authority)
         self._listener = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
         self._listener.bind(("127.0.0.1", 0))
         self._listener.listen()
@@ -115,6 +127,9 @@ class _FakeTurnOverStream:
                 conn.close()
                 self.closed.append(number)
                 return
+            presented = conn.getpeercert()
+            if presented:
+                self.client_subjects.append(presented.get("subject", ()))
             conn.settimeout(0.05)
         held = b""
         while not self._stop.is_set():
@@ -235,6 +250,12 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
     def client_context(self) -> ssl.SSLContext | None:
         return None
 
+    def client_certificate(self) -> TlsClientCertificate | None:
+        return None
+
+    def client_authority(self) -> str | None:
+        return None
+
     async def asyncSetUp(self) -> None:
         host = _routable_address()
         if host is None:
@@ -243,7 +264,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
         # Before any server exists: a TLS case may skip here without openssl.
         certificate = self.certificate()
         self.stun = _FakeStunServer(*self.PUBLIC, host=host)
-        self.turn = _FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate)
+        self.turn = _FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate, self.client_authority())
         self.addAsyncCleanup(self._close_servers)
         loop = asyncio.get_running_loop()
         self.alice_stack = Stack(
@@ -259,6 +280,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
             turn_transport=self.TRANSPORT,
             turn_server_name=_SERVER_NAME,
             turn_tls_context=self.client_context(),
+            turn_tls_client_certificate=self.client_certificate(),
         )
         self.bob_stack = Stack(bind_host=host, loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
         self.addAsyncCleanup(self._close_stacks)
@@ -395,6 +417,32 @@ class TurnOverTls(_OverTls):
         self.alice_stack.close()
         await self.until(lambda: any(lifetime == struct.pack("!I", 0) for _, lifetime in self.turn.refreshes()))
         self.assertIn((1, struct.pack("!I", 0)), self.turn.refreshes())
+
+
+class TurnOverTlsWithAClientCertificate(_OverTls):
+    PUBLIC = ("203.0.113.24", 40024)
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._clients = _authority(cls._directory, "turn-clients")
+        cls._client = _client(cls._directory, "turn-client", cls._clients) if cls._clients else None
+
+    def client_authority(self) -> str | None:
+        return self._clients
+
+    def client_context(self) -> ssl.SSLContext | None:
+        return ssl.create_default_context(cafile=self._certificate[0])
+
+    def client_certificate(self) -> TlsClientCertificate | None:
+        if self._client is None:
+            self.skipTest("no openssl command to make the client certificate with")
+        return TlsClientCertificate(*self._client)
+
+    async def test_a_server_that_requires_one_takes_it_and_gives_a_relay(self) -> None:
+        _call, relay = await self.place()
+        self.assertEqual(relay.fields["outcome"], NatRelay.ALLOCATED, relay.fields)
+        self.assertEqual(self.turn.client_subjects, [((("commonName", _CLIENT_NAME),),)])
 
 
 class TurnOverTlsUntrusted(_OverTls):
