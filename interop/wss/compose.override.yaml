@@ -2,13 +2,21 @@
 # Copyright (c) 2026 Sytek
 #
 # Gives the lab's Asterisk a TLS listener for SIP WebSockets on 8089, for
-# scripts/lab.sh's `wss` step alone: applied with `-f`, on top of
-# ../compose.yaml, and taken off again as soon as that step is over, so every
-# other flow meets Asterisk exactly as compose.yaml describes it. The
+# scripts/lab.sh's `wss` and `browser` steps alone: applied with `-f`, on top
+# of ../compose.yaml, and taken off again as soon as that step is over, so
+# every other flow meets Asterisk exactly as compose.yaml describes it. The
 # certificates are made for each run by lab.sh's tls_certificates, into the
 # directory SIPRAL_TLS_CERTS names.
+#
+# The hostname is the name the lab reaches it by: Asterisk writes its own
+# host name into the From and Contact of a call it places over a WebSocket,
+# and Docker's default is the container's id, twelve hex digits. When that
+# starts with a digit it is no host name RFC 3261 §25.1 allows (a top label
+# begins with a letter), and the browser's SIP client drops the INVITE
+# unread.
 services:
   asterisk:
+    hostname: asterisk
     volumes:
       - ./wss/http.conf:/etc/asterisk/http.conf:ro
       - ./wss/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro

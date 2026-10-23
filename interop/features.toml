@@ -388,6 +388,15 @@ flows = [
 ]
 
 [[feature]]
+name = "A call each way with a browser over a SIP WebSocket, trickle ICE (RFC 8838, RFC 8840)"
+implemented = true
+unit_tested = true
+flows = [
+  "a call each way with a browser through asterisk",
+  "a call each way with a browser through kamailio",
+]
+
+[[feature]]
 name = "A PBX line bridged to a voice agent that answers SIP"
 implemented = true
 unit_tested = true

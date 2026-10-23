@@ -361,6 +361,20 @@ impl SessionDescription {
         media.connection.as_ref().or(self.connection.as_ref())
     }
 
+    /// Whether one stream is held the old way, by `0.0.0.0` (RFC 3264 §8.4).
+    ///
+    /// Not on a stream ICE carries: there the path is the pair ICE checks, and
+    /// `0.0.0.0` with port 9 is a description that holds no candidate yet (RFC
+    /// 8840 §4.1.1, RFC 8839 §4.2.1.3), which a browser writes in every
+    /// description it trickles.
+    #[must_use]
+    pub fn holds_by_address(&self, media: &MediaDescription) -> bool {
+        let ice = media.attribute("ice-ufrag").is_some() || self.attribute("ice-ufrag").is_some();
+        !ice && self
+            .connection_of(media)
+            .is_some_and(Connection::is_black_hole)
+    }
+
     /// Whether one stream asks for the RFC 3611 `voip-metrics` XR block. A
     /// media-level `a=rtcp-xr` replaces the session one (§5.1), whatever it lists.
     #[must_use]

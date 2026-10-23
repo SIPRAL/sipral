@@ -38,6 +38,7 @@
 )]
 
 mod audio;
+mod browser;
 mod device_open;
 mod drift;
 mod dtls;
@@ -808,6 +809,50 @@ fn extra_flows(
             Ok(said) => println!("  pass  {what}{said}"),
             Err(why) => {
                 println!("  FAIL  {what} — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // a call each way with a browser, and only when named: a headless
+    // Chromium that scripts/lab.sh starts beside this run, registered over a
+    // WebSocket at the same server. Through Asterisk as `labuser-webrtc`,
+    // which bridges the two WebRTC legs; through Kamailio as `webrtc-sipral`,
+    // the media end to end and trickled both ways. See `browser`
+    if wanted.split(',').any(|name| name.trim() == "browser")
+        && (server == "asterisk" || server == "kamailio")
+    {
+        let through_asterisk = server == "asterisk";
+        let (variable, default_user, browser) = if through_asterisk {
+            ("SIPRAL_USER_WEBRTC", "labuser-webrtc", "9061")
+        } else {
+            (
+                "SIPRAL_USER_WEBRTC_PROXY",
+                "webrtc-sipral",
+                "webrtc-browser",
+            )
+        };
+        let line_user = env::var(variable).unwrap_or_else(|_| default_user.to_owned());
+        let line_pass = if through_asterisk {
+            pass.to_owned()
+        } else {
+            env::var("SIPRAL_PASS_WEBRTC_PROXY").unwrap_or_else(|_| "webrtcpass".to_owned())
+        };
+        let lab = browser::Lab {
+            server,
+            remote,
+            user: &line_user,
+            pass: &line_pass,
+            browser,
+            trickle: if through_asterisk {
+                sipral::IceTrickle::Off
+            } else {
+                sipral::IceTrickle::Full
+            },
+        };
+        match browser::run(&lab) {
+            Ok(said) => println!("  pass  a call each way with a browser through {server}{said}"),
+            Err(why) => {
+                println!("  FAIL  a call each way with a browser through {server} — {why}");
                 failures += 1;
             }
         }
@@ -3624,6 +3669,10 @@ mod tests {
             webrtc::MEDIA_SEED => crate::webrtc::MEDIA_SEED,
             webrtc::WS_SEED => crate::webrtc::WS_SEED,
             webrtc::WS_MEDIA_SEED => crate::webrtc::WS_MEDIA_SEED,
+            browser::SEED => crate::browser::SEED,
+            browser::MEDIA_SEED => crate::browser::MEDIA_SEED,
+            browser::PROXY_SEED => crate::browser::PROXY_SEED,
+            browser::PROXY_MEDIA_SEED => crate::browser::PROXY_MEDIA_SEED,
             inband::INBAND_SEED => crate::inband::INBAND_SEED,
             inband::INBAND_MEDIA_SEED => crate::inband::INBAND_MEDIA_SEED,
             inband::AMD_SEED => crate::inband::AMD_SEED,

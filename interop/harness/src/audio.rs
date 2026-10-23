@@ -134,6 +134,33 @@ fn is_marker(samples: &[i16]) -> bool {
     loudness(samples) >= MARK_LOUDNESS
 }
 
+/// The amplitude of the component at `hz`, by Goertzel.
+pub(crate) fn level_at(samples: &[i16], rate: u32, hz: f64) -> f64 {
+    let coefficient = 2.0 * (core::f64::consts::TAU * hz / f64::from(rate)).cos();
+    let (mut before, mut last) = (0.0_f64, 0.0_f64);
+    for sample in samples {
+        let next = f64::from(*sample) + coefficient * last - before;
+        before = last;
+        last = next;
+    }
+    let power = before.mul_add(before, last * last) - coefficient * before * last;
+    #[allow(clippy::cast_precision_loss)]
+    let length = samples.len().max(1) as f64;
+    2.0 * power.max(0.0).sqrt() / length
+}
+
+/// The amplitude at the pitch [`Media::listen_for`] names above which a
+/// frame holds that tone: a sixth of what a far end sending a sine at a third
+/// of full scale puts there, after G.711.
+const PITCHED_LEVEL: f64 = 2_000.0;
+
+/// Whether `samples` hold a tone at `hz`: loud enough there, and louder there
+/// than at this end's own tone, which an echo would bring back.
+fn is_pitched(samples: &[i16], rate: u32, hz: f64) -> bool {
+    let there = level_at(samples, rate, hz);
+    there >= PITCHED_LEVEL && there > level_at(samples, rate, f64::from(TONE_HZ))
+}
+
 /// What the far end sent back, counted the same way the harness has always
 /// counted it: from outside the session, watching what each call returns.
 #[derive(Debug, Default, Clone, Copy)]
@@ -176,6 +203,10 @@ pub(crate) struct Heard {
     /// the buffer's own count of under-runs, which settles a run only once
     /// the packet after it is played, can be behind this one at any moment.
     pub(crate) longest_silence: u32,
+    /// Frames `MediaSession::playback` reported as [`Playback::Packet`] that
+    /// held the far end's own tone at the pitch [`Media::listen_for`] named;
+    /// zero when none was named.
+    pub(crate) pitched: u32,
 }
 
 /// Where the earpiece's silence falls against the tone, frame by frame.
@@ -305,6 +336,9 @@ pub(crate) struct Media {
     intercept: Vec<SocketAddr>,
     /// What came from them, for [`Media::take_intercepted`].
     intercepted: Vec<(SocketAddr, Vec<u8>)>,
+    /// The pitch of the far end's own tone, when it sends one rather than
+    /// echoing this end's ([`Media::listen_for`]).
+    pitch: Option<f64>,
 }
 
 impl Media {
@@ -345,7 +379,15 @@ impl Media {
             rewrite: None,
             intercept: Vec::new(),
             intercepted: Vec::new(),
+            pitch: None,
         }
+    }
+
+    /// Count the frames that hold the far end's own tone at `hz`
+    /// ([`Heard::pitched`]): for a far end that sends a tone of its own, a
+    /// browser's, rather than an echo of this one.
+    pub(crate) const fn listen_for(&mut self, hz: f64) {
+        self.pitch = Some(hz);
     }
 
     /// Keep what `servers` send out of the call: [`Media::turn`] and
@@ -729,6 +771,11 @@ impl Media {
             self.heard.audible = self.heard.audible.saturating_add(1);
         }
         if matches!(outcome, Playback::Packet)
+            && self.pitch.is_some_and(|hz| is_pitched(room, rate, hz))
+        {
+            self.heard.pitched = self.heard.pitched.saturating_add(1);
+        }
+        if matches!(outcome, Playback::Packet)
             && is_marker(room)
             && let Some(PendingMark {
                 armed,
@@ -794,7 +841,7 @@ fn rewritten(packet: &[u8], rewrite: Option<(u8, u8)>) -> std::borrow::Cow<'_, [
 
 #[cfg(test)]
 mod tests {
-    use super::{AMPLITUDE, Gaps, MARK_AMPLITUDE, TONE_HZ, is_marker, tone};
+    use super::{AMPLITUDE, Gaps, MARK_AMPLITUDE, TONE_HZ, is_marker, is_pitched, tone};
 
     /// Frames as the earpiece took them: `T` the tone, `q` a quiet packet
     /// (the far end's own pause), `s` silence because the buffer had nothing.
@@ -853,5 +900,26 @@ mod tests {
                 "at {rate} Hz the tone came out at {hertz} Hz"
             );
         }
+    }
+
+    /// A far end's own sine is heard at its pitch; this end's tone coming
+    /// back, or silence, is not.
+    #[test]
+    fn a_far_end_s_tone_is_told_apart_from_this_end_s_echo() {
+        let rate = 8_000_u32;
+        let sine: Vec<i16> = (0..160_u32)
+            .map(|index| {
+                let at = core::f64::consts::TAU * 1_000.0 * f64::from(index) / f64::from(rate);
+                #[allow(clippy::cast_possible_truncation)]
+                let sample = (10_000.0 * at.sin()).round() as i16;
+                sample
+            })
+            .collect();
+        assert!(is_pitched(&sine, rate, 1_000.0));
+        let mut echo = vec![0_i16; 160];
+        let mut phase = 0_u32;
+        tone(&mut echo, &mut phase, rate);
+        assert!(!is_pitched(&echo, rate, 1_000.0));
+        assert!(!is_pitched(&[0; 160], rate, 1_000.0));
     }
 }

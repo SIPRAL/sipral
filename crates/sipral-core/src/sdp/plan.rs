@@ -478,8 +478,9 @@ impl SessionDescription {
             agreed_codec(ours, theirs, &payloads).ok_or(SdpError::NoCodec { stream })?;
         let dtmf = agreed_dtmf(ours, theirs, &payloads, codec.clock_rate());
 
-        // RFC 3264 §8.4: 0.0.0.0 means send nothing (old-style hold)
-        let black_hole = peer_connection.is_some_and(Connection::is_black_hole);
+        // RFC 3264 §8.4: 0.0.0.0 means send nothing (old-style hold), on a stream ICE does not
+        // carry (`SessionDescription::holds_by_address`)
+        let black_hole = remote.holds_by_address(theirs);
         let theirs_says = remote.direction_of(theirs);
         let theirs_says = if black_hole {
             not_receiving(theirs_says)
@@ -1275,6 +1276,31 @@ m=audio 49170 RTP/AVP 0\r\n");
         assert_eq!(plan.direction, Direction::RecvOnly);
         assert_eq!(plan.rtcp, RtcpPlan::Off);
         assert_eq!(plan.remote, addr("0.0.0.0:49170"));
+    }
+
+    #[test]
+    fn a_trickling_answer_with_no_candidate_yet_is_not_a_hold() {
+        // RFC 8840 §4.1.1: a description holding no candidate writes 0.0.0.0 and port 9, as
+        // Chromium does in every description it trickles; ICE finds the path, so both ways stay
+        let local = ours(5004, "0", "a=rtcp-mux\r\n");
+        let trickling = sdp("v=0\r\n\
+o=- 2 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 9 RTP/AVP 0\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtcp:9 IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:P18v\r\n\
+a=ice-pwd:VHdx75N2HQdyDdLVVH2YQWMG\r\n\
+a=ice-options:trickle\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n");
+        let plan = local
+            .media_plan(&trickling, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert_eq!(plan.direction, Direction::SendRecv);
+        assert_eq!(plan.rtcp, RtcpPlan::Muxed);
     }
 
     #[test]

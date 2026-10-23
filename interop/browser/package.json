@@ -1,0 +1,12 @@
+{
+  "name": "sipral-lab-browser",
+  "private": true,
+  "description": "The browser end of scripts/lab.sh's browser step: a headless Chromium driven by Playwright, JsSIP in the page.",
+  "license": "AGPL-3.0-only OR LicenseRef-Sipral-Commercial",
+  "type": "module",
+  "dependencies": {
+    "esbuild": "0.28.2",
+    "jssip": "3.13.9",
+    "playwright": "1.64.1"
+  }
+}
