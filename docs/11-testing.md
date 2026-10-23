@@ -1886,9 +1886,9 @@ uploads anything.
 | `sipral` and the workspace crates it depends on | crates.io | `crate.sh` | any host |
 | `Sipral`, `Sipral.Opus` | NuGet | `nuget.sh collect` per RID, then `nuget.sh pack` | the Mac (osx-arm64, osx-x64), Windows under Git Bash (win-x64, win-arm64), a Docker host (linux-x64, linux-arm64); the pack anywhere with the .NET SDK |
 | `Sipral.Maui` | NuGet | `maui.sh` | a Mac with Xcode, the Android NDK and the .NET MAUI workloads |
-| `CSipral.xcframework.zip`, and the root `Package.swift` pointed at it | an asset of this repository's release `vX.Y.Z`; the Swift package is this repository | `xcframework.sh --release` | a Mac with Xcode |
+| `CSipral.xcframework.zip`, `CSipral-opus.xcframework.zip`, and the root `Package.swift` pointed at both | assets of this repository's release `vX.Y.Z`; the Swift package is this repository | `xcframework.sh --release`, without and with `--with-opus` | a Mac with Xcode |
 | `sipral`, `sipral-opus` wheels | PyPI | `wheels.sh` | the Mac (`macosx_12_0_arm64`), an Intel Mac (`macosx_12_0_x86_64`), Windows under Git Bash (`win_amd64`, and `win_arm64` with `--windows-arm64`, whose import and tests run on a Windows on Arm machine), a Docker host (`--manylinux`, `--linux-arm64`) |
-| `sipral.aar`, `sipral-opus.aar`, their POM and sources jar | Maven | `android.sh`, whose image runs `aar.sh` | a Docker host |
+| `sipral.aar`, `sipral-opus.aar`, `sipral-telecom.aar`, their POMs and sources jars | Maven | `android.sh`, whose image runs `aar.sh` | a Docker host |
 | `sipral-jvm`, `sipral-jvm-opus`, their POM and sources jar | Maven | `jvm.sh` | a Linux host with Docker, Maven and a JDK |
 | `sipral` (Dart and Flutter) | pub.dev | `pub.sh` | any host with the Dart SDK |
 | `sipral-react-native` | npm | `npm.sh` | any host with npm |
@@ -1915,8 +1915,12 @@ Every run of the script, `--dry-run` included, checks that the manifest
 still reads, that it names the platforms `apple.sh` builds every archive
 for, and that the constants are where `--release` writes them; a dry run
 writes them into a copy, from a zip it makes and keeps in its stage
-directory. The package carries the default variant; the zip with libopus is
-an asset an application points its own `binaryTarget` at. The React Native
+directory. The package carries both variants: the default one under the
+trait `Standard`, and the one with libopus, `CSipral-opus.xcframework.zip`
+holding `CSipralOpus.xcframework`, under the trait `Opus`, named by
+`csipralOpusURL` and `csipralOpusChecksum`, which `xcframework.sh --release
+--with-opus` writes. The trait and its target exist only while that
+checksum is set. The React Native
 podspec asks for the same package, from this repository at exactly its own
 version, unless `SIPRAL_SWIFT_PACKAGE` names another place.
 
@@ -1931,8 +1935,8 @@ What has to be true before anything is built for a release:
    package READMEs say nothing that was only true before the release; one
    commit, the release commit.
 4. On the Mac, from the release commit, `xcframework.sh --out DIR
-   --release`, then one commit of the root `Package.swift` it wrote and
-   nothing else. That commit changes nothing a library is built from, and it
+   --release` and `xcframework.sh --out DIR-opus --release --with-opus`, then
+   one commit of the root `Package.swift` they wrote and nothing else. That commit changes nothing a library is built from, and it
    is the one tagged `vX.Y.Z`: SwiftPM reads the manifest at the tag, so the
    tag has to carry the checksum. `./scripts/check.sh --only swift` on it.
 5. Every other script above run without `--dry-run`, for both variants
@@ -1963,6 +1967,6 @@ What is open, and stops the steps it names until it is settled:
   every package's repository link are read from this repository, which is
   private until the visibility is flipped (`10-roadmap.md`, "Ordering
   constraints"); a private release asset is not one SwiftPM can download.
-- **Maven Central.** Both artefacts need a signature per file and a javadoc
+- **Maven Central.** Every Maven artefact needs a signature per file and a javadoc
   jar beside the sources jar; the Kotlin sources have no Javadoc of their
   own to put in it.

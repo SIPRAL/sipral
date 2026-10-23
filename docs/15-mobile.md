@@ -2026,10 +2026,10 @@ repository.
 | Artefact | Where | Versions there |
 |---|---|---|
 | Swift package, default (no Opus) | this repository, root `Package.swift`, over `CSipral.xcframework.zip` among the release's assets | 1.2.0 on, by tag |
-| `CSipral-opus.xcframework.zip` | an asset of the releases v1.2.1 and v1.2.3 only; no `Package.swift` names it | - |
+| `CSipral-opus.xcframework.zip` | an asset of the releases v1.2.1 and v1.2.3; from 1.3 the root `Package.swift`'s trait `Opus` names it | - |
 | `org.sipral:sipral`, `org.sipral:sipral-opus` (AAR) | Maven Central | 1.1.0, 1.2.0 |
 | `org.sipral:sipral-jvm`, `org.sipral:sipral-jvm-opus` | Maven Central | 1.1.0, 1.2.0 |
-| `sipral-telecom.aar` (the `ConnectionService` helper) | not published anywhere; `scripts/package/android.sh` builds it, with no POM | - |
+| `org.sipral:sipral-telecom` (the telecom helper) | not published yet; `scripts/package/android.sh` builds it with its POM and sources jar, for Maven Central from 1.3 | - |
 | `Sipral.Maui` | NuGet | 1.2.0 |
 
 Opus stays out of the default artefacts on purpose (`docs/05-media.md`,
@@ -2042,11 +2042,27 @@ THIRD-PARTY-NOTICES.md); an application that wants it names the variant.
 // target: .product(name: "Sipral", package: "sipral")
 ```
 
-**SwiftPM, with Opus.** The root package cannot be pointed at the other
-zip, so an application that wants Opus carries the `Sipral` module's
-sources from the same tag (`bindings/swift/Sources/Sipral`) in a package of
-its own, over the Opus zip, whose checksum is the SHA-256 GitHub shows for
-the asset:
+**SwiftPM, with Opus, from 1.3.** The root package has two traits:
+`Standard`, the default, over `CSipral.xcframework.zip`, and `Opus`, over
+`CSipral-opus.xcframework.zip`. Naming `Opus` turns the default off, so one
+library is linked; it needs Swift 6.1 (Xcode 16.3) or later:
+
+```swift
+.package(url: "https://github.com/SIPRAL/sipral", exact: "1.3.0", traits: ["Opus"]),
+// target: .product(name: "Sipral", package: "sipral")
+```
+
+`traits: [.defaults, "Opus"]` would ask for both libraries, and the build
+fails with "Multiple commands produce" the same header, module map and
+archive. A release declares the
+trait only once its Opus zip is among the assets, because SwiftPM refuses a
+package that names an archive it cannot fetch, even one no build uses.
+
+**SwiftPM, with Opus, v1.2.1 to v1.2.3.** Those root packages cannot be
+pointed at the other zip, so an application that wants Opus carries the
+`Sipral` module's sources from the same tag (`bindings/swift/Sources/Sipral`)
+in a package of its own, over the Opus zip, whose checksum is the SHA-256
+GitHub shows for the asset:
 
 ```swift
 targets: [
@@ -2070,18 +2086,24 @@ For a version Central does not have, `scripts/package/android.sh --out DIR`
 writes `DIR/maven`, a local Maven repository with `org.sipral:sipral` and
 its POM (kotlinx-coroutines as its dependency), named in
 `dependencyResolutionManagement` as `maven { url = uri("DIR/maven") }`. The
-telecom helper is taken as a file, with the dependency its POM would have
-named:
+telecom helper is in the same repository, as `org.sipral:sipral-telecom`,
+whose POM names `org.sipral:sipral`, `kotlinx-coroutines-android` and
+`androidx.core:core-telecom`; an application on the Opus AAR leaves the
+default one out:
 
 ```kotlin
-implementation(files("libs/sipral-telecom.aar"))
-implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+implementation("org.sipral:sipral-telecom:1.3.0")
+// with Opus instead:
+implementation("org.sipral:sipral-opus:1.3.0")
+implementation("org.sipral:sipral-telecom:1.3.0") { exclude(group = "org.sipral", module = "sipral") }
 ```
 
-Its classes are compiled by Kotlin 2.4, unlike `sipral.aar`'s, which
-`aar.sh` compiles for 2.2: an application on Android Gradle Plugin 9.4's
-built-in Kotlin (2.2) fails to compile against it ("compiled with an
-incompatible version of Kotlin") until it adds
+Its classes are compiled as Kotlin 2.2, like `sipral.aar`'s, so an
+application on Android Gradle Plugin 9.4's built-in Kotlin (2.2) compiles
+against both; `android.sh` reads the helper's Kotlin metadata to hold it to
+that. Up to 1.2.3 the helper was compiled by Kotlin 2.4 and taken as a file
+(`implementation(files("libs/sipral-telecom.aar"))`, with
+`kotlinx-coroutines-android` beside it), and such an application had to add
 `id("org.jetbrains.kotlin.android") version "2.4.21" apply false` to its
 root `plugins`.
 

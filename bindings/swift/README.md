@@ -196,13 +196,15 @@ given as `<NAME>`. `docs/15-mobile.md`, "The Swift package on iOS", has what
 ran on the iOS 26.5 simulator, against a peer on the same Mac and through
 the lab's Asterisk.
 
-That package carries the library without Opus. The variant with it,
-`CSipral-opus.xcframework.zip`, is an asset of the releases from v1.2.1
-and named by no `Package.swift`: an application that wants it keeps the
-`Sipral` module's sources from the same tag in a package of its own, over a
-`binaryTarget` with that zip's URL and checksum. `docs/15-mobile.md`,
-"Consuming the packages", has both manifests, what is published where, and
-what ran from them.
+That package carries the library without Opus by default. From 1.3 on, the
+variant with it, `CSipral-opus.xcframework.zip`, is the package trait
+`Opus`: `.package(url: "https://github.com/SIPRAL/sipral", exact: "1.3.0",
+traits: ["Opus"])`, which needs Swift 6.1 (Xcode 16.3) or later. For v1.2.1
+to v1.2.3 that zip is an asset no `Package.swift` names, and an application
+keeps the `Sipral` module's sources from the same tag in a package of its
+own, over a `binaryTarget` with the zip's URL and checksum.
+`docs/15-mobile.md`, "Consuming the packages", has the manifests, what is
+published where, and what ran from them.
 
 ## Use
 

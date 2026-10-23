@@ -825,11 +825,11 @@ logcat, with no password in it.
 
 `org.sipral:sipral` and `org.sipral:sipral-opus`, the AAR without and with
 Opus, are on Maven Central up to 1.2.0; a later version is taken from the
-local Maven repository `android.sh` writes. `sipral-telecom.aar` is published
-nowhere: an application takes it as a file, `implementation(files(...))`,
-with `kotlinx-coroutines-android` beside it, and on Kotlin 2.4, which its
-classes are compiled with. `docs/15-mobile.md`, "Consuming the packages",
-has the Gradle lines and what ran from them.
+local Maven repository `android.sh` writes. The telecom helper is
+`org.sipral:sipral-telecom` from 1.3 on, with its POM and sources jar,
+compiled as Kotlin 2.2 like the AAR; `android.sh` puts it in the same local
+Maven repository. `docs/15-mobile.md`, "Consuming the packages", has the
+Gradle lines and what ran from them.
 
 `scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
 three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the

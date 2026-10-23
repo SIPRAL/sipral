@@ -317,6 +317,89 @@ else
     printf '\nandroid.sh: failed\n'; exit 1
 fi
 cp telecom/build/outputs/aar/telecom-release.aar "$OUT/sipral-telecom.aar"
+
+# org.sipral:sipral-telecom, for a Maven repository: its POM names the three
+# dependencies telecom/build.gradle.kts declares, with the metadata Maven
+# Central asks for, beside a sources jar; the local repository gets both
+# archives, so an application resolves the helper the way it resolves
+# org.sipral:sipral. It names org.sipral:sipral, the coordinate it was built
+# against in both variants; an application on sipral-opus excludes that one.
+TELECOM_POM="$OUT/sipral-telecom-$VERSION.pom"
+TELECOM_SOURCES="$OUT/sipral-telecom-$VERSION-sources.jar"
+gradle_dep() { sed -n "s|^ *api(\"$1:\(.*\)\")\$|\1|p; s|^ *implementation(\"$1:\(.*\)\")\$|\1|p" telecom/build.gradle.kts; }
+TELECOM_COROUTINES=$(gradle_dep org.jetbrains.kotlinx:kotlinx-coroutines-android)
+TELECOM_CORE=$(gradle_dep androidx.core:core-telecom)
+[ -n "$TELECOM_COROUTINES" ] && [ -n "$TELECOM_CORE" ] \
+    || fail "telecom/build.gradle.kts: no kotlinx-coroutines-android or core-telecom version to write the POM from"
+cat >"$TELECOM_POM" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.sipral</groupId>
+  <artifactId>sipral-telecom</artifactId>
+  <version>$VERSION</version>
+  <packaging>aar</packaging>
+  <name>Sipral telecom helper for Android</name>
+  <description>Sipral - Session Initiation Protocol Rust Audio Layer. The calls of org.sipral:sipral in Android's telecom framework: a self-managed ConnectionService, a Core-Telecom adapter, the call's foreground service and the app lifecycle.</description>
+  <url>https://sipral.org</url>
+  <licenses>
+    <license>
+      <name>AGPL-3.0-only</name>
+      <url>https://www.gnu.org/licenses/agpl-3.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+    <license>
+      <name>LicenseRef-Sipral-Commercial</name>
+      <url>https://sipral.org/terms/</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>Sytek</name>
+      <organization>Sytek</organization>
+      <organizationUrl>https://sytek.ro</organizationUrl>
+    </developer>
+  </developers>
+  <scm>
+    <url>https://github.com/SIPRAL/sipral</url>
+    <connection>scm:git:https://github.com/SIPRAL/sipral.git</connection>
+  </scm>
+  <dependencies>
+    <dependency>
+      <groupId>org.sipral</groupId>
+      <artifactId>sipral</artifactId>
+      <version>$VERSION</version>
+      <type>aar</type>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jetbrains.kotlinx</groupId>
+      <artifactId>kotlinx-coroutines-android</artifactId>
+      <version>$TELECOM_COROUTINES</version>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>androidx.core</groupId>
+      <artifactId>core-telecom</artifactId>
+      <version>$TELECOM_CORE</version>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+rm -f "$TELECOM_SOURCES"
+if (cd telecom/src/main/kotlin && jar cf "$TELECOM_SOURCES" .); then
+    TELECOM_REPO="$OUT/maven/org/sipral/sipral-telecom/$VERSION"
+    mkdir -p "$TELECOM_REPO"
+    cp "$OUT/sipral-telecom.aar" "$TELECOM_REPO/sipral-telecom-$VERSION.aar"
+    cp "$TELECOM_POM" "$TELECOM_REPO/"
+    pass "org.sipral:sipral-telecom:$VERSION: $(basename "$TELECOM_POM"), $(basename "$TELECOM_SOURCES"), and in the local Maven repository"
+else
+    fail "jar cf $(basename "$TELECOM_SOURCES")"
+fi
 cp sample/build/outputs/apk/debug/sample-debug.apk "$OUT/$APK_NAME"
 if [ "$RELEASE" -eq 1 ]; then
     cp sample/build/outputs/apk/release/sample-release-unsigned.apk "$OUT/$RELEASE_APK"
