@@ -2613,7 +2613,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ----------------------------------------
-crypto-bigint 0.7.5 -- Apache-2.0 OR MIT
+crypto-bigint 0.7.9 -- Apache-2.0 OR MIT
 ----------------------------------------
 
 [LICENSE-APACHE]

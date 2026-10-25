@@ -217,7 +217,7 @@ beside it.
 | `wnaf` 0.14.1 | windowed scalar multiplication | Apache-2.0 OR MIT |
 | `ff` 0.14.0 | finite field traits | MIT OR Apache-2.0 |
 | `group` 0.14.0 | elliptic curve group traits | MIT OR Apache-2.0 |
-| `crypto-bigint` 0.7.5 | constant-time big integers | Apache-2.0 OR MIT |
+| `crypto-bigint` 0.7.9 | constant-time big integers | Apache-2.0 OR MIT |
 | `num-traits` 0.2.19 | numeric traits `crypto-bigint` uses | MIT OR Apache-2.0 |
 | `sec1` 0.8.1 | SEC1 point encoding | Apache-2.0 OR MIT |
 | `der` 0.8.2 | the DER types `sec1` and `ecdsa` use | Apache-2.0 OR MIT |
