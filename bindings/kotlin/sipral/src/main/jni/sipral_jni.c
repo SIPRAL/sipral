@@ -5730,3 +5730,213 @@ Java_org_sipral_SipralNative_sipral_1isup_1number(JNIEnv *env, jobject self, jby
     return (jint)status;
 }
 
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, jlong stack, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_network_config_t config_value;
+    memset(&config_value, 0, sizeof config_value);
+    config_value.size = sizeof config_value;
+    config_value.trust = (sipral_network_trust_t)configTrust;
+    config_value.reserved = (uint32_t)configReserved;
+    jbyte *configAuthorityPem_data = configAuthorityPem ? (*env)->GetByteArrayElements(env, configAuthorityPem, NULL) : NULL;
+    jsize configAuthorityPem_size = configAuthorityPem ? (*env)->GetArrayLength(env, configAuthorityPem) : 0;
+    config_value.authority_pem = (const char *)configAuthorityPem_data;
+    config_value.authority_pem_len = (size_t)configAuthorityPem_size;
+    jbyte *configPinSha256_data = configPinSha256 ? (*env)->GetByteArrayElements(env, configPinSha256, NULL) : NULL;
+    jsize configPinSha256_size = configPinSha256 ? (*env)->GetArrayLength(env, configPinSha256) : 0;
+    config_value.pin_sha256 = (const char *)configPinSha256_data;
+    config_value.pin_sha256_len = (size_t)configPinSha256_size;
+    jbyte *configClientCertificatePem_data = configClientCertificatePem ? (*env)->GetByteArrayElements(env, configClientCertificatePem, NULL) : NULL;
+    jsize configClientCertificatePem_size = configClientCertificatePem ? (*env)->GetArrayLength(env, configClientCertificatePem) : 0;
+    config_value.client_certificate_pem = (const char *)configClientCertificatePem_data;
+    config_value.client_certificate_pem_len = (size_t)configClientCertificatePem_size;
+    jbyte *configClientKeyPem_data = configClientKeyPem ? (*env)->GetByteArrayElements(env, configClientKeyPem, NULL) : NULL;
+    jsize configClientKeyPem_size = configClientKeyPem ? (*env)->GetArrayLength(env, configClientKeyPem) : 0;
+    config_value.client_key_pem = (const char *)configClientKeyPem_data;
+    config_value.client_key_pem_len = (size_t)configClientKeyPem_size;
+    jbyte *configNameServers_data = configNameServers ? (*env)->GetByteArrayElements(env, configNameServers, NULL) : NULL;
+    jsize configNameServers_size = configNameServers ? (*env)->GetArrayLength(env, configNameServers) : 0;
+    config_value.name_servers = (const char *)configNameServers_data;
+    config_value.name_servers_len = (size_t)configNameServers_size;
+    jbyte *configTlsServerName_data = configTlsServerName ? (*env)->GetByteArrayElements(env, configTlsServerName, NULL) : NULL;
+    jsize configTlsServerName_size = configTlsServerName ? (*env)->GetArrayLength(env, configTlsServerName) : 0;
+    config_value.tls_server_name = (const char *)configTlsServerName_data;
+    config_value.tls_server_name_len = (size_t)configTlsServerName_size;
+    config_value.connect_timeout_ms = (uint32_t)configConnectTimeoutMs;
+    config_value.reserved_end = (uint32_t)configReservedEnd;
+    sipral_status_t status = sipral_network_start((sipral_handle_t)stack, &config_value, (uint64_t)nowMs);
+    if (configAuthorityPem) {
+        (*env)->ReleaseByteArrayElements(env, configAuthorityPem, configAuthorityPem_data, JNI_ABORT);
+    }
+    if (configPinSha256) {
+        (*env)->ReleaseByteArrayElements(env, configPinSha256, configPinSha256_data, JNI_ABORT);
+    }
+    if (configClientCertificatePem) {
+        (*env)->ReleaseByteArrayElements(env, configClientCertificatePem, configClientCertificatePem_data, JNI_ABORT);
+    }
+    if (configClientKeyPem) {
+        (*env)->ReleaseByteArrayElements(env, configClientKeyPem, configClientKeyPem_data, JNI_ABORT);
+    }
+    if (configNameServers) {
+        (*env)->ReleaseByteArrayElements(env, configNameServers, configNameServers_data, JNI_ABORT);
+    }
+    if (configTlsServerName) {
+        (*env)->ReleaseByteArrayElements(env, configTlsServerName, configTlsServerName_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1run(JNIEnv *env, jobject self, jlong stack, jlong nowMs, jlong waitMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_network_run((sipral_handle_t)stack, (uint64_t)nowMs, (uint32_t)waitMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1stop(JNIEnv *env, jobject self, jlong stack)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_network_stop((sipral_handle_t)stack);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jbyteArray serverUri, jlong protocol, jbyteArray buffer, jlongArray needed)
+{
+    (void)env;
+    (void)self;
+    sipral_network_config_t config_value;
+    memset(&config_value, 0, sizeof config_value);
+    config_value.size = sizeof config_value;
+    config_value.trust = (sipral_network_trust_t)configTrust;
+    config_value.reserved = (uint32_t)configReserved;
+    jbyte *configAuthorityPem_data = configAuthorityPem ? (*env)->GetByteArrayElements(env, configAuthorityPem, NULL) : NULL;
+    jsize configAuthorityPem_size = configAuthorityPem ? (*env)->GetArrayLength(env, configAuthorityPem) : 0;
+    config_value.authority_pem = (const char *)configAuthorityPem_data;
+    config_value.authority_pem_len = (size_t)configAuthorityPem_size;
+    jbyte *configPinSha256_data = configPinSha256 ? (*env)->GetByteArrayElements(env, configPinSha256, NULL) : NULL;
+    jsize configPinSha256_size = configPinSha256 ? (*env)->GetArrayLength(env, configPinSha256) : 0;
+    config_value.pin_sha256 = (const char *)configPinSha256_data;
+    config_value.pin_sha256_len = (size_t)configPinSha256_size;
+    jbyte *configClientCertificatePem_data = configClientCertificatePem ? (*env)->GetByteArrayElements(env, configClientCertificatePem, NULL) : NULL;
+    jsize configClientCertificatePem_size = configClientCertificatePem ? (*env)->GetArrayLength(env, configClientCertificatePem) : 0;
+    config_value.client_certificate_pem = (const char *)configClientCertificatePem_data;
+    config_value.client_certificate_pem_len = (size_t)configClientCertificatePem_size;
+    jbyte *configClientKeyPem_data = configClientKeyPem ? (*env)->GetByteArrayElements(env, configClientKeyPem, NULL) : NULL;
+    jsize configClientKeyPem_size = configClientKeyPem ? (*env)->GetArrayLength(env, configClientKeyPem) : 0;
+    config_value.client_key_pem = (const char *)configClientKeyPem_data;
+    config_value.client_key_pem_len = (size_t)configClientKeyPem_size;
+    jbyte *configNameServers_data = configNameServers ? (*env)->GetByteArrayElements(env, configNameServers, NULL) : NULL;
+    jsize configNameServers_size = configNameServers ? (*env)->GetArrayLength(env, configNameServers) : 0;
+    config_value.name_servers = (const char *)configNameServers_data;
+    config_value.name_servers_len = (size_t)configNameServers_size;
+    jbyte *configTlsServerName_data = configTlsServerName ? (*env)->GetByteArrayElements(env, configTlsServerName, NULL) : NULL;
+    jsize configTlsServerName_size = configTlsServerName ? (*env)->GetArrayLength(env, configTlsServerName) : 0;
+    config_value.tls_server_name = (const char *)configTlsServerName_data;
+    config_value.tls_server_name_len = (size_t)configTlsServerName_size;
+    config_value.connect_timeout_ms = (uint32_t)configConnectTimeoutMs;
+    config_value.reserved_end = (uint32_t)configReservedEnd;
+    jbyte *serverUri_data = serverUri ? (*env)->GetByteArrayElements(env, serverUri, NULL) : NULL;
+    jsize serverUri_size = serverUri ? (*env)->GetArrayLength(env, serverUri) : 0;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t needed_value = 0;
+    sipral_status_t status = sipral_network_locate(&config_value, (const char *)serverUri_data, (size_t)serverUri_size, (sipral_transport_t)protocol, (char *)buffer_data, (size_t)buffer_size, &needed_value);
+    if (configAuthorityPem) {
+        (*env)->ReleaseByteArrayElements(env, configAuthorityPem, configAuthorityPem_data, JNI_ABORT);
+    }
+    if (configPinSha256) {
+        (*env)->ReleaseByteArrayElements(env, configPinSha256, configPinSha256_data, JNI_ABORT);
+    }
+    if (configClientCertificatePem) {
+        (*env)->ReleaseByteArrayElements(env, configClientCertificatePem, configClientCertificatePem_data, JNI_ABORT);
+    }
+    if (configClientKeyPem) {
+        (*env)->ReleaseByteArrayElements(env, configClientKeyPem, configClientKeyPem_data, JNI_ABORT);
+    }
+    if (configNameServers) {
+        (*env)->ReleaseByteArrayElements(env, configNameServers, configNameServers_data, JNI_ABORT);
+    }
+    if (configTlsServerName) {
+        (*env)->ReleaseByteArrayElements(env, configTlsServerName, configTlsServerName_data, JNI_ABORT);
+    }
+    if (serverUri) {
+        (*env)->ReleaseByteArrayElements(env, serverUri, serverUri_data, JNI_ABORT);
+    }
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)needed_value;
+        (*env)->SetLongArrayRegion(env, needed, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1media_1open(JNIEnv *env, jobject self, jlong stack, jbyteArray buffer, jlongArray needed)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t needed_value = 0;
+    sipral_status_t status = sipral_network_media_open((sipral_handle_t)stack, (char *)buffer_data, (size_t)buffer_size, &needed_value);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)needed_value;
+        (*env)->SetLongArrayRegion(env, needed, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1media_1attach(JNIEnv *env, jobject self, jlong stack, jbyteArray address, jlong call, jlong media)
+{
+    (void)env;
+    (void)self;
+    jbyte *address_data = address ? (*env)->GetByteArrayElements(env, address, NULL) : NULL;
+    jsize address_size = address ? (*env)->GetArrayLength(env, address) : 0;
+    sipral_status_t status = sipral_network_media_attach((sipral_handle_t)stack, (const char *)address_data, (size_t)address_size, (sipral_handle_t)call, (sipral_handle_t)media);
+    if (address) {
+        (*env)->ReleaseByteArrayElements(env, address, address_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1media_1capture(JNIEnv *env, jobject self, jlong stack, jlong media, jlong nowMs, jshortArray samples)
+{
+    (void)env;
+    (void)self;
+    jshort *samples_data = samples ? (*env)->GetShortArrayElements(env, samples, NULL) : NULL;
+    jsize samples_size = samples ? (*env)->GetArrayLength(env, samples) : 0;
+    sipral_status_t status = sipral_network_media_capture((sipral_handle_t)stack, (sipral_handle_t)media, (uint64_t)nowMs, (const int16_t *)samples_data, (size_t)samples_size);
+    if (samples) {
+        (*env)->ReleaseShortArrayElements(env, samples, samples_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1network_1media_1close(JNIEnv *env, jobject self, jlong stack, jbyteArray address)
+{
+    (void)env;
+    (void)self;
+    jbyte *address_data = address ? (*env)->GetByteArrayElements(env, address, NULL) : NULL;
+    jsize address_size = address ? (*env)->GetArrayLength(env, address) : 0;
+    sipral_status_t status = sipral_network_media_close((sipral_handle_t)stack, (const char *)address_data, (size_t)address_size);
+    if (address) {
+        (*env)->ReleaseByteArrayElements(env, address, address_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+

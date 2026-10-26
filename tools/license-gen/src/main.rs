@@ -40,6 +40,9 @@ const SHIPPED_CRATES: &[&str] = &["sipral", "sipral-ffi"];
 /// The generated file's path, relative to the workspace root.
 const OUTPUT_FILE: &str = "THIRD-PARTY-LICENSES.txt";
 
+/// `--net`'s generated file's path, relative to the workspace root.
+const NET_OUTPUT_FILE: &str = "crates/sipral-net/THIRD-PARTY-LICENSES.txt";
+
 /// `crates/sipral-aec-webrtc`'s own manifest directory, relative to the
 /// workspace root — outside `[workspace] members`, so `--aec` is told where
 /// to look rather than finding it the way [`shipped_dependencies`] does.
@@ -64,6 +67,18 @@ const AEC_REGISTRY_CRATES: &[&str] = &[
     "webrtc-audio-processing-config",
 ];
 
+/// Where the licence files of a crate whose package ships none are kept,
+/// relative to the workspace root: one directory per `name-version`, holding
+/// the files its own repository carries at that release's tag, copied
+/// unchanged. Used only when the package itself has none. Five, all under
+/// the networking component's resolver on targets the library is not built
+/// for by default: `jni` and `jni-macros` 0.22.4 (tag `v0.22.4`),
+/// `jni-sys-macros` 0.4.1 (`v0.4.1-macros`) and `ndk-context` 0.1.1
+/// (`ndk-context-0.1.1`), on Android; and `r-efi` 6.0.0, on UEFI, whose
+/// licence is in the file its package names `AUTHORS`, copied here as
+/// `LICENSE-AUTHORS` so it reads as one.
+const UNSHIPPED_DIR: &str = "tools/license-gen/unshipped";
+
 /// Filenames, matched by prefix and case-insensitively, that carry a
 /// component's own licence text at the root of its source tree.
 const LICENCE_FILE_PREFIXES: &[&str] = &["LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE"];
@@ -78,7 +93,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let check_only = args.iter().any(|a| a == "--check");
     let aec = args.iter().any(|a| a == "--aec");
-    let (outcome, output_file, regenerate_hint) = if aec {
+    let net = args.iter().any(|a| a == "--net");
+    let (outcome, output_file, regenerate_hint) = if net {
+        (
+            run_net(check_only),
+            NET_OUTPUT_FILE,
+            "cargo run -p sipral-license-gen -- --net",
+        )
+    } else if aec {
         (
             run_aec(check_only),
             AEC_OUTPUT_FILE,
@@ -107,12 +129,56 @@ fn main() -> ExitCode {
 fn run(check_only: bool) -> Result<bool, String> {
     let root = workspace_root()?;
     let members = workspace_member_names(&root)?;
-    let deps = shipped_dependencies(&root, &members)?;
-    let registry_roots = registry_src_roots()?;
-
+    let deps = shipped_dependencies(&root, &members, None)?;
     let mut rendered = String::new();
     render_header(&mut rendered, deps.len());
-    for (name, version) in &deps {
+    render_all(&root, &deps, &mut rendered)?;
+    write_or_check(&root, OUTPUT_FILE, &rendered, check_only)
+}
+
+/// [`run`]'s sibling for the networking component: what a library built with
+/// `sipral-ffi`'s `network` feature carries beyond what [`run`] lists, in a
+/// file of its own beside `crates/sipral-net`, as `--aec`'s is beside its
+/// crate. The packages the bindings ship are built without the feature, and
+/// their SBOMs list what [`OUTPUT_FILE`] lists and nothing more.
+fn run_net(check_only: bool) -> Result<bool, String> {
+    let root = workspace_root()?;
+    let members = workspace_member_names(&root)?;
+    let shipped = shipped_dependencies(&root, &members, None)?;
+    let deps: BTreeSet<(String, String)> =
+        shipped_dependencies(&root, &members, Some("sipral-ffi/network"))?
+            .difference(&shipped)
+            .cloned()
+            .collect();
+    let mut rendered = String::new();
+    render_header_net(&mut rendered, deps.len());
+    render_all(&root, &deps, &mut rendered)?;
+    write_or_check(&root, NET_OUTPUT_FILE, &rendered, check_only)
+}
+
+/// Write `rendered` to `file`, or with `check_only` say whether it is what is there.
+fn write_or_check(
+    root: &Path,
+    file: &str,
+    rendered: &str,
+    check_only: bool,
+) -> Result<bool, String> {
+    if check_only {
+        let committed = fs::read_to_string(root.join(file)).unwrap_or_default();
+        return Ok(committed == rendered);
+    }
+    fs::write(root.join(file), rendered).map_err(|e| format!("writing {file}: {e}"))?;
+    Ok(true)
+}
+
+/// Every component's entry, in order.
+fn render_all(
+    root: &Path,
+    deps: &BTreeSet<(String, String)>,
+    rendered: &mut String,
+) -> Result<(), String> {
+    let registry_roots = registry_src_roots()?;
+    for (name, version) in deps {
         let dir = locate_crate_dir(&registry_roots, name, version).ok_or_else(|| {
             format!(
                 "{name} {version} is not in a cached registry checkout; run `cargo fetch` first"
@@ -121,24 +187,25 @@ fn run(check_only: bool) -> Result<bool, String> {
         let license = read_license_expression(&dir).ok_or_else(|| {
             format!("{name} {version}: no `license` or `license-file` field in its Cargo.toml")
         })?;
-        let files = licence_files(&dir)
+        let mut files = licence_files(&dir)
             .map_err(|e| format!("{name} {version}: reading its licence files: {e}"))?;
         if files.is_empty() {
+            let unshipped = root.join(UNSHIPPED_DIR).join(format!("{name}-{version}"));
+            if unshipped.is_dir() {
+                files = licence_files(&unshipped).map_err(|e| {
+                    format!("{name} {version}: reading {}: {e}", unshipped.display())
+                })?;
+            }
+        }
+        if files.is_empty() {
             return Err(format!(
-                "{name} {version}: declares `{license}` but ships no licence file at its root"
+                "{name} {version}: declares `{license}` but ships no licence file at its root, \
+                 and {UNSHIPPED_DIR}/{name}-{version} holds none from its repository"
             ));
         }
-        render_entry(&mut rendered, name, version, &license, &files);
+        render_entry(rendered, name, version, &license, &files);
     }
-
-    if check_only {
-        let committed = fs::read_to_string(root.join(OUTPUT_FILE)).unwrap_or_default();
-        return Ok(committed == rendered);
-    }
-
-    fs::write(root.join(OUTPUT_FILE), rendered)
-        .map_err(|e| format!("writing {OUTPUT_FILE}: {e}"))?;
-    Ok(true)
+    Ok(())
 }
 
 /// [`run`]'s sibling for `crates/sipral-aec-webrtc`: the three crates.io
@@ -386,14 +453,20 @@ fn field_value(text: &str, key: &str) -> Option<String> {
 /// across every target, and returns the external (non-workspace) crates it
 /// names, deduplicated and sorted. Relying on `cargo tree`'s own edge-kind
 /// and per-target filtering, rather than reimplementing feature unification
-/// here, is what keeps this tool small.
+/// here, is what keeps this tool small. `features` turns on what a build
+/// with them carries: the networking component's, for [`run_net`].
 fn shipped_dependencies(
     root: &Path,
     members: &BTreeSet<String>,
+    features: Option<&str>,
 ) -> Result<BTreeSet<(String, String)>, String> {
     let mut args = vec![
         "tree", "-e", "normal", "--prefix", "none", "--target", "all",
     ];
+    if let Some(features) = features {
+        args.push("--features");
+        args.push(features);
+    }
     for krate in SHIPPED_CRATES {
         args.push("-p");
         args.push(krate);
@@ -535,11 +608,42 @@ fn render_header(out: &mut String, component_count: usize) {
          ships a binary of -- `sipral` and `sipral-ffi` -- across every target the \
          project builds for: macOS, iOS, Windows and Linux. For each one: its name, \
          version, licence expression, and the full licence text(s) exactly as that \
-         component's own source ships them.\n\
+         component's own source ships them. A library built with `sipral-ffi`'s \
+         `network` feature carries more, listed in \
+         crates/sipral-net/THIRD-PARTY-LICENSES.txt.\n\
          \n\
          This file is generated. Do not edit it by hand: run\n\
          `cargo run -p sipral-license-gen` to regenerate it after any change to\n\
          `Cargo.lock`, and `cargo run -p sipral-license-gen -- --check`, which\n\
+         `scripts/check.sh` runs, to check it is still current.\n\
+         \n"
+    );
+}
+
+fn render_header_net(out: &mut String, component_count: usize) {
+    out.push_str(
+        "sipral-net -- third-party licences\n\
+         ===================================\n\
+         \n\
+         Ship this file beside THIRD-PARTY-LICENSES.txt with any binary built\n\
+         with sipral-ffi's `network` feature, the networking component, or that\n\
+         links crates/sipral-net: `LICENSE-COMMERCIAL.md` and `LICENSING.md`\n\
+         require it, because the licences below require it themselves. Nothing\n\
+         here repeats what that file lists.\n\
+         \n",
+    );
+    let _ = write!(
+        out,
+        "This lists every one of the {component_count} third-party components such a \
+         build carries beyond those, across every target the project builds for. For \
+         each one: its name, version, licence expression, and the full licence \
+         text(s) as that component's own source ships them, or, for the few whose \
+         packages ship none, as their own repository carries them at that release \
+         (tools/license-gen/unshipped).\n\
+         \n\
+         This file is generated. Do not edit it by hand: run\n\
+         `cargo run -p sipral-license-gen -- --net` to regenerate it, and\n\
+         `cargo run -p sipral-license-gen -- --net --check`, which\n\
          `scripts/check.sh` runs, to check it is still current.\n\
          \n"
     );

@@ -188,6 +188,11 @@ LAYER_SECTIONS = {
             "best-effort SRTP to an endpoint with SDES on",
         ),
     ),
+    # `scripts/lab.sh network`, not part of a run that names nothing
+    "the networking component -- a C program with no networking code, over TLS to a name found by SRV": (
+        "asterisk",
+        ("a C program with no networking code",),
+    ),
     "a server by name -- RFC 3263 from the Python layer, straight at Asterisk": (
         "asterisk",
         (

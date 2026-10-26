@@ -521,9 +521,13 @@ this end directly rather than through the line's own proxy.
   `docs/13-client-requirements.md`).
 - **It does not run a thread of its own**, again outside `Runtime`.
 - **It has no TLS of its own.** `TransportProtocol::Tls` describes a transport
-  the caller has already secured; no TLS implementation is linked, and none is
-  planned, because a stack that picked one would impose it on every embedder
-  (`docs/01-architecture.md`, `docs/03-core-signalling.md`). Whatever
+  the caller has already secured; no TLS implementation is linked into the
+  stack, because a stack that picked one would impose it on every embedder
+  (`docs/01-architecture.md`, `docs/03-core-signalling.md`). The one TLS in
+  the tree is the optional networking component's, rustls, linked only by a
+  build that asks for it (`docs/26-network.md`): there the caller securing the
+  transport is that component, and it checks the certificate as the bindings
+  do. Whatever
   protection SDES's key exchange needs from the signalling transport (above)
   is therefore entirely the application's to provide. The same holds for a
   TURN server reached over TLS (below): the stack frames what crosses the

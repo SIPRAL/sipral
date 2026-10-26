@@ -342,6 +342,52 @@ and are not linked, and nothing here reaches either through PipeWire:
 Debian's `libpipewire-0.3.so.0` itself depends on the C library and nothing
 else, and talks to the daemon over its own socket.
 
+### The networking component
+
+`sipral-net`, behind `sipral-ffi`'s `network` feature and off by default, runs
+the sockets, TLS and RFC 3263 lookups for a program that has none of its own
+(`docs/26-network.md`). The TLS protocol and the DNS client are the two
+pieces of protocol this tree takes from crates rather than writing: TLS
+because a TLS stack is cryptography all the way down, DNS because the
+resolver has to read each platform's own configuration. A library built
+without the feature — every package the bindings ship — contains none of the
+crates below; `cargo tree -p sipral-ffi -e normal` without it shows that.
+Every licence was read from the component's own manifest.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `rustls` 0.23.46 | TLS 1.2 and 1.3, `default-features = false` plus `ring`, `std`, `tls12` | Apache-2.0 OR ISC OR MIT |
+| `rustls-webpki` 0.103.16 | the certificate path and name check | ISC |
+| `rustls-pki-types` 1.15.1 | DER and PEM containers for certificates and keys | MIT OR Apache-2.0 |
+| `rustls-native-certs` 0.8.5 | reads the platform's trust store; `security-framework` on macOS, `schannel` on Windows, `openssl-probe` elsewhere | Apache-2.0 OR ISC OR MIT |
+| `ring` 0.17.14 | the cryptographic provider under `rustls`, and `untrusted` 0.9.0 under it | Apache-2.0 AND ISC; ISC |
+| `hickory-resolver`, `hickory-net`, `hickory-proto` 0.26.3 | the DNS client: NAPTR, SRV, A, AAAA, the system's resolver configuration | MIT OR Apache-2.0 |
+| `tokio` 1.54.1 | the current-thread runtime the resolver runs on, and `mio`, `bytes`, `slab` under it | MIT |
+| `moka` 0.12.16 | the resolver's answer cache | MIT OR Apache-2.0 |
+| `idna` 1.1.0 and the `icu_*` 2.4.0 crates | international domain names; with them `litemap`, `tinystr`, `writeable`, `yoke`, `zerofrom`, `zerotrie`, `zerovec` and `potential_utf` | MIT OR Apache-2.0; Unicode-3.0 |
+| `tracing` 0.1.44 | the resolver's logging façade; nothing here installs a subscriber | MIT |
+
+The rest arrive through those and are dual MIT OR Apache-2.0 —
+`futures-*`, `parking_lot`, `rand` 0.10, `getrandom` 0.4, `ipnet`,
+`smallvec`, `thiserror`, `resolv-conf`, `system-configuration` and the like —
+or are named in `crates/sipral-net/THIRD-PARTY-LICENSES.txt` with their own
+texts. Three kinds
+carry a notice a binary has to reproduce beyond the MIT one: `ring`'s, ISC
+for its own code and Apache-2.0 or ISC for what it took from BoringSSL, in
+its three files `LICENSE`, `LICENSE-BoringSSL` and `LICENSE-other-bits`; ISC
+for `rustls-webpki` and `untrusted`; and Unicode-3.0 for the `icu_*` family and the crates beside
+it. `crates/sipral-net/THIRD-PARTY-LICENSES.txt` carries every one of those
+texts, generated from the graph with the feature on, and is shipped beside
+`THIRD-PARTY-LICENSES.txt` with such a build; the packages the bindings ship
+carry neither those crates nor that file. Five components under the resolver, on Android and UEFI
+only, ship no licence file in their packages (`jni`, `jni-macros`,
+`jni-sys-macros`, `ndk-context`, `r-efi`); their texts are the ones their own
+repositories carry at that release, kept in `tools/license-gen/unshipped/`.
+
+`rustls-platform-verifier`, the usual way to reach the platform's own
+verifier, is not used: its graph carries `webpki-root-certs`, licensed
+CDLA-Permissive-2.0, which `deny.toml` does not allow.
+
 ## A component an application attaches, not linked by Sipral itself
 
 ### webrtc-audio-processing

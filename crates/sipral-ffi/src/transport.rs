@@ -129,12 +129,13 @@ codes! {
 }
 
 codes! {
-    /// Why a TLS connection was refused, as the platform's TLS library said it. Names for
+    /// Why a TLS connection was refused, as the TLS library that ran it said it. Names for
     /// `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
     ///
-    /// Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
-    /// classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
-    /// with this left at none.
+    /// The stack links no TLS library (`docs/22-tls.md`); it carries the classification of
+    /// whoever ran the connection: the application, a binding, or the networking component
+    /// (`sipral_network_start`). A connection never answered is
+    /// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralTlsFailure: u32 {
         /// Not a TLS failure, or one the application could not classify.

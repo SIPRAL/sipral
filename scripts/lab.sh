@@ -154,6 +154,20 @@
 #                               the C ABI over TLS 1.2 the same way, with
 #                               OpenSSL holding the key
 #                               (interop/tls/client-cert.c)
+#   scripts/lab.sh network      only the networking component
+#                               (docs/26-network.md): a C program with no
+#                               socket, TLS or resolver of its own
+#                               (interop/network/register-and-hold.c) finds
+#                               Asterisk's SIP domain by the NAPTR and SRV
+#                               records a name server beside it publishes,
+#                               the domain itself having no address,
+#                               registers over TLS checked against it,
+#                               calls the tone, hears it, holds the call,
+#                               resumes it, hears it again and hangs up --
+#                               all through sipral_network_*. Not part of a
+#                               run that names nothing: it builds the
+#                               library again with the `network` feature,
+#                               into target/network
 #   scripts/lab.sh robust      only the field failures that need a network
 #                               to show (docs/11-testing.md's table): a
 #                               link that drops IP fragments, with INVITEs
@@ -699,6 +713,9 @@ elif [ "$WANT" = vitalpbx-live ]; then
 elif [ "$WANT" = bridge ]; then
     HARNESS=""
     printf '  note  not used by the bridge step, which runs its own example\n'
+elif [ "$WANT" = network ]; then
+    HARNESS=""
+    printf '  note  not used by the network step, which builds its own library and program\n'
 elif [ -n "${SIPRAL_HARNESS:-}" ]; then
     [ -x "$SIPRAL_HARNESS" ] || { fail "SIPRAL_HARNESS is not an executable file"; exit 1; }
     HARNESS="$SIPRAL_HARNESS"
@@ -777,7 +794,7 @@ fi
 step "the socket-framed agent"
 if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ] \
     || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ] \
-    || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ]; then
+    || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ] || [ "$WANT" = network ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
     printf '  note  not used by the %s step\n' "$WANT"
@@ -815,7 +832,8 @@ elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
 elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ] \
-    || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ]; then
+    || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ] \
+    || [ "$WANT" = network ]; then
     SWIFT_AGENT=""
     printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -4906,6 +4924,77 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
                 && pass "Sipral.Sample.Agent behind a client certificate, TLS 1.3: said none was required, another authority's refused and an expired one, then registered with the lab's, answered and echoed" \
                 || fail "Sipral.Sample.Agent behind a client certificate"
             tls_c_client_certificate || true
+        fi
+        ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+        wait_for asterisk "Asterisk Ready" >/dev/null || true
+        rm -rf "$SIPRAL_TLS_CERTS"
+        unset SIPRAL_TLS_CERTS
+    fi
+fi
+
+# The networking component (docs/26-network.md), through a C program that has
+# no networking code of its own: interop/network/register-and-hold.c, built in
+# a container against a libsipral built with sipral-ffi's `network` feature
+# into target/network, so the library every other step links is left as it
+# was. The container runs its own name server, dnsmasq on loopback, as the
+# system resolver /etc/resolv.conf names, publishing for TLS_NAME a NAPTR
+# record to `_sips._tcp`, an SRV record there to pbx.lab.sipral.test:5061 and
+# that host's address, Asterisk's -- and no address for TLS_NAME itself, so
+# the server is reached only through NAPTR and SRV. The program trusts the
+# lab authority alone and registers as labuser-c-net
+# (interop/tls/pjsip_local.conf) on Asterisk's TLS listener, which presents
+# the certificate tls_certificates made for TLS_NAME; then it calls 9002,
+# hears the tone, holds, resumes, hears it again, hangs up and unregisters.
+network_flow() {
+    local lib="$ROOT/target/network/release" log
+    if ! CARGO_TARGET_DIR="$ROOT/target/network" \
+        cargo build --release -p sipral-ffi --features network >/dev/null 2>&1; then
+        fail "cargo build --release -p sipral-ffi --features network"
+        return 1
+    fi
+    log=$(lab_run "the C program on the networking component" $((LAB_START_APT_S + 180)) \
+        --network "$LAB_NETWORK" \
+        -v "$lib:/lib-sipral:ro" \
+        -v "$ROOT/bindings/c/include:/sipral-include:ro" \
+        -v "$ROOT/interop/network:/network:ro" \
+        -v "$SIPRAL_TLS_CERTS:/lab-tls:ro" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y gcc libc6-dev dnsmasq >/dev/null 2>&1
+            cc -std=c11 -Wall -Wextra -Werror -I/sipral-include /network/register-and-hold.c \
+                -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral -o /tmp/register-and-hold || exit 1
+            address=\$(getent hosts asterisk | cut -d' ' -f1)
+            [ -n \"\$address\" ] || exit 1
+            dnsmasq --no-resolv --no-hosts --listen-address=127.0.0.1 --bind-interfaces \
+                --naptr-record=$TLS_NAME,10,10,S,SIPS+D2T,,_sips._tcp.$TLS_NAME \
+                --srv-host=_sips._tcp.$TLS_NAME,pbx.lab.sipral.test,5061,10,0 \
+                --host-record=pbx.lab.sipral.test,\$address || exit 1
+            echo 'nameserver 127.0.0.1' >/etc/resolv.conf
+            /tmp/register-and-hold $TLS_NAME /lab-tls/ca.pem labuser-c-net labpass 9002" 2>&1)
+    printf '%s\n' "$log" | sed 's/^/    /'
+    said() { printf '%s\n' "$log" | found -E "$1"; }
+    if said "^lookup NAPTR $TLS_NAME\$" && said "^lookup SRV _sips\._tcp\.$TLS_NAME\$" \
+        && said '^lookup A pbx\.lab\.sipral\.test$' && said '^located [0-9.]+:5061$' \
+        && said '^registered$' && said '^heard [0-9]+ frames from the far end$' \
+        && said '^held$' && said '^resumed$' && said '^heard [0-9]+ frames from the far end after resuming$' \
+        && said '^ended$' && said '^unregistered$' && ! said '^transport failed'; then
+        pass "a C program with no networking code: Asterisk found by NAPTR and SRV, registered over TLS checked against the domain, the tone heard, held, resumed, heard again, hung up and unregistered"
+    else
+        fail "the C program on the networking component"
+        return 1
+    fi
+}
+
+if [ "$WANT" = network ]; then
+    step "the networking component -- a C program with no networking code, over TLS to a name found by SRV"
+    if ! tls_certificates; then
+        fail "the networking component: the certificates"
+    else
+        ( cd interop && docker compose -f compose.yaml -f tls/compose.override.yaml up -d asterisk ) \
+            >/dev/null 2>&1 || fail "could not restart Asterisk with the TLS listeners"
+        if wait_for asterisk "Asterisk Ready"; then
+            network_flow || true
         fi
         ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
         wait_for asterisk "Asterisk Ready" >/dev/null || true

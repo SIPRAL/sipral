@@ -72,6 +72,7 @@ which files are generated and which are written by hand, and
    sipral-stir       STIR/SHAKEN, sans-I/O — sipral-ua and sipral (`stir`)
    sipral-diag       pcapng export and redaction — sipral (`redaction`)
    sipral-headless   PCM on a socket, no audio device — sipral ⇠ ⎯ ⎯ (`headless`)
+   sipral-net        sockets, TLS, NAPTR and SRV, optional — sipral-ffi (`network`)
    sipral-io-*       CoreAudio, WASAPI, AAudio, PipeWire, the device itself
         │
    sipral-io-common  the ring, the gate, volume — no device at all
@@ -136,9 +137,15 @@ that reached into one could not be built without it.
 
 ### Who owns the sockets, the resolver and TLS
 
-Nothing in this tree opens one. The core says where a message should go and
+Nothing in the core opens one. The core says where a message should go and
 what has to be resolved (`Event::ResolveNeeded`, `Event::TransportWanted`); the
-caller answers.
+caller answers. The caller can be the application, a binding with the
+platform's APIs, or `sipral-net`, the optional networking component
+([26-network.md](26-network.md)): sockets, rustls and a resolver that asks
+NAPTR and SRV, for a program that drives the core directly, in Rust or through
+`sipral_network_*` in the C ABI. It names `sipral-core` and nothing else of
+this tree, nothing but `sipral-ffi`'s off-by-default `network` feature names
+it, and so an application that brings its own networking links none of it.
 
 An account can name its registrar or its outbound proxy by a URI rather than
 an address (`Account::located`). RFC 3263 is then this tree's and the lookups
@@ -170,6 +177,9 @@ deployment needs:
   TLS. A client certificate a server asks for is presented by that same TLS,
   its key held where the platform keeps keys, and the stack hears only why a
   connection failed (`22-tls.md`, "A client certificate").
+
+`sipral-net` does both, and is what a deployment that wants neither limit and
+no networking code of its own uses instead.
 
 ### sipral-core
 
@@ -275,6 +285,15 @@ what an account places and verify who calls it
 into pcapng and redacts personal data out of a SIP message before it leaves
 the organisation, behind the facade's `redaction` feature
 ([14-diagnostics.md](14-diagnostics.md)).
+
+### sipral-net
+
+The networking component, optional: UDP and TCP sockets, TLS with rustls
+against the platform's trust store, a private authority or one pinned
+certificate, and NAPTR, SRV, A and AAAA lookups with hickory's resolver, each
+answer handed back for the core's `Locator` to rank. The one crate in the
+tree that opens sockets and links TLS; it names only `sipral-core`, and only
+`sipral-ffi` names it, behind `network`. Detail in [26-network.md](26-network.md).
 
 ### sipral-ffi
 

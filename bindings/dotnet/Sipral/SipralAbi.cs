@@ -230,12 +230,13 @@ public enum SipralTransportError : uint
 }
 
 /// <summary>
-/// Why a TLS connection was refused, as the platform's TLS library said it. Names for
+/// Why a TLS connection was refused, as the TLS library that ran it said it. Names for
 /// `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
 ///
-/// Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
-/// classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
-/// with this left at none.
+/// The stack links no TLS library (`docs/22-tls.md`); it carries the classification of
+/// whoever ran the connection: the application, a binding, or the networking component
+/// (`sipral_network_start`). A connection never answered is
+/// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
 /// </summary>
 public enum SipralTlsFailure : uint
 {
@@ -3294,6 +3295,32 @@ public enum SipralIsupNumber : uint
     /// number (§3.26).
     /// </summary>
     AdditionalCalling = 7,
+}
+
+/// <summary>
+/// Which servers a TLS connection the component makes trusts. Names for
+/// `sipral_network_config_t::trust`; an account's `tls_pin_sha256` wins over it for the
+/// connections to that account's server.
+/// </summary>
+public enum SipralNetworkTrust : uint
+{
+    /// <summary>
+    /// The authorities in the platform's trust store.
+    /// </summary>
+    Platform = 0,
+    /// <summary>
+    /// The platform's, and those in `authority_pem` beside them.
+    /// </summary>
+    PlatformAndAuthority = 1,
+    /// <summary>
+    /// Only those in `authority_pem`.
+    /// </summary>
+    OnlyAuthority = 2,
+    /// <summary>
+    /// Only the certificate whose SHA-256 fingerprint is `pin_sha256`; chain, name and
+    /// dates are not checked (`docs/22-tls.md`).
+    /// </summary>
+    Pinned = 3,
 }
 
 /// <summary>
@@ -8414,6 +8441,99 @@ public struct SipralIsup
 }
 
 /// <summary>
+/// How the networking component connects and resolves (ABI 1.5). Set `size` to
+/// `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
+/// platform's trust store and resolver, and no client certificate.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralNetworkConfig
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// A SipralNetworkTrust.
+    /// </summary>
+    public uint Trust;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved;
+    /// <summary>
+    /// PEM certificates of the authorities trusted with
+    /// `SIPRAL_NETWORK_TRUST_PLATFORM_AND_AUTHORITY` or `_ONLY_AUTHORITY`. Not
+    /// NUL-terminated.
+    /// </summary>
+    public IntPtr AuthorityPem;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint AuthorityPemLen;
+    /// <summary>
+    /// The fingerprint for `SIPRAL_NETWORK_TRUST_PINNED`, written as
+    /// `sipral_account_config_t::tls_pin_sha256` is.
+    /// </summary>
+    public IntPtr PinSha256;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint PinSha256Len;
+    /// <summary>
+    /// The client certificate presented when a server asks for one, leaf first, then any
+    /// intermediates, as PEM; null for none.
+    /// </summary>
+    public IntPtr ClientCertificatePem;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ClientCertificatePemLen;
+    /// <summary>
+    /// Its private key as PEM (PKCS #8, SEC 1 or PKCS #1); required with the certificate.
+    /// </summary>
+    public IntPtr ClientKeyPem;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ClientKeyPemLen;
+    /// <summary>
+    /// The name servers to ask, comma-separated `host:port`; null for the system's
+    /// resolver configuration.
+    /// </summary>
+    public IntPtr NameServers;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint NameServersLen;
+    /// <summary>
+    /// The name every TLS server's certificate is checked against; null for the host of
+    /// the account's `server_uri` (RFC 5922 section 7.3), else the address connected to.
+    /// </summary>
+    public IntPtr TlsServerName;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TlsServerNameLen;
+    /// <summary>
+    /// How long connecting, and then a TLS handshake, may each take; zero for 8000.
+    /// </summary>
+    public uint ConnectTimeoutMs;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint ReservedEnd;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralNetworkConfig Sized()
+    {
+        var value = default(SipralNetworkConfig);
+        value.Size = (nuint)Marshal.SizeOf<SipralNetworkConfig>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -9131,6 +9251,30 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_isup_number(byte[] body, nuint bodyLen, uint which, sbyte[] buffer, nuint capacity, out nuint needed);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_start(ulong stack, in SipralNetworkConfig config, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_run(ulong stack, ulong nowMs, uint waitMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_stop(ulong stack);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_locate(in SipralNetworkConfig config, sbyte[] serverUri, nuint serverUriLen, uint protocol, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_media_open(ulong stack, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_media_attach(ulong stack, sbyte[] address, nuint addressLen, ulong call, ulong media);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_media_capture(ulong stack, ulong media, ulong nowMs, short[] samples, nuint sampleCount);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_network_media_close(ulong stack, sbyte[] address, nuint addressLen);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -9184,7 +9328,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 4;
+    public const uint AbiVersionMinor = 5;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9403,6 +9547,15 @@ public static partial class Sipral
     public const uint FeatureLocalConference = 16777216;
 
     /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+    /// `sipral_network_start` and the entry points beside it run the
+    /// sockets, TLS and RFC 3263 lookups for a stack. Set when this library
+    /// was built with sipral-ffi's `network` feature, which the bindings'
+    /// packages leave out.
+    /// </summary>
+    public const uint FeatureNetwork = 33554432;
+
+    /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
     ///
     /// The bound the session builds against, not a path MTU. Checked before
@@ -9607,6 +9760,7 @@ public static partial class Sipral
         ("sipral_pinned_certificate_t", Marshal.SizeOf<SipralPinnedCertificate>(), 40, 36, 40),
         ("sipral_network_test_config_t", Marshal.SizeOf<SipralNetworkTestConfig>(), 48, 36, 40),
         ("sipral_isup_t", Marshal.SizeOf<SipralIsup>(), 72, 68, 68),
+        ("sipral_network_config_t", Marshal.SizeOf<SipralNetworkConfig>(), 120, 68, 68),
     };
 
     /// <summary>The calling thread's last error, or an empty string
@@ -13500,6 +13654,176 @@ public static partial class Sipral
     {
         Check(NativeMethods.sipral_isup_number(body, (nuint)body.Length, which, buffer, (nuint)buffer.Length, out var needed));
         return needed;
+    }
+
+    /// <summary>
+    /// Have the library run this stack's networking (ABI 1.5).
+    ///
+    /// From now on sipral_network_run does what the loop of `sipral_stack_poll`,
+    /// `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
+    /// stack must have been created on `SIPRAL_TRANSPORT_UDP` with a `bind_address` that names
+    /// an interface (`sipral_advertised_address` finds it), else `SIPRAL_STATUS_WRONG_STATE`:
+    /// its socket is bound there now, at the port the system chooses when it named zero, and
+    /// accounts on TCP or TLS reach their servers on connections of their own
+    /// (`stream_protocol`), which are the component's too. Every
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered with a connection bound under a number
+    /// from 2^31 up, every `SIPRAL_EVENT_KIND_LOOKUP_WANTED` with the resolver's answer, and a
+    /// connection that fails is reported with `sipral_stack_transport_failed_with`, its reason
+    /// in `sipral_transport_failed_event_t::tls` as the bindings give it.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when it already runs; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// configuration that cannot be read, saying which member; `SIPRAL_STATUS_TRANSPORT_DOWN`
+    /// when the socket cannot be bound or the resolver's configuration read;
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without the component.
+    ///
+    /// Safety
+    ///
+    /// `config` must be null, for the defaults, or point at a `sipral_network_config_t` whose
+    /// buffers are readable for their lengths.
+    /// </summary>
+    public static void NetworkStart(ulong stack, in SipralNetworkConfig config, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_network_start(stack, in config, nowMs));
+    }
+
+    /// <summary>
+    /// One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+    /// what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
+    /// of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
+    /// again. The callback runs inside it, on this thread, as it does inside
+    /// `sipral_stack_poll`, and may call any entry point here but this one.
+    ///
+    /// `now_ms` is the caller's monotonic clock, as everywhere else. Call it in a loop; nothing
+    /// in the library calls it for the application. `SIPRAL_STATUS_WRONG_STATE` before
+    /// sipral_network_start, `SIPRAL_STATUS_BUSY` from inside its own callback.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void NetworkRun(ulong stack, ulong nowMs, uint waitMs)
+    {
+        Check(NativeMethods.sipral_network_run(stack, nowMs, waitMs));
+    }
+
+    /// <summary>
+    /// Stop running this stack's networking (ABI 1.5): every socket and connection the
+    /// component opened is closed, its media sockets with them, and the stack's events go to
+    /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
+    /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
+    /// was not running.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void NetworkStop(ulong stack)
+    {
+        Check(NativeMethods.sipral_network_stop(stack));
+    }
+
+    /// <summary>
+    /// Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
+    /// (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+    /// ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
+    ///
+    /// For the address to name in `bind_address` and `Contact`, with
+    /// `sipral_advertised_address` toward the first of them. `config` is the resolver's (null
+    /// for the system's); this blocks for as long as the lookups take, ten seconds each at
+    /// most. `SIPRAL_STATUS_UNREACHABLE_ADDRESS` when the DNS names no address,
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set when they do not fit.
+    ///
+    /// Safety
+    ///
+    /// `config` must be null or point at a readable `sipral_network_config_t`, `server_uri`
+    /// must be readable for `server_uri_len` bytes, `buffer` writable for `capacity` bytes or
+    /// null with a capacity of zero, and `out_needed` null or pointing at one `size_t`.
+    /// </summary>
+    public static nuint NetworkLocate(in SipralNetworkConfig config, string serverUri, uint protocol, sbyte[] buffer)
+    {
+        var serverUriBytes = Encoding.UTF8.GetBytes(serverUri);
+        var serverUriSigned = new sbyte[serverUriBytes.Length];
+        Buffer.BlockCopy(serverUriBytes, 0, serverUriSigned, 0, serverUriBytes.Length);
+        Check(NativeMethods.sipral_network_locate(in config, serverUriSigned, (nuint)serverUriSigned.Length, protocol, buffer, (nuint)buffer.Length, out var needed));
+        return needed;
+    }
+
+    /// <summary>
+    /// Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+    /// at a port from its RTP range when it has one (the odd one above kept for RTCP), and
+    /// write its `host:port`, NUL-terminated, into `buffer`, for
+    /// `sipral_call_config_t::media_address` or an answer's.
+    ///
+    /// `capacity` must be at least `SIPRAL_ADDRESS_BYTES`, so that nothing is opened that
+    /// could not be named: below it is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set
+    /// and nothing opened. `SIPRAL_STATUS_WRONG_STATE` before sipral_network_start or on a
+    /// stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
+    /// no free pair.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
+    /// `size_t`.
+    /// </summary>
+    public static nuint NetworkMediaOpen(ulong stack, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_network_media_open(stack, buffer, (nuint)buffer.Length, out var needed));
+        return needed;
+    }
+
+    /// <summary>
+    /// Give a call's media to the socket sipral_network_media_open opened at `address`
+    /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+    /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
+    /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
+    /// sipral_network_run. The socket closes, and its port goes back, when the call ends.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+    ///
+    /// Safety
+    ///
+    /// `address` must be readable for `address_len` bytes.
+    /// </summary>
+    public static void NetworkMediaAttach(ulong stack, string address, ulong call, ulong media)
+    {
+        var addressBytes = Encoding.UTF8.GetBytes(address);
+        var addressSigned = new sbyte[addressBytes.Length];
+        Buffer.BlockCopy(addressBytes, 0, addressSigned, 0, addressBytes.Length);
+        Check(NativeMethods.sipral_network_media_attach(stack, addressSigned, (nuint)addressSigned.Length, call, media));
+    }
+
+    /// <summary>
+    /// One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
+    /// socket the call's handle is attached to (ABI 1.5). The frame is as
+    /// `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
+    /// with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a handle no socket is attached to.
+    ///
+    /// Safety
+    ///
+    /// `samples` must be readable for `sample_count` samples.
+    /// </summary>
+    public static void NetworkMediaCapture(ulong stack, ulong media, ulong nowMs, short[] samples)
+    {
+        Check(NativeMethods.sipral_network_media_capture(stack, media, nowMs, samples, (nuint)samples.Length));
+    }
+
+    /// <summary>
+    /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+    /// range. For a socket whose call never came to media; one whose call ended has closed
+    /// already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+    ///
+    /// Safety
+    ///
+    /// `address` must be readable for `address_len` bytes.
+    /// </summary>
+    public static void NetworkMediaClose(ulong stack, string address)
+    {
+        var addressBytes = Encoding.UTF8.GetBytes(address);
+        var addressSigned = new sbyte[addressBytes.Length];
+        Buffer.BlockCopy(addressBytes, 0, addressSigned, 0, addressBytes.Length);
+        Check(NativeMethods.sipral_network_media_close(stack, addressSigned, (nuint)addressSigned.Length));
     }
 
 }

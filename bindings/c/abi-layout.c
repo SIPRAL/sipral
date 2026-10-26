@@ -1072,3 +1072,23 @@ _Static_assert(offsetof(sipral_isup_t, original_redirecting_reason) == SIPRAL_LA
 _Static_assert(offsetof(sipral_isup_t, calling_category) == SIPRAL_LAYOUT(68, 64, 64), "sipral_isup_t::calling_category");
 _Static_assert(offsetof(sipral_isup_t, calling_category) + sizeof(((sipral_isup_t *)0)->calling_category) == SIPRAL_LAYOUT(72, 68, 68), "sipral_isup_t is pinned through calling_category");
 
+_Static_assert(sizeof(sipral_network_config_t) == SIPRAL_LAYOUT(120, 68, 68), "sipral_network_config_t");
+_Static_assert(offsetof(sipral_network_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_network_config_t::size");
+_Static_assert(offsetof(sipral_network_config_t, trust) == SIPRAL_LAYOUT(8, 4, 4), "sipral_network_config_t::trust");
+_Static_assert(offsetof(sipral_network_config_t, reserved) == SIPRAL_LAYOUT(12, 8, 8), "sipral_network_config_t::reserved");
+_Static_assert(offsetof(sipral_network_config_t, authority_pem) == SIPRAL_LAYOUT(16, 12, 12), "sipral_network_config_t::authority_pem");
+_Static_assert(offsetof(sipral_network_config_t, authority_pem_len) == SIPRAL_LAYOUT(24, 16, 16), "sipral_network_config_t::authority_pem_len");
+_Static_assert(offsetof(sipral_network_config_t, pin_sha256) == SIPRAL_LAYOUT(32, 20, 20), "sipral_network_config_t::pin_sha256");
+_Static_assert(offsetof(sipral_network_config_t, pin_sha256_len) == SIPRAL_LAYOUT(40, 24, 24), "sipral_network_config_t::pin_sha256_len");
+_Static_assert(offsetof(sipral_network_config_t, client_certificate_pem) == SIPRAL_LAYOUT(48, 28, 28), "sipral_network_config_t::client_certificate_pem");
+_Static_assert(offsetof(sipral_network_config_t, client_certificate_pem_len) == SIPRAL_LAYOUT(56, 32, 32), "sipral_network_config_t::client_certificate_pem_len");
+_Static_assert(offsetof(sipral_network_config_t, client_key_pem) == SIPRAL_LAYOUT(64, 36, 36), "sipral_network_config_t::client_key_pem");
+_Static_assert(offsetof(sipral_network_config_t, client_key_pem_len) == SIPRAL_LAYOUT(72, 40, 40), "sipral_network_config_t::client_key_pem_len");
+_Static_assert(offsetof(sipral_network_config_t, name_servers) == SIPRAL_LAYOUT(80, 44, 44), "sipral_network_config_t::name_servers");
+_Static_assert(offsetof(sipral_network_config_t, name_servers_len) == SIPRAL_LAYOUT(88, 48, 48), "sipral_network_config_t::name_servers_len");
+_Static_assert(offsetof(sipral_network_config_t, tls_server_name) == SIPRAL_LAYOUT(96, 52, 52), "sipral_network_config_t::tls_server_name");
+_Static_assert(offsetof(sipral_network_config_t, tls_server_name_len) == SIPRAL_LAYOUT(104, 56, 56), "sipral_network_config_t::tls_server_name_len");
+_Static_assert(offsetof(sipral_network_config_t, connect_timeout_ms) == SIPRAL_LAYOUT(112, 60, 60), "sipral_network_config_t::connect_timeout_ms");
+_Static_assert(offsetof(sipral_network_config_t, reserved_end) == SIPRAL_LAYOUT(116, 64, 64), "sipral_network_config_t::reserved_end");
+_Static_assert(offsetof(sipral_network_config_t, reserved_end) + sizeof(((sipral_network_config_t *)0)->reserved_end) == SIPRAL_LAYOUT(120, 68, 68), "sipral_network_config_t is pinned through reserved_end");
+

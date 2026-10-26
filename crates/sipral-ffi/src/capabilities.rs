@@ -142,6 +142,12 @@ constants! {
     /// and rate: `sipral_local_conference_create`,
     /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
     pub const SIPRAL_FEATURE_LOCAL_CONFERENCE: u32 = 1 << 24;
+    /// See [`SIPRAL_FEATURE_DTMF`]. The networking component (ABI 1.5):
+    /// `sipral_network_start` and the entry points beside it run the
+    /// sockets, TLS and RFC 3263 lookups for a stack. Set when this library
+    /// was built with sipral-ffi's `network` feature, which the bindings'
+    /// packages leave out.
+    pub const SIPRAL_FEATURE_NETWORK: u32 = 1 << 25;
 }
 
 record! {
@@ -268,6 +274,10 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     }
     if capabilities.local_conference {
         features |= SIPRAL_FEATURE_LOCAL_CONFERENCE;
+    }
+    // this crate's own feature, not the facade's: the component lives here
+    if cfg!(feature = "network") {
+        features |= SIPRAL_FEATURE_NETWORK;
     }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),

@@ -62,6 +62,9 @@ allow = ["AGPL-3.0-only"]
 name = "sipral-headless"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+name = "sipral-net"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 name = "sipral-ffi"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]

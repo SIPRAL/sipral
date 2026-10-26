@@ -318,6 +318,12 @@ unit_tested = true
 flows = ["a registrar named by its host name, located by its A record through the lab's DNS", "a server named by a domain, located by an SRV record from the application's resolver", "failover between two servers"]
 
 [[feature]]
+name = "Networking run by the library for a C program: sockets, TLS, NAPTR and SRV"
+implemented = true
+unit_tested = true
+flows = ["a C program with no networking code"]
+
+[[feature]]
 name = "A call hung up while its devices open, with nothing waiting for the open"
 implemented = true
 unit_tested = true

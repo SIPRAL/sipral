@@ -895,6 +895,7 @@ the generator itself — never the block, which the next run overwrites.
 | Accounts on different transports in one stack (UDP, and TLS on a connection of its own) | yes | yes | yes |
 | A call's own mute, gain and meter in the audio engine | yes | yes | yes |
 | A server named by a name, located by RFC 3263 | yes | yes | yes |
+| Networking run by the library for a C program: sockets, TLS, NAPTR and SRV | yes | yes | not yet |
 | A call hung up while its devices open, with nothing waiting for the open | yes | yes | yes |
 | Requests written in the compact form (RFC 3261 §7.3.3) | yes | yes | yes |
 | A far end's hold, resume and refresh answered on the SDES line in force | yes | yes | yes |

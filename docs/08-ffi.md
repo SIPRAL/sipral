@@ -1169,8 +1169,10 @@ constructor argument (`invite_limit` / `inviteLimit`).
 
 ### When a transport fails, and why
 
-Sipral opens no socket and links no TLS library (`22-tls.md`), so a TLS
-connection that is refused is refused in the application's code, and until
+The stack opens no socket and links no TLS library (`22-tls.md`; the optional
+networking component of `26-network.md` is the one exception, and reports its
+refusals the way this section describes), so a TLS connection that is refused
+is refused in the application's code, and until
 ABI 0.31 the stack heard only that its transport failed. Every layer on top
 then reported "the connection to the server closed" whether the server was
 down, its certificate was self-signed, it named another host or it had
@@ -4164,3 +4166,46 @@ and `SipralTurnServer`); .NET `SipralClientCertificate`
 `ClientCertificate` (`clientCertificate` on the stack and the account,
 `turnClientCertificate`). Each reports the four values the same way, and their
 READMEs have the details.
+
+## What ABI 1.5 added
+
+### The networking component
+
+Eight entry points, one struct, one enumeration and one feature bit, all
+appended: `sipral_network_start`, `sipral_network_run`, `sipral_network_stop`,
+`sipral_network_locate`, `sipral_network_media_open`,
+`sipral_network_media_attach`, `sipral_network_media_capture` and
+`sipral_network_media_close`; `sipral_network_config_t`; the
+`sipral_network_trust_t` values 0 to 3; and `SIPRAL_FEATURE_NETWORK`
+(`1 << 25`). Nothing that existed moved, and a binding printed at 1.4 loads
+against a 1.5 library and works as it did.
+
+They hand a stack's networking to the library: its UDP socket, a TCP or TLS
+connection for every `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, an answer from a
+real resolver for every `SIPRAL_EVENT_KIND_LOOKUP_WANTED`, a socket for each
+call's media, and the loop above written once, so that a C or C++ program has
+none of it to write. `docs/26-network.md` has the whole of it: the trust
+choices, which name a certificate is checked against, the failures and their
+reasons, and what is not done yet.
+
+**Why the entry points are in every build and the component is not.** It
+links rustls, a resolver and a runtime under the resolver, which no binding
+needs: each opens its own connections with the platform's APIs. So it is
+`sipral-ffi`'s one feature that is off by default, `network`, and the
+libraries the bindings package leave it out. The header does not branch on
+it, as it branches on nothing: a library without it answers every
+`sipral_network_*` call with `SIPRAL_STATUS_NOT_SUPPORTED`, and
+`SIPRAL_FEATURE_NETWORK` says so before a stack is made. The printed bindings
+carry the declarations like every other; their idiomatic layers do not call
+them.
+
+**How it sees the events.** It reads every event before the callback does,
+through an observer the stack holds while the component runs, and acts on four
+kinds: a transport wanted, a lookup wanted, a transport failed, a call ended.
+It then calls the same entry points an application calls —
+`sipral_stack_poll`, `sipral_stack_poll_transmit`, `sipral_stack_receive_*`,
+`sipral_stack_transport_bind`, `sipral_stack_transport_failed_with`, the media
+calls — and answers a lookup the way `sipral_account_looked_up` does, so the
+stack cannot tell it from an application, and the callback, run inside
+`sipral_network_run` with none of the component's locks held, may call back
+into it.

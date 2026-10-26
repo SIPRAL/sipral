@@ -238,12 +238,13 @@ enum class SipralTransportError(val value: Int) {
 }
 
 /**
- * Why a TLS connection was refused, as the platform's TLS library said it. Names for
+ * Why a TLS connection was refused, as the TLS library that ran it said it. Names for
  * `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
  *
- * Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
- * classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
- * with this left at none.
+ * The stack links no TLS library (`docs/22-tls.md`); it carries the classification of
+ * whoever ran the connection: the application, a binding, or the networking component
+ * (`sipral_network_start`). A connection never answered is
+ * `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
  */
 enum class SipralTlsFailure(val value: Int) {
     /**
@@ -3654,6 +3655,36 @@ enum class SipralIsupNumber(val value: Int) {
 }
 
 /**
+ * Which servers a TLS connection the component makes trusts. Names for
+ * `sipral_network_config_t::trust`; an account's `tls_pin_sha256` wins over it for the
+ * connections to that account's server.
+ */
+enum class SipralNetworkTrust(val value: Int) {
+    /**
+     * The authorities in the platform's trust store.
+     */
+    PLATFORM(0),
+    /**
+     * The platform's, and those in `authority_pem` beside them.
+     */
+    PLATFORM_AND_AUTHORITY(1),
+    /**
+     * Only those in `authority_pem`.
+     */
+    ONLY_AUTHORITY(2),
+    /**
+     * Only the certificate whose SHA-256 fingerprint is `pin_sha256`; chain, name and
+     * dates are not checked (`docs/22-tls.md`).
+     */
+    PINNED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralNetworkTrust? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -6454,6 +6485,64 @@ class SipralNetworkTestConfig(
 )
 
 /**
+ * How the networking component connects and resolves (ABI 1.5). Set `size` to
+ * `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
+ * platform's trust store and resolver, and no client certificate.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralNetworkConfig(
+    /**
+     * A SipralNetworkTrust.
+     */
+    val trust: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved: Long = 0,
+    /**
+     * PEM certificates of the authorities trusted with
+     * `SIPRAL_NETWORK_TRUST_PLATFORM_AND_AUTHORITY` or `_ONLY_AUTHORITY`. Not
+     * NUL-terminated.
+     */
+    val authorityPem: String? = null,
+    /**
+     * The fingerprint for `SIPRAL_NETWORK_TRUST_PINNED`, written as
+     * `sipral_account_config_t::tls_pin_sha256` is.
+     */
+    val pinSha256: String? = null,
+    /**
+     * The client certificate presented when a server asks for one, leaf first, then any
+     * intermediates, as PEM; null for none.
+     */
+    val clientCertificatePem: String? = null,
+    /**
+     * Its private key as PEM (PKCS #8, SEC 1 or PKCS #1); required with the certificate.
+     */
+    val clientKeyPem: String? = null,
+    /**
+     * The name servers to ask, comma-separated `host:port`; null for the system's
+     * resolver configuration.
+     */
+    val nameServers: String? = null,
+    /**
+     * The name every TLS server's certificate is checked against; null for the host of
+     * the account's `server_uri` (RFC 5922 section 7.3), else the address connected to.
+     */
+    val tlsServerName: String? = null,
+    /**
+     * How long connecting, and then a TLS handshake, may each take; zero for 8000.
+     */
+    val connectTimeoutMs: Long = 0,
+    /**
+     * Zero.
+     */
+    val reservedEnd: Long = 0,
+)
+
+/**
  * Something the library has to tell the application.
  *
  * Library-owned, valid for the callback only. Read no further than
@@ -8695,7 +8784,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 4)
+        agree(1, 5)
     }
 
     /**
@@ -8909,6 +8998,14 @@ internal object SipralNative {
     external fun sipral_message_isup(message: ByteArray, offset: LongArray, len: LongArray): Int
     external fun sipral_isup_read(body: ByteArray, isup: LongArray): Int
     external fun sipral_isup_number(body: ByteArray, which: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_network_start(stack: Long, configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, nowMs: Long): Int
+    external fun sipral_network_run(stack: Long, nowMs: Long, waitMs: Long): Int
+    external fun sipral_network_stop(stack: Long): Int
+    external fun sipral_network_locate(configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, serverUri: ByteArray, protocol: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_network_media_open(stack: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_network_media_attach(stack: Long, address: ByteArray, call: Long, media: Long): Int
+    external fun sipral_network_media_capture(stack: Long, media: Long, nowMs: Long, samples: ShortArray): Int
+    external fun sipral_network_media_close(stack: Long, address: ByteArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -8929,7 +9026,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 4
+    const val ABI_VERSION_MINOR: Long = 5
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9148,6 +9245,15 @@ object Sipral {
     const val FEATURE_LOCAL_CONFERENCE: Long = 16777216
 
     /**
+     * See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+     * `sipral_network_start` and the entry points beside it run the
+     * sockets, TLS and RFC 3263 lookups for a stack. Set when this library
+     * was built with sipral-ffi's `network` feature, which the bindings'
+     * packages leave out.
+     */
+    const val FEATURE_NETWORK: Long = 33554432
+
+    /**
      * The buffer a caller has to bring for one outgoing packet.
      *
      * The bound the session builds against, not a path MTU. Checked before
@@ -9354,6 +9460,7 @@ object Sipral {
         "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
         "sipral_network_test_config_t" to intArrayOf(48, 36, 40),
         "sipral_isup_t" to intArrayOf(72, 68, 68),
+        "sipral_network_config_t" to intArrayOf(120, 68, 68),
     )
 
     /**
@@ -13123,6 +13230,176 @@ object Sipral {
         val neededSlot = LongArray(1)
         check(SipralNative.sipral_isup_number(body, which, buffer, neededSlot))
         return neededSlot[0]
+    }
+
+    /**
+     * Have the library run this stack's networking (ABI 1.5).
+     *
+     * From now on sipral_network_run does what the loop of `sipral_stack_poll`,
+     * `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
+     * stack must have been created on `SIPRAL_TRANSPORT_UDP` with a `bind_address` that names
+     * an interface (`sipral_advertised_address` finds it), else `SIPRAL_STATUS_WRONG_STATE`:
+     * its socket is bound there now, at the port the system chooses when it named zero, and
+     * accounts on TCP or TLS reach their servers on connections of their own
+     * (`stream_protocol`), which are the component's too. Every
+     * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered with a connection bound under a number
+     * from 2^31 up, every `SIPRAL_EVENT_KIND_LOOKUP_WANTED` with the resolver's answer, and a
+     * connection that fails is reported with `sipral_stack_transport_failed_with`, its reason
+     * in `sipral_transport_failed_event_t::tls` as the bindings give it.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` when it already runs; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+     * configuration that cannot be read, saying which member; `SIPRAL_STATUS_TRANSPORT_DOWN`
+     * when the socket cannot be bound or the resolver's configuration read;
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without the component.
+     *
+     * Safety
+     *
+     * `config` must be null, for the defaults, or point at a `sipral_network_config_t` whose
+     * buffers are readable for their lengths.
+     */
+    fun networkStart(stack: Long, config: SipralNetworkConfig, nowMs: Long) {
+        val configAuthorityPem = config.authorityPem?.toByteArray(Charsets.UTF_8)
+        val configPinSha256 = config.pinSha256?.toByteArray(Charsets.UTF_8)
+        val configClientCertificatePem = config.clientCertificatePem?.toByteArray(Charsets.UTF_8)
+        val configClientKeyPem = config.clientKeyPem?.toByteArray(Charsets.UTF_8)
+        val configNameServers = config.nameServers?.toByteArray(Charsets.UTF_8)
+        val configTlsServerName = config.tlsServerName?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_network_start(stack, config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, nowMs))
+    }
+
+    /**
+     * One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+     * what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
+     * of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
+     * again. The callback runs inside it, on this thread, as it does inside
+     * `sipral_stack_poll`, and may call any entry point here but this one.
+     *
+     * `now_ms` is the caller's monotonic clock, as everywhere else. Call it in a loop; nothing
+     * in the library calls it for the application. `SIPRAL_STATUS_WRONG_STATE` before
+     * sipral_network_start, `SIPRAL_STATUS_BUSY` from inside its own callback.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun networkRun(stack: Long, nowMs: Long, waitMs: Long) {
+        check(SipralNative.sipral_network_run(stack, nowMs, waitMs))
+    }
+
+    /**
+     * Stop running this stack's networking (ABI 1.5): every socket and connection the
+     * component opened is closed, its media sockets with them, and the stack's events go to
+     * the callback alone again. The stack is told nothing; a stack about to be destroyed needs
+     * no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
+     * was not running.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun networkStop(stack: Long) {
+        check(SipralNative.sipral_network_stop(stack))
+    }
+
+    /**
+     * Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
+     * (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+     * ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
+     *
+     * For the address to name in `bind_address` and `Contact`, with
+     * `sipral_advertised_address` toward the first of them. `config` is the resolver's (null
+     * for the system's); this blocks for as long as the lookups take, ten seconds each at
+     * most. `SIPRAL_STATUS_UNREACHABLE_ADDRESS` when the DNS names no address,
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set when they do not fit.
+     *
+     * Safety
+     *
+     * `config` must be null or point at a readable `sipral_network_config_t`, `server_uri`
+     * must be readable for `server_uri_len` bytes, `buffer` writable for `capacity` bytes or
+     * null with a capacity of zero, and `out_needed` null or pointing at one `size_t`.
+     */
+    fun networkLocate(config: SipralNetworkConfig, serverUri: String, protocol: Long, buffer: ByteArray): Long {
+        val configAuthorityPem = config.authorityPem?.toByteArray(Charsets.UTF_8)
+        val configPinSha256 = config.pinSha256?.toByteArray(Charsets.UTF_8)
+        val configClientCertificatePem = config.clientCertificatePem?.toByteArray(Charsets.UTF_8)
+        val configClientKeyPem = config.clientKeyPem?.toByteArray(Charsets.UTF_8)
+        val configNameServers = config.nameServers?.toByteArray(Charsets.UTF_8)
+        val configTlsServerName = config.tlsServerName?.toByteArray(Charsets.UTF_8)
+        val serverUriBytes = serverUri.toByteArray(Charsets.UTF_8)
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_network_locate(config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, serverUriBytes, protocol, buffer, neededSlot))
+        return neededSlot[0]
+    }
+
+    /**
+     * Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+     * at a port from its RTP range when it has one (the odd one above kept for RTCP), and
+     * write its `host:port`, NUL-terminated, into `buffer`, for
+     * `sipral_call_config_t::media_address` or an answer's.
+     *
+     * `capacity` must be at least `SIPRAL_ADDRESS_BYTES`, so that nothing is opened that
+     * could not be named: below it is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set
+     * and nothing opened. `SIPRAL_STATUS_WRONG_STATE` before sipral_network_start or on a
+     * stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
+     * no free pair.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
+     * `size_t`.
+     */
+    fun networkMediaOpen(stack: Long, buffer: ByteArray): Long {
+        val neededSlot = LongArray(1)
+        check(SipralNative.sipral_network_media_open(stack, buffer, neededSlot))
+        return neededSlot[0]
+    }
+
+    /**
+     * Give a call's media to the socket sipral_network_media_open opened at `address`
+     * (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+     * arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
+     * `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
+     * sipral_network_run. The socket closes, and its port goes back, when the call ends.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+     *
+     * Safety
+     *
+     * `address` must be readable for `address_len` bytes.
+     */
+    fun networkMediaAttach(stack: Long, address: String, call: Long, media: Long) {
+        val addressBytes = address.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_network_media_attach(stack, addressBytes, call, media))
+    }
+
+    /**
+     * One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
+     * socket the call's handle is attached to (ABI 1.5). The frame is as
+     * `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
+     * with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for a handle no socket is attached to.
+     *
+     * Safety
+     *
+     * `samples` must be readable for `sample_count` samples.
+     */
+    fun networkMediaCapture(stack: Long, media: Long, nowMs: Long, samples: ShortArray) {
+        check(SipralNative.sipral_network_media_capture(stack, media, nowMs, samples))
+    }
+
+    /**
+     * Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+     * range. For a socket whose call never came to media; one whose call ended has closed
+     * already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+     *
+     * Safety
+     *
+     * `address` must be readable for `address_len` bytes.
+     */
+    fun networkMediaClose(stack: Long, address: String) {
+        val addressBytes = address.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_network_media_close(stack, addressBytes))
     }
 
 }

@@ -49,7 +49,7 @@
     X(sipral_recording_options) X(sipral_transport_failure)                   \
     X(sipral_local_conference_config) X(sipral_local_conference_info)         \
     X(sipral_local_conference_member) X(sipral_pinned_certificate)            \
-    X(sipral_network_test_config) X(sipral_isup)
+    X(sipral_network_test_config) X(sipral_isup) X(sipral_network_config)
 
 static int failures;
 
@@ -1238,6 +1238,21 @@ static sipral_status_t isup_at(struct fixture *fixture, size_t declared)
     return sipral_isup_read(smoke_rel, sizeof smoke_rel, &read);
 }
 
+/* A server named by its address, which asks no name server. A library built
+ * without the networking component reads the length and answers NOT_SUPPORTED,
+ * which is the length taken: the struct is read before the build is asked. */
+static sipral_status_t network_config_at(struct fixture *fixture, size_t declared)
+{
+    (void)fixture;
+    sipral_network_config_t config = { 0 };
+    config.size = declared;
+    static const char uri[] = "sip:127.0.0.1:5060";
+    char found[SIPRAL_ADDRESS_BYTES];
+    sipral_status_t status = sipral_network_locate(&config, uri, sizeof uri - 1, SIPRAL_TRANSPORT_UDP,
+                                                   found, sizeof found, NULL);
+    return status == SIPRAL_STATUS_NOT_SUPPORTED ? SIPRAL_STATUS_OK : status;
+}
+
 static const struct {
     const char *name;
     sipral_status_t (*at)(struct fixture *fixture, size_t declared);
@@ -1279,6 +1294,7 @@ static const struct {
     { "sipral_pinned_certificate_t", pinned_certificate_at },
     { "sipral_network_test_config_t", network_test_config_at },
     { "sipral_isup_t", isup_at },
+    { "sipral_network_config_t", network_config_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

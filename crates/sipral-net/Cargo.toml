@@ -1,0 +1,64 @@
+[package]
+name = "sipral-net"
+description = "Optional networking for the Sipral core: UDP, TCP and TLS sockets, and RFC 3263's NAPTR and SRV lookups."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# the arm crates.io reads; why the dual expression is not here is in
+# crates/sipral/Cargo.toml
+license = "AGPL-3.0-only"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = true
+
+[dependencies]
+sipral-core.workspace = true
+# TLS, protocol and state machine. `default-features = false` plus `ring`
+# drops the default `aws-lc-rs` provider, which needs `cmake` to build, for
+# the same reason the `example-tls` feature of `sipral` gives; `tls12`
+# because a PBX on a LAN still often speaks nothing newer (Asterisk's
+# `method=tlsv1_2` in the lab).
+rustls = { version = "0.23.46", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+# the platform's trust store, read once per network: the keychain's roots on
+# macOS, the system store on Windows, the CA bundle elsewhere, every one
+# checked by rustls's own `webpki`. Not `rustls-platform-verifier`, whose
+# graph carries `webpki-root-certs` (CDLA-Permissive-2.0, outside the
+# allow list in `deny.toml`) on the one target that crate builds it for.
+rustls-native-certs = "0.8.5"
+# DER and PEM containers for certificates and keys, the types rustls takes
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
+# NAPTR, SRV, A and AAAA, against the servers the application names, and on
+# every target but Android (below) the system's resolver configuration
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio"] }
+# the one thread hickory's lookups run on: a current-thread runtime, so no
+# worker pool comes with it
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "sync"] }
+
+# the system's resolver configuration: `/etc/resolv.conf`, the System
+# Configuration framework on Apple platforms, the adapters on Windows. Not on
+# Android, where hickory reads it through `jni`, a crate whose package ships
+# no licence file for `THIRD-PARTY-LICENSES.txt` to carry; there the
+# application names its servers.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+hickory-resolver = { version = "0.26.3", default-features = false, features = [
+    "tokio",
+    "system-config",
+] }
+
+[dev-dependencies]
+# a throwaway authority and server certificate per test run, never committed
+rcgen = "0.14.10"
+# the tests' own DNS server, answering from a table, built with the message
+# types the resolver above already links
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
