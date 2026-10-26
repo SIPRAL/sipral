@@ -180,14 +180,30 @@ sequence (or `LiveCommunicationBridge`, below, in CallKit's place); on Android, 
 In the Swift package the push parameters are `SipralStack.addAccount(push:)`
 with a `SipralPush` (`SipralPush.apnsVoip(token:teamId:bundleId:)` writes
 the token in hex and the topic as `TEAMID.bundle.voip`, RFC 8599 §10), and
-`Account.pushEcho()` reads the answer. `PushKitAdapter` reports a call to
-CallKit for every VoIP push, which iOS requires of an application that wants
+`Account.pushEcho()` reads the answer; `addAccount(instanceId:)` puts RFC
+5626's `+sip.instance` on every REGISTER's `Contact`, which a push proxy may
+require of a binding, and `addAccount(headers:)` adds the application's own
+fields to every REGISTER. `PushKitAdapter` reports a call to
+CallKit for every VoIP push the system says must be, which iOS requires of an application that wants
 to keep receiving them: one that names no caller, or arrives before there is
 an account, is shown and ended at once. A shown call that no INVITE fills is
 ended too, as failed when the announcement was refused and as unanswered
 when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing. The push's
-payload carries the caller under `caller`; that, and what sends the push, is
-the push gateway's side (below).
+payload carries the caller under `caller`, its name under `name` and the
+held INVITE's `Call-ID` under `call-id`; that, and what sends the push, is
+the push gateway's side (below). A push whose payload is sealed is opened by
+the decoder the application gives `PushKitAdapter`, which returns the same
+three fields. From iOS 26.4 PushKit says with each push whether a call must
+be reported for it (`PKVoIPPushMetadata.mustReport`); the adapter takes that
+delivery too, and a push that need not be reported is not shown: the binding
+is refreshed, and its INVITE is shown as any other incoming call. The name
+reaches the call screen as `CXCallUpdate.localizedCallerName`, from the push
+or, when it carried none, from the INVITE once matched; and
+`CallKitBridge.endShown(uuid:reason:)` takes down a screen the application
+will not ring, as unanswered, its INVITE declined if it comes. An
+application with its own `PKPushRegistryDelegate` calls
+`PushKitBridge.handle(push:account:)`, or `receive(_:mustReport:account:)`,
+from it instead (`bindings/swift/README.md`).
 
 **The user answers before the INVITE.** On a phone this is the usual order:
 the push raises the call screen at once, and the INVITE follows the refresh
@@ -483,7 +499,7 @@ the PBX.
 What a push carries is `kind` (`call`, `message`, `dialog`, `refresh`),
 `caller` (the held request's `From` URI, which `PushKitAdapter` reads),
 `name` when the `From` has one, and `call-id` (the held request's, for
-`announce_call`). `PushKitAdapter` reads `call-id` beside `caller`, and the
+`announce_call`). `PushKitAdapter` reads `call-id` and `name` beside `caller`, and the
 Swift push bridge announces with it whenever the push has one
 (`Account.announce(caller:callId:)`); on Android, `TelecomBridge.pushArrived`
 and `wakeForPush` take it as `callId` (`SipralAccount.announce(caller,
@@ -1722,7 +1738,7 @@ CallKit, by `CallKitBridge`.
   the lock screen, a headset and CarPlay act on the same call.
   `PushKitAdapter` is created in `didFinishLaunching`, so a launch a push
   caused gets the push; the account is opened before that returns.
-  Every push is reported to CallKit ("Through `sipral.h`", above).
+  Every push the system says must be reported is reported to CallKit ("Through `sipral.h`", above).
 - **Push parameters.** With a VoIP token and a team in the build
   (`SipralTeamIdentifier`, from `DEVELOPMENT_TEAM`), the account's REGISTER
   carries `pn-provider=apns`, the token in hex as `pn-prid` and

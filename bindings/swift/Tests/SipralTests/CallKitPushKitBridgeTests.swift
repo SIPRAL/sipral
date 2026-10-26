@@ -7,18 +7,30 @@ import XCTest
 /// Records what it was told, standing in for `CXProvider`, which does not
 /// exist on macOS or Linux.
 final actor RecordingProvider: CallKitProviding {
-    private(set) var reported: [(uuid: UUID, callerId: String)] = []
+    private(set) var reported: [(uuid: UUID, callerId: String, displayName: String?)] = []
+    /// The names given to calls already shown.
+    private(set) var named: [(uuid: UUID, displayName: String)] = []
     private(set) var connecting: [UUID] = []
     private(set) var connected: [UUID] = []
     private(set) var ended: [(uuid: UUID, reason: CallKitBridge.EndReason)] = []
     var failNextReport = false
 
     nonisolated func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void) {
+        reportIncomingCall(uuid: uuid, callerId: callerId, displayName: nil, completion: completion)
+    }
+
+    nonisolated func reportIncomingCall(
+        uuid: UUID, callerId: String, displayName: String?, completion: @Sendable @escaping (Error?) -> Void
+    ) {
         Task {
             let shouldFail = await self.consumeFailNextReport()
-            await self.record(uuid: uuid, callerId: callerId)
+            await self.record(uuid: uuid, callerId: callerId, displayName: displayName)
             completion(shouldFail ? CallKitBridgeError.unknownCall(uuid) : nil)
         }
+    }
+
+    nonisolated func reportCallerName(uuid: UUID, displayName: String) {
+        Task { await self.recordName(uuid, displayName) }
     }
 
     nonisolated func reportCallConnecting(uuid: UUID) {
@@ -38,7 +50,10 @@ final actor RecordingProvider: CallKitProviding {
         return failNextReport
     }
 
-    private func record(uuid: UUID, callerId: String) { reported.append((uuid, callerId)) }
+    private func record(uuid: UUID, callerId: String, displayName: String?) {
+        reported.append((uuid, callerId, displayName))
+    }
+    private func recordName(_ uuid: UUID, _ displayName: String) { named.append((uuid, displayName)) }
     private func recordConnecting(_ uuid: UUID) { connecting.append(uuid) }
     private func recordConnected(_ uuid: UUID) { connected.append(uuid) }
     private func recordEnded(_ uuid: UUID, _ reason: CallKitBridge.EndReason) { ended.append((uuid, reason)) }
@@ -330,6 +345,59 @@ final class PushKitBridgeTests: XCTestCase {
 
         pushKit.matchIncomingCall(event, on: stack)
         XCTAssertEqual(pending.matchedCallHandle, 424242)
+    }
+
+    // MARK: - a push's payload, and the system's word on it
+
+    func testTheClearPayloadIsReadAndAnythingElseIsNothing() {
+        let fields = VoipPushFields(clear: [
+            "caller": "sip:alice@sipral.invalid", "call-id": "a84b4c76e66710", "name": "Alice Liddell", "kind": "call",
+        ])
+        XCTAssertEqual(
+            fields,
+            VoipPushFields(callerId: "sip:alice@sipral.invalid", callId: "a84b4c76e66710", displayName: "Alice Liddell")
+        )
+        XCTAssertEqual(fields.push?.displayName, "Alice Liddell")
+        let sealed = VoipPushFields(clear: ["box": "q9cXg2A=", "caller": "", "name": 7])
+        XCTAssertEqual(sealed, VoipPushFields())
+        XCTAssertNil(sealed.push, "no caller, nothing to announce")
+    }
+
+    func testAPushWithANameShowsItAndOneTheSystemNeedNotSeeIsNotShown() async throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = RecordingProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let fields = VoipPushFields(callerId: "sip:alice@sipral.invalid", displayName: "Alice Liddell")
+
+        let quiet = await pushKit.receive(fields, mustReport: false, account: account)
+        guard case .notShown(let named) = quiet else { return XCTFail("\(quiet)") }
+        XCTAssertEqual(named?.callerId, "sip:alice@sipral.invalid")
+        let nothing = await provider.reported
+        XCTAssertTrue(nothing.isEmpty, "a push the system did not ask to see was shown")
+
+        let shown = await pushKit.receive(fields, account: account)
+        guard case .shown(let pending) = shown else { return XCTFail("\(shown)") }
+        XCTAssertEqual(pending.displayName, "Alice Liddell")
+        let reported = await provider.reported
+        XCTAssertEqual(reported.map(\.displayName), ["Alice Liddell"])
+        XCTAssertEqual(reported.first?.uuid, pending.uuid)
+    }
+
+    /// A decoder that could not open the payload leaves nothing to announce:
+    /// the screen iOS requires is still shown, and ended at once.
+    func testAPushNothingCouldBeReadFromIsShownAndEnded() async throws {
+        let provider = RecordingProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let outcome = await pushKit.receive(nil, account: nil)
+        guard case .unusable = outcome else { return XCTFail("\(outcome)") }
+        let reported = await provider.reported
+        XCTAssertEqual(reported.map(\.callerId), ["Unknown"])
+        let ended = await eventually(within: 5) { await provider.ended.count == 1 }
+        XCTAssertTrue(ended)
+        let reason = await provider.ended.first?.reason
+        XCTAssertEqual(reason, .failed)
     }
 }
 

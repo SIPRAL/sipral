@@ -25,9 +25,13 @@ final class FakeRegistrar: @unchecked Sendable {
     private var open: [NWConnection] = []
     private var connections = 0
     let port: UInt16
+    /// The address it listens on: loopback, unless told another of this
+    /// machine's.
+    let host: String
 
-    init(identity: SecIdentity? = nil, plainToTls: Bool = false) throws {
+    init(identity: SecIdentity? = nil, plainToTls: Bool = false, host: String = "127.0.0.1") throws {
         self.plainToTls = plainToTls
+        self.host = host
         let tcp = NWProtocolTCP.Options()
         let parameters: NWParameters
         if let identity {
@@ -37,7 +41,7 @@ final class FakeRegistrar: @unchecked Sendable {
         } else {
             parameters = NWParameters(tls: nil, tcp: tcp)
         }
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: .any)
         listener = try NWListener(using: parameters)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in
@@ -53,7 +57,7 @@ final class FakeRegistrar: @unchecked Sendable {
         accepted = { [weak self] connection in self?.serve(connection) }
     }
 
-    var address: String { "127.0.0.1:\(port)" }
+    var address: String { "\(host):\(port)" }
 
     var requests: [(connection: Int, message: String)] { lock.withLock { _requests } }
 

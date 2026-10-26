@@ -159,6 +159,18 @@ public struct CallerIdentity: Sendable, Equatable {
     public let isup: IsupCaller?
 }
 
+extension CallEventData {
+    /// The name to show for whoever is calling, from an `.incomingCall`:
+    /// the asserted identity's display name, which only a peer the account
+    /// trusts gives (RFC 3325), else the `From`'s; `nil` when neither names
+    /// anyone. `PushKitBridge` shows it on a pushed screen whose push gave
+    /// no name; for a call that came without a push, it is the
+    /// `displayName` to give `CallKitBridge.reportIncomingCall`.
+    public var callerName: String? {
+        [assertedDisplay, fromDisplay].lazy.compactMap { $0 }.first { !$0.isEmpty }
+    }
+}
+
 /// How a call asked to be answered (RFC 5373) and rung (`Alert-Info`). Whether
 /// to answer without the person is the application's policy; this is what
 /// the caller asked for.

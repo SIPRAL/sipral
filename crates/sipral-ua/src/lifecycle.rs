@@ -542,6 +542,9 @@ impl UserAgent {
     /// An account on its own connection ([`crate::Account::on_stream`])
     /// ignores a `transport` of another protocol and keeps (or waits for) a
     /// connection of its own protocol, so nothing meant for TLS goes in clear.
+    /// One whose connection to the same server is asked for and not bound
+    /// yet goes on waiting for that one: the REGISTER held for it goes when
+    /// it is bound, with this `contact`.
     ///
     /// If a want-rung is waiting, the next rung is climbed at once.
     ///
@@ -559,10 +562,11 @@ impl UserAgent {
             .accounts
             .get_mut(&account)
             .ok_or(UaError::NoSuchAccount)?;
+        let moved = config.remote != remote;
         config.transport = transport;
         config.remote = remote;
         config.contact = contact.clone();
-        self.keep_own_flow(account, transport);
+        self.keep_own_flow(account, transport, moved);
         if matches!(
             self.life.last(),
             Some(Rung::WantTransport | Rung::WantAddress)

@@ -857,6 +857,40 @@ public final class SipralStack: @unchecked Sendable {
         return tlsTrust
     }
 
+    /// The name the certificate of a TLS connection to `destination` must
+    /// carry: `tlsServerName` when given, else the host of the server URI of
+    /// the account located there (RFC 5922 §7.3: the domain configured, not
+    /// the host or address SRV and the lookup turned it into), else the
+    /// address connected to, as the C networking component has it.
+    private func streamServerName(to destination: String) -> String {
+        if let givenTlsServerName { return givenTlsServerName }
+        let located = movingQueue.sync {
+            accounts.values.first {
+                ($0.streamProtocol == .tls || $0.streamProtocol == .wss) && $0.registrarAddress == destination
+                    && $0.serverUri != nil
+            }
+        }
+        return located?.serverUri.flatMap(Self.serverName(of:)) ?? UDPSocket.parse(destination).host
+    }
+
+    /// The host of a SIP or SIPS URI when it is a name; `nil` for an address
+    /// or a URI with no host.
+    static func serverName(of uri: String) -> String? {
+        guard let colon = uri.firstIndex(of: ":") else { return nil }
+        var rest = uri[uri.index(after: colon)...]
+        if let at = rest.lastIndex(of: "@") {
+            rest = rest[rest.index(after: at)...]
+        }
+        if let end = rest.firstIndex(where: { $0 == ";" || $0 == "?" }) {
+            rest = rest[..<end]
+        }
+        // a bracketed IPv6 reference is an address
+        guard !rest.hasPrefix("[") else { return nil }
+        let host = rest.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        guard !host.isEmpty, !isAddress("\(host):5061") else { return nil }
+        return host
+    }
+
     /// The certificate the account with its own TLS connection to that
     /// server presents: its own if it has one, else the stack's.
     private func streamIdentity(to destination: String) -> ClientIdentity? {
@@ -881,7 +915,7 @@ public final class SipralStack: @unchecked Sendable {
         do {
             made = try SignallingConnection(
                 server: server, bindHost: signallingQueue.sync { linkHost }, transport: over,
-                serverName: over == .tls ? givenTlsServerName ?? UDPSocket.parse(server).host : UDPSocket.parse(server).host,
+                serverName: over == .tls ? streamServerName(to: destination) : UDPSocket.parse(server).host,
                 trust: over == .tls ? streamTrust(to: destination) : .platform,
                 identity: over == .tls ? streamIdentity(to: destination) : nil, patienceMs: Self.patienceMs
             )
@@ -1258,8 +1292,10 @@ public final class SipralStack: @unchecked Sendable {
     /// `streamProtocol` (`.tcp`, `.tls`, `.ws` or `.wss`) gives the account its
     /// own connection to its server, beside UDP accounts on the same stack;
     /// its REGISTER and calls go over it. TLS checks `tlsPin` if set, else the
-    /// stack's `tlsTrust`, and presents `tlsClientIdentity` if set, else the
-    /// stack's, when the server asks for a client certificate. A closed
+    /// stack's `tlsTrust` for the stack's `tlsServerName`, else the host of
+    /// `serverUri` (RFC 5922 §7.3: the SIP domain, not the address SRV led
+    /// to), else the address connected to, and presents `tlsClientIdentity`
+    /// if set, else the stack's, when the server asks for a client certificate. A closed
     /// connection is reopened; until open, a call throws `.transportDown`. Only on a UDP stack; other values throw
     /// `.invalidArgument`. `.ws`/`.wss` run a WebSocket (RFC 7118) asking for
     /// `websocketResource` (`/ws`) with `websocketHost` as `Host` (the
@@ -1273,6 +1309,19 @@ public final class SipralStack: @unchecked Sendable {
     ///
     /// `push` puts RFC 8599's `pn-*` parameters on every REGISTER's
     /// `Contact` (`SipralPush`); `Account.pushEcho()` reads the answer.
+    ///
+    /// `instanceId` is the `+sip.instance` URN of RFC 5626 §4.1
+    /// (`urn:uuid:...`, angle brackets optional), on the `Contact` of every
+    /// REGISTER, de-registration included: kept across launches, it lets the
+    /// registrar replace this device's binding instead of adding another, and
+    /// a push proxy that requires it refuses a REGISTER without it. `headers`
+    /// go on every REGISTER of the account, in order: the first, the one
+    /// answering a challenge, each refresh and the de-registration. They are
+    /// checked as `placeCall(headers:)`'s are: `Expires` is the stack's
+    /// (`expiresSeconds`), a `Supported` is the application's, merged with
+    /// the `gruu` an `instanceId` brings (RFC 5627 §4.1), and an account
+    /// without a `registrar` sends no REGISTER, so given any it throws
+    /// `.invalidArgument`.
     public func addAccount(
         aor: String,
         registrarAddress: String? = nil,
@@ -1289,7 +1338,9 @@ public final class SipralStack: @unchecked Sendable {
         displayName: String? = nil,
         authUser: String? = nil,
         authPassword: String? = nil,
+        instanceId: String? = nil,
         expiresSeconds: UInt64 = 0,
+        headers: [SipralHeader] = [],
         sessionTimer: SessionTimer = .default,
         privacy: Privacy = [],
         trustedPeers: [String] = [],
@@ -1333,7 +1384,9 @@ public final class SipralStack: @unchecked Sendable {
             displayName: displayName,
             authUser: authUser,
             authPassword: authPassword,
+            instanceId: instanceId,
             expiresSeconds: expiresSeconds,
+            headers: headers,
             sessionTimer: sessionTimer,
             privacy: privacy,
             trustedPeers: trustedPeers,
@@ -2300,9 +2353,11 @@ public final class SipralStack: @unchecked Sendable {
             drainStun()
             drainFarewells()
             actOnTurnStreams()
+            // where a server was located before any connection to it is
+            // opened: the connection finds its account's pin and name by it
+            actOnLookups()
             actOnStreamsWanted()
             actOnMainLetGo()
-            actOnLookups()
         }
         closedSemaphore.signal()
     }
