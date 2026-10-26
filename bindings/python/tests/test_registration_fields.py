@@ -40,6 +40,7 @@ class _Registrar:
         self._udp.settimeout(0.05)
         self.address = f"127.0.0.1:{self._udp.getsockname()[1]}"
         self.registers: list[str] = []
+        self._seen: set[str | None] = set()
         self._stop = threading.Event()
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -52,7 +53,11 @@ class _Registrar:
             text = data.decode("utf-8", "replace")
             if not text.startswith("REGISTER "):
                 continue
-            self.registers.append(text)
+            # written down once: a stack slowed down retransmits before the
+            # answer lands, and the repeat is answered as what it repeats
+            if _header("CSeq", text) not in self._seen:
+                self._seen.add(_header("CSeq", text))
+                self.registers.append(text)
             lines = []
             for name in ("Via", "From", "To", "Call-ID", "CSeq"):
                 value = _header(name, text)

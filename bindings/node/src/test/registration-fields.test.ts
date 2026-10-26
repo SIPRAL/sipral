@@ -5,7 +5,8 @@
 // REGISTER it sends: a push proxy (RFC 8599) refuses one whose `Contact` has
 // no `+sip.instance`. A loopback registrar challenges the first REGISTER,
 // grants the answer for a few seconds so the refresh comes soon, and keeps
-// every REGISTER, the de-registration included.
+// every REGISTER once, the de-registration included, a retransmission
+// answered as the request it repeats.
 
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
@@ -22,12 +23,17 @@ let registers: string[] = [];
 beforeEach(async () => {
   stacks = [];
   registers = [];
+  const seen = new Set<string | null>();
   registrar = await Peer.open();
   registrar.responder = (message) => {
     if (!message.startsWith('REGISTER ')) {
       return null;
     }
-    registers.push(message);
+    // a stack slowed down retransmits before the answer lands
+    if (!seen.has(header('CSeq', message))) {
+      seen.add(header('CSeq', message));
+      registers.push(message);
+    }
     if (header('Authorization', message) === null && registers.length === 1) {
       return answer(message, '401 Unauthorized', 'registrar', 'WWW-Authenticate: Digest realm="example.com", nonce="n1", qop="auth"\r\n');
     }

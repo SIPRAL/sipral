@@ -35,6 +35,7 @@ Copyright (c) 2026 Sytek
 - [Voice-agent services](docs/24-voice-agents.md)
 - [A network test before the call](docs/25-network-test.md)
 - [The networking component](docs/26-network.md)
+- [Sipral from C++](docs/27-cpp.md)
 
 # Repository
 

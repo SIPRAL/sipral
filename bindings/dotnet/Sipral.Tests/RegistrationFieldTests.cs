@@ -21,7 +21,8 @@ namespace Sipral.Tests;
 /// <c>headers</c>) on every REGISTER: a push proxy (RFC 8599) refuses one
 /// whose <c>Contact</c> has no <c>+sip.instance</c>. A loopback registrar
 /// challenges the first REGISTER, grants the answer for a few seconds so the
-/// refresh comes soon, and writes down every REGISTER.
+/// refresh comes soon, and writes down every REGISTER once, a retransmission
+/// answered as the request it repeats.
 /// </summary>
 public sealed class RegistrationFieldTests
 {
@@ -37,6 +38,7 @@ public sealed class RegistrationFieldTests
     {
         private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
         private readonly Thread _thread;
+        private readonly HashSet<string> _seen = new();
         private volatile bool _stopped;
 
         public Registrar()
@@ -74,7 +76,11 @@ public sealed class RegistrationFieldTests
                 {
                     continue;
                 }
-                Registers.Enqueue(message);
+                // a stack slowed down retransmits before the answer lands
+                if (_seen.Add(Header("CSeq", message) ?? string.Empty))
+                {
+                    Registers.Enqueue(message);
+                }
                 var lines = new List<string>();
                 foreach (var name in new[] { "Via", "From", "To", "Call-ID", "CSeq" })
                 {

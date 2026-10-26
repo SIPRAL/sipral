@@ -5,7 +5,8 @@
 // REGISTER it sends: a push proxy (RFC 8599) refuses one whose `Contact` has
 // no `+sip.instance`. A loopback registrar challenges the first REGISTER,
 // grants the answer for a few seconds so the refresh comes soon, and writes
-// down every REGISTER, the de-registration included.
+// down every REGISTER once, the de-registration included, a retransmission
+// answered as the request it repeats.
 
 import 'dart:convert';
 import 'dart:io';
@@ -31,7 +32,10 @@ final class Registrar {
       if (!message.startsWith('REGISTER ')) {
         return;
       }
-      registers.add(message);
+      // a stack slowed down retransmits before the answer lands
+      if (_seen.add(reach.header('CSeq', message) ?? '')) {
+        registers.add(message);
+      }
       final lines = <String>[];
       for (final name in ['Via', 'From', 'To', 'Call-ID', 'CSeq']) {
         final value = reach.header(name, message) ?? '';
@@ -70,6 +74,7 @@ final class Registrar {
   );
 
   final RawDatagramSocket _socket;
+  final _seen = <String>{};
   final registers = <String>[];
 
   String get address => '127.0.0.1:${_socket.port}';
