@@ -820,8 +820,17 @@ class Stack:
         websocket_host: str | None = None,
         websocket_resource: str | None = None,
         webrtc: bool = False,
+        instance_id: str | None = None,
+        headers=None,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
+
+        ``instance_id`` is the RFC 5626 Section 4.1 ``+sip.instance`` URN
+        (``urn:uuid:...``), put on the `Contact` of every REGISTER: a push
+        proxy (RFC 8599) refuses a REGISTER without it. ``headers`` (pairs or a
+        mapping) go on every REGISTER of the account, the answer to a
+        challenge, the refresh and the de-registration included; `Expires` is
+        the stack's (``expires_seconds``), and they need a ``registrar``.
 
         ``realms`` the password answers (RFC 3261 Section 22.1). Left out: the
         realm the server first challenges with plus every REGISTER realm; an
@@ -929,6 +938,8 @@ class Stack:
             recording_in_clear=recording_in_clear,
             realms=realms,
             webrtc=webrtc,
+            instance_id=instance_id,
+            headers=headers,
         )
         account.tls_client_certificate = tls_client_certificate
         with self._lock:

@@ -367,6 +367,12 @@ final class SipralStack {
   /// server asks for one; the stack's `clientCertificate` when null. A
   /// refusal is `SipralEventKind.transportFailed` with
   /// [SipralStackEvent.tlsFailure] saying why.
+  ///
+  /// [instanceId] is the RFC 5626 §4.1 `+sip.instance` URN (`urn:uuid:...`)
+  /// on the `Contact` of every REGISTER: a push proxy (RFC 8599) refuses a
+  /// REGISTER without it. [headers] go on every REGISTER of the account, the
+  /// answer to a challenge, the refresh and the de-registration included;
+  /// `Expires` is the stack's, and they need a [registrar].
   SipralAccount addAccount(
     String aor, {
     String? registrarAddress,
@@ -385,6 +391,8 @@ final class SipralStack {
     String? websocketResource,
     bool webrtc = false,
     SipralClientCertificate? clientCertificate,
+    String? instanceId,
+    List<(String, String)> headers = const [],
   }) {
     _ensureOpen();
     if ((registrarAddress == null) == (serverUri == null)) {
@@ -438,6 +446,18 @@ final class SipralStack {
       );
       final websocketHostText = _text(arena, websocketHost);
       final websocketResourceText = _text(arena, websocketResource);
+      final instanceText = _text(arena, instanceId);
+      final fields = arena<SipralHeader>(headers.isEmpty ? 1 : headers.length);
+      for (var index = 0; index < headers.length; index++) {
+        final (name, value) = headers[index];
+        final nameText = _text(arena, name);
+        final valueText = _text(arena, value);
+        fields[index]
+          ..name = nameText.$1
+          ..nameLen = nameText.$2
+          ..value = valueText.$1
+          ..valueLen = valueText.$2;
+      }
       config.ref
         ..size = ffi.sizeOf<SipralAccountConfig>()
         ..aor = aorText.$1
@@ -467,7 +487,11 @@ final class SipralStack {
         ..websocketHostLen = websocketHostText.$2
         ..websocketResource = websocketResourceText.$1
         ..websocketResourceLen = websocketResourceText.$2
-        ..webrtc = webrtc ? SipralToggle.on : 0;
+        ..webrtc = webrtc ? SipralToggle.on : 0
+        ..instanceId = instanceText.$1
+        ..instanceIdLen = instanceText.$2
+        ..headers = headers.isEmpty ? ffi.nullptr : fields
+        ..headersLen = headers.length;
       final out = arena<SipralHandle>();
       _check(
         _sipral,

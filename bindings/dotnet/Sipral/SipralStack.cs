@@ -857,7 +857,16 @@ public sealed partial class SipralStack : IDisposable
     /// 3261 §22.1). By default: the server's first challenge realm and every
     /// REGISTER challenge realm. An SBC challenging calls under its own realm
     /// needs both named. Other challenges go unanswered, reported as
-    /// <see cref="SipralEventKind.ChallengeDeclined"/>.</summary>
+    /// <see cref="SipralEventKind.ChallengeDeclined"/>.
+    ///
+    /// <paramref name="instanceId"/> is the RFC 5626 §4.1
+    /// <c>+sip.instance</c> URN (<c>urn:uuid:...</c>) on the <c>Contact</c> of
+    /// every REGISTER: a push proxy (RFC 8599) refuses a REGISTER without
+    /// it. <paramref name="headers"/> go on every REGISTER of the account,
+    /// the answer to a challenge, the refresh and the de-registration
+    /// included; <c>Expires</c> is the stack's
+    /// (<paramref name="expiresSeconds"/>), and they need a
+    /// <paramref name="registrar"/>.</summary>
     public Account AddAccount(
         string aor,
         string? registrarAddress = null,
@@ -880,7 +889,9 @@ public sealed partial class SipralStack : IDisposable
         IEnumerable<string>? realms = null,
         string? websocketHost = null,
         string? websocketResource = null,
-        SipralClientCertificate? tlsClientCertificate = null)
+        SipralClientCertificate? tlsClientCertificate = null,
+        string? instanceId = null,
+        IEnumerable<(string Name, string Value)>? headers = null)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
@@ -900,7 +911,7 @@ public sealed partial class SipralStack : IDisposable
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
             sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
             new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
-                websocketHost, websocketResource, tlsClientCertificate));
+                websocketHost, websocketResource, tlsClientCertificate, instanceId, headers?.ToArray()));
         lock (_accounts)
         {
             _accounts.Add(account);

@@ -1863,6 +1863,70 @@ fn every_register_after_a_challenge_carries_a_higher_cseq() {
     assert_eq!(cseq_of(&goodbye), 4, "and the un-REGISTER the fourth");
 }
 
+#[test]
+fn the_instance_and_the_accounts_own_fields_ride_on_every_register_it_sends() {
+    // a push proxy (RFC 8599) that needs RFC 5626's +sip.instance refuses a
+    // REGISTER without it, so the first, the answer to a challenge, the
+    // refresh and the un-REGISTER all have to carry it, and the account's
+    // own fields with it
+    const URN: &str = "urn:uuid:f81d4fae-7ced-11d0-a765-00a0c91e6bf6";
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(
+        account()
+            .credentials(Credentials::new("alice", "open sesame"))
+            .instance_id(URN)
+            .header(HeaderName::Extension("X-Push-Key"), b"k-17"),
+    );
+    agent.register(id, t0).expect("the REGISTER goes");
+    let first = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(&first, 401, "Unauthorized", REGISTRAR_CHALLENGE),
+        t0,
+    );
+    let retry = sent(&mut agent);
+    deliver(&mut agent, &granted(&retry, 3_600), t0);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &granted(&refresh, 3_600),
+        t0 + Duration::from_secs(3_060),
+    );
+    events(&mut agent);
+
+    agent
+        .unregister(id, t0 + Duration::from_secs(3_100))
+        .expect("the un-REGISTER goes");
+    let goodbye = sent(&mut agent);
+
+    for (which, request) in [
+        ("the first", &first),
+        ("the answer to the challenge", &retry),
+        ("the refresh", &refresh),
+        ("the un-REGISTER", &goodbye),
+    ] {
+        assert_eq!(
+            text(request, HeaderName::Extension("X-Push-Key")),
+            "k-17",
+            "{which} lost the account's field"
+        );
+        assert!(
+            text(request, HeaderName::Contact).contains(&format!("+sip.instance=\"<{URN}>\"")),
+            "{which} has no +sip.instance: {}",
+            text(request, HeaderName::Contact)
+        );
+    }
+    assert!(
+        text(&goodbye, HeaderName::Contact).contains("expires=0")
+            || text(&goodbye, HeaderName::Expires) == "0",
+        "the un-REGISTER asks for no binding"
+    );
+}
+
 /// The one the registrar in these tests makes.
 const REGISTRAR_CHALLENGE: &str =
     "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc123\", qop=\"auth\"\r\n";

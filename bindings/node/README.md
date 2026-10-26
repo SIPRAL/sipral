@@ -160,6 +160,10 @@ application's thread.
   `checkCertificate`, `rebind`, `retarget`, `freeze` and `thaw`, `announce`.
   An account added with `serverUri` is located through RFC 3263 with the
   stack's `resolver` -- the platform's lookup and DNS SRV/NAPTR by default.
+  `instanceId` puts RFC 5626's `+sip.instance` on the `Contact` of every
+  REGISTER, which a push proxy (RFC 8599) refuses to do without, and
+  `headers` go on every REGISTER: the first, the answer to a challenge, the
+  refresh and the de-registration.
 - **Calls:** `hold`, `resume`, `transfer`, `transferTo`, `join` (a three-way
   call mixed here), `hangupFor` (a `Reason`), `setHeaders`, `sendText` (RFC
   4103), `setFocus`, `conferenceUri`, `subscribeConference`, `recordTo` (RFC

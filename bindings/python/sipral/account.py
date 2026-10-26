@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence
 
 from ._sipral_cffi import ffi, lib
+from .call import header_array
 from .enums import Activity, RegistrationState
 from .errors import SipralError
 from .errors import call as _call
@@ -145,6 +146,8 @@ class Account:
         recording_in_clear: bool = False,
         realms: Sequence[str] | None = None,
         webrtc: bool = False,
+        instance_id: str | None = None,
+        headers=None,
     ) -> "Account":
         aor_bytes = aor.encode("utf-8")
         registrar_address_bytes = (registrar_address or "").encode("utf-8")
@@ -263,6 +266,16 @@ class Account:
         if websocket_resource_buf is not None:
             config.websocket_resource = websocket_resource_buf
             config.websocket_resource_len = len(websocket_resource_bytes)
+        instance_bytes = _optional(instance_id)
+        instance_buf = ffi.new("char[]", instance_bytes) if instance_bytes else None
+        if instance_buf is not None:
+            config.instance_id = instance_buf
+            config.instance_id_len = len(instance_bytes)
+        headers_kept = None
+        if headers:
+            headers_array, headers_kept = header_array(headers)
+            config.headers = headers_array
+            config.headers_len = len(headers_kept) // 2
 
         out_account = ffi.new("sipral_handle_t *")
         _call(

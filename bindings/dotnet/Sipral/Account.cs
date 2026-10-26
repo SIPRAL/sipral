@@ -17,7 +17,8 @@ internal sealed record AccountLocation(
     string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised,
     SipralTransport StreamProtocol = 0, IEnumerable<string>? Realms = null,
     string? WebsocketHost = null, string? WebsocketResource = null,
-    SipralClientCertificate? ClientCertificate = null);
+    SipralClientCertificate? ClientCertificate = null,
+    string? InstanceId = null, (string Name, string Value)[]? Headers = null);
 
 /// <summary>
 /// One <c>sipral_account_add</c> handle. Built through
@@ -169,8 +170,11 @@ public sealed class Account
         var displayNameBytes = displayName is null ? null : Encoding.UTF8.GetBytes(displayName);
         var authUserBytes = authUser is null ? null : Encoding.UTF8.GetBytes(authUser);
         var authPasswordBytes = authPassword is null ? null : Encoding.UTF8.GetBytes(authPassword);
+        var instanceBytes = location.InstanceId is null ? null : Encoding.UTF8.GetBytes(location.InstanceId);
 
         ulong accountHandle = 0;
+        using (var instancePin = Pin(instanceBytes))
+        using (var headers = new SipralHeaderArray(location.Headers))
         using (var aorPin = Pin(aorBytes))
         using (var registrarAddressPin = Pin(registrarAddressBytes))
         using (var registrarPin = Pin(registrarBytes))
@@ -278,6 +282,13 @@ public sealed class Account
             config.StirAttestation = (uint)security.StirAttestation;
             config.RecordingInClear = security.RecordingInClear ? (uint)SipralToggle.On : 0;
             config.Webrtc = security.Webrtc ? (uint)SipralToggle.On : 0;
+            if (instanceBytes is not null)
+            {
+                config.InstanceId = instancePin.Pointer;
+                config.InstanceIdLen = (nuint)instanceBytes.Length;
+            }
+            config.Headers = headers.Address;
+            config.HeadersLen = headers.Count;
 
             SipralErrors.Call(() => NativeMethods.sipral_account_add(stack.Handle, config, out accountHandle), "sipral_account_add");
         }
