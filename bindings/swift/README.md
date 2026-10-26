@@ -611,6 +611,19 @@ build reaches a TURN server over TCP with a plain socket, and refuses TLS.
 `Tests/SipralTests/TurnStreamTests.swift` proves both against a TURN server
 on a TCP port inside the test, over TLS with a certificate trusted and not.
 
+### A message hook
+
+`stack.setMessageHook { outgoing, message, remote in ... }` sees every SIP
+message whole, as `[UInt8]`, just before it is sent and just after it
+arrives, with the far end as `host:port`, and answers a `SipralHookVerdict`:
+`.keep`, `.replace(bytes)` (`Content-Length` must match the body) or
+`.drop`; `setMessageHook(nil)` removes it. An error the hook throws keeps
+the message. It runs inside the stack's lock: it must not call back into
+that stack, and should return quickly (`docs/03-core-signalling.md`, "A
+message hook"). `Tests/SipralTests/MessageHookTests.swift` proves a header
+added to an INVITE reaching a loopback PBX, a dropped answer never read and
+a throwing hook keeping the message.
+
 ### A REFER from outside any call
 
 `SipralStack(referrals: true)` hands a REFER that names no dialog —

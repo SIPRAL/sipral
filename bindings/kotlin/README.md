@@ -477,6 +477,19 @@ host part of `address` when null — with HTTPS endpoint identification, by
 self-signed server is trusted. `NatCheck.kt` proves it against a TURN server
 on a TCP port inside the check, over TLS with a certificate trusted and not.
 
+### A message hook
+
+`client.setMessageHook { outgoing, message, remote -> ... }` sees every SIP
+message whole, as a `ByteArray`, just before it is sent and just after it
+arrives, with the far end as `host:port`, and answers a
+`SipralHookVerdict`: `Keep`, `Replace(bytes)` (`Content-Length` must match
+the body) or `Drop`; `setMessageHook(null)` removes it. What the hook throws
+keeps the message. It runs inside the stack's lock, on the poll thread: it
+must not call back into that client, and should return quickly
+(`docs/03-core-signalling.md`, "A message hook"). `MessageHookCheck.kt`
+proves a header added to an INVITE reaching a loopback PBX, a dropped
+answer never read and a throwing hook keeping the message.
+
 ### A REFER from outside any call
 
 `SipralClient.open(referrals = true)` hands a REFER that names no dialog —
