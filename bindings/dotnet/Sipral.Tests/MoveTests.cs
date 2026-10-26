@@ -271,19 +271,21 @@ public sealed class MoveTests
     public void AStackOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove()
     {
         var elsewhere = OtherAddress();
+        // the default route, which may be a VPN's address and not elsewhere
+        var route = NatTests.RouteToward("192.0.2.1")!;
         using var stack = new SipralStack(audio: SipralAudio.Application);
         var port = stack.BindAddress[(stack.BindAddress.LastIndexOf(':') + 1)..];
         var away = stack.AddAccount("sip:alice@192.0.2.1", registrarAddress: "192.0.2.1:5060");
-        Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
+        Assert.Equal($"{route}:{port}", stack.BindAddress);
 
         stack.MoveTo(elsewhere);
         var here = stack.AddAccount("sip:bob@127.0.0.1", registrarAddress: "127.0.0.1:5060");
         Assert.Equal($"127.0.0.1:{port}", here.Advertised);
 
         stack.MoveTo("127.0.0.1");
-        Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
+        Assert.Equal($"{route}:{port}", stack.BindAddress);
         Assert.True(stack.KeptSignallingPort);
-        Assert.Equal($"{elsewhere}:{port}", away.Advertised);
+        Assert.Equal($"{route}:{port}", away.Advertised);
         Assert.Equal($"127.0.0.1:{port}", here.Advertised);
     }
 

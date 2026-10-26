@@ -60,20 +60,60 @@ _ALLOCATE_ERROR = 0x0113
 _REFRESH_REQUEST = 0x0004
 
 
+def _reachable(address: str) -> bool:
+    """Whether a datagram from loopback, and one from ``address`` itself,
+    arrive at ``address``: not so for a VPN's point-to-point address, which
+    holds the default route while no local socket can reach it."""
+    receiver = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+    senders = []
+    try:
+        receiver.bind((address, 0))
+        receiver.settimeout(0.5)
+        for source in ("127.0.0.1", address):
+            sender = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+            senders.append(sender)
+            sender.bind((source, 0))
+            sender.sendto(b"probe", receiver.getsockname())
+            if receiver.recv(16) != b"probe":
+                return False
+        return True
+    except OSError:
+        return False
+    finally:
+        receiver.close()
+        for sender in senders:
+            sender.close()
+
+
 def _routable_address() -> str | None:
-    """This host's default-route address, or ``None``.
+    """This host's default-route address, or ``None``; when a VPN tunnel holds
+    the default route on an address local sockets cannot reach, another of
+    this host's own addresses that they can.
 
     ICE excludes loopback host candidates (RFC 8445 Section 5.1.1.1). A UDP
     `connect` picks a source address without sending anything.
     """
+    candidates = []
     probe = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
     try:
         probe.connect(("203.0.113.1", 80))  # RFC 5737 TEST-NET-3: never dialled
-        return probe.getsockname()[0]
+        candidates.append(probe.getsockname()[0])
     except OSError:
-        return None
+        pass
     finally:
         probe.close()
+    try:
+        for *_, (address, _port) in socket_module.getaddrinfo(
+            socket_module.gethostname(), None, socket_module.AF_INET
+        ):
+            if address not in candidates:
+                candidates.append(address)
+    except OSError:
+        pass
+    return next(
+        (address for address in candidates if not address.startswith("127.") and _reachable(address)),
+        None,
+    )
 
 
 def _xor_address(transaction_id: bytes, host: str, port: int) -> bytes:

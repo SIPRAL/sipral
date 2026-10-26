@@ -672,22 +672,53 @@ public sealed class NatTests
     }
 
     /// <summary>This host's address on its default route, or
-    /// <see langword="null"/>. ICE excludes loopback candidates (RFC 8445
-    /// §5.1.1.1), so even two local stacks need a real address.
-    ///
-    /// A connected socket's local address is the route's, but on macOS
-    /// under load about one connect in a thousand reports 0.0.0.0 instead
-    /// (the library's own route lookup asks again for the same reason): a
-    /// stack bound there offers ICE nothing usable and the call is refused.
-    /// That answer is no answer, and the route is asked again.</summary>
+    /// <see langword="null"/>; when a VPN tunnel holds the default route on
+    /// an address no local socket can reach, another of this host's own
+    /// addresses that they can. ICE excludes loopback candidates (RFC 8445
+    /// §5.1.1.1), so even two local stacks need a real address.</summary>
     internal static string? RoutableAddress()
+    {
+        var candidates = new List<IPAddress>();
+        if (RouteToward("203.0.113.1") is { } route) // RFC 5737 TEST-NET-3: never dialled
+        {
+            candidates.Add(IPAddress.Parse(route));
+        }
+        foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up)
+            {
+                continue;
+            }
+            foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+            {
+                var address = unicast.Address;
+                if (address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address)
+                    && !candidates.Contains(address))
+                {
+                    candidates.Add(address);
+                }
+            }
+        }
+        return candidates.FirstOrDefault(Reachable)?.ToString();
+    }
+
+    /// <summary>The source address the system picks toward
+    /// <paramref name="address"/>, or <see langword="null"/>; a connected UDP
+    /// socket sends nothing.
+    ///
+    /// On macOS under load about one connect in a thousand reports 0.0.0.0
+    /// instead (the library's own route lookup asks again for the same
+    /// reason): a stack bound there offers ICE nothing usable and the call
+    /// is refused. That answer is no answer, and the route is asked
+    /// again.</summary>
+    internal static string? RouteToward(string address)
     {
         for (var attempt = 0; attempt < 20; attempt++)
         {
             try
             {
                 using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-                probe.Connect("203.0.113.1", 80); // RFC 5737 TEST-NET-3: never dialled
+                probe.Connect(address, 5060);
                 var local = ((IPEndPoint)probe.LocalEndPoint!).Address;
                 if (!local.Equals(IPAddress.Any))
                 {
@@ -700,5 +731,35 @@ public sealed class NatTests
             }
         }
         return null;
+    }
+
+    /// <summary>Whether a datagram from loopback, and one from
+    /// <paramref name="address"/> itself, arrive at it: not so for a VPN's
+    /// point-to-point address, which holds the default route while no local
+    /// socket can reach it.</summary>
+    private static bool Reachable(IPAddress address)
+    {
+        try
+        {
+            using var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            receiver.Bind(new IPEndPoint(address, 0));
+            receiver.ReceiveTimeout = 500;
+            foreach (var source in new[] { IPAddress.Loopback, address })
+            {
+                using var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                sender.Bind(new IPEndPoint(source, 0));
+                sender.SendTo("probe"u8.ToArray(), receiver.LocalEndPoint!);
+                var buffer = new byte[16];
+                if (receiver.Receive(buffer) != 5)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
     }
 }

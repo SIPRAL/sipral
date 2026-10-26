@@ -2983,15 +2983,34 @@ step_secrets() {
 # lockfiles, but also npm, NuGet, Maven and Python, which cargo deny never
 # reads. The database moves while the code stands still, so this is a tree
 # check that runs on every invocation, the release one included.
+#
+# Each lockfile and manifest the tree carries is named to the scanner rather
+# than found by walking the tree: a walk honours .gitignore from the
+# repository's top, so a checkout inside a directory that repository ignores
+# (a git worktree under .claude/) found nothing at all and failed as if
+# something were vulnerable.
 step_vulnerabilities() {
     step "known vulnerabilities"
     if command -v osv-scanner >/dev/null 2>&1; then
-        local out
-        if out="$(osv-scanner scan source -r --config "$ROOT/osv-scanner.toml" "$ROOT" 2>&1)"; then
-            pass "osv-scanner"
-        else
+        local out lockfile
+        local lockfiles=()
+        while IFS= read -r lockfile; do
+            lockfiles+=(-L "$ROOT/$lockfile")
+        done < <(git -C "$ROOT" ls-files --cached --others --exclude-standard -- \
+            '*Cargo.lock' '*package-lock.json' '*yarn.lock' '*pnpm-lock.yaml' '*pom.xml' \
+            '*.csproj' '*packages.lock.json' '*pubspec.lock' '*Package.resolved' \
+            '*requirements*.txt' '*poetry.lock' '*uv.lock' '*go.sum' '*Gemfile.lock' '*gradle.lockfile' \
+            | sort -u)
+        if [ "${#lockfiles[@]}" -eq 0 ]; then
+            fail "osv-scanner: no lockfile or manifest in the tree to scan"
+        elif out="$(osv-scanner scan source --config "$ROOT/osv-scanner.toml" "${lockfiles[@]}" 2>&1)"; then
+            pass "osv-scanner, $((${#lockfiles[@]} / 2)) lockfiles and manifests"
+        elif printf '%s\n' "$out" | found -E '^\| https://osv.dev'; then
             printf '%s\n' "$out" | grep -E '^\| https://osv.dev|^Total' | sed 's/^/        /'
             fail "osv-scanner: a dependency has a known vulnerability (osv-scanner.toml sets one aside, with its reason)"
+        else
+            printf '%s\n' "$out" | tail -5 | sed 's/^/        /'
+            fail "osv-scanner did not finish its scan"
         fi
     else
         fail "osv-scanner not installed: brew install osv-scanner"

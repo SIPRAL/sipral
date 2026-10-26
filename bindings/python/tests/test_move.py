@@ -22,17 +22,7 @@ from sipral import SipralError, Stack
 from sipral._sipral_cffi import lib
 from sipral.enums import AudioMode, EventKind, Recovery, SrtpSuite, Status
 
-
-def _routable_address() -> str | None:
-    """This host's default-route address; a UDP `connect` sends nothing."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("203.0.113.1", 80))  # RFC 5737 TEST-NET-3: never dialled
-        return probe.getsockname()[0]
-    except OSError:
-        return None
-    finally:
-        probe.close()
+from .test_nat import _routable_address
 
 
 def _loud(pcm: bytes) -> bool:
@@ -155,6 +145,17 @@ class ACallMovesWithTheNetwork(_Pair):
         self.assertEqual(call.media_address, moved, "a refused move keeps the socket it had")
 
 
+def _route_toward(address: str) -> str:
+    """The source address the system picks toward ``address``; a UDP
+    `connect` sends nothing."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect((address, 5060))
+        return probe.getsockname()[0]
+    finally:
+        probe.close()
+
+
 def _free_port(host: str) -> int:
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -215,10 +216,12 @@ class TheSignallingPortSurvivesAMove(unittest.TestCase):
 
 
     def test_a_stack_on_every_interface_keeps_choosing_its_route_across_a_move(self) -> None:
+        # the default route, which may be a VPN's address and not self.host
+        route = _route_toward("192.0.2.1")
         with Stack(audio=AudioMode.APPLICATION) as stack:
             port = stack.bind_address.rsplit(":", 1)[1]
             away = stack.add_account("sip:alice@192.0.2.1", registrar_address="192.0.2.1:5060")
-            self.assertEqual(stack.bind_address, f"{self.host}:{port}")
+            self.assertEqual(stack.bind_address, f"{route}:{port}")
 
             stack.move_to(self.host)
             here = stack.add_account("sip:bob@127.0.0.1", registrar_address="127.0.0.1:5060")
@@ -227,11 +230,11 @@ class TheSignallingPortSurvivesAMove(unittest.TestCase):
             stack.move_to("127.0.0.1")
             self.assertEqual(
                 stack.bind_address,
-                f"{self.host}:{port}",
+                f"{route}:{port}",
                 "the route toward the first account's server, not the address the move named",
             )
             self.assertTrue(stack.kept_signalling_port)
-            self.assertEqual(away.advertised, f"{self.host}:{port}")
+            self.assertEqual(away.advertised, f"{route}:{port}")
             self.assertEqual(here.advertised, f"127.0.0.1:{port}")
 
 
