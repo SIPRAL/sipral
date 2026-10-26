@@ -1372,6 +1372,63 @@ bridge_stop() {
     docker rm -f "$BRIDGE_NAME" "$BRIDGE_AGENT_NAME" >/dev/null 2>&1
 }
 
+# The message hook on the wire (docs/03-core-signalling.md, "A message
+# hook"): interop/hook/hooked.py registers as labuser-agent through the
+# Python layer with a hook that adds X-Lab-Hook to every request it sends,
+# sets Max-Forwards to 42 and takes Expires away from the REGISTER that asks
+# for a binding (not from the one that asks for zero), and reads the
+# registrar's answers before the stack does. Asterisk's message log, on for
+# the run, is the wire: a REGISTER it received has to carry the added header
+# and the changed value, and one of them no Expires.
+hook_flow() {
+    local beside log seen mark
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    mark=$( ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) | wc -l)
+    ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger on' ) >/dev/null 2>&1
+    log=$(lab_run "the hooked Python layer" $((LAB_START_APT_S + 60)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_LIBRARY=/lib-sipral \
+        -e PYTHONPATH=/python \
+        -e SIPRAL_AOR=sip:labuser-agent@asterisk \
+        -e SIPRAL_REGISTRAR=sip:asterisk \
+        -e SIPRAL_AUTH_USER=labuser-agent -e SIPRAL_AUTH_PASSWORD=labpass \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        -v "$ROOT/interop/hook:/hook:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            SIPRAL_REGISTRAR_ADDRESS="$address:5060" exec python3 -u /hook/hooked.py' 2>&1)
+    ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger off' ) >/dev/null 2>&1
+    # the REGISTERs Asterisk received, each from its "Received SIP request"
+    # banner to the next banner, the compose prefix and Asterisk's time taken off
+    seen=$( ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) | tail -n +"$((mark + 1))" \
+        | sed 's/^[^|]*| //; s/^\[[^]]*\] //' \
+        | awk '/<--- (Received|Transmitting) SIP/ { keep = ($0 ~ /Received SIP request/); first = 1; next }
+               keep && first { keep = ($0 ~ /^REGISTER /); first = 0 }
+               keep { print }')
+    printf '%s\n' "$log" | sed 's/^/    /'
+    printf '%s\n' "$seen" | grep -E 'REGISTER sip:|X-Lab-Hook|Max-Forwards|Expires' \
+        | sed 's/^/    asterisk: /'
+    printf '%s\n' "$log" | found '^out REGISTER rewritten, Expires taken away$' \
+        || { printf '  the hook never took Expires out of a REGISTER\n'; return 1; }
+    printf '%s\n' "$log" | found -E '^in SIP/2.0 (401|200) ' \
+        || { printf '  the hook never read an answer to the REGISTER\n'; return 1; }
+    printf '%s\n' "$log" | found '^registered$' && printf '%s\n' "$log" | found '^unregistered$' \
+        || { printf '  it did not register and unregister through the hook\n'; return 1; }
+    printf '%s\n' "$seen" | found 'X-Lab-Hook: added' \
+        || { printf '  the added header never reached Asterisk\n'; return 1; }
+    printf '%s\n' "$seen" | found 'Max-Forwards: 42' \
+        || { printf '  the changed Max-Forwards never reached Asterisk\n'; return 1; }
+    # each REGISTER on one line: one of them has to have come without Expires
+    printf '%s\n' "$seen" | awk '/^REGISTER / { if (n) print line; line = ""; n = 1 } { line = line "|" $0 } END { if (n) print line }' \
+        | grep -v -i '|Expires:' | found 'X-Lab-Hook: added' \
+        || { printf '  every REGISTER reached Asterisk with an Expires the hook took away\n'; return 1; }
+}
+
 # One call through the bridge, with the Python layer's agent.py as the voice
 # agent, listening and never registering. [agent-call] plays a tone and
 # dials "12#"; the agent echoes, hears the "#" through the bridge and hangs
@@ -3893,6 +3950,9 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
         step "the Python example agent, called by Asterisk"
         python_agent && pass "agent.py answered, echoed and hung up" \
             || fail "agent.py"
+        step "the message hook on the wire, through the Python layer"
+        hook_flow && pass "a REGISTER rewritten by the hook reached Asterisk with a header added, Max-Forwards changed and a field taken away; the answers were read through the hook, registered and unregistered" \
+            || fail "the message hook"
     fi
     step "the socket-framed agent, called by Asterisk"
     headless_socket_agent && pass "headless-socket-agent answered, echoed and carried DTMF" \
