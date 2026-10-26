@@ -106,7 +106,7 @@ October 2026, released.
 - LiveCommunicationKit on iOS *(done)*
 - The Rust API promised between releases and published on crates.io, checked on every change *(done)*
 
-### 1.3 — On real phones, and on WebRTC lines
+### 1.3 — Real phones, browsers and carrier trunks, ahead of schedule
 
 November 2026, planned.
 
@@ -118,27 +118,22 @@ November 2026, planned.
 - A cold start after a push in Swift and Kotlin, as in .NET MAUI: the woken app resumes its account rather than registering from scratch *(done)*
 - Android transactional Telecom API (API 34 and later) beside the self-managed ConnectionService *(done)*
 - Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH *(done)*
-
-### 1.4 — Browsers and the telephone network
-
-December 2026, planned.
-
 - Trickle ICE (RFC 8838, RFC 8840): candidates sent as they are found, so a call is set up sooner *(done)*
-- An audio call to and from a browser over WebRTC, through a SIP over WebSocket server, proven in the lab
+- An audio call to and from a browser over WebRTC, through a SIP over WebSocket server, proven in the lab *(done)*
 - SIP-T and SIP-I: the ISUP a carrier gateway carries inside SIP (RFC 3204, RFC 3372) read and written *(done)*
 - Calling number, redirection and release cause taken from the ISUP when a gateway sends them *(done)*
 - SIP-T and SIP-I calls proven against a carrier-style gateway in the lab *(done)*
+- A client certificate on SIP over TLS, signed by the platform: Secure Enclave on iOS, Android Keystore, the Keychain on macOS, CNG on Windows *(done)*
+- The same certificate in the C ABI and in the Swift, Kotlin, .NET, Python, Dart and Node bindings *(done)*
+- Proven against an Asterisk that requires a client certificate, at TLS 1.3 and 1.2, in the lab *(done)*
+
+### 1.4 — Embedding without a binding
+
+December 2026, planned.
+
 - Networking ready to use from Rust and C: sockets, TLS and NAPTR/SRV lookups in one optional component, so an application without a binding no longer writes its own
 - A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller
 - A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding
-
-### 1.5 — Keys that never leave the device
-
-March 2027, planned.
-
-- A client certificate on SIP over TLS, signed by the platform: Secure Enclave on iOS, Android Keystore, the Keychain on macOS, CNG on Windows *(in progress)*
-- The same certificate in the C ABI and in the Swift, Kotlin and .NET bindings *(done)*
-- Proven against PBXs and proxies that require a client certificate, in the lab *(in progress)*
 
 ### 2.0 — Beyond audio
 
@@ -718,7 +713,7 @@ deliberately does not need.
 second Sipral, surviving the impairment profiles, with audio quality
 unchanged from the audio-only build.
 
-## Phase 7 — WebRTC peers and the telephone network, 1.3 and 1.4
+## Phase 7 — WebRTC peers and the telephone network, 1.3
 
 Decided on 21 October 2026: WebRTC for audio, trickle ICE and SIP-T/SIP-I
 join the plan, each for a
@@ -735,7 +730,7 @@ reason that did not exist when they went in.
   the answer to any offer that bundles, a call each way on Asterisk's
   `webrtc=yes` over UDP and over a WebSocket and one to FreeSWITCH in the lab
   (`docs/05-media.md`, "A WebRTC line").
-- **A browser at the other end (1.4).** A browser's SIP client registers over
+- **A browser at the other end (1.3, planned for 1.4).** A browser's SIP client registers over
   a WebSocket and offers its candidates as it finds them; a call to it has to
   take trickled candidates (RFC 8838, carried in SIP by RFC 8840's INFO
   package) and can send its own the same way, so the call is up before the
@@ -745,8 +740,9 @@ reason that did not exist when they went in.
   no hold (`docs/05-media.md`, "A browser at the other end") — and the lab
   step, a headless Chromium with JsSIP through Asterisk's secure WebSocket
   and through Kamailio's, media end to end and trickled both ways there
-  (`scripts/lab.sh browser`, `docs/11-testing.md`), awaits its first run.
-- **SIP-T and SIP-I (1.4).** A carrier gateway carries the ISUP of the call
+  (`scripts/lab.sh browser`, `docs/11-testing.md`), passed in the full lab
+  on 23 October 2026.
+- **SIP-T and SIP-I (1.3, planned for 1.4).** A carrier gateway carries the ISUP of the call
   inside SIP (RFC 3204's `application/ISUP` body, RFC 3372's SIP-T, ITU-T
   Q.1912.5's SIP-I). An endpoint on such a trunk reads the calling number,
   the redirection and the release cause from it when the SIP headers say

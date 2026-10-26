@@ -129,8 +129,8 @@ order they are published in.
 ## Not yet
 
 - **Video** comes in 2.0.
-- **WebRTC:** a PBX WebRTC line comes in 1.3, a browser at the other end and
-  trickle ICE in 1.4.
+- **WebRTC:** a PBX WebRTC line, a browser at the other end and trickle ICE
+  are built on `main` and come in 1.3.
 
 ## Roadmap
 
@@ -138,9 +138,8 @@ order they are published in.
 criteria, the same list as [sipral.org/roadmap](https://sipral.org/roadmap/).
 
 - **1.2, voice agents and more platforms:** the SIP bridge, the Pipecat transport, connectors to five speech services, a bridge run from a configuration file, OAuth2 sign-in to the PBX and the agent's own latency; Node.js and TypeScript, .NET MAUI, a network test before the call, answering-machine detection, SIP over WebSocket and LiveCommunicationKit; the Rust API promised between releases and published on crates.io; a week of calls held with no error. Released on 15 October 2026.
-- **1.3, November 2026:** iOS and Android proven on real phones (call screen, audio routes, a push that wakes the phone, Wi-Fi to mobile data, battery) and through the stores' test tracks; a cold start after a push in Swift and Kotlin; Android's transactional Telecom API; calls on a PBX WebRTC line (BUNDLE, the browser profile).
-- **1.4, December 2026:** trickle ICE, an audio call to and from a browser, and SIP-T and SIP-I on a carrier gateway; networking ready to use from Rust and C (sockets, TLS, NAPTR/SRV), a C++ API, and a hook that rewrites any SIP message in or out.
-- **1.5, March 2027:** a client certificate on SIP over TLS, its key held by the platform (Secure Enclave, Android Keystore, the macOS Keychain, CNG), in the C ABI and the Swift, Kotlin and .NET bindings.
+- **1.3, November 2026:** iOS and Android proven on real phones (call screen, audio routes, a push that wakes the phone, Wi-Fi to mobile data, battery) and through the stores' test tracks; a cold start after a push in Swift and Kotlin; Android's transactional Telecom API; calls on a PBX WebRTC line (BUNDLE, the browser profile). Ahead of schedule, from 1.4 and 1.5: trickle ICE, an audio call to and from a browser, SIP-T and SIP-I on a carrier gateway, and a client certificate on SIP over TLS, its key held by the platform (Secure Enclave, Android Keystore, the macOS Keychain, CNG), in the C ABI and the Swift, Kotlin, .NET, Python, Dart and Node bindings.
+- **1.4, December 2026:** networking ready to use from Rust and C (sockets, TLS, NAPTR/SRV), a C++ API, and a hook that rewrites any SIP message in or out.
 - **2.0, mid 2027:** video (VP8, VP9, AV1) and ZRTP.
 - **Ongoing:** carrier interop on paid accounts and a commercial SBC, more PBXs in the lab.
 

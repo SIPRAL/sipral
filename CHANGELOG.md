@@ -45,7 +45,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Changed
 
-- The roadmap plans 1.3 for November 2026 (iOS and Android on real phones, a PBX WebRTC line) and 1.4 for December (trickle ICE, a browser at the other end, SIP-T and SIP-I), then 1.5 for March 2027 (a client certificate on SIP over TLS, its key held by the platform) (`docs/10-roadmap.md`, "Phase 7"). 1.4 also brings networking ready to use from Rust and C, a C++ API and a hook that rewrites SIP messages in and out (`docs/10-roadmap.md`, "Phase 8").
+- The roadmap plans 1.3 for November 2026: iOS and Android on real phones, a PBX WebRTC line, and, built ahead of the 1.4 and 1.5 they were planned for, trickle ICE, a browser at the other end, SIP-T and SIP-I and a client certificate on SIP over TLS, its key held by the platform (`docs/10-roadmap.md`, "Phase 7"). 1.4, in December, brings networking ready to use from Rust and C, a C++ API and a hook that rewrites SIP messages in and out (`docs/10-roadmap.md`, "Phase 8"); there is no 1.5 any more.
 - The README and the documentation say what is not there yet, video and a WebRTC peer, instead of listing what Sipral leaves out; `docs/09-rfc-index.md`'s "Deliberately not implemented" table is gone, and `docs/07-headless.md` says where the agent's work happens. The README and `docs/01-architecture.md` say that the bindings open TLS and run NAPTR and SRV lookups with the platform's APIs, and that only the optional Rust reference loop lacks them.
 
 ## [1.2.3] - 2026-10-21
