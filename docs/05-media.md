@@ -1017,6 +1017,10 @@ FreeSWITCH. One choice shapes every peer the join meets: the extended master sec
 a session without it to disable RFC 5705, the exporter every DTLS-SRTP key
 comes out of. RFC 5764 and RFC 8827 never mention the extension, so a peer
 whose TLS library predates RFC 7627 is one this crate will not key SRTP with.
+Such a peer still gets encrypted media: SDES (RFC 4568), its keys in the SDP
+over TLS signalling, needs no exporter, and the lab's FreePBX 16, whose
+OpenSSL 1.0.2 has no extended master secret, passes with it
+(`11-testing.md`).
 
 Two choices in the layers below the handshake go the way a reader might not
 expect. When two fragments of one handshake message disagree — and in epoch 0

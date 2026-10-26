@@ -1225,7 +1225,9 @@ final class SipralStack {
     _closed = true;
     _ticker?.cancel();
     await _reading?.cancel();
-    for (final socket in _streams.values) {
+    // a copy: a socket's own done or error handler, which destroy() may run
+    // at once, takes it out of the map this loop would still be reading
+    for (final socket in List.of(_streams.values)) {
       socket.destroy();
     }
     _streams.clear();
