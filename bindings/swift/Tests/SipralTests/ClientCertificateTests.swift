@@ -458,7 +458,9 @@ final class ClientCertificateTests: XCTestCase {
     #if !targetEnvironment(simulator)
     /// A Secure Enclave key that needs the user's presence, on a context
     /// that may not ask: the handshake cannot be signed, which is the key
-    /// unavailable, as on a phone whose user has not unlocked it.
+    /// unavailable, as on a phone whose user has not unlocked it. Made as
+    /// available as `secureEnclaveKey()`'s, since one usable only while the
+    /// screen is unlocked cannot even be made on a locked Mac.
     func testAKeyThatWillNotSignIsUnavailable() async throws {
         let registrar = try registrar()
         defer { registrar.stop() }
@@ -466,7 +468,7 @@ final class ClientCertificateTests: XCTestCase {
         context.interactionNotAllowed = true
         var failure: Unmanaged<CFError>?
         let access = try XCTUnwrap(SecAccessControlCreateWithFlags(
-            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence], &failure
+            nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, [.privateKeyUsage, .userPresence], &failure
         ))
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
