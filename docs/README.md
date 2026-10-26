@@ -46,6 +46,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [24-voice-agents.md](24-voice-agents.md) | connecting Sipral to AI voice-agent services: the SIP bridge, Pipecat and headless PCM paths, and for each service its address, transports, codecs, admission and audio format |
 | [25-network-test.md](25-network-test.md) | the network test before a call: STUN, TURN, the account's server and an echo call, rated, and the thresholds of its verdict |
 | [26-network.md](26-network.md) | the optional networking component: the sockets, TLS and NAPTR and SRV lookups run by the library for a C, C++ or Rust program, its trust choices, its failures and what it does not do yet |
+| [27-cpp.md](27-cpp.md) | Sipral from C++: the header-only classes over the C ABI, their lifetimes, errors and handlers, and how they are held |
 
 ## Conventions
 

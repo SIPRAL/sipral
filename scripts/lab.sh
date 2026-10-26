@@ -164,7 +164,9 @@
 #                               registers over TLS checked against it,
 #                               calls the tone, hears it, holds the call,
 #                               resumes it, hears it again and hangs up --
-#                               all through sipral_network_*. Not part of a
+#                               all through sipral_network_*; then the same
+#                               from C++ through bindings/cpp
+#                               (register-and-hold.cpp). Not part of a
 #                               run that names nothing: it builds the
 #                               library again with the `network` feature,
 #                               into target/network
@@ -4945,6 +4947,8 @@ fi
 # (interop/tls/pjsip_local.conf) on Asterisk's TLS listener, which presents
 # the certificate tls_certificates made for TLS_NAME; then it calls 9002,
 # hears the tone, holds, resumes, hears it again, hangs up and unregisters.
+# interop/network/register-and-hold.cpp does the same next, as the same user,
+# through the C++ layer (bindings/cpp), its lines read behind `cpp: `.
 network_flow() {
     local lib="$ROOT/target/network/release" log
     if ! CARGO_TARGET_DIR="$ROOT/target/network" \
@@ -4956,14 +4960,18 @@ network_flow() {
         --network "$LAB_NETWORK" \
         -v "$lib:/lib-sipral:ro" \
         -v "$ROOT/bindings/c/include:/sipral-include:ro" \
+        -v "$ROOT/bindings/cpp/include:/sipral-cpp-include:ro" \
         -v "$ROOT/interop/network:/network:ro" \
         -v "$SIPRAL_TLS_CERTS:/lab-tls:ro" \
         debian:trixie-slim sh -c "
             export DEBIAN_FRONTEND=noninteractive
             apt-get -qq update >/dev/null 2>&1
-            apt-get -qq install -y gcc libc6-dev dnsmasq >/dev/null 2>&1
+            apt-get -qq install -y gcc g++ libc6-dev dnsmasq >/dev/null 2>&1
             cc -std=c11 -Wall -Wextra -Werror -I/sipral-include /network/register-and-hold.c \
                 -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral -o /tmp/register-and-hold || exit 1
+            c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -I/sipral-include -I/sipral-cpp-include \
+                /network/register-and-hold.cpp \
+                -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral -o /tmp/register-and-hold-cpp || exit 1
             address=\$(getent hosts asterisk | cut -d' ' -f1)
             [ -n \"\$address\" ] || exit 1
             dnsmasq --no-resolv --no-hosts --listen-address=127.0.0.1 --bind-interfaces \
@@ -4971,19 +4979,27 @@ network_flow() {
                 --srv-host=_sips._tcp.$TLS_NAME,pbx.lab.sipral.test,5061,10,0 \
                 --host-record=pbx.lab.sipral.test,\$address || exit 1
             echo 'nameserver 127.0.0.1' >/etc/resolv.conf
-            /tmp/register-and-hold $TLS_NAME /lab-tls/ca.pem labuser-c-net labpass 9002" 2>&1)
+            /tmp/register-and-hold $TLS_NAME /lab-tls/ca.pem labuser-c-net labpass 9002
+            /tmp/register-and-hold-cpp $TLS_NAME /lab-tls/ca.pem labuser-c-net labpass 9002 | sed 's/^/cpp: /'" 2>&1)
     printf '%s\n' "$log" | sed 's/^/    /'
-    said() { printf '%s\n' "$log" | found -E "$1"; }
-    if said "^lookup NAPTR $TLS_NAME\$" && said "^lookup SRV _sips\._tcp\.$TLS_NAME\$" \
-        && said '^lookup A pbx\.lab\.sipral\.test$' && said '^located [0-9.]+:5061$' \
-        && said '^registered$' && said '^heard [0-9]+ frames from the far end$' \
-        && said '^held$' && said '^resumed$' && said '^heard [0-9]+ frames from the far end after resuming$' \
-        && said '^ended$' && said '^unregistered$' && ! said '^transport failed'; then
-        pass "a C program with no networking code: Asterisk found by NAPTR and SRV, registered over TLS checked against the domain, the tone heard, held, resumed, heard again, hung up and unregistered"
-    else
-        fail "the C program on the networking component"
-        return 1
-    fi
+    # the same lines from each program, the C++ one's behind `cpp: `
+    said() { printf '%s\n' "$log" | found -E "^$prefix$1"; }
+    local prefix language failed=0
+    for language in C C++; do
+        prefix=""
+        [ "$language" = C++ ] && prefix="cpp: "
+        if said "lookup NAPTR $TLS_NAME\$" && said "lookup SRV _sips\._tcp\.$TLS_NAME\$" \
+            && said 'lookup A pbx\.lab\.sipral\.test$' && said 'located [0-9.]+:5061$' \
+            && said 'registered$' && said 'heard [0-9]+ frames from the far end$' \
+            && said 'held$' && said 'resumed$' && said 'heard [0-9]+ frames from the far end after resuming$' \
+            && said 'ended$' && said 'unregistered$' && ! said 'transport failed'; then
+            pass "a $language program with no networking code: Asterisk found by NAPTR and SRV, registered over TLS checked against the domain, the tone heard, held, resumed, heard again, hung up and unregistered"
+        else
+            fail "the $language program on the networking component"
+            failed=1
+        fi
+    done
+    return "$failed"
 }
 
 if [ "$WANT" = network ]; then

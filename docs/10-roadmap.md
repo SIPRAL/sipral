@@ -132,7 +132,7 @@ November 2026, planned.
 December 2026, planned.
 
 - Networking ready to use from Rust and C: sockets, TLS and NAPTR/SRV lookups in one optional component, so an application without a binding no longer writes its own *(done)*
-- A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller
+- A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller *(done)*
 - A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding *(in progress)*
 
 ### 2.0 — Beyond audio
@@ -784,7 +784,9 @@ C++ softphones that would move off another stack, and three pieces close it:
   rules, TURN over TCP or TLS.
 - **A C++ API.** Classes over the C ABI for the stack, accounts, calls and
   events, with lifetimes tied to scope, in a header shipped beside
-  `sipral.h`.
+  `sipral.h`. *Built*: `bindings/cpp/include/sipral.hpp`, C++17, header only
+  (`27-cpp.md`); `bindings/cpp/smoke.cpp` in the gate, and
+  `interop/network/register-and-hold.cpp` in `scripts/lab.sh network`.
 - **A message hook.** A callback that sees every SIP message just before it
   goes out and just after it comes in, and may change its header fields and
   body or drop it, for a PBX or carrier that needs a header no option

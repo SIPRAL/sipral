@@ -1129,6 +1129,33 @@ step_linked_from_c() {
             fail "interop/harness-c/main.c does not compile:"
             sed 's/^/        /' "$work/cc-harness"
         fi
+        # the C++ layer the same way: its smoke test compiled as an integrator
+        # would, warnings fatal, and run; the lab's C++ program compiled and not
+        # run, for the reason the C driver is not
+        if c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -I bindings/c/include \
+            -o "$work/smoke-cpp" bindings/cpp/smoke.cpp \
+            -L"$ROOT/target/release" -lsipral_ffi -Wl,-rpath,"$ROOT/target/release" \
+            >"$work/cxx" 2>&1; then
+            pass "c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror"
+            if ran=$("$work/smoke-cpp" 2>&1); then
+                pass "bindings/cpp/smoke.cpp"
+            else
+                fail "bindings/cpp/smoke.cpp did not come back zero:"
+                printf '%s\n' "$ran" | sed 's/^/        /'
+            fi
+        else
+            fail "bindings/cpp/smoke.cpp does not compile:"
+            sed 's/^/        /' "$work/cxx"
+        fi
+        if c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -I bindings/c/include -I bindings/cpp/include \
+            -o "$work/register-and-hold-cpp" interop/network/register-and-hold.cpp \
+            -L"$ROOT/target/release" -lsipral_ffi -Wl,-rpath,"$ROOT/target/release" \
+            >"$work/cxx-network" 2>&1; then
+            pass "interop/network/register-and-hold.cpp"
+        else
+            fail "interop/network/register-and-hold.cpp does not compile:"
+            sed 's/^/        /' "$work/cxx-network"
+        fi
         rm -rf "$work"
     else
         fail "$DYLIB: nothing to link against"

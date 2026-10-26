@@ -86,11 +86,14 @@ a digit and plays back what it reads (CMake is needed once, for libopus).
 
 | Platform | Languages | Device mode | Artefact (`scripts/package/`) |
 |---|---|---|---|
-| macOS | Rust, C, Swift, Kotlin/Java, .NET, Python, Dart, Node.js | CoreAudio voice processing | XCFramework, NuGet, wheel |
-| iOS | Rust, C, Swift, .NET MAUI, React Native, Flutter | CoreAudio voice processing, CallKit and PushKit helpers | XCFramework, NuGet (MAUI) |
-| Android | Rust, C, Kotlin, .NET MAUI, React Native, Flutter | AAudio (API 28+), `ConnectionService` helper | AAR for arm64-v8a, armeabi-v7a, x86_64; NuGet (MAUI) |
-| Windows | Rust, C, .NET, Python, Dart, Node.js | WASAPI communications streams | NuGet, wheels (x64, arm64) |
-| Linux | Rust, C, Kotlin/Java, .NET, Python, Dart, Node.js | application mode; `sipral-io-pipewire` for a desktop | NuGet, manylinux wheels, JVM jar (x64, arm64) |
+| macOS | Rust, C, C++, Swift, Kotlin/Java, .NET, Python, Dart, Node.js | CoreAudio voice processing | XCFramework, NuGet, wheel |
+| iOS | Rust, C, C++, Swift, .NET MAUI, React Native, Flutter | CoreAudio voice processing, CallKit and PushKit helpers | XCFramework, NuGet (MAUI) |
+| Android | Rust, C, C++, Kotlin, .NET MAUI, React Native, Flutter | AAudio (API 28+), `ConnectionService` helper | AAR for arm64-v8a, armeabi-v7a, x86_64; NuGet (MAUI) |
+| Windows | Rust, C, C++, .NET, Python, Dart, Node.js | WASAPI communications streams | NuGet, wheels (x64, arm64) |
+| Linux | Rust, C, C++, Kotlin/Java, .NET, Python, Dart, Node.js | application mode; `sipral-io-pipewire` for a desktop | NuGet, manylinux wheels, JVM jar (x64, arm64) |
+
+C++ is `bindings/cpp/include/sipral.hpp`, header only, C++17, over the same
+library as C ([`docs/27-cpp.md`](docs/27-cpp.md)).
 
 Application mode — PCM in the application's hands — is available on every
 platform and in every language but one: the React Native package runs device
