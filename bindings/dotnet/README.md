@@ -447,6 +447,19 @@ the stack's, go in `new SipralCallOptions { Codecs = "PCMA,PCMU" }` for
 §6.1), so answering it chooses which codecs rather than which comes first.
 `Sipral.Tests/CallControlTests.cs` proves each on loopback stacks.
 
+### A message hook
+
+`stack.SetMessageHook((outgoing, message, remote) => ...)` sees every SIP
+message just before it is sent and just after it arrives, whole, with the far
+end as `host:port`, and answers `SipralMessageVerdict.Keep`,
+`SipralMessageVerdict.Replace(bytes)` (`Content-Length` must match the body)
+or `SipralMessageVerdict.Drop`, which stops it: not sent, or not read. It runs
+with the stack locked, on the thread inside the stack, so it must not call
+into this stack and should return quickly; one that throws keeps the message
+as it is. `SetMessageHook(null)` removes it. `Sipral.Tests/MessageHookTests.cs`
+adds a header to an INVITE, drops a response and throws, against a loopback
+PBX.
+
 ### What a call carries in its audio, and recording it
 
 A digit the far end leaves in the audio arrives as

@@ -146,6 +146,8 @@ export {
   INVITE_LIMIT_VOICE_AGENT,
   type InviteLimit,
   type LogLine,
+  type MessageHook,
+  MessageVerdict,
   type Resolver,
   Stack,
   type StackEvents,
