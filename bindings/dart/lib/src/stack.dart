@@ -178,6 +178,79 @@ final class SipralStack {
   /// returns: copy what you keep, and call nothing on this stack from it.
   void Function(SipralEvent event)? onRawEvent;
 
+  /// Callables given to `sipral_stack_message_hook`, closed with the stack.
+  final List<ffi.NativeCallable<SipralMessageHookCallback>> _hookCallbacks = [];
+
+  /// See, change or drop every SIP message just before it is sent and just
+  /// after it arrives (`sipral_stack_message_hook`); null removes the hook.
+  ///
+  /// `hook(outgoing, message, remote)` gets true for a message on its way
+  /// out, the whole message, and the far end as `host:port`, and answers
+  /// [SipralMessageVerdict.keep], [SipralMessageVerdict.replace]
+  /// (`Content-Length` must match the body) or [SipralMessageVerdict.drop]:
+  /// not sent, or not read. It runs inside the stack's lock, inside the call
+  /// into the stack that moved the message, on this isolate's thread: it
+  /// must not call back into this stack, and should return quickly. A hook
+  /// that throws keeps the message as it is.
+  void setMessageHook(
+    SipralMessageVerdict Function(
+      bool outgoing,
+      Uint8List message,
+      String remote,
+    )?
+    hook,
+  ) {
+    _ensureOpen();
+    if (hook == null) {
+      _check(
+        _sipral,
+        'sipral_stack_message_hook',
+        _sipral.stackMessageHook(_handle, ffi.nullptr, ffi.nullptr),
+      );
+      return;
+    }
+    int ask(ffi.Pointer<SipralHookedMessage> hooked, ffi.Pointer<ffi.Void> _) {
+      try {
+        final seen = hooked.ref;
+        final remote = _decode(seen.remote.cast(), seen.remoteLen);
+        final message = Uint8List.fromList(
+          seen.message.asTypedList(seen.messageLen),
+        );
+        final verdict = hook(
+          seen.direction == Sipral.hookOutgoing,
+          message,
+          remote,
+        );
+        final replacement = verdict._replacement;
+        if (replacement == null) {
+          return verdict._answer;
+        }
+        return using((arena) {
+          final bytes = arena<ffi.Uint8>(max(1, replacement.length));
+          bytes.asTypedList(replacement.length).setAll(0, replacement);
+          return _sipral.hookedMessageReplace(bytes, replacement.length) ==
+                  SipralStatus.ok
+              ? Sipral.hookReplace
+              : Sipral.hookKeep;
+        });
+      } on Object {
+        // nothing may unwind into the library: the message goes on as it is
+        return Sipral.hookKeep;
+      }
+    }
+
+    final callback = ffi.NativeCallable<SipralMessageHookCallback>.isolateLocal(
+      ask,
+      exceptionalReturn: Sipral.hookKeep,
+    );
+    _hookCallbacks.add(callback);
+    _check(
+      _sipral,
+      'sipral_stack_message_hook',
+      _sipral.stackMessageHook(_handle, callback.nativeFunction, ffi.nullptr),
+    );
+  }
+
   /// Milliseconds since the stack was created, the clock of every `now_ms`.
   int nowMs() => _clock.elapsedMilliseconds;
 
@@ -1160,6 +1233,10 @@ final class SipralStack {
     _sipral.stackDestroy(_handle);
     _socket.close();
     _callback.close();
+    for (final hook in _hookCallbacks) {
+      hook.close();
+    }
+    _hookCallbacks.clear();
     _release();
     await _events.close();
   }
@@ -1324,4 +1401,33 @@ final class SipralStack {
   void _forget(SipralCall call) {
     _calls.remove(call.handle);
   }
+}
+
+/// What a [SipralStack.setMessageHook] hook answers for one message.
+final class SipralMessageVerdict {
+  const SipralMessageVerdict._(this._answer, this._replacement);
+
+  /// The message goes on as it is.
+  static const SipralMessageVerdict keep = SipralMessageVerdict._(
+    Sipral.hookKeep,
+    null,
+  );
+
+  /// The message is not sent, or not read. A transaction whose message is
+  /// dropped retransmits and times out as if it were lost.
+  static const SipralMessageVerdict drop = SipralMessageVerdict._(
+    Sipral.hookDrop,
+    null,
+  );
+
+  /// [message] goes in the message's place, from its start line to the end
+  /// of its body; `Content-Length` must match the body.
+  factory SipralMessageVerdict.replace(List<int> message) =>
+      SipralMessageVerdict._(Sipral.hookReplace, Uint8List.fromList(message));
+
+  final int _answer;
+  final Uint8List? _replacement;
+
+  /// The bytes of a [SipralMessageVerdict.replace], null otherwise.
+  Uint8List? get replacement => _replacement;
 }

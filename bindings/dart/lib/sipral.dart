@@ -18,6 +18,7 @@ export 'src/idiomatic.dart'
         SipralLookup,
         SipralMedia,
         SipralMediaStatistics,
+        SipralMessageVerdict,
         SipralNetworkTestResult,
         SipralPinnedCertificateInfo,
         SipralResolver,

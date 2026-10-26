@@ -178,6 +178,18 @@ application's thread.
 
 `stack.close()` hangs up what is still up and releases everything.
 
+## A message hook
+
+`stack.setMessageHook((outgoing, message, remote) => ...)` sees every SIP
+message just before it is sent and just after it arrives, whole as a
+`Buffer`, with the far end as `host:port`, and answers `MessageVerdict.keep`,
+`MessageVerdict.replace(bytes)` (`Content-Length` must match the body) or
+`MessageVerdict.drop`: not sent, or not read. It runs synchronously on the
+main thread, inside the call into the stack that moved the message, with the
+stack locked: it must not call into this stack and should return quickly.
+One that throws keeps the message as it is; `setMessageHook(null)` removes
+it. `src/test/message-hook.test.ts` proves each against a loopback PBX.
+
 ## Tests
 
 ```bash

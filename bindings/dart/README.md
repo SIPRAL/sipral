@@ -155,6 +155,19 @@ throws a `SipralException` with `SipralStatus.limitReached`.
 raising `maxDialogs` raises too, zero for the default each
 (`docs/08-ffi.md`, "Limits, and what went out twice").
 
+## A message hook
+
+`stack.setMessageHook((outgoing, message, remote) => ...)` sees every SIP
+message just before it is sent and just after it arrives, whole, with the far
+end as `host:port`, and answers `SipralMessageVerdict.keep`,
+`SipralMessageVerdict.replace(bytes)` (`Content-Length` must match the body)
+or `SipralMessageVerdict.drop`: not sent, or not read. It is a
+`NativeCallable.isolateLocal`, run synchronously inside the call into the
+stack that moved the message, on this isolate's thread, with the stack
+locked: it must not call into this stack and should return quickly. One that
+throws keeps the message as it is; `setMessageHook(null)` removes it.
+`test/message_hook_test.dart` proves each against a loopback PBX.
+
 ## Where a stack is reached, and where its server is
 
 `SipralStack.open()` with no `bindHost` listens on every interface and

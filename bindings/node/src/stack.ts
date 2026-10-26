@@ -44,6 +44,10 @@ import {
 } from './internal.js';
 import { MediaPacket } from './media.js';
 import {
+  SIPRAL_HOOK_DROP,
+  SIPRAL_HOOK_KEEP,
+  SIPRAL_HOOK_OUTGOING,
+  SIPRAL_HOOK_REPLACE,
   SIPRAL_INVITE_LIMIT_BURST,
   SIPRAL_INVITE_LIMIT_EVERY_MS,
   SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST,
@@ -68,6 +72,7 @@ import {
   SipralTurnStream,
   sipral_event_callback_t,
   sipral_log_callback_t,
+  sipral_message_hook_callback_t,
   sipral_screen_callback_t,
 } from './sipral_abi.js';
 import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream } from './tls.js';
@@ -480,6 +485,38 @@ interface MappedSocket {
   relayed: () => void;
 }
 
+/** What a {@link Stack.setMessageHook} hook answers for one message. */
+export class MessageVerdict {
+  /** The message goes on as it is. */
+  static readonly keep = new MessageVerdict(SIPRAL_HOOK_KEEP, null);
+
+  /**
+   * The message is not sent, or not read. A transaction whose message is
+   * dropped retransmits and times out as if it were lost.
+   */
+  static readonly drop = new MessageVerdict(SIPRAL_HOOK_DROP, null);
+
+  private constructor(
+    readonly answer: number,
+    /** The bytes of a {@link MessageVerdict.replace}, null otherwise. */
+    readonly replacement: Buffer | null,
+  ) {}
+
+  /**
+   * `message` goes in the message's place, from its start line to the end
+   * of its body; `Content-Length` must match the body.
+   */
+  static replace(message: Uint8Array): MessageVerdict {
+    return new MessageVerdict(SIPRAL_HOOK_REPLACE, Buffer.from(message));
+  }
+}
+
+/**
+ * A message hook: `outgoing` is true for a message on its way out, `message`
+ * the whole message, `remote` the far end as `host:port`.
+ */
+export type MessageHook = (outgoing: boolean, message: Buffer, remote: string) => MessageVerdict;
+
 /**
  * A SIP stack: the class an application opens first.
  *
@@ -528,6 +565,7 @@ export class Stack extends EventEmitter<StackEvents> {
   private callback: bigint | null = null;
   private logCallback: bigint | null = null;
   private screenCallback: bigint | null = null;
+  private hookCallback: bigint | null = null;
   private readonly retired: bigint[] = [];
   private ticker: NodeJS.Timeout | undefined;
   private reconnectTimer: NodeJS.Timeout | undefined;
@@ -1086,6 +1124,52 @@ export class Stack extends EventEmitter<StackEvents> {
     }
   }
 
+  /**
+   * See, change or drop every SIP message just before it is sent and just
+   * after it arrives (`sipral_stack_message_hook`); null removes the hook.
+   * The hook answers {@link MessageVerdict.keep}, {@link MessageVerdict.replace}
+   * or {@link MessageVerdict.drop}. It runs inside the stack's lock, inside
+   * the call into the stack that moved the message, on this thread: it must
+   * not call back into this stack, and should return quickly. A hook that
+   * throws keeps the message as it is, and the error is reported.
+   */
+  setMessageHook(hook: MessageHook | null): void {
+    if (hook === null) {
+      check(this.sipral, 'sipral_stack_message_hook', this.sipral.sipral_stack_message_hook(this.stackHandle, null, null));
+      if (this.hookCallback !== null) {
+        this.retired.push(this.hookCallback);
+        this.hookCallback = null;
+      }
+      return;
+    }
+    const callback = koffi.register((address: Pointer) => {
+      try {
+        const hooked = read<{ direction: number; remote: Pointer; remote_len: Wide; message: Pointer; message_len: Wide }>(
+          address,
+          'sipral_hooked_message_t',
+        );
+        const verdict = hook(
+          hooked.direction === SIPRAL_HOOK_OUTGOING,
+          readBytes(hooked.message, hooked.message_len) ?? Buffer.alloc(0),
+          readText(hooked.remote, hooked.remote_len) ?? '',
+        );
+        if (verdict.replacement === null) {
+          return verdict.answer;
+        }
+        const replaced = this.sipral.sipral_hooked_message_replace(verdict.replacement, verdict.replacement.length);
+        return replaced === SipralStatus.Ok ? SIPRAL_HOOK_REPLACE : SIPRAL_HOOK_KEEP;
+      } catch (error) {
+        queueMicrotask(() => this.report(error));
+        return SIPRAL_HOOK_KEEP;
+      }
+    }, koffi.pointer(sipral_message_hook_callback_t));
+    check(this.sipral, 'sipral_stack_message_hook', this.sipral.sipral_stack_message_hook(this.stackHandle, callback, null));
+    if (this.hookCallback !== null) {
+      this.retired.push(this.hookCallback);
+    }
+    this.hookCallback = callback;
+  }
+
   /** How fast one address may ring this stack (`sipral_stack_invite_limit`). */
   setInviteLimit(limit: InviteLimit): void {
     check(this.sipral, 'sipral_stack_invite_limit', this.sipral.sipral_stack_invite_limit(this.stackHandle, limit.everyMs, limit.burst));
@@ -1620,7 +1704,7 @@ export class Stack extends EventEmitter<StackEvents> {
   }
 
   private release(): void {
-    for (const callback of [this.callback, this.logCallback, this.screenCallback, ...this.retired]) {
+    for (const callback of [this.callback, this.logCallback, this.screenCallback, this.hookCallback, ...this.retired]) {
       if (callback !== null) {
         koffi.unregister(callback);
       }
@@ -1628,6 +1712,7 @@ export class Stack extends EventEmitter<StackEvents> {
     this.callback = null;
     this.logCallback = null;
     this.screenCallback = null;
+    this.hookCallback = null;
     this.retired.length = 0;
   }
 

@@ -276,7 +276,11 @@ that has to go before the endpoint reads the message, one hook per endpoint
 sees every SIP message whole, as bytes, and keeps it, replaces it or drops it
 (`Endpoint::set_message_hook`; in C `sipral_stack_message_hook`, in Python
 `Stack.set_message_hook`, in Swift `SipralStack.setMessageHook(_:)`, in
-Kotlin `SipralClient.setMessageHook`).
+Kotlin `SipralClient.setMessageHook`, in .NET `SipralStack.SetMessageHook`,
+in Dart `SipralStack.setMessageHook`, in Node.js `Stack.setMessageHook`, in
+C++ `sipral::Stack::set_message_hook`). `scripts/lab.sh`, beside Asterisk,
+shows it on the wire: a REGISTER Asterisk received with the header the hook
+added, the `Max-Forwards` it changed and without the `Expires` it took away.
 
 - **Out**, it runs in `Endpoint::poll_transmit`, after the message is built
   and measured and before any framing (a WebSocket's) is put around it. A

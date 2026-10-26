@@ -1147,6 +1147,61 @@ public sealed partial class SipralStack : IDisposable
             "sipral_stack_screen");
     }
 
+    // Kept for the stack's life: a replaced hook may still be running.
+    private readonly List<SipralMessageHookCallback> _hookCallbacks = new();
+
+    /// <summary>
+    /// Installs a message hook (<c>sipral_stack_message_hook</c>), or removes
+    /// it with <see langword="null"/>. <c>hook(outgoing, message, remote)</c>
+    /// sees every SIP message just before it is sent (<c>outgoing</c> true)
+    /// and just after it arrives, whole, with the far end as
+    /// <c>host:port</c>, and answers <see cref="SipralMessageVerdict.Keep"/>,
+    /// <see cref="SipralMessageVerdict.Replace"/> or
+    /// <see cref="SipralMessageVerdict.Drop"/>. It runs with the stack's lock
+    /// held, on the thread inside the stack: it must not call back into this
+    /// stack, and should return quickly. A hook that throws keeps the
+    /// message as it is.
+    /// </summary>
+    public void SetMessageHook(Func<bool, byte[], string, SipralMessageVerdict>? hook)
+    {
+        if (hook is null)
+        {
+            SipralErrors.Call(() => NativeMethods.sipral_stack_message_hook(Handle, IntPtr.Zero, IntPtr.Zero), "sipral_stack_message_hook");
+            return;
+        }
+        SipralMessageHookCallback callback = (raw, _) =>
+        {
+            try
+            {
+                var hooked = Marshal.PtrToStructure<SipralHookedMessage>(raw);
+                var remote = Marshal.PtrToStringUTF8(hooked.Remote, (int)hooked.RemoteLen) ?? string.Empty;
+                var message = new byte[(int)hooked.MessageLen];
+                Marshal.Copy(hooked.Message, message, 0, message.Length);
+                var verdict = hook(hooked.Direction == global::Sipral.Sipral.HookOutgoing, message, remote);
+                if (verdict?.Replacement is { } replacement)
+                {
+                    return NativeMethods.sipral_hooked_message_replace(replacement, (nuint)replacement.Length) == SipralStatus.Ok
+                        ? global::Sipral.Sipral.HookReplace
+                        : global::Sipral.Sipral.HookKeep;
+                }
+                return verdict?.Answer ?? global::Sipral.Sipral.HookKeep;
+            }
+            catch (Exception ex)
+            {
+                // an exception must not unwind into the native frame below
+                Trace.TraceError($"Sipral: message hook threw: {ex}");
+                return global::Sipral.Sipral.HookKeep;
+            }
+        };
+        lock (_hookCallbacks)
+        {
+            _hookCallbacks.Add(callback);
+        }
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_message_hook(Handle, Marshal.GetFunctionPointerForDelegate(callback), IntPtr.Zero),
+            "sipral_stack_message_hook");
+    }
+
     /// <summary>
     /// Accepts a REFER and places the call it asks for
     /// (<c>sipral_call_accept_transfer</c>). <paramref name="args"/> is a
