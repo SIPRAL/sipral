@@ -133,6 +133,17 @@ fn with_message<R>(read: impl FnOnce(&str) -> R) -> Option<R> {
         .flatten()
 }
 
+/// The status an entry point called from inside the library answered, as a [`Fail`] carrying
+/// the sentence it left, prefixed with `place`.
+#[cfg(feature = "network")]
+pub(crate) fn answered(status: SipralStatus, place: &str) -> Result<(), Fail> {
+    if status == SipralStatus::Ok {
+        return Ok(());
+    }
+    let said = with_message(str::to_owned).unwrap_or_default();
+    Err(fail(status, format!("{place}: {said}")))
+}
+
 /// Copy the message out, or say how much room it needs.
 ///
 /// # Safety

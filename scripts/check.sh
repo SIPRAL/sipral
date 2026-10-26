@@ -946,6 +946,14 @@ step_third_party_licences() {
         printf '        %s\n' "$lic_out"
         printf '        regenerate it: cargo run -p sipral-license-gen\n'
     fi
+    # and what a library built with the networking component carries beyond it
+    if lic_out=$(cargo run -p sipral-license-gen -- --net --check 2>&1); then
+        pass "crates/sipral-net/THIRD-PARTY-LICENSES.txt matches the networking component's graph"
+    else
+        fail "crates/sipral-net/THIRD-PARTY-LICENSES.txt is stale:"
+        printf '        %s\n' "$lic_out"
+        printf '        regenerate it: cargo run -p sipral-license-gen -- --net\n'
+    fi
 }
 
 # The workspace, or with --crates the packages named: `--workspace` becomes

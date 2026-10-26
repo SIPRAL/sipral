@@ -568,13 +568,16 @@ impl StackEntry {
 
     /// Deliver what was queued when the pass began, with nothing held; return how
     /// many and whether more waits.
-    fn deliver(&self, speaker: Speaker) -> (usize, bool) {
+    fn deliver(&self, speaker: &Speaker) -> (usize, bool) {
         let mut batch = {
             let mut outbox = self.outbox();
             std::mem::take(&mut outbox.waiting)
         };
         let mut delivered = 0_usize;
         while let Some(delivery) = batch.pop_front() {
+            if let Some(ref observer) = speaker.observer {
+                observer(&delivery.event);
+            }
             unsafe { (speaker.callback)(ptr::from_ref(&delivery.event), speaker.user_data) };
             delivered = delivered.saturating_add(1);
         }
@@ -615,11 +618,18 @@ struct Outbox {
 }
 
 /// Where a stack's events go, copied out for delivery after release.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Speaker {
     callback: unsafe extern "C" fn(event: *const SipralEvent, user_data: *mut c_void),
     user_data: *mut c_void,
+    /// What reads every event first, held by the delivery so it outlives a detach meanwhile.
+    observer: Option<Observer>,
 }
+
+/// Something inside the library that reads every event just before the application's callback
+/// does: the networking component (`crate::network`), which answers lookups and opens the
+/// connections the stack asks for.
+pub(crate) type Observer = Arc<dyn Fn(&SipralEvent) + Send + Sync>;
 
 /// One event on its way to the callback. Read after the lock is gone, so its
 /// pointers point only into the owners beside it.
@@ -734,6 +744,8 @@ pub(crate) struct StackState {
     pub(crate) conferences: Vec<(SipralHandle, crate::local_conference::Shared)>,
     /// The network tests under way (`crate::network_test`).
     pub(crate) tests: crate::network_test::Tests,
+    /// What reads every event before the callback, while the networking component runs.
+    pub(crate) observer: Option<Observer>,
 }
 
 // Safety: the user pointer is only handed back to the caller's callback;
@@ -1361,6 +1373,7 @@ pub(crate) unsafe fn create_on(
         lost: Vec::new(),
         conferences: Vec::new(),
         tests: crate::network_test::Tests::default(),
+        observer: None,
     };
     // the main transport's first request now waits in `sipral_stack_poll_transmit`
     crate::nat::Nat::start(
@@ -1613,6 +1626,8 @@ entry! {
         }
         // a running poll holds its own share until it is done
         STACKS.remove(stack).map_err(handle_failed)?;
+        // its sockets, connections and resolver, when the networking component ran them
+        crate::network::forget(stack);
         Ok(())
     }
 }
@@ -1649,14 +1664,15 @@ entry! {
             state.events_dropped = state
                 .events_dropped
                 .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
-            let speaker = should_deliver.then_some(Speaker {
+            let speaker = should_deliver.then(|| Speaker {
                 callback: state.callback,
                 user_data: state.user_data,
+                observer: state.observer.clone(),
             });
             (counted, speaker)
         };
         if let Some(speaker) = speaker {
-            let (delivered, left_waiting) = entry.deliver(speaker);
+            let (delivered, left_waiting) = entry.deliver(&speaker);
             counted.events_delivered = delivered;
             if left_waiting {
                 // what arrived during the pass is due now
@@ -4145,8 +4161,9 @@ pub(crate) mod tests {
         let speaker = Speaker {
             callback: flood_from_another_thread,
             user_data: ptr::from_ref(&flooded).cast::<c_void>().cast_mut(),
+            observer: None,
         };
-        let (delivered, left_waiting) = entry.deliver(speaker);
+        let (delivered, left_waiting) = entry.deliver(&speaker);
 
         assert_eq!(delivered, 1, "only what was waiting when this pass began");
         assert!(left_waiting, "and it says the flood is still waiting");

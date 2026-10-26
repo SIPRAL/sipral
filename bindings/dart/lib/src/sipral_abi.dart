@@ -285,12 +285,13 @@ abstract final class SipralTransportError {
   static const int closed = 5;
 }
 
-/// Why a TLS connection was refused, as the platform's TLS library said it. Names for
+/// Why a TLS connection was refused, as the TLS library that ran it said it. Names for
 /// `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
 ///
-/// Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
-/// classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
-/// with this left at none.
+/// The stack links no TLS library (`docs/22-tls.md`); it carries the classification of
+/// whoever ran the connection: the application, a binding, or the networking component
+/// (`sipral_network_start`). A connection never answered is
+/// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
 abstract final class SipralTlsFailure {
   /// Not a TLS failure, or one the application could not classify.
   static const int none = 0;
@@ -2492,6 +2493,24 @@ abstract final class SipralIsupNumber {
   /// The first generic number qualified as an additional calling party
   /// number (§3.26).
   static const int additionalCalling = 7;
+}
+
+/// Which servers a TLS connection the component makes trusts. Names for
+/// `sipral_network_config_t::trust`; an account's `tls_pin_sha256` wins over it for the
+/// connections to that account's server.
+abstract final class SipralNetworkTrust {
+  /// The authorities in the platform's trust store.
+  static const int platform = 0;
+
+  /// The platform's, and those in `authority_pem` beside them.
+  static const int platformAndAuthority = 1;
+
+  /// Only those in `authority_pem`.
+  static const int onlyAuthority = 2;
+
+  /// Only the certificate whose SHA-256 fingerprint is `pin_sha256`; chain, name and
+  /// dates are not checked (`docs/22-tls.md`).
+  static const int pinned = 3;
 }
 
 /// The version of the ABI this library provides.
@@ -6649,6 +6668,79 @@ final class SipralIsup extends ffi.Struct {
   external int callingCategory;
 }
 
+/// How the networking component connects and resolves (ABI 1.5). Set `size` to
+/// `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
+/// platform's trust store and resolver, and no client certificate.
+final class SipralNetworkConfig extends ffi.Struct {
+  /// `sizeof` this struct, as the caller's header declares it.
+  @ffi.Size()
+  external int size;
+
+  /// A SipralNetworkTrust.
+  @ffi.Uint32()
+  external int trust;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved;
+
+  /// PEM certificates of the authorities trusted with
+  /// `SIPRAL_NETWORK_TRUST_PLATFORM_AND_AUTHORITY` or `_ONLY_AUTHORITY`. Not
+  /// NUL-terminated.
+  external ffi.Pointer<ffi.Char> authorityPem;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int authorityPemLen;
+
+  /// The fingerprint for `SIPRAL_NETWORK_TRUST_PINNED`, written as
+  /// `sipral_account_config_t::tls_pin_sha256` is.
+  external ffi.Pointer<ffi.Char> pinSha256;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int pinSha256Len;
+
+  /// The client certificate presented when a server asks for one, leaf first, then any
+  /// intermediates, as PEM; null for none.
+  external ffi.Pointer<ffi.Char> clientCertificatePem;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int clientCertificatePemLen;
+
+  /// Its private key as PEM (PKCS #8, SEC 1 or PKCS #1); required with the certificate.
+  external ffi.Pointer<ffi.Char> clientKeyPem;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int clientKeyPemLen;
+
+  /// The name servers to ask, comma-separated `host:port`; null for the system's
+  /// resolver configuration.
+  external ffi.Pointer<ffi.Char> nameServers;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int nameServersLen;
+
+  /// The name every TLS server's certificate is checked against; null for the host of
+  /// the account's `server_uri` (RFC 5922 section 7.3), else the address connected to.
+  external ffi.Pointer<ffi.Char> tlsServerName;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int tlsServerNameLen;
+
+  /// How long connecting, and then a TLS handshake, may each take; zero for 8000.
+  @ffi.Uint32()
+  external int connectTimeoutMs;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reservedEnd;
+}
+
 /// Why the library could not be opened, or cannot serve this binding.
 final class SipralLoadError extends Error {
   SipralLoadError(this.message);
@@ -6730,7 +6822,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 5;
+  static const int abiVersionMinor = 6;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -6885,6 +6977,13 @@ final class Sipral {
   /// and rate: `sipral_local_conference_create`,
   /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
   static const int featureLocalConference = 16777216;
+
+  /// See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+  /// `sipral_network_start` and the entry points beside it run the
+  /// sockets, TLS and RFC 3263 lookups for a stack. Set when this library
+  /// was built with sipral-ffi's `network` feature, which the bindings'
+  /// packages leave out.
+  static const int featureNetwork = 33554432;
 
   /// The buffer a caller has to bring for one outgoing packet.
   ///
@@ -7073,6 +7172,7 @@ final class Sipral {
         'sipral_pinned_certificate_t': [ffi.sizeOf<SipralPinnedCertificate>(), 40, 36, 40],
         'sipral_network_test_config_t': [ffi.sizeOf<SipralNetworkTestConfig>(), 48, 36, 40],
         'sipral_isup_t': [ffi.sizeOf<SipralIsup>(), 72, 68, 68],
+        'sipral_network_config_t': [ffi.sizeOf<SipralNetworkConfig>(), 120, 68, 68],
       };
 
   /// Copy the calling thread's last error message into `buffer`.
@@ -10120,4 +10220,139 @@ final class Sipral {
   late final int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) isupNumber = library.lookupFunction<
       ffi.Int32 Function(ffi.Pointer<ffi.Uint8> body, ffi.Size bodyLen, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_isup_number');
+
+  /// Have the library run this stack's networking (ABI 1.5).
+  ///
+  /// From now on sipral_network_run does what the loop of `sipral_stack_poll`,
+  /// `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
+  /// stack must have been created on `SIPRAL_TRANSPORT_UDP` with a `bind_address` that names
+  /// an interface (`sipral_advertised_address` finds it), else `SIPRAL_STATUS_WRONG_STATE`:
+  /// its socket is bound there now, at the port the system chooses when it named zero, and
+  /// accounts on TCP or TLS reach their servers on connections of their own
+  /// (`stream_protocol`), which are the component's too. Every
+  /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered with a connection bound under a number
+  /// from 2^31 up, every `SIPRAL_EVENT_KIND_LOOKUP_WANTED` with the resolver's answer, and a
+  /// connection that fails is reported with `sipral_stack_transport_failed_with`, its reason
+  /// in `sipral_transport_failed_event_t::tls` as the bindings give it.
+  ///
+  /// `SIPRAL_STATUS_WRONG_STATE` when it already runs; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+  /// configuration that cannot be read, saying which member; `SIPRAL_STATUS_TRANSPORT_DOWN`
+  /// when the socket cannot be bound or the resolver's configuration read;
+  /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without the component.
+  ///
+  /// Safety
+  ///
+  /// `config` must be null, for the defaults, or point at a `sipral_network_config_t` whose
+  /// buffers are readable for their lengths.
+  late final int Function(int stack, ffi.Pointer<SipralNetworkConfig> config, int nowMs) networkStart = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralNetworkConfig> config, ffi.Uint64 nowMs),
+      int Function(int stack, ffi.Pointer<SipralNetworkConfig> config, int nowMs)>('sipral_network_start');
+
+  /// One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+  /// what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
+  /// of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
+  /// again. The callback runs inside it, on this thread, as it does inside
+  /// `sipral_stack_poll`, and may call any entry point here but this one.
+  ///
+  /// `now_ms` is the caller's monotonic clock, as everywhere else. Call it in a loop; nothing
+  /// in the library calls it for the application. `SIPRAL_STATUS_WRONG_STATE` before
+  /// sipral_network_start, `SIPRAL_STATUS_BUSY` from inside its own callback.
+  ///
+  /// Safety
+  ///
+  /// Safe to call with any handle value.
+  late final int Function(int stack, int nowMs, int waitMs) networkRun = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Uint64 nowMs, ffi.Uint32 waitMs),
+      int Function(int stack, int nowMs, int waitMs)>('sipral_network_run');
+
+  /// Stop running this stack's networking (ABI 1.5): every socket and connection the
+  /// component opened is closed, its media sockets with them, and the stack's events go to
+  /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
+  /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
+  /// was not running.
+  ///
+  /// Safety
+  ///
+  /// Safe to call with any handle value.
+  late final int Function(int stack) networkStop = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack),
+      int Function(int stack)>('sipral_network_stop');
+
+  /// Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
+  /// (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+  /// ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
+  ///
+  /// For the address to name in `bind_address` and `Contact`, with
+  /// `sipral_advertised_address` toward the first of them. `config` is the resolver's (null
+  /// for the system's); this blocks for as long as the lookups take, ten seconds each at
+  /// most. `SIPRAL_STATUS_UNREACHABLE_ADDRESS` when the DNS names no address,
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set when they do not fit.
+  ///
+  /// Safety
+  ///
+  /// `config` must be null or point at a readable `sipral_network_config_t`, `server_uri`
+  /// must be readable for `server_uri_len` bytes, `buffer` writable for `capacity` bytes or
+  /// null with a capacity of zero, and `out_needed` null or pointing at one `size_t`.
+  late final int Function(ffi.Pointer<SipralNetworkConfig> config, ffi.Pointer<ffi.Char> serverUri, int serverUriLen, int protocol, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) networkLocate = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<SipralNetworkConfig> config, ffi.Pointer<ffi.Char> serverUri, ffi.Size serverUriLen, ffi.Uint32 protocol, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(ffi.Pointer<SipralNetworkConfig> config, ffi.Pointer<ffi.Char> serverUri, int serverUriLen, int protocol, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_network_locate');
+
+  /// Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+  /// at a port from its RTP range when it has one (the odd one above kept for RTCP), and
+  /// write its `host:port`, NUL-terminated, into `buffer`, for
+  /// `sipral_call_config_t::media_address` or an answer's.
+  ///
+  /// `capacity` must be at least `SIPRAL_ADDRESS_BYTES`, so that nothing is opened that
+  /// could not be named: below it is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set
+  /// and nothing opened. `SIPRAL_STATUS_WRONG_STATE` before sipral_network_start or on a
+  /// stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
+  /// no free pair.
+  ///
+  /// Safety
+  ///
+  /// `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
+  /// `size_t`.
+  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) networkMediaOpen = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_network_media_open');
+
+  /// Give a call's media to the socket sipral_network_media_open opened at `address`
+  /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+  /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
+  /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
+  /// sipral_network_run. The socket closes, and its port goes back, when the call ends.
+  ///
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+  ///
+  /// Safety
+  ///
+  /// `address` must be readable for `address_len` bytes.
+  late final int Function(int stack, ffi.Pointer<ffi.Char> address, int addressLen, int call, int media) networkMediaAttach = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> address, ffi.Size addressLen, SipralHandle call, SipralHandle media),
+      int Function(int stack, ffi.Pointer<ffi.Char> address, int addressLen, int call, int media)>('sipral_network_media_attach');
+
+  /// One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
+  /// socket the call's handle is attached to (ABI 1.5). The frame is as
+  /// `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
+  /// with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
+  ///
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a handle no socket is attached to.
+  ///
+  /// Safety
+  ///
+  /// `samples` must be readable for `sample_count` samples.
+  late final int Function(int stack, int media, int nowMs, ffi.Pointer<ffi.Int16> samples, int sampleCount) networkMediaCapture = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle media, ffi.Uint64 nowMs, ffi.Pointer<ffi.Int16> samples, ffi.Size sampleCount),
+      int Function(int stack, int media, int nowMs, ffi.Pointer<ffi.Int16> samples, int sampleCount)>('sipral_network_media_capture');
+
+  /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+  /// range. For a socket whose call never came to media; one whose call ended has closed
+  /// already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+  ///
+  /// Safety
+  ///
+  /// `address` must be readable for `address_len` bytes.
+  late final int Function(int stack, ffi.Pointer<ffi.Char> address, int addressLen) networkMediaClose = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> address, ffi.Size addressLen),
+      int Function(int stack, ffi.Pointer<ffi.Char> address, int addressLen)>('sipral_network_media_close');
 }

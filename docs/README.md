@@ -45,6 +45,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [23-compared-with-pjsip.md](23-compared-with-pjsip.md) | the same scenarios run for Sipral's headless agent and for pjsua against one Asterisk: registration, call set-up, memory, CPU, bad links, a moved address, the INVITE with ICE |
 | [24-voice-agents.md](24-voice-agents.md) | connecting Sipral to AI voice-agent services: the SIP bridge, Pipecat and headless PCM paths, and for each service its address, transports, codecs, admission and audio format |
 | [25-network-test.md](25-network-test.md) | the network test before a call: STUN, TURN, the account's server and an echo call, rated, and the thresholds of its verdict |
+| [26-network.md](26-network.md) | the optional networking component: the sockets, TLS and NAPTR and SRV lookups run by the library for a C, C++ or Rust program, its trust choices, its failures and what it does not do yet |
 
 ## Conventions
 

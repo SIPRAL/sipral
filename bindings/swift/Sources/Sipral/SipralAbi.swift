@@ -151,12 +151,13 @@ public enum SipralTransportError: UInt32, Sendable {
     case closed = 5
 }
 
-/// Why a TLS connection was refused, as the platform's TLS library said it. Names for
+/// Why a TLS connection was refused, as the TLS library that ran it said it. Names for
 /// `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
 ///
-/// Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
-/// classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
-/// with this left at none.
+/// The stack links no TLS library (`docs/22-tls.md`); it carries the classification of
+/// whoever ran the connection: the application, a binding, or the networking component
+/// (`sipral_network_start`). A connection never answered is
+/// `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
 public enum SipralTlsFailure: UInt32, Sendable {
     /// Not a TLS failure, or one the application could not classify.
     case none = 0
@@ -1936,6 +1937,21 @@ public enum SipralIsupNumber: UInt32, Sendable {
     case additionalCalling = 7
 }
 
+/// Which servers a TLS connection the component makes trusts. Names for
+/// `sipral_network_config_t::trust`; an account's `tls_pin_sha256` wins over it for the
+/// connections to that account's server.
+public enum SipralNetworkTrust: UInt32, Sendable {
+    /// The authorities in the platform's trust store.
+    case platform = 0
+    /// The platform's, and those in `authority_pem` beside them.
+    case platformAndAuthority = 1
+    /// Only those in `authority_pem`.
+    case onlyAuthority = 2
+    /// Only the certificate whose SHA-256 fingerprint is `pin_sha256`; chain, name and
+    /// dates are not checked (`docs/22-tls.md`).
+    case pinned = 3
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2398,6 +2414,16 @@ public extension sipral_isup_t {
     }
 }
 
+public extension sipral_network_config_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -2500,7 +2526,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 5
+    public static let abiVersionMinor: UInt32 = 6
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2655,6 +2681,13 @@ public enum Sipral {
     /// and rate: `sipral_local_conference_create`,
     /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
     public static let featureLocalConference: UInt32 = 16777216
+
+    /// See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+    /// `sipral_network_start` and the entry points beside it run the
+    /// sockets, TLS and RFC 3263 lookups for a stack. Set when this library
+    /// was built with sipral-ffi's `network` feature, which the bindings'
+    /// packages leave out.
+    public static let featureNetwork: UInt32 = 33554432
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -2897,6 +2930,7 @@ public enum Sipral {
         ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
         ("sipral_network_test_config_t", MemoryLayout<sipral_network_test_config_t>.size, 48, 36, 40),
         ("sipral_isup_t", MemoryLayout<sipral_isup_t>.size, 72, 68, 68),
+        ("sipral_network_config_t", MemoryLayout<sipral_network_config_t>.size, 120, 68, 68),
     ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
@@ -6920,6 +6954,186 @@ public enum Sipral {
             }
         try check(status)
         return needed
+    }
+
+    /// Have the library run this stack's networking (ABI 1.5).
+    ///
+    /// From now on sipral_network_run does what the loop of `sipral_stack_poll`,
+    /// `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
+    /// stack must have been created on `SIPRAL_TRANSPORT_UDP` with a `bind_address` that names
+    /// an interface (`sipral_advertised_address` finds it), else `SIPRAL_STATUS_WRONG_STATE`:
+    /// its socket is bound there now, at the port the system chooses when it named zero, and
+    /// accounts on TCP or TLS reach their servers on connections of their own
+    /// (`stream_protocol`), which are the component's too. Every
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered with a connection bound under a number
+    /// from 2^31 up, every `SIPRAL_EVENT_KIND_LOOKUP_WANTED` with the resolver's answer, and a
+    /// connection that fails is reported with `sipral_stack_transport_failed_with`, its reason
+    /// in `sipral_transport_failed_event_t::tls` as the bindings give it.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when it already runs; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// configuration that cannot be read, saying which member; `SIPRAL_STATUS_TRANSPORT_DOWN`
+    /// when the socket cannot be bound or the resolver's configuration read;
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without the component.
+    ///
+    /// Safety
+    ///
+    /// `config` must be null, for the defaults, or point at a `sipral_network_config_t` whose
+    /// buffers are readable for their lengths.
+    public static func networkStart(stack: SipralHandle, config: sipral_network_config_t, nowMs: UInt64) throws {
+        try ensureAbi()
+        var config = config
+        let status = sipral_network_start(stack, &config, nowMs)
+        try check(status)
+    }
+
+    /// One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+    /// what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
+    /// of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
+    /// again. The callback runs inside it, on this thread, as it does inside
+    /// `sipral_stack_poll`, and may call any entry point here but this one.
+    ///
+    /// `now_ms` is the caller's monotonic clock, as everywhere else. Call it in a loop; nothing
+    /// in the library calls it for the application. `SIPRAL_STATUS_WRONG_STATE` before
+    /// sipral_network_start, `SIPRAL_STATUS_BUSY` from inside its own callback.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func networkRun(stack: SipralHandle, nowMs: UInt64, waitMs: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_network_run(stack, nowMs, waitMs)
+        try check(status)
+    }
+
+    /// Stop running this stack's networking (ABI 1.5): every socket and connection the
+    /// component opened is closed, its media sockets with them, and the stack's events go to
+    /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
+    /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
+    /// was not running.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func networkStop(stack: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_network_stop(stack)
+        try check(status)
+    }
+
+    /// Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
+    /// (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+    /// ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
+    ///
+    /// For the address to name in `bind_address` and `Contact`, with
+    /// `sipral_advertised_address` toward the first of them. `config` is the resolver's (null
+    /// for the system's); this blocks for as long as the lookups take, ten seconds each at
+    /// most. `SIPRAL_STATUS_UNREACHABLE_ADDRESS` when the DNS names no address,
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set when they do not fit.
+    ///
+    /// Safety
+    ///
+    /// `config` must be null or point at a readable `sipral_network_config_t`, `server_uri`
+    /// must be readable for `server_uri_len` bytes, `buffer` writable for `capacity` bytes or
+    /// null with a capacity of zero, and `out_needed` null or pointing at one `size_t`.
+    public static func networkLocate(config: sipral_network_config_t, serverUri: String, `protocol`: UInt32, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var config = config
+        var needed = Int()
+        let status =
+            Array(serverUri.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    buffer.withUnsafeMutableBufferPointer { p3 in
+                        sipral_network_locate(&config, p1.baseAddress, p1.count, `protocol`, p3.baseAddress, p3.count, &needed)
+                    }
+                }
+            }
+        try check(status)
+        return needed
+    }
+
+    /// Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+    /// at a port from its RTP range when it has one (the odd one above kept for RTCP), and
+    /// write its `host:port`, NUL-terminated, into `buffer`, for
+    /// `sipral_call_config_t::media_address` or an answer's.
+    ///
+    /// `capacity` must be at least `SIPRAL_ADDRESS_BYTES`, so that nothing is opened that
+    /// could not be named: below it is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set
+    /// and nothing opened. `SIPRAL_STATUS_WRONG_STATE` before sipral_network_start or on a
+    /// stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
+    /// no free pair.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
+    /// `size_t`.
+    public static func networkMediaOpen(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p1 in
+                sipral_network_media_open(stack, p1.baseAddress, p1.count, &needed)
+            }
+        try check(status)
+        return needed
+    }
+
+    /// Give a call's media to the socket sipral_network_media_open opened at `address`
+    /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+    /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
+    /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
+    /// sipral_network_run. The socket closes, and its port goes back, when the call ends.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+    ///
+    /// Safety
+    ///
+    /// `address` must be readable for `address_len` bytes.
+    public static func networkMediaAttach(stack: SipralHandle, address: String, call: SipralHandle, media: SipralHandle) throws {
+        try ensureAbi()
+        let status =
+            Array(address.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_network_media_attach(stack, p1.baseAddress, p1.count, call, media)
+                }
+            }
+        try check(status)
+    }
+
+    /// One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
+    /// socket the call's handle is attached to (ABI 1.5). The frame is as
+    /// `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
+    /// with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a handle no socket is attached to.
+    ///
+    /// Safety
+    ///
+    /// `samples` must be readable for `sample_count` samples.
+    public static func networkMediaCapture(stack: SipralHandle, media: SipralHandle, nowMs: UInt64, samples: [Int16]) throws {
+        try ensureAbi()
+        let status =
+            samples.withUnsafeBufferPointer { p3 in
+                sipral_network_media_capture(stack, media, nowMs, p3.baseAddress, p3.count)
+            }
+        try check(status)
+    }
+
+    /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+    /// range. For a socket whose call never came to media; one whose call ended has closed
+    /// already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+    ///
+    /// Safety
+    ///
+    /// `address` must be readable for `address_len` bytes.
+    public static func networkMediaClose(stack: SipralHandle, address: String) throws {
+        try ensureAbi()
+        let status =
+            Array(address.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_network_media_close(stack, p1.baseAddress, p1.count)
+                }
+            }
+        try check(status)
     }
 
 }

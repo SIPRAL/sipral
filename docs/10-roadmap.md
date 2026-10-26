@@ -131,7 +131,7 @@ November 2026, planned.
 
 December 2026, planned.
 
-- Networking ready to use from Rust and C: sockets, TLS and NAPTR/SRV lookups in one optional component, so an application without a binding no longer writes its own
+- Networking ready to use from Rust and C: sockets, TLS and NAPTR/SRV lookups in one optional component, so an application without a binding no longer writes its own *(done)*
 - A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller
 - A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding *(in progress)*
 
@@ -776,7 +776,12 @@ C++ softphones that would move off another stack, and three pieces close it:
   TLS and RFC 3263's NAPTR and SRV lookups for the core, in Rust and behind
   the C ABI, with the platform's trust store and the same pinning and private
   CA choices the bindings offer. Its dependencies stay inside the licence set
-  in `deny.toml`.
+  in `deny.toml`. *Built*: `sipral-net`, and `sipral_network_*` behind
+  `sipral-ffi`'s `network` feature (ABI 1.6, `26-network.md`); a C program
+  with no networking code registers over TLS to a name found by NAPTR and
+  SRV, holds and resumes a call at Asterisk in `scripts/lab.sh network`. Not
+  yet: the platform's trust store on iOS and Android, RFC 5922's certificate
+  rules, TURN over TCP or TLS.
 - **A C++ API.** Classes over the C ABI for the stack, accounts, calls and
   events, with lifetimes tied to scope, in a header shipped beside
   `sipral.h`.

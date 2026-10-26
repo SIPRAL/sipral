@@ -13,14 +13,17 @@ endpoint described under "The lab's TLS endpoint".
 
 ## Who checks what
 
-Sipral links no TLS library and never will (`01-architecture.md`, "Who owns
-the sockets, the resolver and TLS"; `20-security-model.md`, "It has no TLS
-of its own"). So the certificate check is always done by the platform's TLS
-library, and by whoever drives it:
+The stack links no TLS library (`01-architecture.md`, "Who owns the sockets,
+the resolver and TLS"; `20-security-model.md`, "It has no TLS of its own").
+So the certificate check is done by whoever drives the connection: the
+platform's TLS library, through the application or a binding, or rustls in
+the optional networking component (`26-network.md`), for a program that has
+no TLS of its own:
 
 | Connection | Opened by | Certificate checked by | Checked against | Where |
 |---|---|---|---|---|
 | SIP over TLS, C | the application, through the C ABI: `transport` `SIPRAL_TRANSPORT_TLS`, `sipral_stack_transport_bind`, bytes in with `sipral_stack_receive_stream`, out with `sipral_stack_poll_transmit` | the application's TLS library, and the application's own RFC 5922 check | the SIP domain the user configured | `crates/sipral-ffi/src/transport.rs`; the stack only frames the bytes (`crates/sipral-core/src/msg/framer.rs`) |
+| SIP over TLS, C, with no TLS of the application's | the networking component, `sipral_network_start`: a connection per `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` | rustls, against the platform's trust store, a private authority or a pin (`sipral_network_config_t::trust`), or the account's `tls_pin_sha256` | `tls_server_name`, or the host of the account's `server_uri` (RFC 5922 §7.3), by the HTTPS rules | `crates/sipral-net`, `crates/sipral-ffi/src/network/driver.rs`; `26-network.md` |
 | SIP over TLS, Python | the binding, `Stack(signalling=Transport.TLS)` | Python's `ssl` (OpenSSL) | `tls_server_name`, or the host part of `signalling_server` | `bindings/python/sipral/signalling.py`, `bindings/python/sipral/stack.py` |
 | SIP over TLS, .NET | the binding, `new SipralStack(signalling: SipralTransport.Tls)` | `SslStream` | `tlsServerName`, or the host part of `signallingServer` | `bindings/dotnet/Sipral/SipralSignalling.cs` |
 | SIP over TLS, Kotlin | the binding, `SipralClient.open(signalling = SipralTransport.TLS)` | `SSLSocket`'s trust managers; the name by the HTTPS rules, in the binding | `tlsServerName`, or the host part of `signallingServer` | `bindings/kotlin/.../idiomatic/SipralSignalling.kt` |

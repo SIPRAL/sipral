@@ -67,7 +67,17 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # account's `stir_*` members are in every build of it; a build without the
 # feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to a key or to trust
 # anchors, and `SIPRAL_FEATURE_STIR` says so first.
+#
+# `network` is the one off by default: the networking component behind
+# `sipral_network_*` (`sipral-net`: rustls, the resolver and a runtime under
+# it), for a C or C++ application that has no sockets of its own. The
+# bindings open theirs with the platform's APIs, so the libraries they ship
+# leave it out. The header does not branch on it either — every
+# `sipral_network_*` entry point is in every build — and a build without it
+# answers `SIPRAL_STATUS_NOT_SUPPORTED`, which `SIPRAL_FEATURE_NETWORK` says
+# first.
 default = ["opus", "dtls", "ice", "stun", "stir"]
+network = ["dep:sipral-net"]
 opus = ["sipral/opus"]
 stir = ["sipral/stir", "sipral-ua/stir"]
 dtls = ["sipral/dtls"]
@@ -89,6 +99,8 @@ sipral-ua = { path = "../sipral-ua", version = "=1.2.3" }
 # asks. Its `ice` follows this crate's, so that what the pump captures says
 # how it leaves a media socket the way `sipral_media_capture` does.
 sipral-audio = { path = "../sipral-audio", version = "=1.2.3" }
+# the networking component, behind `network` above
+sipral-net = { path = "../sipral-net", version = "=1.2.3", optional = true }
 # the two seeds a stack is created with, wiped once the engine and the agent
 # hold their own copies; the version `sipral` names, so nothing new enters
 # the build
@@ -118,6 +130,13 @@ sipral-media = { path = "../sipral-media", version = "=1.2.3", default-features 
 # carries `sipral-headless`.
 sipral = { path = "../sipral", version = "=1.2.3", default-features = false, features = ["redaction", "headless"] }
 sipral-headless = { path = "../sipral-headless", version = "=1.2.3" }
+# the networking component's own test (`src/network/tests.rs`): a SIP server
+# over TLS with a throwaway authority, and a name server answering from a
+# table, both on loopback. The same three crates `sipral-net` and its tests
+# already build, so nothing new enters the lockfile.
+rcgen = "0.14.10"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "allow"

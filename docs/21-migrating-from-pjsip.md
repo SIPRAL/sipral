@@ -35,7 +35,11 @@ mapping further down follows from them.
    owns the sockets, the resolver and TLS"): the application reads a
    socket and hands the bytes in (`sipral_stack_receive_datagram`,
    `sipral_stack_receive_stream`), calls `sipral_stack_poll` with the time
-   now, and writes what `sipral_stack_poll_transmit` hands back. The
+   now, and writes what `sipral_stack_poll_transmit` hands back — or, in a
+   library built with the networking component, calls `sipral_network_run`
+   and has the library run the sockets, the TLS and the NAPTR and SRV
+   lookups for it (`26-network.md`), the nearest thing to PJSIP's own
+   transports. The
    idiomatic layers own the signalling socket — UDP, or one TCP or TLS
    connection — and one poll thread for the
    application, so the Python sample below has no loop in it; the C sample
@@ -476,7 +480,7 @@ is up, and it is driven one frame at a time:
 /* Device mode: the library opens the platform's microphone and loudspeaker
  * and pumps every call through them. Each encoded packet still comes back
  * to the application, through this callback, to send from the call's own
- * media socket: the library never opens a socket. */
+ * media socket: the stack never opens a socket itself. */
 void configure_device_mode(sipral_stack_config_t *config, sipral_audio_transmit_callback_t send,
                            void *user_data)
 {

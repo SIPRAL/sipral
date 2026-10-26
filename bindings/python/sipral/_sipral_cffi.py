@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR 5
+#define SIPRAL_ABI_VERSION_MINOR 6
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -275,6 +275,15 @@ typedef uint64_t sipral_handle_t;
  * `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
  */
 #define SIPRAL_FEATURE_LOCAL_CONFERENCE 16777216
+
+/**
+ * See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+ * `sipral_network_start` and the entry points beside it run the
+ * sockets, TLS and RFC 3263 lookups for a stack. Set when this library
+ * was built with sipral-ffi's `network` feature, which the bindings'
+ * packages leave out.
+ */
+#define SIPRAL_FEATURE_NETWORK 33554432
 
 /**
  * The buffer a caller has to bring for one outgoing packet.
@@ -501,6 +510,7 @@ typedef struct sipral_local_conference_member sipral_local_conference_member_t;
 typedef struct sipral_pinned_certificate sipral_pinned_certificate_t;
 typedef struct sipral_network_test_config sipral_network_test_config_t;
 typedef struct sipral_isup sipral_isup_t;
+typedef struct sipral_network_config sipral_network_config_t;
 
 /**
  * The result of a call across the C ABI.
@@ -721,12 +731,13 @@ enum {
 };
 
 /**
- * Why a TLS connection was refused, as the platform's TLS library said it. Names for
+ * Why a TLS connection was refused, as the TLS library that ran it said it. Names for
  * `sipral_transport_failure_t::tls` and `sipral_transport_failed_event_t::tls`.
  *
- * Sipral links no TLS library (`docs/22-tls.md`); the stack only carries the application's
- * classification. A connection never answered is `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED`
- * with this left at none.
+ * The stack links no TLS library (`docs/22-tls.md`); it carries the classification of
+ * whoever ran the connection: the application, a binding, or the networking component
+ * (`sipral_network_start`). A connection never answered is
+ * `SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED` with this left at none.
  */
 typedef uint32_t sipral_tls_failure_t;
 enum {
@@ -3786,6 +3797,32 @@ enum {
      * number (§3.26).
      */
     SIPRAL_ISUP_NUMBER_ADDITIONAL_CALLING = 7,
+};
+
+/**
+ * Which servers a TLS connection the component makes trusts. Names for
+ * `sipral_network_config_t::trust`; an account's `tls_pin_sha256` wins over it for the
+ * connections to that account's server.
+ */
+typedef uint32_t sipral_network_trust_t;
+enum {
+    /**
+     * The authorities in the platform's trust store.
+     */
+    SIPRAL_NETWORK_TRUST_PLATFORM = 0,
+    /**
+     * The platform's, and those in `authority_pem` beside them.
+     */
+    SIPRAL_NETWORK_TRUST_PLATFORM_AND_AUTHORITY = 1,
+    /**
+     * Only those in `authority_pem`.
+     */
+    SIPRAL_NETWORK_TRUST_ONLY_AUTHORITY = 2,
+    /**
+     * Only the certificate whose SHA-256 fingerprint is `pin_sha256`; chain, name and
+     * dates are not checked (`docs/22-tls.md`).
+     */
+    SIPRAL_NETWORK_TRUST_PINNED = 3,
 };
 
 /**
@@ -8398,6 +8435,88 @@ struct sipral_isup {
 };
 
 /**
+ * How the networking component connects and resolves (ABI 1.5). Set `size` to
+ * `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
+ * platform's trust store and resolver, and no client certificate.
+ */
+struct sipral_network_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * A sipral_network_trust_t.
+     */
+    sipral_network_trust_t trust;
+    /**
+     * Zero.
+     */
+    uint32_t reserved;
+    /**
+     * PEM certificates of the authorities trusted with
+     * `SIPRAL_NETWORK_TRUST_PLATFORM_AND_AUTHORITY` or `_ONLY_AUTHORITY`. Not
+     * NUL-terminated.
+     */
+    const char *authority_pem;
+    /**
+     * How many bytes of it.
+     */
+    size_t authority_pem_len;
+    /**
+     * The fingerprint for `SIPRAL_NETWORK_TRUST_PINNED`, written as
+     * `sipral_account_config_t::tls_pin_sha256` is.
+     */
+    const char *pin_sha256;
+    /**
+     * How many bytes of it.
+     */
+    size_t pin_sha256_len;
+    /**
+     * The client certificate presented when a server asks for one, leaf first, then any
+     * intermediates, as PEM; null for none.
+     */
+    const char *client_certificate_pem;
+    /**
+     * How many bytes of it.
+     */
+    size_t client_certificate_pem_len;
+    /**
+     * Its private key as PEM (PKCS #8, SEC 1 or PKCS #1); required with the certificate.
+     */
+    const char *client_key_pem;
+    /**
+     * How many bytes of it.
+     */
+    size_t client_key_pem_len;
+    /**
+     * The name servers to ask, comma-separated `host:port`; null for the system's
+     * resolver configuration.
+     */
+    const char *name_servers;
+    /**
+     * How many bytes of it.
+     */
+    size_t name_servers_len;
+    /**
+     * The name every TLS server's certificate is checked against; null for the host of
+     * the account's `server_uri` (RFC 5922 section 7.3), else the address connected to.
+     */
+    const char *tls_server_name;
+    /**
+     * How many bytes of it.
+     */
+    size_t tls_server_name_len;
+    /**
+     * How long connecting, and then a TLS handshake, may each take; zero for 8000.
+     */
+    uint32_t connect_timeout_ms;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_end;
+};
+
+/**
  * Copy the calling thread's last error message into `buffer`.
  *
  * UTF-8 with a trailing NUL. `out_needed`, when not null, always receives
@@ -11443,6 +11562,141 @@ sipral_status_t sipral_isup_read(const uint8_t *body, size_t body_len, sipral_is
  */
 sipral_status_t sipral_isup_number(const uint8_t *body, size_t body_len, sipral_isup_number_t which, char *buffer, size_t capacity, size_t *out_needed);
 
+/**
+ * Have the library run this stack's networking (ABI 1.5).
+ *
+ * From now on sipral_network_run does what the loop of `sipral_stack_poll`,
+ * `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
+ * stack must have been created on `SIPRAL_TRANSPORT_UDP` with a `bind_address` that names
+ * an interface (`sipral_advertised_address` finds it), else `SIPRAL_STATUS_WRONG_STATE`:
+ * its socket is bound there now, at the port the system chooses when it named zero, and
+ * accounts on TCP or TLS reach their servers on connections of their own
+ * (`stream_protocol`), which are the component's too. Every
+ * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` is answered with a connection bound under a number
+ * from 2^31 up, every `SIPRAL_EVENT_KIND_LOOKUP_WANTED` with the resolver's answer, and a
+ * connection that fails is reported with `sipral_stack_transport_failed_with`, its reason
+ * in `sipral_transport_failed_event_t::tls` as the bindings give it.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` when it already runs; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+ * configuration that cannot be read, saying which member; `SIPRAL_STATUS_TRANSPORT_DOWN`
+ * when the socket cannot be bound or the resolver's configuration read;
+ * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without the component.
+ *
+ * Safety
+ *
+ * `config` must be null, for the defaults, or point at a `sipral_network_config_t` whose
+ * buffers are readable for their lengths.
+ */
+sipral_status_t sipral_network_start(sipral_handle_t stack, const sipral_network_config_t *config, uint64_t now_ms);
+
+/**
+ * One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+ * what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
+ * of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
+ * again. The callback runs inside it, on this thread, as it does inside
+ * `sipral_stack_poll`, and may call any entry point here but this one.
+ *
+ * `now_ms` is the caller's monotonic clock, as everywhere else. Call it in a loop; nothing
+ * in the library calls it for the application. `SIPRAL_STATUS_WRONG_STATE` before
+ * sipral_network_start, `SIPRAL_STATUS_BUSY` from inside its own callback.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_network_run(sipral_handle_t stack, uint64_t now_ms, uint32_t wait_ms);
+
+/**
+ * Stop running this stack's networking (ABI 1.5): every socket and connection the
+ * component opened is closed, its media sockets with them, and the stack's events go to
+ * the callback alone again. The stack is told nothing; a stack about to be destroyed needs
+ * no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
+ * was not running.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_network_stop(sipral_handle_t stack);
+
+/**
+ * Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
+ * (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+ * ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
+ *
+ * For the address to name in `bind_address` and `Contact`, with
+ * `sipral_advertised_address` toward the first of them. `config` is the resolver's (null
+ * for the system's); this blocks for as long as the lookups take, ten seconds each at
+ * most. `SIPRAL_STATUS_UNREACHABLE_ADDRESS` when the DNS names no address,
+ * `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set when they do not fit.
+ *
+ * Safety
+ *
+ * `config` must be null or point at a readable `sipral_network_config_t`, `server_uri`
+ * must be readable for `server_uri_len` bytes, `buffer` writable for `capacity` bytes or
+ * null with a capacity of zero, and `out_needed` null or pointing at one `size_t`.
+ */
+sipral_status_t sipral_network_locate(const sipral_network_config_t *config, const char *server_uri, size_t server_uri_len, sipral_transport_t protocol, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+ * at a port from its RTP range when it has one (the odd one above kept for RTCP), and
+ * write its `host:port`, NUL-terminated, into `buffer`, for
+ * `sipral_call_config_t::media_address` or an answer's.
+ *
+ * `capacity` must be at least `SIPRAL_ADDRESS_BYTES`, so that nothing is opened that
+ * could not be named: below it is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with `out_needed` set
+ * and nothing opened. `SIPRAL_STATUS_WRONG_STATE` before sipral_network_start or on a
+ * stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
+ * no free pair.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
+ * `size_t`.
+ */
+sipral_status_t sipral_network_media_open(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Give a call's media to the socket sipral_network_media_open opened at `address`
+ * (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+ * arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
+ * `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
+ * sipral_network_run. The socket closes, and its port goes back, when the call ends.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+ *
+ * Safety
+ *
+ * `address` must be readable for `address_len` bytes.
+ */
+sipral_status_t sipral_network_media_attach(sipral_handle_t stack, const char *address, size_t address_len, sipral_handle_t call, sipral_handle_t media);
+
+/**
+ * One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
+ * socket the call's handle is attached to (ABI 1.5). The frame is as
+ * `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
+ * with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for a handle no socket is attached to.
+ *
+ * Safety
+ *
+ * `samples` must be readable for `sample_count` samples.
+ */
+sipral_status_t sipral_network_media_capture(sipral_handle_t stack, sipral_handle_t media, uint64_t now_ms, const int16_t *samples, size_t sample_count);
+
+/**
+ * Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+ * range. For a socket whose call never came to media; one whose call ended has closed
+ * already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+ *
+ * Safety
+ *
+ * `address` must be readable for `address_len` bytes.
+ */
+sipral_status_t sipral_network_media_close(sipral_handle_t stack, const char *address, size_t address_len);
+
 """
 
 ffi = FFI()
@@ -11594,4 +11848,5 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_pinned_certificate_t": (40, 36, 40),
     "sipral_network_test_config_t": (48, 36, 40),
     "sipral_isup_t": (72, 68, 68),
+    "sipral_network_config_t": (120, 68, 68),
 }

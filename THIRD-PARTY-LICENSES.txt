@@ -5,7 +5,7 @@ Ship this file, or an equivalent notice screen, with any binary that
 contains Sipral: `LICENSE-COMMERCIAL.md` and `LICENSING.md` require it,
 because the licences below require it themselves.
 
-This lists every one of the 55 third-party components in the normal (non-dev, non-build) dependency graph of the crates Sipral ships a binary of -- `sipral` and `sipral-ffi` -- across every target the project builds for: macOS, iOS, Windows and Linux. For each one: its name, version, licence expression, and the full licence text(s) exactly as that component's own source ships them.
+This lists every one of the 55 third-party components in the normal (non-dev, non-build) dependency graph of the crates Sipral ships a binary of -- `sipral` and `sipral-ffi` -- across every target the project builds for: macOS, iOS, Windows and Linux. For each one: its name, version, licence expression, and the full licence text(s) exactly as that component's own source ships them. A library built with `sipral-ffi`'s `network` feature carries more, listed in crates/sipral-net/THIRD-PARTY-LICENSES.txt.
 
 This file is generated. Do not edit it by hand: run
 `cargo run -p sipral-license-gen` to regenerate it after any change to

@@ -20,7 +20,7 @@ whether it is met; *in part* is followed by what is missing.
 |---|---|---|---|
 | 3261 | SIP: Session Initiation Protocol | sipral-core | phase 1 |
 | 3263 | Locating SIP servers: transport selection, the `maddr` target, the default port, and what counts as a failed hop | sipral-core | phase 1 |
-| 3263 | Locating SIP servers: the NAPTR, SRV and A queries themselves | caller, asked one at a time (`UaEvent::LookupWanted`, `SIPRAL_EVENT_KIND_LOOKUP_WANTED`) and answered as records (`sipral_account_looked_up`); every binding answers with the platform's resolver, and the reference loop does the A query only | phase 1 |
+| 3263 | Locating SIP servers: the NAPTR, SRV and A queries themselves | caller, asked one at a time (`UaEvent::LookupWanted`, `SIPRAL_EVENT_KIND_LOOKUP_WANTED`) and answered as records (`sipral_account_looked_up`); every binding answers with the platform's resolver, the networking component with hickory's (`sipral-net`, `docs/26-network.md`), and the reference loop does the A query only | phase 1 |
 | 3263 | Locating an account's server named by a URI (`Account::located`, `server_uri`): NAPTR when asked for, SRV for the account's transport, then A or AAAA; every target kept in §4.3's order for failover on a timeout, a lost transport or a 503; the name asked again when its time-to-live runs out or the recovery ladder wants an address | sipral-core, sipral-ua | phase 1; built |
 | 2782 | SRV records: ordering candidates by priority and weight | sipral-core, over the records the caller's resolver returns | phase 1; built |
 | 3264 | Offer/answer model with SDP | sipral-core | phase 1 |
