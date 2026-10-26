@@ -792,7 +792,8 @@ C++ softphones that would move off another stack, and three pieces close it:
   body or drop it, for a PBX or carrier that needs a header no option
   covers. *Built* in the endpoint, for Rust (`Endpoint::set_message_hook`,
   `Rewrite`), C (`sipral_stack_message_hook`, ABI 1.5) and Python
-  (`Stack.set_message_hook`), with its tests in each; the other bindings
+  (`Stack.set_message_hook`), Swift (`SipralStack.setMessageHook(_:)`) and
+  Kotlin (`SipralClient.setMessageHook`), with its tests in each; the other bindings
   have the C entry points in their generated layers but no method of their
   own yet, and the lab step is still to come (`03-core-signalling.md`, "A
   message hook").

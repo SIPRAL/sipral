@@ -49,6 +49,7 @@ import org.sipral.SipralIceTrickle
 import org.sipral.SipralLink
 import org.sipral.SipralLogLevel
 import org.sipral.SipralLogListener
+import org.sipral.SipralMessageHookListener
 import org.sipral.SipralNat
 import org.sipral.SipralNetworkTestConfig
 import org.sipral.SipralRecovery
@@ -100,6 +101,18 @@ internal fun overStream(protocol: Long): Boolean =
 private class TurnStream(val socket: Socket) {
     val input: InputStream = socket.getInputStream()
     val output: OutputStream = socket.getOutputStream()
+}
+
+/** What a [SipralClient.setMessageHook] hook decides for one message. */
+sealed class SipralHookVerdict {
+    /** Let the message on as it is. */
+    object Keep : SipralHookVerdict()
+
+    /** Put [message] in its place. */
+    class Replace(val message: ByteArray) : SipralHookVerdict()
+
+    /** Stop it: not sent, or not read. */
+    object Drop : SipralHookVerdict()
 }
 
 /**
@@ -872,6 +885,38 @@ class SipralClient private constructor(
             null
         }
         retryBusy { Sipral.stackLog(handle, (if (on) level else SipralLogLevel.OFF).value.toLong(), listener) }
+    }
+
+    /**
+     * See, change or drop every SIP message just before it is sent and just
+     * after it arrives (`sipral_stack_message_hook`; `docs/03-core-signalling.md`,
+     * "A message hook"); null removes the hook. [hook] gets whether the
+     * message is on its way out, the whole message, and the far end as
+     * `host:port`, and answers [SipralHookVerdict.Keep],
+     * [SipralHookVerdict.Replace] (`Content-Length` must match the body) or
+     * [SipralHookVerdict.Drop]; what it throws keeps the message as it is.
+     * It runs inside the stack's lock, on the thread that is inside the
+     * stack: it must not call back into this client, and should return
+     * quickly.
+     */
+    fun setMessageHook(hook: ((outgoing: Boolean, message: ByteArray, remote: String) -> SipralHookVerdict)?) {
+        val listener = hook?.let {
+            SipralMessageHookListener { hooked ->
+                try {
+                    when (val verdict = it(hooked.direction == Sipral.HOOK_OUTGOING, hooked.message ?: ByteArray(0), hooked.remote ?: "")) {
+                        SipralHookVerdict.Keep -> Sipral.HOOK_KEEP
+                        SipralHookVerdict.Drop -> Sipral.HOOK_DROP
+                        is SipralHookVerdict.Replace -> {
+                            Sipral.hookedMessageReplace(verdict.message)
+                            Sipral.HOOK_REPLACE
+                        }
+                    }
+                } catch (_: Exception) {
+                    Sipral.HOOK_KEEP
+                }
+            }
+        }
+        retryBusy { Sipral.stackMessageHook(handle, listener) }
     }
 
     /**

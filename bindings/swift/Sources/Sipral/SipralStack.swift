@@ -162,7 +162,15 @@ public final class SipralStack: @unchecked Sendable {
         /// Where `setLog` sends lines. Guarded by `logQueue`.
         var logHandler: LogHandler?
         let logQueue = DispatchQueue(label: "org.sipral.stack.log")
+        /// What `setMessageHook(_:)` installed. Guarded by `hookQueue`.
+        var messageHook: MessageHook?
+        let hookQueue = DispatchQueue(label: "org.sipral.stack.hook")
     }
+
+    /// Receives whether the message is on its way out, the whole message
+    /// from its start line to the end of its body, and the far end as
+    /// `host:port`; answers what becomes of the message.
+    public typealias MessageHook = @Sendable (Bool, [UInt8], String) throws -> SipralHookVerdict
 
     /// Receives level, module, the redacted line, and how many lines a flood
     /// dropped before it.
@@ -1074,6 +1082,30 @@ public final class SipralStack: @unchecked Sendable {
                 try Sipral.check(
                     sipral_stack_log(handle, SipralLogLevel.off.rawValue, nil, nil)
                 )
+            }
+        }
+    }
+
+    /// See, change or drop every SIP message just before it is sent and just
+    /// after it arrives (`docs/03-core-signalling.md`, "A message hook");
+    /// `nil` removes the hook. `hook(outgoing, message, remote)` answers
+    /// `.keep`, `.replace(bytes)` (`Content-Length` must match the body) or
+    /// `.drop`; an error it throws keeps the message as it is. It runs
+    /// inside the stack's lock, on the thread that is inside the stack: it
+    /// must not call back into this stack, and should return quickly.
+    public func setMessageHook(_ hook: MessageHook?) throws {
+        let box = self.box
+        box.hookQueue.sync { box.messageHook = hook }
+        let boxPointer = Unmanaged.passUnretained(box).toOpaque()
+        // Two calls rather than a conditional over the callback: Swift 6.4
+        // forms a C function pointer only from a direct function reference.
+        try retryingBusy {
+            if hook != nil {
+                try Sipral.stackMessageHook(
+                    stack: handle, callback: sipralMessageHookTrampoline, userData: boxPointer
+                )
+            } else {
+                try Sipral.stackMessageHook(stack: handle, callback: nil, userData: nil)
             }
         }
     }
@@ -2383,6 +2415,47 @@ private func sipralLogTrampoline(
         text(line.message, line.message_len),
         line.suppressed
     )
+}
+
+/// What a message hook decides for one message.
+public enum SipralHookVerdict: Sendable, Equatable {
+    /// Let the message on as it is.
+    case keep
+    /// Put these bytes in its place.
+    case replace([UInt8])
+    /// Stop it: not sent, or not read.
+    case drop
+}
+
+/// Runs inside the stack's lock, on the thread that is inside the stack;
+/// nothing thrown crosses back into the library.
+private func sipralMessageHookTrampoline(
+    _ hooked: UnsafePointer<sipral_hooked_message_t>?, _ userData: UnsafeMutableRawPointer?
+) -> UInt32 {
+    guard let hooked, let userData else { return Sipral.hookKeep }
+    let seen = hooked.pointee
+    guard seen.size >= MemoryLayout<sipral_hooked_message_t>.size, let bytes = seen.message else {
+        return Sipral.hookKeep
+    }
+    let box = Unmanaged<SipralStack.StackBox>.fromOpaque(userData).takeUnretainedValue()
+    guard let hook = box.hookQueue.sync(execute: { box.messageHook }) else { return Sipral.hookKeep }
+    let message = Array(UnsafeBufferPointer(start: bytes, count: seen.message_len))
+    let remote = seen.remote.map {
+        String(decoding: UnsafeRawBufferPointer(start: $0, count: seen.remote_len), as: UTF8.self)
+    } ?? ""
+    do {
+        switch try hook(seen.direction == Sipral.hookOutgoing, message, remote) {
+        case .keep:
+            return Sipral.hookKeep
+        case .drop:
+            return Sipral.hookDrop
+        case .replace(let replacement):
+            try Sipral.hookedMessageReplace(bytes: replacement)
+            return Sipral.hookReplace
+        }
+    } catch {
+        return Sipral.hookKeep
+    }
 }
 
 /// Runs on the engine thread; the packet is valid only until return, so it

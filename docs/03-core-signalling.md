@@ -275,7 +275,8 @@ For a PBX or a carrier that needs a header no option covers, or sends one
 that has to go before the endpoint reads the message, one hook per endpoint
 sees every SIP message whole, as bytes, and keeps it, replaces it or drops it
 (`Endpoint::set_message_hook`; in C `sipral_stack_message_hook`, in Python
-`Stack.set_message_hook`).
+`Stack.set_message_hook`, in Swift `SipralStack.setMessageHook(_:)`, in
+Kotlin `SipralClient.setMessageHook`).
 
 - **Out**, it runs in `Endpoint::poll_transmit`, after the message is built
   and measured and before any framing (a WebSocket's) is put around it. A
