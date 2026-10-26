@@ -229,6 +229,19 @@ export CARGO_TARGET_DIR=/cache/cargo/target
 mkdir -p /cache/cargo/registry
 ln -sfn /cache/cargo/registry "$CARGO_HOME/registry"
 export GRADLE_USER_HOME=/cache/gradle
+# Gradle's own cache cleanup drops a POM it has not read for 30 days and keeps
+# the jar beside it, and resolving from its metadata store never fetches the
+# POM again: the licence check below reads each artefact's POM, so a cache a
+# month old failed it with "no POM in the cache". Nothing is ever pruned here;
+# removing the volume is how this cache is emptied.
+mkdir -p "$GRADLE_USER_HOME/init.d"
+cat >"$GRADLE_USER_HOME/init.d/sipral-cache-kept.gradle" <<'GRADLE'
+beforeSettings { settings ->
+    settings.caches {
+        cleanup = Cleanup.DISABLED
+    }
+}
+GRADLE
 
 step "$AAR_NAME, $VARIANT_LABEL"
 rm -rf "$OUT/natives" "$OUT/aar"
