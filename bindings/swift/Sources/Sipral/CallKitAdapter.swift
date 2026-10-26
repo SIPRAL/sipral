@@ -30,10 +30,26 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
     }
 
     public func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void) {
+        reportIncomingCall(uuid: uuid, callerId: callerId, displayName: nil, completion: completion)
+    }
+
+    /// The caller's URI as the call's generic handle, and `displayName`,
+    /// when there is one, as the name the screen and recents show.
+    public func reportIncomingCall(
+        uuid: UUID, callerId: String, displayName: String?, completion: @Sendable @escaping (Error?) -> Void
+    ) {
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: callerId)
+        update.localizedCallerName = displayName
         update.hasVideo = false
         provider.reportNewIncomingCall(with: uuid, update: update, completion: completion)
+    }
+
+    /// Only the name changes; the handle stays the one reported.
+    public func reportCallerName(uuid: UUID, displayName: String) {
+        let update = CXCallUpdate()
+        update.localizedCallerName = displayName
+        provider.reportCall(with: uuid, updated: update)
     }
 
     /// An outgoing call's progress is the system's to show

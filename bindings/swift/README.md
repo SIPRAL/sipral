@@ -71,14 +71,56 @@ it, compiled in only where those frameworks actually work
 too, but every type in it is `API_UNAVAILABLE(macos)`, so `canImport` alone
 is not enough to keep this package building there).
 
-`PushKitAdapter` reports every VoIP push to CallKit, as iOS requires: one
-whose payload names the caller under `caller` runs the sequence on the
-account its closure returns, and any other, or one that meets no account,
-is shown and ended at once (`PushKitBridge.reportUnusable`). Its
-`tokenChanged` hands over the token, which `SipralPush.apnsVoip(token:teamId:bundleId:)`
+`PushKitAdapter` reports to CallKit every VoIP push the system says must
+be, as iOS requires: one whose payload names a caller runs the
+sequence on the account its closure returns, and any other, or one that
+meets no account, is shown and ended at once (`PushKitBridge.reportUnusable`).
+What it reads from a payload is its `decoder`'s to say: by default the
+clear `caller`, `call-id` and `name` (`VoipPushFields(clear:)`); an
+application whose push carries only a sealed box opens the box there and
+returns the same fields, and a decoder that throws makes the push one that
+names no caller. iOS 26.4 adds a delivery with `PKVoIPPushMetadata`
+(`pushRegistry(_:didReceiveIncomingVoIPPushWith:metadata:withCompletionHandler:)`),
+which the adapter implements beside the older one, under
+`@available(iOS 26.4, *)`: a push whose `mustReport` is false — the
+application in the foreground or already in a call, or a push delivered
+late — is not shown; the binding is refreshed, `notShown` is told what it
+named, and its INVITE, if one comes, is an ordinary incoming call.
+
+```swift
+let push = PushKitAdapter(bridge: pushBridge, decoder: { payload in
+    let opened = try Sealed.open(payload["box"] as? String)  // the application's own
+    return VoipPushFields(callerId: opened.caller, callId: opened.callId, displayName: opened.name)
+}) { accountBox.account }
+```
+
+An application that keeps its own `PKPushRegistryDelegate` and calls
+`PushKitBridge.handle(push:account:)` from it is a supported use: the bridge
+needs nothing from PushKit, which is why the adapter is a thin layer over
+it. That delegate then owns what the adapter does: calling `handle` (or
+`receive(_:mustReport:account:)`, which also takes the system's
+`mustReport`) inside the push handler, before its completion; showing and
+ending a push it cannot use with `reportUnusable(callerId:)`, since iOS
+stops delivering to an application that reports nothing; and handing every
+stack event to `matchIncomingCall`. It takes the adapter's place rather
+than running beside one, or each push would be reported twice.
+
+A push's `name`, or for a call that came without one `CallEventData.callerName`
+(the asserted identity's display name from a trusted peer, else the
+`From`'s), is the name the call screen shows: `CallKitAdapter` puts it in
+`CXCallUpdate.localizedCallerName` beside the caller's URI as a generic
+handle, and a pushed screen whose push carried none is given the INVITE's
+name once matched (`CallKitProviding.reportCallerName`).
+`CallKitBridge.endShown(uuid:reason:)` takes a shown call off the screen as
+`.unanswered` by default, for a push the application will not ring: a kept
+Answer fails, and the INVITE, if it comes, is declined with 603.
+
+Its `tokenChanged` hands over the token, which `SipralPush.apnsVoip(token:teamId:bundleId:)`
 turns into RFC 8599's `pn-provider`, `pn-prid` and `pn-param` for
 `SipralStack.addAccount(push:)`; `Account.pushEcho()` reads what the
-registrar said back. `PushKitBridge.matchIncomingCall` takes every stack
+registrar said back. A push proxy that needs RFC 5626's `+sip.instance` on
+the binding gets it from `addAccount(instanceId:)`, and fields of its own on
+every REGISTER from `addAccount(headers:)` (below). `PushKitBridge.matchIncomingCall` takes every stack
 event: it returns the push shown for an `incomingCall`, to be resolved with
 the `Call` `takeIncomingCall` gives, and ends the screen of an
 `announcedCallMissing` as unanswered. `CallKitAdapter.startOutgoingCall(callee:dial:)`
@@ -385,11 +427,24 @@ answers a ringing call with a 3xx.
 let account = try stack.addAccount(
     aor: "sip:alice@example.invalid",
     registrarAddress: "203.0.113.10:5060",
+    instanceId: "urn:uuid:3c1b7d2e-58f4-4b39-9a61-0d2c7e4f8a15",  // kept across launches
+    headers: [SipralHeader(name: "X-Tenant", value: "north-7")],   // on every REGISTER
     sessionTimer: .interval(seconds: 600),  // or .off; thirty minutes by default
     privacy: [.id],                         // withhold my number
     trustedPeers: ["203.0.113.10"]          // whose asserted identity is believed
 )
 ```
+
+`instanceId` is the `+sip.instance` of RFC 5626 §4.1, written on the
+`Contact` of every REGISTER the account sends, de-registration included; a
+registrar replaces the device's binding by it rather than adding one per
+address, and a push proxy that requires it refuses a REGISTER without it.
+Store it once (a `urn:uuid:`) and give the same one at every launch.
+`headers` go on every REGISTER as well — the first, the one answering a
+challenge, each refresh, the de-registration — checked as a call's are:
+`Expires` is the stack's (`expiresSeconds`), a `Supported` is merged with
+the `gruu` an instance brings, and an account without a `registrar`, which
+sends no REGISTER, refuses them.
 
 ### STIR/SHAKEN, SRTP per account and the encryption report
 
@@ -713,7 +768,12 @@ let carrier = try stack.addAccount(
 The stack asks for the connection with `SipralEventKind.transportWanted`,
 nothing outgrown, and this layer opens it to the account's server whatever
 `streamFallback` says: a TLS one held to the account's `tlsPin` when it has
-one, to `tlsTrust` under `tlsServerName` otherwise. The account's REGISTER
+one, to `tlsTrust` otherwise, for the name `tlsServerName` gives, else the
+host of the account's `serverUri` (RFC 5922 §7.3: the SIP domain
+configured, not the address SRV and the lookup led to), else the address
+connected to. Once located, the account's `Contact` moves to the route
+toward its server while the connection is being opened; the REGISTER goes
+the moment the connection is up, and the connection is asked for once. The account's REGISTER
 and every request of its calls go over it, its `Contact` names the protocol,
 and a connection that closes is opened again and the account registered
 again. Until it is open, a call the account places throws `.transportDown`.

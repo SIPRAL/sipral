@@ -204,10 +204,12 @@ final class PushTests: XCTestCase {
         let bobEvents: Recorder<SipralEvent>
     }
 
-    private func woken(callId: String? = nil) async throws -> Woken {
+    private func woken(callId: String? = nil, callerName: String? = nil) async throws -> Woken {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
-        let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress, displayName: callerName
+        )
         let bobAccount = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
         let provider = RecordingProvider()
         let callKit = CallKitBridge(provider: provider)
@@ -310,6 +312,54 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(ended.callData?.statusCode, 603)
         let confirmed = aliceEvents.elements.contains { $0.kind == .callConfirmed }
         XCTAssertFalse(confirmed, "a declined call was answered")
+    }
+
+    // MARK: - the caller's name
+
+    /// A push that carried no name: the screen is given the one the
+    /// INVITE's `From` carries, once the INVITE is matched to it.
+    func testAScreenThePushGaveNoNameIsGivenTheInvitesName() async throws {
+        let phone = try await woken(callerName: "Alice Liddell")
+        defer { phone.alice.close(); phone.bob.close() }
+        let shown = await phone.provider.reported
+        XCTAssertEqual(shown.map(\.displayName), [nil])
+
+        let (aliceCall, bobCall, _) = try await inviteArrives(phone)
+        defer { aliceCall.close(); bobCall.close() }
+        let named = await eventually(within: 5) { await !phone.provider.named.isEmpty }
+        XCTAssertTrue(named, "the INVITE's name never reached the screen")
+        let given = await phone.provider.named
+        XCTAssertEqual(given.map(\.uuid), [phone.pending.uuid])
+        XCTAssertEqual(given.map(\.displayName), ["Alice Liddell"])
+    }
+
+    // MARK: - the application ends a screen
+
+    /// For a push the application will not ring: the screen ends as
+    /// unanswered, a kept Answer fails, and the INVITE, when it comes, is
+    /// declined.
+    func testTheApplicationEndsAScreenAsUnansweredAndItsInviteIsDeclined() async throws {
+        let phone = try await woken()
+        defer { phone.alice.close(); phone.bob.close() }
+        XCTAssertThrowsError(try phone.callKit.endShown(uuid: UUID())) { error in
+            guard case CallKitBridgeError.unknownCall = error else { return XCTFail("\(error)") }
+        }
+        let outcome = Outcome()
+        phone.callKit.handleAnswer(uuid: phone.pending.uuid) { outcome.record($0) }
+        try phone.callKit.endShown(uuid: phone.pending.uuid)
+        XCTAssertEqual(outcome.all.count, 1)
+        XCTAssertNotEqual(outcome.all.first, "answered")
+        let ended = await eventually(within: 5) { await phone.provider.ended.contains { $0.uuid == phone.pending.uuid } }
+        XCTAssertTrue(ended, "the screen was left up")
+        let reasons = await phone.provider.ended.filter { $0.uuid == phone.pending.uuid }.map(\.reason)
+        XCTAssertEqual(reasons, [.unanswered])
+
+        let (aliceCall, bobCall, aliceEvents) = try await inviteArrives(phone)
+        defer { aliceCall.close(); bobCall.close() }
+        let endedEvent = await aliceEvents.first(within: 5) { $0.kind == .callEnded }
+        XCTAssertEqual(try XCTUnwrap(endedEvent, "the caller's call stayed up").callData?.statusCode, 603)
+        let reportedAgain = await phone.provider.ended.filter { $0.uuid == phone.pending.uuid }.count
+        XCTAssertEqual(reportedAgain, 1, "the end was reported twice")
     }
 }
 #endif

@@ -186,7 +186,9 @@ public final class Account: @unchecked Sendable {
         displayName: String?,
         authUser: String?,
         authPassword: String?,
+        instanceId: String?,
         expiresSeconds: UInt64,
+        headers: [SipralHeader],
         sessionTimer: SessionTimer,
         privacy: Privacy,
         trustedPeers: [String],
@@ -206,7 +208,7 @@ public final class Account: @unchecked Sendable {
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
              suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin,
-             named, websocketHost, websocketResource, push?.provider, push?.prid, push?.param]
+             named, websocketHost, websocketResource, push?.provider, push?.prid, push?.param, instanceId]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -255,6 +257,10 @@ public final class Account: @unchecked Sendable {
             if let authPasswordPointer = parts[6].pointer {
                 config.auth_password = authPasswordPointer
                 config.auth_password_len = parts[6].count
+            }
+            if let instancePointer = parts[20].pointer {
+                config.instance_id = instancePointer
+                config.instance_id_len = parts[20].count
             }
             config.expires_seconds = expiresSeconds
             if let providerPointer = parts[17].pointer {
@@ -305,7 +311,7 @@ public final class Account: @unchecked Sendable {
                     config.stir_key_len = keyBytes.count
                 }
                 return try retryingBusy {
-                    try Sipral.accountAdd(stack: stack.handle, config: config, configHeaders: [])
+                    try Sipral.accountAdd(stack: stack.handle, config: config, configHeaders: headers)
                 }
             }
         }

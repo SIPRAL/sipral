@@ -140,6 +140,113 @@ final class AccountStreamTests: XCTestCase {
         }
     }
 
+    // MARK: - an account located by SRV, on TLS
+
+    /// A stack whose resolver sends `sips:registrar.sipral.test` through SRV
+    /// to `pbx-7.sipral.test`, at `host`, the registrar's port.
+    private func locating(
+        to registrar: FakeRegistrar, trust: TLSTrust = .platform
+    ) throws -> SipralStack {
+        let port = registrar.port
+        let host = registrar.host
+        return try SipralStack(audio: .application, tlsTrust: trust, resolver: { name, record in
+            if record == .srv, name == "_sips._tcp.\(SignallingTests.serverName)" {
+                return DnsLookupAnswer(answer: .records, records: ["300 10 60 \(port) pbx-7.sipral.test"])
+            }
+            if record == .a, name == "pbx-7.sipral.test" {
+                return DnsLookupAnswer(answer: .records, records: ["300 \(host)"])
+            }
+            return .nothing
+        })
+    }
+
+    /// RFC 5922 §7.3: the certificate is checked against the SIP domain
+    /// configured, not against the address SRV and the lookup led to.
+    func testAnAccountLocatedBySrvIsHeldToItsSipDomainNotTheAddress() async throws {
+        let (identity, der) = try SignallingTests.certificate("domain")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        let stack = try locating(to: registrar, trust: .onlyAuthority(der))
+        defer { stack.close() }
+        let events = Recorder(stack.events())
+        let account = try stack.addAccount(
+            aor: "sip:bob@\(SignallingTests.serverName)", serverUri: "sips:\(SignallingTests.serverName)",
+            streamProtocol: .tls, registrar: "sips:\(SignallingTests.serverName)"
+        )
+        try account.register()
+        try await registered(account)
+        XCTAssertEqual(account.registrarAddress, registrar.address)
+        let failed = events.elements.compactMap(\.transportFailedData)
+        XCTAssertTrue(failed.isEmpty, failed.map { $0.detail ?? "" }.description)
+        XCTAssertEqual(SipralStack.serverName(of: "sips:alice@pbx.example.com:5061;transport=tls"), "pbx.example.com")
+        XCTAssertNil(SipralStack.serverName(of: "sips:198.51.100.7:5061"))
+        XCTAssertNil(SipralStack.serverName(of: "sip:[2001:db8::7]:5061"))
+    }
+
+    /// The first `Contact` is written before the server is known, so it moves
+    /// once the server is located, while the connection asked for is being
+    /// opened: the REGISTER still goes the moment the connection is up, and
+    /// the connection is asked for once.
+    func testAnAccountWhoseContactMovesOnceLocatedRegistersAsSoonAsItsConnectionIsUp() async throws {
+        guard let here = Self.reachableLocalAddress() else {
+            throw XCTSkip("this machine has no address but loopback that its own sockets reach")
+        }
+        let (identity, der) = try SignallingTests.certificate("moving")
+        let registrar = try FakeRegistrar(identity: identity, host: here)
+        defer { registrar.stop() }
+        let stack = try locating(to: registrar)
+        defer { stack.close() }
+        let events = Recorder(stack.events())
+        let pin = "SHA256=" + SHA256.hash(data: Data(der)).map { String(format: "%02X", $0) }.joined(separator: ":")
+        let account = try stack.addAccount(
+            aor: "sip:bob@\(SignallingTests.serverName)", serverUri: "sips:\(SignallingTests.serverName)",
+            tlsPin: pin, streamProtocol: .tls, registrar: "sips:\(SignallingTests.serverName)"
+        )
+        XCTAssertFalse(account.contact.contains(here), account.contact)
+        let started = Date()
+        try account.register()
+        let done = await eventually(within: 7) { (try? account.registrationState) == .registered }
+        XCTAssertTrue(done, "registered only after \(Date().timeIntervalSince(started)) s")
+        XCTAssertTrue(account.contact.contains(here), account.contact)
+        let register = try XCTUnwrap(registrar.registers.first?.message)
+        XCTAssertTrue(FakeRegistrar.header("Contact", register)?.contains(here) == true, register)
+        let wanted = events.elements.compactMap(\.transportWantedData)
+        XCTAssertEqual(wanted.map(\.destination), [registrar.address])
+    }
+
+    /// An IPv4 address of this machine other than loopback that a socket of
+    /// its own reaches: not a point-to-point tunnel's, which a VPN may hold.
+    static func reachableLocalAddress() -> String? {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        var candidates: [String] = []
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }).map(\.pointee) {
+            let flags = Int32(entry.ifa_flags)
+            guard let address = entry.ifa_addr, address.pointee.sa_family == sa_family_t(AF_INET),
+                  flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0, flags & IFF_POINTOPOINT == 0 else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                address, socklen_t(address.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST
+            ) == 0 else { continue }
+            candidates.append(String(cString: host))
+        }
+        for candidate in candidates {
+            guard let listening = try? UDPSocket(host: candidate, port: 0),
+                  let sending = try? UDPSocket(host: "0.0.0.0", port: 0) else { continue }
+            defer {
+                listening.close()
+                sending.close()
+            }
+            _ = sending.send(Array("here".utf8), to: listening.localAddress)
+            for _ in 0..<50 {
+                if listening.receive() != nil { return candidate }
+                usleep(2_000)
+            }
+        }
+        return nil
+    }
+
     func testTheSettingsAreReadBackWithTheDefaultsFilledIn() throws {
         let plain = try SipralStack(audio: .application, bindHost: "127.0.0.1")
         defer { plain.close() }

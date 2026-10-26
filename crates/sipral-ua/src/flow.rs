@@ -167,12 +167,24 @@ impl UserAgent {
         }
     }
 
-    /// `account` was pointed at `transport` again ([`UserAgent::rebind`]):
-    /// one on a connection of its own keeps a transport of its protocol to
-    /// its server — `transport` when it is one, else whichever is bound
-    /// there — or names none, and asks again, rather than taking a transport
-    /// of another protocol.
-    pub(crate) fn keep_own_flow(&mut self, account: AccountId, transport: TransportId) {
+    /// `account` was pointed at `transport` again ([`UserAgent::rebind`]),
+    /// and at another server when `moved`: one on a connection of its own
+    /// keeps a transport of its protocol to its server — `transport` when it
+    /// is one, else whichever is bound there — or names none, and asks
+    /// again, rather than taking a transport of another protocol.
+    ///
+    /// A connection already asked for, to the same server and not bound
+    /// yet, is the one it waits for: forgetting the question would leave the
+    /// REGISTER held for it to wait out [`STREAM_WAIT`] after the connection
+    /// came, and the next REGISTER to ask a second time for a connection
+    /// already on its way. A layer that rewrites the `Contact` once the
+    /// server is located does it while that connection is being opened.
+    pub(crate) fn keep_own_flow(
+        &mut self,
+        account: AccountId,
+        transport: TransportId,
+        moved: bool,
+    ) {
         let Some(config) = self.accounts.get_mut(&account) else {
             return;
         };
@@ -190,7 +202,9 @@ impl UserAgent {
             .endpoint
             .transport_to(protocol, config.remote)
             .unwrap_or(NO_FLOW_YET);
-        if config.transport == NO_FLOW_YET {
+        let none = config.transport == NO_FLOW_YET;
+        let on_its_way = !moved && self.flows_wanted.contains_key(&account);
+        if none && !on_its_way {
             self.flows_wanted.remove(&account);
             self.flows_asked.remove(&account);
         }
@@ -814,6 +828,59 @@ mod tests {
             "a lost connection is asked for again"
         );
     }
+
+    /// What a layer does once the server is located: the `Contact` is
+    /// rewritten toward it, by a rebind onto the main transport, while the
+    /// connection asked for is still being opened.
+    #[test]
+    fn a_line_rebound_while_its_connection_is_on_its_way_registers_the_moment_it_comes() {
+        let t0 = Instant::now();
+        let (mut agent, _, on_tls) = two_lines(t0);
+        agent.register(on_tls, t0).unwrap();
+        let (_, events) = drain(&mut agent);
+        assert_eq!(wanted(&events), [(TransportProtocol::Tls, second())]);
+
+        let moved = uri("sips:100@192.0.2.9:50123;transport=tls");
+        agent.rebind(on_tls, UDP, second(), &moved, t0).unwrap();
+        // a REGISTER asked for meanwhile (a push's refresh) waits for the
+        // same connection rather than asking for another
+        agent.register(on_tls, t0).unwrap();
+        let (sent, events) = drain(&mut agent);
+        assert!(sent.is_empty(), "nothing goes before the connection");
+        assert!(
+            wanted(&events).is_empty(),
+            "asked a second time: {events:?}"
+        );
+
+        bind_stream(&mut agent, TransportProtocol::Tls, t0);
+        let (sent, _) = drain(&mut agent);
+        let register = sent
+            .iter()
+            .find(|one| one.transport == TLS && one.bytes.starts_with(b"REGISTER "))
+            .expect("the REGISTER goes when the connection is bound");
+        assert!(
+            String::from_utf8_lossy(&header(&register.bytes, HeaderName::Contact))
+                .contains("192.0.2.9:50123"),
+            "with the Contact the rebind wrote"
+        );
+    }
+
+    /// A rebind toward another server forgets the question asked for the
+    /// old one, and the next REGISTER asks for the new one.
+    #[test]
+    fn a_line_rebound_toward_another_server_asks_for_a_connection_there() {
+        let t0 = Instant::now();
+        let (mut agent, _, on_tls) = two_lines(t0);
+        agent.register(on_tls, t0).unwrap();
+        let _ = drain(&mut agent);
+        let elsewhere = addr("203.0.113.30:5061");
+        let moved = uri("sips:100@192.0.2.1:50123;transport=tls");
+        agent.rebind(on_tls, UDP, elsewhere, &moved, t0).unwrap();
+        agent.register(on_tls, t0).unwrap();
+        let (_, events) = drain(&mut agent);
+        assert_eq!(wanted(&events), [(TransportProtocol::Tls, elsewhere)]);
+    }
+
     #[test]
     fn an_account_on_tls_pointed_at_the_udp_socket_keeps_its_connection() {
         let t0 = Instant::now();

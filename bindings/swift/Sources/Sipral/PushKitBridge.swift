@@ -12,11 +12,69 @@ public struct VoipPush: Sendable {
     /// The held INVITE's `Call-ID`, when the proxy that pushed put it in
     /// the push (`call-id`); matched before the caller is.
     public let callId: String?
+    /// The name the call screen shows for the caller
+    /// (`CXCallUpdate.localizedCallerName`), when the push carried one.
+    public let displayName: String?
 
-    public init(callerId: String, callId: String? = nil) {
+    public init(callerId: String, callId: String? = nil, displayName: String? = nil) {
         self.callerId = callerId
         self.callId = callId
+        self.displayName = displayName
     }
+}
+
+/// What one push's payload says, as `PushKitAdapter` reads it: who is
+/// calling, the held INVITE's `Call-ID`, and the caller's name. Any of them
+/// may be missing; a push with no caller is shown and ended at once.
+public struct VoipPushFields: Sendable, Equatable {
+    public var callerId: String?
+    public var callId: String?
+    public var displayName: String?
+
+    public init(callerId: String? = nil, callId: String? = nil, displayName: String? = nil) {
+        self.callerId = callerId
+        self.callId = callId
+        self.displayName = displayName
+    }
+
+    /// The fields a push gateway writes in the clear part of the payload
+    /// (`docs/15-mobile.md`, "The lab's push gateway"): `caller`, `call-id`
+    /// and `name`, each a string. What `PushKitAdapter` reads when the
+    /// application gives it no decoder.
+    public init(clear payload: [AnyHashable: Any]) {
+        func text(_ key: String) -> String? {
+            guard let value = payload[key] as? String, !value.isEmpty else { return nil }
+            return value
+        }
+        self.init(callerId: text("caller"), callId: text("call-id"), displayName: text("name"))
+    }
+
+    /// The push to announce, when there is a caller to announce it by.
+    public var push: VoipPush? {
+        guard let callerId, !callerId.isEmpty else { return nil }
+        return VoipPush(callerId: callerId, callId: callId, displayName: displayName)
+    }
+}
+
+/// Turns a received payload (`PKPushPayload.dictionaryPayload`) into the
+/// fields `PushKitAdapter` reads: for a push whose payload is sealed, the
+/// application opens it here. Runs on the registry's queue, before the push
+/// is reported, so it is quick; one that throws makes the push unusable.
+public typealias VoipPushDecoder = @Sendable (_ payload: [AnyHashable: Any]) throws -> VoipPushFields
+
+/// What became of one push handed to `PushKitBridge.receive(_:mustReport:account:)`.
+public enum PushOutcome: Sendable {
+    /// Shown, announced and waiting for its INVITE.
+    case shown(PendingCall)
+    /// Shown and ended at once, since it named no caller, met no account or
+    /// had its announcement refused; or never shown, the system refusing
+    /// the screen (Do Not Disturb, a blocked caller).
+    case unusable
+    /// Not shown, since the system said this push need not be
+    /// (`PKVoIPPushMetadata.mustReport` false); the binding was refreshed,
+    /// and the INVITE, if one comes, is an ordinary incoming call. Carries
+    /// what the push named, or `nil` when it named no caller.
+    case notShown(VoipPush?)
 }
 
 /// Runs `docs/15-mobile.md`'s "C2" sequence for one incoming push:
@@ -57,27 +115,36 @@ public final class PushKitBridge: @unchecked Sendable {
     /// failed, before the error is rethrown. A push for a call that is
     /// already on screen, because its INVITE came first and was shown, ends
     /// the second screen at once.
+    ///
+    /// The screen shows the push's `displayName` for the caller; a push
+    /// that carried none has the INVITE's name shown once it is matched
+    /// (`CallEventData.callerName`).
+    ///
+    /// An application with a `PKPushRegistryDelegate` of its own calls this
+    /// (or `receive(_:mustReport:account:)`) from its push handler, before
+    /// that handler's completion, in place of `PushKitAdapter`.
     @discardableResult
     public func handle(push: VoipPush, account: Account) async throws -> PendingCall {
-        let uuid = try await callKit.reportIncomingCall(callerId: push.callerId)
+        let uuid = try await callKit.reportIncomingCall(callerId: push.callerId, displayName: push.displayName)
 
         let announced: (announcement: SipralHandle?, call: SipralHandle?)
         do {
             announced = try account.announce(caller: push.callerId, callId: push.callId)
         } catch {
-            callKit.endShown(uuid: uuid, reason: .failed)
+            callKit.takeDown(uuid: uuid, reason: .failed)
             throw error
         }
         try? account.refreshBinding()
 
         let pendingCall = PendingCall(
-            uuid: uuid, callerId: push.callerId, announcement: announced.announcement, callKit: callKit
+            uuid: uuid, callerId: push.callerId, displayName: push.displayName,
+            announcement: announced.announcement, callKit: callKit
         )
         if let arrivedHandle = announced.call {
             // The INVITE beat the push.
             pendingCall.resolveLater(callHandle: arrivedHandle)
             if callKit.uuid(forCallHandle: arrivedHandle) != nil {
-                callKit.endShown(uuid: uuid, reason: .failed)
+                callKit.takeDown(uuid: uuid, reason: .failed)
                 return pendingCall
             }
         }
@@ -90,7 +157,32 @@ public final class PushKitBridge: @unchecked Sendable {
     /// and ended at once as failed.
     public func reportUnusable(callerId: String?) async {
         guard let uuid = try? await callKit.reportIncomingCall(callerId: callerId ?? "Unknown") else { return }
-        callKit.endShown(uuid: uuid, reason: .failed)
+        callKit.takeDown(uuid: uuid, reason: .failed)
+    }
+
+    /// One push, as `PushKitAdapter` hands every one over: `fields` as the
+    /// application's decoder read them (`nil` when it could not), whether
+    /// the system requires a call shown for it, and the account it woke.
+    ///
+    /// With `mustReport` (always, before iOS 26.4), a push that names a
+    /// caller and meets an account runs `handle(push:account:)`, and any
+    /// other is shown and ended at once (`reportUnusable(callerId:)`), so
+    /// iOS keeps delivering. Without it nothing is shown or announced: the
+    /// binding is refreshed (RFC 8599 §4.1.3), and the INVITE, if one
+    /// comes, arrives as an ordinary incoming call for the application to
+    /// show, as one does while the application runs.
+    public func receive(_ fields: VoipPushFields?, mustReport: Bool = true, account: Account?) async -> PushOutcome {
+        let push = fields?.push
+        guard mustReport else {
+            try? account?.refreshBinding()
+            return .notShown(push)
+        }
+        guard let push, let account else {
+            await reportUnusable(callerId: fields?.callerId)
+            return .unusable
+        }
+        guard let pending = try? await handle(push: push, account: account) else { return .unusable }
+        return .shown(pending)
     }
 
     /// Hand every event from `SipralStack.events()` here; three matter.
@@ -100,7 +192,8 @@ public final class PushKitBridge: @unchecked Sendable {
     /// `resolve(with:)`d with the `Call` from `SipralStack.takeIncomingCall`;
     /// `nil` means no push announced this call, so the application shows
     /// it itself. A call the stack matched is found by its announcement,
-    /// any other by the caller's user part, oldest push first.
+    /// any other by the caller's user part, oldest push first. A screen the
+    /// push gave no name is given the INVITE's (`CallEventData.callerName`).
     /// `announcedCallMissing` ends the screen that was waiting for it, as
     /// unanswered.
     @discardableResult
@@ -121,6 +214,9 @@ public final class PushKitBridge: @unchecked Sendable {
                 return index.map { pending.remove(at: $0) }
             }
             found?.resolveLater(callHandle: event.call)
+            if let found, found.displayName == nil, let name = event.callData?.callerName {
+                callKit.nameCaller(uuid: found.uuid, displayName: name)
+            }
             return found
         case .announcedCallMissing?:
             guard let announcement = event.announceData?.announcement else { return nil }
@@ -128,7 +224,7 @@ public final class PushKitBridge: @unchecked Sendable {
                 pending.firstIndex { $0.announcement == announcement }.map { pending.remove(at: $0) }
             }
             if let missed {
-                callKit.endShown(uuid: missed.uuid, reason: .unanswered)
+                callKit.takeDown(uuid: missed.uuid, reason: .unanswered)
             }
             return nil
         default:
@@ -150,15 +246,18 @@ public final class PushKitBridge: @unchecked Sendable {
 public final class PendingCall: @unchecked Sendable {
     public let uuid: UUID
     public let callerId: String
+    /// The caller's name the push carried, or `nil`.
+    public let displayName: String?
     /// The stack's announcement, or `nil` when the INVITE came first.
     public let announcement: SipralHandle?
     private let callKit: CallKitBridge
     private let stateQueue = DispatchQueue(label: "org.sipral.pushkit.pending")
     private var resolvedHandle: SipralHandle?
 
-    init(uuid: UUID, callerId: String, announcement: SipralHandle?, callKit: CallKitBridge) {
+    init(uuid: UUID, callerId: String, displayName: String?, announcement: SipralHandle?, callKit: CallKitBridge) {
         self.uuid = uuid
         self.callerId = callerId
+        self.displayName = displayName
         self.announcement = announcement
         self.callKit = callKit
     }

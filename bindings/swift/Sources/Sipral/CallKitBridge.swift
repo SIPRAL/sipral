@@ -10,9 +10,29 @@ public protocol CallKitProviding: AnyObject, Sendable {
     /// `CXProvider.reportNewIncomingCall`. Must be reported before the
     /// system push handler that triggered it returns.
     func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void)
+    /// The same, with the name the screen shows for the caller
+    /// (`CXCallUpdate.localizedCallerName`), or `nil` for none. A provider
+    /// that has no use for the name gets the call reported without it.
+    func reportIncomingCall(
+        uuid: UUID, callerId: String, displayName: String?, completion: @Sendable @escaping (Error?) -> Void
+    )
+    /// The caller's name, for a call already shown without one: the name
+    /// its INVITE gave (`CXProvider.reportCall(with:updated:)`). Nothing,
+    /// for a provider that shows no names.
+    func reportCallerName(uuid: UUID, displayName: String)
     func reportCallConnecting(uuid: UUID)
     func reportCallConnected(uuid: UUID)
     func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason)
+}
+
+public extension CallKitProviding {
+    func reportIncomingCall(
+        uuid: UUID, callerId: String, displayName: String?, completion: @Sendable @escaping (Error?) -> Void
+    ) {
+        reportIncomingCall(uuid: uuid, callerId: callerId, completion: completion)
+    }
+
+    func reportCallerName(uuid: UUID, displayName: String) {}
 }
 
 /// Mirrors `Call` events onto a `CallKitProviding` (the real `CXProvider` in
@@ -55,14 +75,18 @@ public final class CallKitBridge: @unchecked Sendable {
     /// Reports an incoming call, possibly before its INVITE. The returned
     /// `UUID` is later tied to a `Call` with `bind(uuid:to:)`; until then an
     /// Answer or End the user taps is kept for it.
+    ///
+    /// `displayName` is what the screen shows for the caller, beside
+    /// `callerId`: from the push, or from the INVITE
+    /// (`CallEventData.callerName`) for a call that came without one.
     @discardableResult
-    public func reportIncomingCall(callerId: String) async throws -> UUID {
+    public func reportIncomingCall(callerId: String, displayName: String? = nil) async throws -> UUID {
         let uuid = UUID()
         // Kept before the report: the screen can be answered the moment it shows.
         stateQueue.sync { waiting[uuid] = Waiting() }
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                provider.reportIncomingCall(uuid: uuid, callerId: callerId) { error in
+                provider.reportIncomingCall(uuid: uuid, callerId: callerId, displayName: displayName) { error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -87,13 +111,22 @@ public final class CallKitBridge: @unchecked Sendable {
     ///
     /// What the user did before the call existed is done now: an Answer
     /// answers it and is then fulfilled (or failed), an End declines it with
-    /// 603. Take the application's own `Call.events()` before binding, to
+    /// 603 and binds nothing, since its screen is gone and the system was
+    /// told. Take the application's own `Call.events()` before binding, to
     /// see what that answer brings.
     public func bind(uuid: UUID, to call: Call) {
         let asked = stateQueue.sync { () -> Waiting? in
-            callsByUuid[uuid] = call
-            uuidsByCallHandle[call.handle] = uuid
-            return waiting.removeValue(forKey: uuid)
+            let asked = waiting.removeValue(forKey: uuid)
+            if asked?.ended != true {
+                callsByUuid[uuid] = call
+                uuidsByCallHandle[call.handle] = uuid
+            }
+            return asked
+        }
+        if asked?.ended == true {
+            // its screen is gone already, and the system was told so
+            try? call.reject(code: 603)
+            return
         }
         let events = call.events()
         let task = Task { [weak self, provider] in
@@ -126,9 +159,7 @@ public final class CallKitBridge: @unchecked Sendable {
                 watchTasks[uuid] = task
             }
         }
-        if asked?.ended == true {
-            try? call.reject(code: 603)
-        } else if let answered = asked?.answer {
+        if let answered = asked?.answer {
             do {
                 try call.answer()
                 answered(nil)
@@ -146,13 +177,46 @@ public final class CallKitBridge: @unchecked Sendable {
         stateQueue.sync { uuidsByCallHandle[handle] }
     }
 
-    /// Ends a call shown on screen, bound or not: one a push raised that no
-    /// INVITE will fill. An Answer kept for it fails.
-    func endShown(uuid: UUID, reason: EndReason) {
+    /// Takes a shown call off the screen as `reason`, `.unanswered` unless
+    /// told otherwise: for a push the application could not use, or a call
+    /// it decided not to ring. The system is told once, with `reason`.
+    ///
+    /// What waited on the screen settles as `handleEnd(uuid:)` settles it,
+    /// with no `CXEndCallAction` needed: a call bound to it is hung up,
+    /// an Answer kept for it fails with `.callNeverArrived`, and an INVITE
+    /// still to come is declined with 603 when it is bound. Throws
+    /// `.unknownCall` for a `uuid` neither shown nor bound.
+    public func endShown(uuid: UUID, reason: EndReason = .unanswered) throws {
+        if let call = call(for: uuid) {
+            // unbound first, so the hangup's end is not reported a second time
+            unbind(uuid: uuid)
+            try? call.hangup()
+            provider.reportCallEnded(uuid: uuid, reason: reason)
+            return
+        }
+        let kept = stateQueue.sync { () -> (known: Bool, answer: (@Sendable (Error?) -> Void)?) in
+            guard waiting[uuid] != nil else { return (false, nil) }
+            waiting[uuid]?.ended = true
+            defer { waiting[uuid]?.answer = nil }
+            return (true, waiting[uuid]?.answer)
+        }
+        guard kept.known else { throw CallKitBridgeError.unknownCall(uuid) }
+        kept.answer?(CallKitBridgeError.callNeverArrived(uuid))
+        provider.reportCallEnded(uuid: uuid, reason: reason)
+    }
+
+    /// Ends a call shown on screen, bound or not, and forgets it: one a push
+    /// raised that no INVITE will fill. An Answer kept for it fails.
+    func takeDown(uuid: UUID, reason: EndReason) {
         let answer = stateQueue.sync { waiting.removeValue(forKey: uuid)?.answer }
         answer?(CallKitBridgeError.callNeverArrived(uuid))
         provider.reportCallEnded(uuid: uuid, reason: reason)
         unbind(uuid: uuid)
+    }
+
+    /// Shows `displayName` for a call already on screen without one.
+    func nameCaller(uuid: UUID, displayName: String) {
+        provider.reportCallerName(uuid: uuid, displayName: displayName)
     }
 
     private func unbind(uuid: UUID) {

@@ -479,7 +479,9 @@ final class PhoneModel: ObservableObject {
             } else {
                 Task {
                     do {
-                        let uuid = try await bridge.reportIncomingCall(callerId: caller)
+                        let uuid = try await bridge.reportIncomingCall(
+                            callerId: caller, displayName: event.callData?.callerName
+                        )
                         bridge.bind(uuid: uuid, to: call)
                         attach(CallSession(call: call, uuid: uuid, remote: caller, outgoing: false))
                     } catch {
