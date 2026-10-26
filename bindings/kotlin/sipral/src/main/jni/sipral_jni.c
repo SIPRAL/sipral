@@ -28,6 +28,8 @@ static jclass jni_event_callback_class;
 static jmethodID jni_event_callback_deliver;
 static jclass jni_screen_callback_class;
 static jmethodID jni_screen_callback_deliver;
+static jclass jni_message_hook_callback_class;
+static jmethodID jni_message_hook_callback_deliver;
 static jclass jni_processor_callback_class;
 static jmethodID jni_processor_callback_deliver;
 static jclass jni_audio_transmit_callback_class;
@@ -76,6 +78,21 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
         }
         jni_screen_callback_deliver = (*env)->GetStaticMethodID(env, jni_screen_callback_class, "deliver", "(JJJ[B[B)J");
         if (jni_screen_callback_deliver == NULL) {
+            return JNI_ERR;
+        }
+    }
+    {
+        jclass found = (*env)->FindClass(env, "org/sipral/SipralMessageHookListeners");
+        if (found == NULL) {
+            return JNI_ERR;
+        }
+        jni_message_hook_callback_class = (jclass)(*env)->NewGlobalRef(env, found);
+        (*env)->DeleteLocalRef(env, found);
+        if (jni_message_hook_callback_class == NULL) {
+            return JNI_ERR;
+        }
+        jni_message_hook_callback_deliver = (*env)->GetStaticMethodID(env, jni_message_hook_callback_class, "deliver", "(JJJJJ[B[B)J");
+        if (jni_message_hook_callback_deliver == NULL) {
             return JNI_ERR;
         }
     }
@@ -145,6 +162,10 @@ JNI_OnUnload(JavaVM *vm, void *reserved)
     if (jni_screen_callback_class != NULL) {
         (*env)->DeleteGlobalRef(env, jni_screen_callback_class);
         jni_screen_callback_class = NULL;
+    }
+    if (jni_message_hook_callback_class != NULL) {
+        (*env)->DeleteGlobalRef(env, jni_message_hook_callback_class);
+        jni_message_hook_callback_class = NULL;
     }
     if (jni_processor_callback_class != NULL) {
         (*env)->DeleteGlobalRef(env, jni_processor_callback_class);
@@ -1489,6 +1510,76 @@ jni_screen_callback(const sipral_screen_request_t *request, void *user_data)
     return (uint32_t)answer;
 }
 
+/* Where a sipral_message_hook_callback_t lands. The event is handed to
+ * SipralMessageHookListeners.deliver under the key its user pointer carries, on a
+ * thread attached to the JVM for the length of the call when it was not
+ * attached already, and every local reference made here is deleted
+ * before it returns: a poll delivers all its events inside one native
+ * call, and nothing made here would be released until that call ended. Answers with what the listener answered, or with the value that
+ * fails closed when there was none. */
+static uint32_t
+jni_message_hook_callback(const sipral_hooked_message_t *hooked, void *user_data)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    int built = 1;
+    jint found;
+    uint32_t answer = 0;
+    jbyteArray remote = NULL;
+    jbyteArray message = NULL;
+
+    if (jni_vm == NULL || hooked == NULL) {
+        return (uint32_t)answer;
+    }
+    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);
+    if (found == JNI_EDETACHED) {
+        if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {
+            return (uint32_t)answer;
+        }
+        attached = 1;
+    } else if (found != JNI_OK) {
+        return (uint32_t)answer;
+    }
+    if (built && JNI_REACHES(hooked, sipral_hooked_message_t, remote_len) && hooked->remote != NULL) {
+        remote = (*env)->NewByteArray(env, (jsize)hooked->remote_len);
+        if (remote == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, remote, 0, (jsize)hooked->remote_len, (const jbyte *)hooked->remote);
+        }
+    }
+    if (built && JNI_REACHES(hooked, sipral_hooked_message_t, message_len) && hooked->message != NULL) {
+        message = (*env)->NewByteArray(env, (jsize)hooked->message_len);
+        if (message == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, message, 0, (jsize)hooked->message_len, (const jbyte *)hooked->message);
+        }
+    }
+    if (built) {
+        answer = (uint32_t)(*env)->CallStaticLongMethod(env, jni_message_hook_callback_class, jni_message_hook_callback_deliver, (jlong)(intptr_t)user_data, (jlong)hooked->size, JNI_REACHES(hooked, sipral_hooked_message_t, stack) ? (jlong)hooked->stack : 0, JNI_REACHES(hooked, sipral_hooked_message_t, direction) ? (jlong)hooked->direction : 0, JNI_REACHES(hooked, sipral_hooked_message_t, transport) ? (jlong)hooked->transport : 0, remote, message);
+    }
+    /* Pending here either because an array could not be made, or because
+     * deliver let a listener's own exception through rather than catch it:
+     * a policy question with no answer fails closed rather than carry on
+     * with whatever the call above happened to return. */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        answer = 0;
+    }
+    if (remote != NULL) {
+        (*env)->DeleteLocalRef(env, remote);
+    }
+    if (message != NULL) {
+        (*env)->DeleteLocalRef(env, message);
+    }
+    if (attached) {
+        (*jni_vm)->DetachCurrentThread(jni_vm);
+    }
+    return (uint32_t)answer;
+}
+
 /* Where a sipral_processor_callback_t lands. The event is handed to
  * SipralProcessorListeners.deliver under the key its user pointer carries, on a
  * thread attached to the JVM for the length of the call when it was not
@@ -2202,6 +2293,29 @@ Java_org_sipral_SipralNative_sipral_1stack_1invite_1limit(JNIEnv *env, jobject s
     (void)env;
     (void)self;
     sipral_status_t status = sipral_stack_invite_limit((sipral_handle_t)stack, (uint64_t)everyMs, (uint32_t)burst);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1message_1hook(JNIEnv *env, jobject self, jlong stack, jlong callback)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_message_hook((sipral_handle_t)stack, callback != 0 ? jni_message_hook_callback : NULL, (void *)(intptr_t)callback);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1hooked_1message_1replace(JNIEnv *env, jobject self, jbyteArray bytes)
+{
+    (void)env;
+    (void)self;
+    jbyte *bytes_data = bytes ? (*env)->GetByteArrayElements(env, bytes, NULL) : NULL;
+    jsize bytes_size = bytes ? (*env)->GetArrayLength(env, bytes) : 0;
+    sipral_status_t status = sipral_hooked_message_replace((const uint8_t *)bytes_data, (size_t)bytes_size);
+    if (bytes) {
+        (*env)->ReleaseByteArrayElements(env, bytes, bytes_data, JNI_ABORT);
+    }
     return (jint)status;
 }
 

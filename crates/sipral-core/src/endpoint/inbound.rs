@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use super::driver::{Deadline, Endpoint, assemble_response};
 use super::error::ReceiveError;
 use super::event::{DialogEndReason, Event, FailureReason, TerminationReason};
+use super::hook;
 use super::reliable;
 use super::table::Flow;
 use super::via;
@@ -82,6 +83,16 @@ impl Endpoint {
         let protocol = bound.protocol;
         let advertised = bound.local;
 
+        let replaced;
+        let data = match self.ask_hook(hook::Direction::Incoming, data, remote, protocol) {
+            hook::Verdict::Keep => data,
+            hook::Verdict::Replace(bytes) => {
+                replaced = bytes;
+                &*replaced
+            }
+            hook::Verdict::Drop => return Ok(()),
+        };
+
         // taken out so the parsed view borrows a local, leaving `self` free to mutate
         let mut scratch = core::mem::replace(&mut self.scratch, ParseScratch::new());
         let mode = self.config.parse_mode;
@@ -140,9 +151,18 @@ impl Endpoint {
                 Ok(Some(Framed::Message(message))) => {
                     // the framer's buffer runs on past the message
                     let bytes = message.as_bytes().get(..message.len());
-                    self.tap_stream(transport, named_far_end, bytes.unwrap_or_default());
-                    let flow = Self::flow_for(&message, transport, remote, None, protocol);
-                    self.dispatch(&message, flow, advertised, now);
+                    let bytes = bytes.unwrap_or_default();
+                    self.tap_stream(transport, named_far_end, bytes);
+                    match self.ask_hook(hook::Direction::Incoming, bytes, remote, protocol) {
+                        hook::Verdict::Keep => {
+                            let flow = Self::flow_for(&message, transport, remote, None, protocol);
+                            self.dispatch(&message, flow, advertised, now);
+                        }
+                        hook::Verdict::Replace(replaced) => {
+                            self.dispatch_replaced(&replaced, transport, remote, protocol, now);
+                        }
+                        hook::Verdict::Drop => {}
+                    }
                 }
                 // refused, and already passed over: the connection reads on
                 Ok(Some(Framed::Refused {
@@ -211,6 +231,42 @@ impl Endpoint {
                 self.lose_transport(transport);
                 Err(error)
             }
+        }
+    }
+
+    /// A stream message the hook replaced: parsed as if it had been framed so, answered as
+    /// unreadable if it cannot be.
+    fn dispatch_replaced(
+        &mut self,
+        bytes: &[u8],
+        transport: super::TransportId,
+        remote: SocketAddr,
+        protocol: super::TransportProtocol,
+        now: Instant,
+    ) {
+        let Some(advertised) = self.transports.get(transport).map(|bound| bound.local) else {
+            return;
+        };
+        let mut scratch = core::mem::replace(&mut self.scratch, ParseScratch::new());
+        let mode = self.config.parse_mode;
+        let limits = self.config.limits;
+        let outcome = match parse_with_limits(bytes, &mut scratch, mode, limits) {
+            Ok(message) => {
+                let flow = Self::flow_for(&message, transport, remote, None, protocol);
+                self.dispatch(&message, flow, advertised, now);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        };
+        self.scratch = scratch;
+        if let Err(error) = outcome {
+            let arrival = Arrival {
+                transport,
+                remote,
+                local: None,
+                protocol,
+            };
+            self.answer_unreadable(bytes, bytes.len(), error, arrival);
         }
     }
 

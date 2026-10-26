@@ -8325,6 +8325,126 @@ internal object SipralScreenListeners {
 }
 
 /**
+ * One message as SipralMessageHookCallback sees it.
+ *
+ * Read `size` first, like SipralEvent. `message` and `remote` borrow from a
+ * message still being processed: read nothing after the callback returns.
+ */
+class SipralHookedMessage(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * The stack the message belongs to.
+     */
+    val stack: Long,
+    /**
+     * `SIPRAL_HOOK_OUTGOING` or `SIPRAL_HOOK_INCOMING`.
+     */
+    val direction: Long,
+    /**
+     * What it travels over, as a `SipralTransport`; zero for one this ABI has no name for.
+     */
+    val transport: Long,
+    /**
+     * The far end, as `host:port`: where it goes, or where it came from.
+     */
+    val remote: String?,
+    /**
+     * The message, from its start line to the end of its body; `sipral_message_header` and
+     * its companions read headers out of it.
+     */
+    val message: ByteArray?,
+)
+
+/**
+ * The message hook: called once per SIP message out and once per message in. Installed
+ * with sipral_stack_message_hook.
+ *
+ * **It runs with the stack's lock held** (see the module docs). **It must not call back into
+ * the stack it was given**, from any thread; such a call is answered `SIPRAL_STATUS_BUSY`.
+ * It must not unwind across the boundary, and should return quickly: every message waits
+ * for it.
+ *
+ * `hooked` and what it points at are valid for this call only.
+ *
+ * **The answer** is `SIPRAL_HOOK_KEEP`, `SIPRAL_HOOK_REPLACE` (after handing the new message
+ * to `sipral_hooked_message_replace`) or `SIPRAL_HOOK_DROP`; any other value keeps the
+ * message.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. It answers with a Long, which the shim
+ * hands the library back. What a listener throws is not delivered anywhere:
+ * the shim clears it and answers as if this had returned zero, which is what
+ * every answering listener here is defined to take as "no".
+ */
+fun interface SipralMessageHookListener {
+    fun onHooked(hooked: SipralHookedMessage): Long
+}
+
+/**
+ * Every SipralMessageHookListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralMessageHookListeners {
+    private val listening = HashMap<Long, SipralMessageHookListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralMessageHookListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /**
+     * Hand a kept listener to a handle the caller already had, letting go of
+     * whatever that handle held before it. A key of zero is the call that
+     * removed the listener outright, and a call that failed leaves the handle
+     * with what it had.
+     */
+    fun installed(key: Long, status: Int, handle: Long) {
+        synchronized(this) {
+            if (status != SipralStatus.OK.value) {
+                listening.remove(key)
+                return
+            }
+            val before = if (key == 0L) handles.remove(handle) else handles.put(handle, key)
+            if (before != null) {
+                listening.remove(before)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was left with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, stack: Long, direction: Long, transport: Long, remote: ByteArray?, message: ByteArray?): Long {
+        val listener = synchronized(this) { listening[key] } ?: return 0
+        return listener.onHooked(SipralHookedMessage(size, stack, direction, transport, remote?.let { String(it, Charsets.UTF_8) }, message))
+    }
+}
+
+/**
  * What SipralProcessorCallback is handed for one call: an ordinary
  * frame to process, or a request to forget what has been learned.
  *
@@ -8695,7 +8815,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 4)
+        agree(1, 5)
     }
 
     /**
@@ -8726,6 +8846,8 @@ internal object SipralNative {
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
     external fun sipral_stack_screen(stack: Long, callback: Long): Int
     external fun sipral_stack_invite_limit(stack: Long, everyMs: Long, burst: Long): Int
+    external fun sipral_stack_message_hook(stack: Long, callback: Long): Int
+    external fun sipral_hooked_message_replace(bytes: ByteArray): Int
     external fun sipral_account_subscribe(stack: Long, account: Long, configTarget: ByteArray?, configPackage: ByteArray?, configAccept: ByteArray?, configExpiresSeconds: Long, configDestination: ByteArray?, configTransport: Long, configReserved: Long, subscription: LongArray, nowMs: Long): Int
     external fun sipral_subscription_end(stack: Long, subscription: Long, nowMs: Long): Int
     external fun sipral_subscription_state(stack: Long, subscription: Long, state: LongArray): Int
@@ -8929,7 +9051,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 4
+    const val ABI_VERSION_MINOR: Long = 5
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9230,6 +9352,34 @@ object Sipral {
     const val INVITE_LIMIT_VOICE_AGENT_EVERY_MS: Long = 50
 
     /**
+     * SipralHookedMessage.direction: about to be handed to the transport.
+     */
+    const val HOOK_OUTGOING: Long = 1
+
+    /**
+     * SipralHookedMessage.direction: just read, not yet parsed.
+     */
+    const val HOOK_INCOMING: Long = 2
+
+    /**
+     * The answer that lets the message on as it is. Zero, so a callback that failed before
+     * answering changes nothing.
+     */
+    const val HOOK_KEEP: Long = 0
+
+    /**
+     * The answer that puts the bytes given to `sipral_hooked_message_replace` in the message's
+     * place. With none given, the message goes on as it is.
+     */
+    const val HOOK_REPLACE: Long = 1
+
+    /**
+     * The answer that stops the message: not sent, or not read. A transaction whose message is
+     * dropped retransmits and times out as if it were lost.
+     */
+    const val HOOK_DROP: Long = 2
+
+    /**
      * Bits of `sipral_call_event_t::privacy` and of
      * `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
      * the fields that could identify the caller.
@@ -9332,6 +9482,7 @@ object Sipral {
         "sipral_event_t" to intArrayOf(384, 248, 264),
         "sipral_suspending_t" to intArrayOf(32, 16, 16),
         "sipral_screen_request_t" to intArrayOf(48, 28, 32),
+        "sipral_hooked_message_t" to intArrayOf(56, 36, 40),
         "sipral_subscribe_config_t" to intArrayOf(88, 48, 48),
         "sipral_watched_dialog_t" to intArrayOf(32, 28, 32),
         "sipral_push_echo_t" to intArrayOf(24, 20, 24),
@@ -9545,6 +9696,7 @@ object Sipral {
         SipralEventListeners.gone(stack)
         SipralAudioTransmitListeners.gone(stack)
         SipralScreenListeners.gone(stack)
+        SipralMessageHookListeners.gone(stack)
         SipralLogListeners.gone(stack)
         check(status)
     }
@@ -9650,6 +9802,64 @@ object Sipral {
      */
     fun stackInviteLimit(stack: Long, everyMs: Long, burst: Long) {
         check(SipralNative.sipral_stack_invite_limit(stack, everyMs, burst))
+    }
+
+    /**
+     * Install, replace, or remove the message hook for one stack.
+     *
+     * Every SIP message this stack sends passes the callback just before it is handed to the
+     * transport, retransmissions included, and every message it receives passes it just after
+     * it arrives, before it is read: a datagram whole, a byte stream one framed message at a
+     * time. Keep-alives are not messages and never reach it. `docs/03-core-signalling.md`,
+     * "A message hook".
+     *
+     * `NULL` removes the hook. A second call replaces the first, on this stack only.
+     *
+     * The no re-entry and no unwind rules are on SipralMessageHookCallback.
+     *
+     * Safety
+     *
+     * `callback`, when not null, is called on whichever thread is inside this stack, while the
+     * hook is installed. `user_data` is handed back untouched and never read here.
+     *
+     * **`user_data` must outlive the last call, which may come after `sipral_stack_destroy`
+     * returns:** an entry point already running on another thread holds its own share of the
+     * stack. Replacing or removing the hook takes the lock, so once it returns the old callback
+     * is not called again.
+     */
+    fun stackMessageHook(stack: Long, listener: SipralMessageHookListener?) {
+        // held across the call so that what SipralMessageHookListeners records and what
+        // the library installed cannot disagree
+        synchronized(SipralMessageHookListeners) {
+            val callback = SipralMessageHookListeners.register(listener)
+            var status = -1
+            try {
+                status = SipralNative.sipral_stack_message_hook(stack, callback)
+            } finally {
+                SipralMessageHookListeners.installed(callback, status, stack)
+            }
+            check(status)
+        }
+    }
+
+    /**
+     * Hand the message hook the bytes to use instead of the message it was called with; the
+     * callback then answers `SIPRAL_HOOK_REPLACE`. The bytes are copied, so they need to live
+     * only for this call. `Content-Length` must match the body: an outgoing message is sent as
+     * it is given, an incoming one is read as if it had arrived so. A second call replaces the
+     * first.
+     *
+     * The replacement belongs to the hook running on the calling thread, so it names no message:
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
+     * with a length.
+     *
+     * Safety
+     *
+     * Call it only from inside a SipralMessageHookCallback. `bytes` must point at `bytes_len`
+     * readable bytes.
+     */
+    fun hookedMessageReplace(bytes: ByteArray) {
+        check(SipralNative.sipral_hooked_message_replace(bytes))
     }
 
     /**

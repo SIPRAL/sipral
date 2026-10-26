@@ -50,6 +50,7 @@ pub mod error;
 pub mod event;
 pub mod handle;
 pub mod header;
+pub mod hook;
 pub mod identity;
 pub mod inband;
 pub mod isup;

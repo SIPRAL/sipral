@@ -3334,6 +3334,27 @@ public delegate void SipralEventCallback(IntPtr @event, IntPtr userData);
 public delegate uint SipralScreenCallback(IntPtr request, IntPtr userData);
 
 /// <summary>
+/// The message hook: called once per SIP message out and once per message in. Installed
+/// with sipral_stack_message_hook.
+///
+/// **It runs with the stack's lock held** (see the module docs). **It must not call back into
+/// the stack it was given**, from any thread; such a call is answered `SIPRAL_STATUS_BUSY`.
+/// It must not unwind across the boundary, and should return quickly: every message waits
+/// for it.
+///
+/// `hooked` and what it points at are valid for this call only.
+///
+/// **The answer** is `SIPRAL_HOOK_KEEP`, `SIPRAL_HOOK_REPLACE` (after handing the new message
+/// to `sipral_hooked_message_replace`) or `SIPRAL_HOOK_DROP`; any other value keeps the
+/// message.
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate uint SipralMessageHookCallback(IntPtr hooked, IntPtr userData);
+
+/// <summary>
 /// Echo cancellation, gain control or noise suppression, run over one
 /// frame, or told to forget what it has learned — SipralProcessorFrame
 /// says which. Installed with sipral_media_attach_processor.
@@ -7179,6 +7200,59 @@ public struct SipralScreenRequest
 }
 
 /// <summary>
+/// One message as SipralMessageHookCallback sees it.
+///
+/// Read `size` first, like SipralEvent. `message` and `remote` borrow from a
+/// message still being processed: read nothing after the callback returns.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralHookedMessage
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The stack the message belongs to.
+    /// </summary>
+    public ulong Stack;
+    /// <summary>
+    /// `SIPRAL_HOOK_OUTGOING` or `SIPRAL_HOOK_INCOMING`.
+    /// </summary>
+    public uint Direction;
+    /// <summary>
+    /// What it travels over, as a `SipralTransport`; zero for one this ABI has no name for.
+    /// </summary>
+    public uint Transport;
+    /// <summary>
+    /// The far end, as `host:port`: where it goes, or where it came from.
+    /// </summary>
+    public IntPtr Remote;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint RemoteLen;
+    /// <summary>
+    /// The message, from its start line to the end of its body; `sipral_message_header` and
+    /// its companions read headers out of it.
+    /// </summary>
+    public IntPtr Message;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MessageLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralHookedMessage Sized()
+    {
+        var value = default(SipralHookedMessage);
+        value.Size = (nuint)Marshal.SizeOf<SipralHookedMessage>();
+        return value;
+    }
+}
+
+/// <summary>
 /// What to watch, and how. Handed to sipral_account_subscribe. Set
 /// `size` to `sizeof(sipral_subscribe_config_t)`; all but `target` and
 /// `package` may be zero.
@@ -8583,6 +8657,12 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_invite_limit(ulong stack, ulong everyMs, uint burst);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_message_hook(ulong stack, IntPtr callback, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_hooked_message_replace(byte[] bytes, nuint bytesLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_subscribe(ulong stack, ulong account, in SipralSubscribeConfig config, out ulong subscription, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -9184,7 +9264,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 4;
+    public const uint AbiVersionMinor = 5;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9485,6 +9565,34 @@ public static partial class Sipral
     public const ulong InviteLimitVoiceAgentEveryMs = 50;
 
     /// <summary>
+    /// SipralHookedMessage.Direction: about to be handed to the transport.
+    /// </summary>
+    public const uint HookOutgoing = 1;
+
+    /// <summary>
+    /// SipralHookedMessage.Direction: just read, not yet parsed.
+    /// </summary>
+    public const uint HookIncoming = 2;
+
+    /// <summary>
+    /// The answer that lets the message on as it is. Zero, so a callback that failed before
+    /// answering changes nothing.
+    /// </summary>
+    public const uint HookKeep = 0;
+
+    /// <summary>
+    /// The answer that puts the bytes given to `sipral_hooked_message_replace` in the message's
+    /// place. With none given, the message goes on as it is.
+    /// </summary>
+    public const uint HookReplace = 1;
+
+    /// <summary>
+    /// The answer that stops the message: not sent, or not read. A transaction whose message is
+    /// dropped retransmits and times out as if it were lost.
+    /// </summary>
+    public const uint HookDrop = 2;
+
+    /// <summary>
     /// Bits of `sipral_call_event_t::privacy` and of
     /// `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
     /// the fields that could identify the caller.
@@ -9585,6 +9693,7 @@ public static partial class Sipral
         ("sipral_event_t", Marshal.SizeOf<SipralEvent>(), 384, 248, 264),
         ("sipral_suspending_t", Marshal.SizeOf<SipralSuspending>(), 32, 16, 16),
         ("sipral_screen_request_t", Marshal.SizeOf<SipralScreenRequest>(), 48, 28, 32),
+        ("sipral_hooked_message_t", Marshal.SizeOf<SipralHookedMessage>(), 56, 36, 40),
         ("sipral_subscribe_config_t", Marshal.SizeOf<SipralSubscribeConfig>(), 88, 48, 48),
         ("sipral_watched_dialog_t", Marshal.SizeOf<SipralWatchedDialog>(), 32, 28, 32),
         ("sipral_push_echo_t", Marshal.SizeOf<SipralPushEcho>(), 24, 20, 24),
@@ -9889,6 +9998,55 @@ public static partial class Sipral
     public static void StackInviteLimit(ulong stack, ulong everyMs, uint burst)
     {
         Check(NativeMethods.sipral_stack_invite_limit(stack, everyMs, burst));
+    }
+
+    /// <summary>
+    /// Install, replace, or remove the message hook for one stack.
+    ///
+    /// Every SIP message this stack sends passes the callback just before it is handed to the
+    /// transport, retransmissions included, and every message it receives passes it just after
+    /// it arrives, before it is read: a datagram whole, a byte stream one framed message at a
+    /// time. Keep-alives are not messages and never reach it. `docs/03-core-signalling.md`,
+    /// "A message hook".
+    ///
+    /// `NULL` removes the hook. A second call replaces the first, on this stack only.
+    ///
+    /// The no re-entry and no unwind rules are on SipralMessageHookCallback.
+    ///
+    /// Safety
+    ///
+    /// `callback`, when not null, is called on whichever thread is inside this stack, while the
+    /// hook is installed. `user_data` is handed back untouched and never read here.
+    ///
+    /// **`user_data` must outlive the last call, which may come after `sipral_stack_destroy`
+    /// returns:** an entry point already running on another thread holds its own share of the
+    /// stack. Replacing or removing the hook takes the lock, so once it returns the old callback
+    /// is not called again.
+    /// </summary>
+    public static void StackMessageHook(ulong stack, IntPtr callback, IntPtr userData)
+    {
+        Check(NativeMethods.sipral_stack_message_hook(stack, callback, userData));
+    }
+
+    /// <summary>
+    /// Hand the message hook the bytes to use instead of the message it was called with; the
+    /// callback then answers `SIPRAL_HOOK_REPLACE`. The bytes are copied, so they need to live
+    /// only for this call. `Content-Length` must match the body: an outgoing message is sent as
+    /// it is given, an incoming one is read as if it had arrived so. A second call replaces the
+    /// first.
+    ///
+    /// The replacement belongs to the hook running on the calling thread, so it names no message:
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
+    /// with a length.
+    ///
+    /// Safety
+    ///
+    /// Call it only from inside a SipralMessageHookCallback. `bytes` must point at `bytes_len`
+    /// readable bytes.
+    /// </summary>
+    public static void HookedMessageReplace(byte[] bytes)
+    {
+        Check(NativeMethods.sipral_hooked_message_replace(bytes, (nuint)bytes.Length));
     }
 
     /// <summary>

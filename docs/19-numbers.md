@@ -975,7 +975,7 @@ cores shared with other work.
 
 | What | Number | How |
 |---|---|---|
-| Shared library, `libsipral_ffi.dylib` | 5.20 MB | 5 201 264 bytes as built, the crate's default features; stripping again changes nothing |
+| Shared library, `libsipral_ffi.dylib` | 5.20 MB | 5 201 264 bytes as built, the crate's default features; stripping again changes nothing. 5.47 MB, 5 466 784 bytes, on 26 October 2026 at C ABI 1.5, with everything 1.1 to 1.3 added |
 | Audio, per frame of 20 ms, 200 calls on 4 threads | 7.6 µs of wall time | the load test as `bench.sh` runs it: a minute of G.711 per call, in-band digit detection running on every frame (below) |
 | The same, one call | 7.1 µs | the same per frame as with two hundred: no call waited on another (0 busy) |
 | Opening a stack | 0.1–1.0 ms | the first stack in a process pays for its own lazy initialisation |

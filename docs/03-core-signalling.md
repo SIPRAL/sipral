@@ -269,6 +269,38 @@ the socket.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 
+### A message hook
+
+For a PBX or a carrier that needs a header no option covers, or sends one
+that has to go before the endpoint reads the message, one hook per endpoint
+sees every SIP message whole, as bytes, and keeps it, replaces it or drops it
+(`Endpoint::set_message_hook`; in C `sipral_stack_message_hook`, in Python
+`Stack.set_message_hook`).
+
+- **Out**, it runs in `Endpoint::poll_transmit`, after the message is built
+  and measured and before any framing (a WebSocket's) is put around it. A
+  retransmission passes it again, so a hook that decides the same way each
+  time sends the identical bytes §17.1.1.2 asks for. A message it drops is
+  never handed to the transport; its transaction retransmits and times out
+  as if the network had lost it.
+- **In**, it runs on each datagram and on each message framed off a
+  connection, before the parser: a replacement is read as if it had arrived
+  so, and answered 400 if it cannot be read; a dropped message is neither
+  read nor answered.
+- Keep-alives (RFC 5626 §3.5.1's CRLF pings and pongs) are not messages and
+  never reach it.
+- A replacement goes out as it is given, so its `Content-Length` must match
+  its body. `Rewrite` takes a message apart into start line, header fields
+  and body, sets, adds and removes fields by name (case-insensitively,
+  compact forms included, folded lines read as one), and writes
+  `Content-Length` for the body when it puts the message back together.
+- A message replaced after the §18.1.1 size check is not measured again: a
+  hook that makes a request much larger over UDP is answerable for it.
+
+In C the hook runs inside the stack's lock, like the screening policy, and a
+call back into the same stack from inside it is answered
+`SIPRAL_STATUS_BUSY`.
+
 ## 3. Transactions
 
 Four state machines from RFC 3261 §17, implemented from the diagrams in the RFC:

@@ -131,6 +131,8 @@ pub struct Endpoint {
     /// Framed stream messages while [`Endpoint::tap_streams`] is on, the newest
     /// [`STREAM_TAP_KEPT`].
     pub(super) stream_tap: Option<VecDeque<StreamMessage>>,
+    /// [`Endpoint::set_message_hook`].
+    pub(super) hook: Option<super::hook::Installed>,
 }
 
 /// How many tapped stream messages wait for [`Endpoint::take_stream_messages`] before the oldest is
@@ -182,7 +184,43 @@ impl Endpoint {
             streamless: HashSet::new(),
             stream_keepalives: HashMap::new(),
             stream_tap: None,
+            hook: None,
         })
+    }
+
+    /// See, change or drop every message on its way out and on its way in; `None` takes the hook
+    /// away. One hook at a time: a second replaces the first. `docs/03-core-signalling.md`,
+    /// "A message hook".
+    pub fn set_message_hook(&mut self, hook: Option<super::hook::MessageHook>) {
+        self.hook = hook.map(super::hook::Installed);
+    }
+
+    /// Whether a hook is installed.
+    #[must_use]
+    pub const fn has_message_hook(&self) -> bool {
+        self.hook.is_some()
+    }
+
+    /// Ask the hook about one message; [`super::hook::Verdict::Keep`] when there is none, or the
+    /// bytes are a keep-alive.
+    pub(super) fn ask_hook(
+        &mut self,
+        direction: super::hook::Direction,
+        bytes: &[u8],
+        remote: SocketAddr,
+        protocol: TransportProtocol,
+    ) -> super::hook::Verdict {
+        match self.hook.as_mut() {
+            Some(hook) if !super::hook::is_keepalive(bytes) => {
+                (hook.0)(&super::hook::HookedMessage {
+                    direction,
+                    bytes,
+                    remote,
+                    protocol,
+                })
+            }
+            _ => super::hook::Verdict::Keep,
+        }
     }
 
     /// Keep a copy of every message framed off a connection for [`Endpoint::take_stream_messages`],
@@ -326,7 +364,21 @@ impl Endpoint {
     /// [`Endpoint::call_record`].
     #[must_use]
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
-        self.transmits.pop_front()
+        while let Some(transmit) = self.transmits.pop_front() {
+            match self.ask_hook(
+                super::hook::Direction::Outgoing,
+                &transmit.payload,
+                transmit.destination,
+                transmit.protocol,
+            ) {
+                super::hook::Verdict::Keep => return Some(transmit),
+                super::hook::Verdict::Replace(bytes) => {
+                    return Some(transmit.with_payload(Arc::from(bytes)));
+                }
+                super::hook::Verdict::Drop => {}
+            }
+        }
+        None
     }
 
     /// Something the layer above has to know. Drain to empty.

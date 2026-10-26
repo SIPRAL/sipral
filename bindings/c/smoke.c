@@ -49,7 +49,7 @@
     X(sipral_recording_options) X(sipral_transport_failure)                   \
     X(sipral_local_conference_config) X(sipral_local_conference_info)         \
     X(sipral_local_conference_member) X(sipral_pinned_certificate)            \
-    X(sipral_network_test_config) X(sipral_isup)
+    X(sipral_network_test_config) X(sipral_isup) X(sipral_hooked_message)
 
 static int failures;
 

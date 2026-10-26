@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 4;
+export const SIPRAL_ABI_VERSION_MINOR = 5;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -354,6 +354,34 @@ export const SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST = 128;
  * The voice-agent preset's interval: one more INVITE every 50 ms.
  */
 export const SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS = 50;
+
+/**
+ * sipral_hooked_message_t::direction: about to be handed to the transport.
+ */
+export const SIPRAL_HOOK_OUTGOING = 1;
+
+/**
+ * sipral_hooked_message_t::direction: just read, not yet parsed.
+ */
+export const SIPRAL_HOOK_INCOMING = 2;
+
+/**
+ * The answer that lets the message on as it is. Zero, so a callback that failed before
+ * answering changes nothing.
+ */
+export const SIPRAL_HOOK_KEEP = 0;
+
+/**
+ * The answer that puts the bytes given to `sipral_hooked_message_replace` in the message's
+ * place. With none given, the message goes on as it is.
+ */
+export const SIPRAL_HOOK_REPLACE = 1;
+
+/**
+ * The answer that stops the message: not sent, or not read. A transaction whose message is
+ * dropped retransmits and times out as if it were lost.
+ */
+export const SIPRAL_HOOK_DROP = 2;
 
 /**
  * Bits of `sipral_call_event_t::privacy` and of
@@ -7956,6 +7984,58 @@ koffi.struct('sipral_screen_request_t', {
 });
 
 /**
+ * One message as sipral_message_hook_callback_t sees it.
+ *
+ * Read `size` first, like sipral_event_t. `message` and `remote` borrow from a
+ * message still being processed: read nothing after the callback returns.
+ */
+export interface SipralHookedMessage {
+  /**
+   * How many bytes of this struct the library filled in.
+   */
+  size: number;
+  /**
+   * The stack the message belongs to.
+   */
+  stack: Wide;
+  /**
+   * `SIPRAL_HOOK_OUTGOING` or `SIPRAL_HOOK_INCOMING`.
+   */
+  direction: number;
+  /**
+   * What it travels over, as a `sipral_transport_t`; zero for one this ABI has no name for.
+   */
+  transport: number;
+  /**
+   * The far end, as `host:port`: where it goes, or where it came from.
+   */
+  remote: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  remote_len: number;
+  /**
+   * The message, from its start line to the end of its body; `sipral_message_header` and
+   * its companions read headers out of it.
+   */
+  message: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  message_len: number;
+}
+koffi.struct('sipral_hooked_message_t', {
+  size: 'size_t',
+  stack: 'sipral_handle_t',
+  direction: 'uint32_t',
+  transport: 'sipral_transport_t',
+  remote: 'void *',
+  remote_len: 'size_t',
+  message: 'void *',
+  message_len: 'size_t',
+});
+
+/**
  * What to watch, and how. Handed to sipral_account_subscribe. Set
  * `size` to `sizeof(sipral_subscribe_config_t)`; all but `target` and
  * `package` may be zero.
@@ -9204,6 +9284,23 @@ export const sipral_event_callback_t = koffi.proto('void sipral_event_callback_t
 export const sipral_screen_callback_t = koffi.proto('uint32_t sipral_screen_callback_t(const sipral_screen_request_t *request, void *user_data)');
 
 /**
+ * The message hook: called once per SIP message out and once per message in. Installed
+ * with sipral_stack_message_hook.
+ *
+ * **It runs with the stack's lock held** (see the module docs). **It must not call back into
+ * the stack it was given**, from any thread; such a call is answered `SIPRAL_STATUS_BUSY`.
+ * It must not unwind across the boundary, and should return quickly: every message waits
+ * for it.
+ *
+ * `hooked` and what it points at are valid for this call only.
+ *
+ * **The answer** is `SIPRAL_HOOK_KEEP`, `SIPRAL_HOOK_REPLACE` (after handing the new message
+ * to `sipral_hooked_message_replace`) or `SIPRAL_HOOK_DROP`; any other value keeps the
+ * message.
+ */
+export const sipral_message_hook_callback_t = koffi.proto('uint32_t sipral_message_hook_callback_t(const sipral_hooked_message_t *hooked, void *user_data)');
+
+/**
  * Echo cancellation, gain control or noise suppression, run over one
  * frame, or told to forget what it has learned — sipral_processor_frame_t
  * says which. Installed with sipral_media_attach_processor.
@@ -9517,6 +9614,49 @@ export class Sipral {
    * Safe to call with any handle value.
    */
   readonly sipral_stack_invite_limit: (stack: Wide, every_ms: Wide, burst: number) => number;
+
+  /**
+   * Install, replace, or remove the message hook for one stack.
+   *
+   * Every SIP message this stack sends passes the callback just before it is handed to the
+   * transport, retransmissions included, and every message it receives passes it just after
+   * it arrives, before it is read: a datagram whole, a byte stream one framed message at a
+   * time. Keep-alives are not messages and never reach it. `docs/03-core-signalling.md`,
+   * "A message hook".
+   *
+   * `NULL` removes the hook. A second call replaces the first, on this stack only.
+   *
+   * The no re-entry and no unwind rules are on sipral_message_hook_callback_t.
+   *
+   * Safety
+   *
+   * `callback`, when not null, is called on whichever thread is inside this stack, while the
+   * hook is installed. `user_data` is handed back untouched and never read here.
+   *
+   * **`user_data` must outlive the last call, which may come after `sipral_stack_destroy`
+   * returns:** an entry point already running on another thread holds its own share of the
+   * stack. Replacing or removing the hook takes the lock, so once it returns the old callback
+   * is not called again.
+   */
+  readonly sipral_stack_message_hook: (stack: Wide, callback: Pointer, user_data: Pointer) => number;
+
+  /**
+   * Hand the message hook the bytes to use instead of the message it was called with; the
+   * callback then answers `SIPRAL_HOOK_REPLACE`. The bytes are copied, so they need to live
+   * only for this call. `Content-Length` must match the body: an outgoing message is sent as
+   * it is given, an incoming one is read as if it had arrived so. A second call replaces the
+   * first.
+   *
+   * The replacement belongs to the hook running on the calling thread, so it names no message:
+   * `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
+   * with a length.
+   *
+   * Safety
+   *
+   * Call it only from inside a sipral_message_hook_callback_t. `bytes` must point at `bytes_len`
+   * readable bytes.
+   */
+  readonly sipral_hooked_message_replace: (bytes: Pointer, bytes_len: number) => number;
 
   /**
    * Watch something at the far end.
@@ -12326,6 +12466,8 @@ export class Sipral {
     this.sipral_stack_counters = library.func('sipral_status_t sipral_stack_counters(sipral_handle_t stack, sipral_counters_t *out_counters)');
     this.sipral_stack_screen = library.func('sipral_status_t sipral_stack_screen(sipral_handle_t stack, sipral_screen_callback_t *callback, void *user_data)');
     this.sipral_stack_invite_limit = library.func('sipral_status_t sipral_stack_invite_limit(sipral_handle_t stack, uint64_t every_ms, uint32_t burst)');
+    this.sipral_stack_message_hook = library.func('sipral_status_t sipral_stack_message_hook(sipral_handle_t stack, sipral_message_hook_callback_t *callback, void *user_data)');
+    this.sipral_hooked_message_replace = library.func('sipral_status_t sipral_hooked_message_replace(const uint8_t *bytes, size_t bytes_len)');
     this.sipral_account_subscribe = library.func('sipral_status_t sipral_account_subscribe(sipral_handle_t stack, sipral_handle_t account, const sipral_subscribe_config_t *config, sipral_handle_t *out_subscription, uint64_t now_ms)');
     this.sipral_subscription_end = library.func('sipral_status_t sipral_subscription_end(sipral_handle_t stack, sipral_handle_t subscription, uint64_t now_ms)');
     this.sipral_subscription_state = library.func('sipral_status_t sipral_subscription_state(sipral_handle_t stack, sipral_handle_t subscription, sipral_subscription_state_t *out_state)');
@@ -12571,6 +12713,7 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_event_t: [384, 248, 264],
   sipral_suspending_t: [32, 16, 16],
   sipral_screen_request_t: [48, 28, 32],
+  sipral_hooked_message_t: [56, 36, 40],
   sipral_subscribe_config_t: [88, 48, 48],
   sipral_watched_dialog_t: [32, 28, 32],
   sipral_push_echo_t: [24, 20, 24],

@@ -4164,3 +4164,40 @@ and `SipralTurnServer`); .NET `SipralClientCertificate`
 `ClientCertificate` (`clientCertificate` on the stack and the account,
 `turnClientCertificate`). Each reports the four values the same way, and their
 READMEs have the details.
+
+## What ABI 1.5 added
+
+### A message hook
+
+Two entry points, one struct passed to a callback, five constants, and
+nothing in any struct a caller declares moved, so `bindings/c/abi-sizes.txt`
+only gains the new struct's line. A binding printed at 1.4 loads against a 1.5
+library and works as it did; one printed at 1.5 is refused by a 1.4 library,
+with both versions named.
+
+- `sipral_stack_message_hook(stack, callback, user_data)` installs,
+  replaces or (with `NULL`) removes the stack's hook, a
+  `sipral_message_hook_callback_t`. It is called with a
+  `const sipral_hooked_message_t *` for every SIP message just before it is
+  handed to the transport (`SIPRAL_HOOK_OUTGOING`) and just after it
+  arrives, before it is read (`SIPRAL_HOOK_INCOMING`): `size`, `stack`,
+  `direction`, `transport` (a `sipral_transport_t`), the far end as
+  `remote`/`remote_len`, and the message whole as `message`/`message_len`.
+  `docs/03-core-signalling.md`, "A message hook", says where each direction
+  runs and what a dropped or replaced message does.
+- It answers `SIPRAL_HOOK_KEEP` (0), `SIPRAL_HOOK_REPLACE` or
+  `SIPRAL_HOOK_DROP`; any other value keeps the message, so a binding whose
+  listener threw changes nothing. For a replacement it first calls
+  `sipral_hooked_message_replace(bytes, bytes_len)`, which copies the
+  bytes into a place kept for the hook running on that thread; outside a
+  running hook that call is `SIPRAL_STATUS_INVALID_ARGUMENT`. The bytes live
+  with the callback, not in the struct, so the struct stays `const` like
+  every other one a callback reads, and no entry point takes it.
+- `sipral_hooked_message_t` is filled by the library, so its length is in
+  `bindings/c/abi-sizes.txt` without a pinned member (56 on 64-bit, 36 and
+  40 on the two 32-bit layouts).
+
+The hook runs inside the stack's lock, as the screening policy does, because
+an incoming message is being read inside `sipral_stack_receive_datagram` or
+`sipral_stack_receive_stream`: a call back into the same stack from inside it
+is answered `SIPRAL_STATUS_BUSY`.

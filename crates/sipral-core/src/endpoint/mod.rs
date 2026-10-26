@@ -16,6 +16,9 @@ mod driver;
 mod error;
 mod event;
 mod failover;
+mod hook;
+#[cfg(test)]
+mod hook_tests;
 mod inbound;
 mod locate;
 mod outgoing;
@@ -51,6 +54,7 @@ pub use error::{
 };
 pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
 pub use failover::UnreachedRequest;
+pub use hook::{Direction, HookedMessage, MessageHook, Rewrite, RewriteError, Verdict};
 pub use locate::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };

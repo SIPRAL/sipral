@@ -2168,6 +2168,16 @@ public extension sipral_screen_request_t {
     }
 }
 
+public extension sipral_hooked_message_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 public extension sipral_subscribe_config_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
@@ -2490,7 +2500,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 4
+    public static let abiVersionMinor: UInt32 = 5
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2706,6 +2716,24 @@ public enum Sipral {
     /// The voice-agent preset's interval: one more INVITE every 50 ms.
     public static let inviteLimitVoiceAgentEveryMs: UInt64 = 50
 
+    /// sipral_hooked_message_t.direction: about to be handed to the transport.
+    public static let hookOutgoing: UInt32 = 1
+
+    /// sipral_hooked_message_t.direction: just read, not yet parsed.
+    public static let hookIncoming: UInt32 = 2
+
+    /// The answer that lets the message on as it is. Zero, so a callback that failed before
+    /// answering changes nothing.
+    public static let hookKeep: UInt32 = 0
+
+    /// The answer that puts the bytes given to `sipral_hooked_message_replace` in the message's
+    /// place. With none given, the message goes on as it is.
+    public static let hookReplace: UInt32 = 1
+
+    /// The answer that stops the message: not sent, or not read. A transaction whose message is
+    /// dropped retransmits and times out as if it were lost.
+    public static let hookDrop: UInt32 = 2
+
     /// Bits of `sipral_call_event_t::privacy` and of
     /// `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
     /// the fields that could identify the caller.
@@ -2846,6 +2874,7 @@ public enum Sipral {
         ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 384, 248, 264),
         ("sipral_suspending_t", MemoryLayout<sipral_suspending_t>.size, 32, 16, 16),
         ("sipral_screen_request_t", MemoryLayout<sipral_screen_request_t>.size, 48, 28, 32),
+        ("sipral_hooked_message_t", MemoryLayout<sipral_hooked_message_t>.size, 56, 36, 40),
         ("sipral_subscribe_config_t", MemoryLayout<sipral_subscribe_config_t>.size, 88, 48, 48),
         ("sipral_watched_dialog_t", MemoryLayout<sipral_watched_dialog_t>.size, 32, 28, 32),
         ("sipral_push_echo_t", MemoryLayout<sipral_push_echo_t>.size, 24, 20, 24),
@@ -3108,6 +3137,56 @@ public enum Sipral {
     public static func stackInviteLimit(stack: SipralHandle, everyMs: UInt64, burst: UInt32) throws {
         try ensureAbi()
         let status = sipral_stack_invite_limit(stack, everyMs, burst)
+        try check(status)
+    }
+
+    /// Install, replace, or remove the message hook for one stack.
+    ///
+    /// Every SIP message this stack sends passes the callback just before it is handed to the
+    /// transport, retransmissions included, and every message it receives passes it just after
+    /// it arrives, before it is read: a datagram whole, a byte stream one framed message at a
+    /// time. Keep-alives are not messages and never reach it. `docs/03-core-signalling.md`,
+    /// "A message hook".
+    ///
+    /// `NULL` removes the hook. A second call replaces the first, on this stack only.
+    ///
+    /// The no re-entry and no unwind rules are on sipral_message_hook_callback_t.
+    ///
+    /// Safety
+    ///
+    /// `callback`, when not null, is called on whichever thread is inside this stack, while the
+    /// hook is installed. `user_data` is handed back untouched and never read here.
+    ///
+    /// **`user_data` must outlive the last call, which may come after `sipral_stack_destroy`
+    /// returns:** an entry point already running on another thread holds its own share of the
+    /// stack. Replacing or removing the hook takes the lock, so once it returns the old callback
+    /// is not called again.
+    public static func stackMessageHook(stack: SipralHandle, callback: sipral_message_hook_callback_t?, userData: UnsafeMutableRawPointer?) throws {
+        try ensureAbi()
+        let status = sipral_stack_message_hook(stack, callback, userData)
+        try check(status)
+    }
+
+    /// Hand the message hook the bytes to use instead of the message it was called with; the
+    /// callback then answers `SIPRAL_HOOK_REPLACE`. The bytes are copied, so they need to live
+    /// only for this call. `Content-Length` must match the body: an outgoing message is sent as
+    /// it is given, an incoming one is read as if it had arrived so. A second call replaces the
+    /// first.
+    ///
+    /// The replacement belongs to the hook running on the calling thread, so it names no message:
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
+    /// with a length.
+    ///
+    /// Safety
+    ///
+    /// Call it only from inside a sipral_message_hook_callback_t. `bytes` must point at `bytes_len`
+    /// readable bytes.
+    public static func hookedMessageReplace(bytes: [UInt8]) throws {
+        try ensureAbi()
+        let status =
+            bytes.withUnsafeBufferPointer { p0 in
+                sipral_hooked_message_replace(p0.baseAddress, p0.count)
+            }
         try check(status)
     }
 

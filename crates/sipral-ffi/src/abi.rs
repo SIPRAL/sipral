@@ -583,6 +583,7 @@ pub const FILLED_BY_US: &[&str] = &[
     "SipralProcessorFrame",
     "SipralAudioTransmit",
     "SipralLogRecord",
+    "SipralHookedMessage",
 ];
 
 /// Everything this ABI publishes, and the only list a person maintains.
@@ -599,6 +600,7 @@ pub const SURFACE: Surface = Surface {
         crate::handle::SipralHandle,
         crate::event::SipralEventCallback,
         crate::screening::SipralScreenCallback,
+        crate::hook::SipralMessageHookCallback,
         crate::media::SipralProcessorCallback,
         crate::audio::SipralAudioTransmitCallback,
         crate::log::SipralLogCallback,
@@ -745,6 +747,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
         crate::screening::SipralScreenRequest::ABI,
+        crate::hook::SipralHookedMessage::ABI,
         crate::subscription::SipralSubscribeConfig::ABI,
         crate::subscription::SipralWatchedDialog::ABI,
         crate::announce::SipralPushEcho::ABI,
@@ -775,6 +778,7 @@ pub const SURFACE: Surface = Surface {
         crate::media::ABI_CONSTANTS,
         crate::transport::ABI_CONSTANTS,
         crate::screening::ABI_CONSTANTS,
+        crate::hook::ABI_CONSTANTS,
         crate::identity::ABI_CONSTANTS,
         crate::log::ABI_CONSTANTS,
     ],
@@ -793,6 +797,8 @@ pub const SURFACE: Surface = Surface {
         crate::counters::sipral_stack_counters::ABI,
         crate::screening::sipral_stack_screen::ABI,
         crate::screening::sipral_stack_invite_limit::ABI,
+        crate::hook::sipral_stack_message_hook::ABI,
+        crate::hook::sipral_hooked_message_replace::ABI,
         crate::subscription::sipral_account_subscribe::ABI,
         crate::subscription::sipral_subscription_end::ABI,
         crate::subscription::sipral_subscription_state::ABI,
@@ -1250,6 +1256,7 @@ mod tests {
             [
                 "SipralEventCallback",
                 "SipralScreenCallback",
+                "SipralMessageHookCallback",
                 "SipralProcessorCallback",
                 "SipralAudioTransmitCallback",
                 "SipralLogCallback",

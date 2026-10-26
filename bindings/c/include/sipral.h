@@ -136,7 +136,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)4)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)5)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -437,6 +437,34 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS ((uint64_t)50)
 
 /**
+ * sipral_hooked_message_t::direction: about to be handed to the transport.
+ */
+#define SIPRAL_HOOK_OUTGOING ((uint32_t)1)
+
+/**
+ * sipral_hooked_message_t::direction: just read, not yet parsed.
+ */
+#define SIPRAL_HOOK_INCOMING ((uint32_t)2)
+
+/**
+ * The answer that lets the message on as it is. Zero, so a callback that failed before
+ * answering changes nothing.
+ */
+#define SIPRAL_HOOK_KEEP ((uint32_t)0)
+
+/**
+ * The answer that puts the bytes given to `sipral_hooked_message_replace` in the message's
+ * place. With none given, the message goes on as it is.
+ */
+#define SIPRAL_HOOK_REPLACE ((uint32_t)1)
+
+/**
+ * The answer that stops the message: not sent, or not read. A transaction whose message is
+ * dropped retransmits and times out as if it were lost.
+ */
+#define SIPRAL_HOOK_DROP ((uint32_t)2)
+
+/**
  * Bits of `sipral_call_event_t::privacy` and of
  * `sipral_account_config_t::privacy` (RFC 3323 §4.2): `header`, obscure
  * the fields that could identify the caller.
@@ -528,6 +556,7 @@ typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
 typedef struct sipral_screen_request sipral_screen_request_t;
+typedef struct sipral_hooked_message sipral_hooked_message_t;
 typedef struct sipral_subscribe_config sipral_subscribe_config_t;
 typedef struct sipral_watched_dialog sipral_watched_dialog_t;
 typedef struct sipral_push_echo sipral_push_echo_t;
@@ -3865,6 +3894,23 @@ typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void *user_
  * (no `Contact` to redirect to).
  */
 typedef uint32_t (*sipral_screen_callback_t)(const sipral_screen_request_t *request, void *user_data);
+
+/**
+ * The message hook: called once per SIP message out and once per message in. Installed
+ * with sipral_stack_message_hook.
+ *
+ * **It runs with the stack's lock held** (see the module docs). **It must not call back into
+ * the stack it was given**, from any thread; such a call is answered `SIPRAL_STATUS_BUSY`.
+ * It must not unwind across the boundary, and should return quickly: every message waits
+ * for it.
+ *
+ * `hooked` and what it points at are valid for this call only.
+ *
+ * **The answer** is `SIPRAL_HOOK_KEEP`, `SIPRAL_HOOK_REPLACE` (after handing the new message
+ * to `sipral_hooked_message_replace`) or `SIPRAL_HOOK_DROP`; any other value keeps the
+ * message.
+ */
+typedef uint32_t (*sipral_message_hook_callback_t)(const sipral_hooked_message_t *hooked, void *user_data);
 
 /**
  * Echo cancellation, gain control or noise suppression, run over one
@@ -7395,6 +7441,48 @@ struct sipral_screen_request {
 };
 
 /**
+ * One message as sipral_message_hook_callback_t sees it.
+ *
+ * Read `size` first, like sipral_event_t. `message` and `remote` borrow from a
+ * message still being processed: read nothing after the callback returns.
+ */
+struct sipral_hooked_message {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The stack the message belongs to.
+     */
+    sipral_handle_t stack;
+    /**
+     * `SIPRAL_HOOK_OUTGOING` or `SIPRAL_HOOK_INCOMING`.
+     */
+    uint32_t direction;
+    /**
+     * What it travels over, as a `sipral_transport_t`; zero for one this ABI has no name for.
+     */
+    sipral_transport_t transport;
+    /**
+     * The far end, as `host:port`: where it goes, or where it came from.
+     */
+    const char *remote;
+    /**
+     * How many bytes of it.
+     */
+    size_t remote_len;
+    /**
+     * The message, from its start line to the end of its body; `sipral_message_header` and
+     * its companions read headers out of it.
+     */
+    const uint8_t *message;
+    /**
+     * How many bytes of it.
+     */
+    size_t message_len;
+};
+
+/**
  * What to watch, and how. Handed to sipral_account_subscribe. Set
  * `size` to `sizeof(sipral_subscribe_config_t)`; all but `target` and
  * `package` may be zero.
@@ -8597,6 +8685,49 @@ sipral_status_t sipral_stack_screen(sipral_handle_t stack, sipral_screen_callbac
  * Safe to call with any handle value.
  */
 sipral_status_t sipral_stack_invite_limit(sipral_handle_t stack, uint64_t every_ms, uint32_t burst);
+
+/**
+ * Install, replace, or remove the message hook for one stack.
+ *
+ * Every SIP message this stack sends passes the callback just before it is handed to the
+ * transport, retransmissions included, and every message it receives passes it just after
+ * it arrives, before it is read: a datagram whole, a byte stream one framed message at a
+ * time. Keep-alives are not messages and never reach it. `docs/03-core-signalling.md`,
+ * "A message hook".
+ *
+ * `NULL` removes the hook. A second call replaces the first, on this stack only.
+ *
+ * The no re-entry and no unwind rules are on sipral_message_hook_callback_t.
+ *
+ * Safety
+ *
+ * `callback`, when not null, is called on whichever thread is inside this stack, while the
+ * hook is installed. `user_data` is handed back untouched and never read here.
+ *
+ * **`user_data` must outlive the last call, which may come after `sipral_stack_destroy`
+ * returns:** an entry point already running on another thread holds its own share of the
+ * stack. Replacing or removing the hook takes the lock, so once it returns the old callback
+ * is not called again.
+ */
+sipral_status_t sipral_stack_message_hook(sipral_handle_t stack, sipral_message_hook_callback_t callback, void *user_data);
+
+/**
+ * Hand the message hook the bytes to use instead of the message it was called with; the
+ * callback then answers `SIPRAL_HOOK_REPLACE`. The bytes are copied, so they need to live
+ * only for this call. `Content-Length` must match the body: an outgoing message is sent as
+ * it is given, an incoming one is read as if it had arrived so. A second call replaces the
+ * first.
+ *
+ * The replacement belongs to the hook running on the calling thread, so it names no message:
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
+ * with a length.
+ *
+ * Safety
+ *
+ * Call it only from inside a sipral_message_hook_callback_t. `bytes` must point at `bytes_len`
+ * readable bytes.
+ */
+sipral_status_t sipral_hooked_message_replace(const uint8_t *bytes, size_t bytes_len);
 
 /**
  * Watch something at the far end.

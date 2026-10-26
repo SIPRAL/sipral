@@ -666,6 +666,8 @@ class Stack:
         self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
         #: Callbacks given to `sipral_stack_log`, kept alive.
         self._log_callbacks: list = []
+        #: Callbacks given to `sipral_stack_message_hook`, kept alive.
+        self._hook_callbacks: list = []
 
         out_stack = ffi.new("sipral_handle_t *")
         try:
@@ -1283,6 +1285,51 @@ class Stack:
         )
         # The replaced callback may still be delivering on the poll thread.
         self._log_callbacks.append(callback)
+
+    def set_message_hook(self, hook=None) -> None:
+        """See, change or drop every SIP message just before it is sent and
+        just after it arrives (`docs/03-core-signalling.md`, "A message
+        hook"); ``None`` removes the hook.
+
+        ``hook(outgoing, message, remote)`` gets ``True`` for a message on
+        its way out, the whole message as ``bytes``, and the far end as
+        ``host:port``. It returns ``None`` to let the message on as it is,
+        ``bytes`` to put in its place (``Content-Length`` must match the
+        body), or ``False`` to stop it. It runs inside the stack's lock, on
+        the thread that is inside the stack: it must not call back into this
+        stack, and should return quickly. An exception it raises keeps the
+        message as it is.
+        """
+        if hook is None:
+            _retry(
+                lambda: lib.sipral_stack_message_hook(self.handle, ffi.NULL, ffi.NULL),
+                "sipral_stack_message_hook",
+            )
+            return
+
+        def ask(hooked, _user_data) -> int:
+            try:
+                remote = ffi.unpack(hooked.remote, hooked.remote_len).decode("utf-8")
+                message = ffi.unpack(ffi.cast("const char *", hooked.message), hooked.message_len)
+                answer = hook(hooked.direction == lib.SIPRAL_HOOK_OUTGOING, message, remote)
+                if answer is False:
+                    return lib.SIPRAL_HOOK_DROP
+                if isinstance(answer, (bytes, bytearray)):
+                    replacement = bytes(answer)
+                    status = lib.sipral_hooked_message_replace(replacement, len(replacement))
+                    if status == lib.SIPRAL_STATUS_OK:
+                        return lib.SIPRAL_HOOK_REPLACE
+            except Exception:  # noqa: BLE001 - nothing may unwind into the library
+                return lib.SIPRAL_HOOK_KEEP
+            return lib.SIPRAL_HOOK_KEEP
+
+        callback = ffi.callback("uint32_t(const sipral_hooked_message_t *, void *)")(ask)
+        _retry(
+            lambda: lib.sipral_stack_message_hook(self.handle, callback, ffi.NULL),
+            "sipral_stack_message_hook",
+        )
+        # The replaced callback may still be running on another thread.
+        self._hook_callbacks.append(callback)
 
     def state(self) -> str:
         """The stack's state as redacted text for a crash report. Safe from

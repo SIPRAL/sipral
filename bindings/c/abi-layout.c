@@ -826,6 +826,16 @@ _Static_assert(offsetof(sipral_screen_request_t, source_len) == SIPRAL_LAYOUT(24
 _Static_assert(offsetof(sipral_screen_request_t, message) == SIPRAL_LAYOUT(32, 20, 24), "sipral_screen_request_t::message");
 _Static_assert(offsetof(sipral_screen_request_t, message_len) == SIPRAL_LAYOUT(40, 24, 28), "sipral_screen_request_t::message_len");
 
+_Static_assert(sizeof(sipral_hooked_message_t) == SIPRAL_LAYOUT(56, 36, 40), "sipral_hooked_message_t");
+_Static_assert(offsetof(sipral_hooked_message_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_hooked_message_t::size");
+_Static_assert(offsetof(sipral_hooked_message_t, stack) == SIPRAL_LAYOUT(8, 4, 8), "sipral_hooked_message_t::stack");
+_Static_assert(offsetof(sipral_hooked_message_t, direction) == SIPRAL_LAYOUT(16, 12, 16), "sipral_hooked_message_t::direction");
+_Static_assert(offsetof(sipral_hooked_message_t, transport) == SIPRAL_LAYOUT(20, 16, 20), "sipral_hooked_message_t::transport");
+_Static_assert(offsetof(sipral_hooked_message_t, remote) == SIPRAL_LAYOUT(24, 20, 24), "sipral_hooked_message_t::remote");
+_Static_assert(offsetof(sipral_hooked_message_t, remote_len) == SIPRAL_LAYOUT(32, 24, 28), "sipral_hooked_message_t::remote_len");
+_Static_assert(offsetof(sipral_hooked_message_t, message) == SIPRAL_LAYOUT(40, 28, 32), "sipral_hooked_message_t::message");
+_Static_assert(offsetof(sipral_hooked_message_t, message_len) == SIPRAL_LAYOUT(48, 32, 36), "sipral_hooked_message_t::message_len");
+
 _Static_assert(sizeof(sipral_subscribe_config_t) == SIPRAL_LAYOUT(88, 48, 48), "sipral_subscribe_config_t");
 _Static_assert(offsetof(sipral_subscribe_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_subscribe_config_t::size");
 _Static_assert(offsetof(sipral_subscribe_config_t, target) == SIPRAL_LAYOUT(8, 4, 4), "sipral_subscribe_config_t::target");

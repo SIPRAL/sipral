@@ -36,12 +36,12 @@ machine = "Apple M2, macOS, rustc 1.95.0, release profile"
 key = "library.bytes"
 what = "the shared library, libsipral_ffi.dylib, as built"
 unit = "B"
-published = 5201264
-# 5 % over the 1.0.0 figure: under it the README's "5 MB" still holds
-margin = 260000
+published = 5466784
+# up to 5 499 999 bytes: past it the README's "5 MB" no longer rounds true
+margin = 33215
 where = [
     "README.md: a 5 MB shared library",
-    "docs/19-numbers.md, 2 October 2026, 1.0.0: 5.20 MB, 5 201 264 bytes",
+    "docs/19-numbers.md, 26 October 2026, C ABI 1.5: 5.47 MB, 5 466 784 bytes",
 ]
 
 [[figure]]
