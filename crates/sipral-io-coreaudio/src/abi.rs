@@ -214,6 +214,29 @@ pub(crate) const PROPERTY_ENABLE_IO: u32 = 2003;
 /// canceller, gain control and noise suppression out of the path.
 pub(crate) const PROPERTY_BYPASS_VOICE_PROCESSING: u32 = 2100;
 
+/// `kAUVoiceIOProperty_OtherAudioDuckingConfiguration` (macOS 14, iOS 17): an
+/// [`OtherAudioDucking`] on the global scope, how far the voice-processing
+/// unit lowers what other applications play on its loudspeaker. A system
+/// before those answers it as a property it does not have.
+pub(crate) const PROPERTY_OTHER_AUDIO_DUCKING: u32 = 2108;
+
+/// `kAUVoiceIOOtherAudioDuckingLevelMin`, the least of the four levels. On a
+/// Mac measured at about -4 dB, against -15 dB for the default level.
+pub(crate) const OTHER_AUDIO_DUCKING_MIN: u32 = 10;
+
+/// `AUVoiceIOOtherAudioDuckingConfiguration`, from
+/// `AudioToolbox/AudioUnitProperties.h`: a `Boolean` (one octet) and the
+/// level as a `UInt32`, padded to eight bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OtherAudioDucking {
+    /// `mEnableAdvancedDucking`: lower the other audio only while someone
+    /// on the call speaks.
+    pub(crate) advanced: u8,
+    /// `mDuckingLevel`.
+    pub(crate) level: u32,
+}
+
 /// `kAudioOutputUnitProperty_SetInputCallback`.
 pub(crate) const PROPERTY_SET_INPUT_CALLBACK: u32 = 2005;
 
@@ -458,6 +481,13 @@ mod tests {
         assert_eq!(offset_of!(TimeStamp, smpte), 32);
         assert_eq!(offset_of!(TimeStamp, flags), 56);
         assert_eq!(offset_of!(TimeStamp, reserved), 60);
+    }
+
+    #[test]
+    fn the_ducking_configuration_pads_its_flag_out_to_the_level() {
+        assert_eq!(size_of::<super::OtherAudioDucking>(), 8);
+        assert_eq!(offset_of!(super::OtherAudioDucking, advanced), 0);
+        assert_eq!(offset_of!(super::OtherAudioDucking, level), 4);
     }
 
     #[test]

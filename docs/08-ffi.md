@@ -2035,6 +2035,12 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   un-REGISTER, or the stack's lock. `sipral_audio_deactivate` waits for the
   teardown at most `audio_probe_ms`, so even one made from the main thread
   returns.
+- **Other applications' sound is lowered only in a call.** On macOS and
+  iOS the system ducks it for as long as the voice-processing unit exists,
+  so the stack builds the unit while an incoming call rings or as a call
+  is placed, and disposes of it once no call needs it and when the stack is
+  destroyed; in a call it asks for the least ducking the system offers
+  (`docs/05-media.md`, "The built-in engine: device mode").
 - **No instruction beyond the baseline.** The resampler and the mixer are
   plain integer arithmetic; `scripts/check.sh` refuses a `target-cpu` or
   `target-feature` in any build configuration in the tree, so a packaged

@@ -1851,21 +1851,38 @@ fn levels_played(fake: &FakeControl, identity: &str) -> Vec<i16> {
     levels
 }
 
+/// The preparations seen so far.
+fn preparations(fake: &FakeControl) -> usize {
+    fake.history()
+        .iter()
+        .filter(|seen| seen.starts_with("prepared"))
+        .count()
+}
+
 /// A platform with something slow to do ahead of an open gets it done while
-/// nothing is open: when the engine is made, and again when a device is
-/// chosen, on the device chosen. Not while a call is carried, whose devices
-/// are open already.
+/// a call rings here and nothing is open, and again on the device chosen
+/// meanwhile. Not before any call, since what it makes ready lowers other
+/// applications' sound as a call does, and not while a call is carried,
+/// whose devices are open already.
 #[test]
-fn the_devices_are_prepared_while_nothing_is_open() {
+fn the_devices_are_prepared_while_a_call_rings_and_nothing_is_open() {
     let fake = a_desk();
     fake.set_preparation(Some(Duration::from_millis(20)));
     let (mut engine, _) = engine_with(Activation::Automatic, &fake);
-    wait_for_history(&fake, "prepared default default");
     engine.refresh().unwrap();
     let headset = handle_of(&engine, "headset");
     engine
         .select(Role::Speaker, Selection::Device(headset))
         .unwrap();
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(
+        preparations(&fake),
+        0,
+        "prepared with no call: {:?}",
+        fake.history()
+    );
+
+    engine.incoming(1);
     wait_for_history(&fake, "prepared default headset");
     engine
         .select(Role::Microphone, Selection::Device(headset))
@@ -1875,19 +1892,12 @@ fn the_devices_are_prepared_while_nothing_is_open() {
     let call = FakeCallControl::new(RATE, 1_000, destination());
     engine.attach(1, call.call()).unwrap();
     wait_for_speaker(&mut engine);
-    let prepared = fake
-        .history()
-        .iter()
-        .filter(|seen| seen.starts_with("prepared"))
-        .count();
+    let prepared = preparations(&fake);
     engine.select(Role::Speaker, Selection::System).unwrap();
     serviced(&mut engine);
     wait_ticks(&engine, 5);
     assert_eq!(
-        fake.history()
-            .iter()
-            .filter(|seen| seen.starts_with("prepared"))
-            .count(),
+        preparations(&fake),
         prepared,
         "prepared under a call: {:?}",
         fake.history()
@@ -1901,6 +1911,7 @@ fn an_open_waits_for_a_preparation_under_way() {
     let fake = a_desk();
     fake.set_preparation(Some(Duration::from_millis(150)));
     let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.incoming(1);
     let call = FakeCallControl::new(RATE, 1_000, destination());
     engine.attach(1, call.call()).unwrap();
     wait_for_speaker(&mut engine);
@@ -1910,6 +1921,68 @@ fn an_open_waits_for_a_preparation_under_way() {
         Some("prepared default default"),
         "{history:?}"
     );
+}
+
+/// The releases seen so far.
+fn releases(fake: &FakeControl) -> usize {
+    fake.history()
+        .iter()
+        .filter(|seen| seen.starts_with("released"))
+        .count()
+}
+
+/// Once no call needs the devices, what the platform kept for the next
+/// open is let go of, after the voice unit itself has closed: a call
+/// carried and ended, and one that rang and was never answered.
+#[test]
+fn what_was_kept_for_the_next_open_is_let_go_of_once_no_call_needs_it() {
+    let fake = a_desk();
+    fake.set_duplex_only(true);
+    fake.set_preparation(Some(Duration::from_millis(20)));
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    let call = FakeCallControl::new(RATE, 1_000, destination());
+    engine.attach(1, call.call()).unwrap();
+    engine.expect(2).unwrap();
+    wait_for_speaker(&mut engine);
+    engine.detach(1);
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(
+        releases(&fake),
+        0,
+        "released under a call still expected: {:?}",
+        fake.history()
+    );
+    engine.detach(2);
+    wait_for_history(&fake, "released, 0 alive");
+
+    engine.incoming(3);
+    wait_for_history(&fake, "prepared default default");
+    engine.detach(3);
+    let started = Instant::now();
+    while releases(&fake) < 2 {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a call that rang and went kept the devices ready: {:?}",
+            fake.history()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        fake.history().last().map(String::as_str),
+        Some("released, 0 alive"),
+        "{:?}",
+        fake.history()
+    );
+}
+
+/// An engine let go of, the stack closed, leaves nothing kept behind.
+#[test]
+fn an_engine_dropped_lets_go_of_what_was_kept() {
+    let fake = a_desk();
+    fake.set_preparation(Some(Duration::from_millis(20)));
+    let (engine, _) = engine_with(Activation::Automatic, &fake);
+    drop(engine);
+    wait_for_history(&fake, "released, 0 alive");
 }
 
 /// What the far end says while the loudspeaker is still opening is held

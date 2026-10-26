@@ -2714,7 +2714,8 @@ against a backend made of fakes, with no device in the room:
   when the application says, for the platforms whose frameworks say when
   audio is the application's. Opened as the call is placed rather than when
   its media starts, they are running when a far end that answers with a
-  recorded greeting starts speaking;
+  recorded greeting starts speaking. A call ringing here has them made
+  ready, not opened (`Engine::incoming`), until it is answered or gone;
 - nothing the stack's poll does waits on a device. A call's media starting
   starts the pump at once, on no device if none has opened yet: silence to
   the far end, and the far end's audio pulled at its own pace and held, its
@@ -2756,28 +2757,48 @@ old unit is closed, and the pump confirms it let go, before the new one is
 opened on a device change: two alive at once is what blocks inside the
 framework, and `sipral-io-coreaudio` refuses a second one outright. A ring
 on a device other than the loudspeaker's plays through a plain output unit
-beside the call's, never a second voice-processing unit. Nor is the
-process's one unit made again for every call: a voice stream that closes
-leaves its unit stopped and uninitialised for the next one to configure
-again, because a new unit opened after an old one was taken down was seen,
+beside the call's, never a second voice-processing unit. Within a call the
+process's one unit is not made again: a voice stream that closes leaves its
+unit stopped and uninitialised for the next one to configure again, because
+in October 2026 a new unit opened after an old one was taken down was seen,
 under the guard allocator, to read freed memory on the framework's own
 property-listener thread within a few rounds of activation, whatever the
-order or the spacing of stop, uninitialise and dispose. A unit whose device
-was lost, or that would not uninitialise, is disposed of, and so is the one a
-recovery replaces. The unit is also built before the first call: whenever
-nothing is open — the engine made, a device chosen, the echo cancellation
-switched, a device come, gone or made the default — the engine has
-`sipral-io-coreaudio::prepare` build it, or move the one parked, onto the
-chosen devices on a thread of its own, and an open waits for that as for a
-teardown. The framework builds a new unit on the system's default devices
-and then moves each half: on a USB DECT headset chosen beside the Mac's own
+order or the spacing of stop, uninitialise and dispose; on macOS 27.0.1,
+120 units made one after another the same way no longer did. A unit whose
+device was lost, or that would not uninitialise, is disposed of, and so is
+the one a recovery replaces.
+
+A voice-processing unit lowers what other applications play on its
+loudspeaker from the moment it is made until it is disposed of, initialised
+or not, running or not: by default to a volume of 0.18 on a Mac's own
+speakers (about -15 dB), and by 60 dB on a virtual device, the amount
+depending on the route. So it lives only while a call needs it. Once no
+call is attached, expected or ringing here, the engine has
+`sipral-io-coreaudio::release` dispose of the unit kept between streams,
+after the devices have closed, and a closed engine does the same; the next
+call builds a unit again. In a call the unit asks for the system's least
+ducking (`kAUVoiceIOProperty_OtherAudioDuckingConfiguration` at its minimum
+level, without the advanced ducking that follows the voices): 0.63 on the
+same speakers (about -4 dB), 38 dB on the virtual device, from macOS 14 and
+iOS 17; earlier systems duck by their own measure. The advanced ducking was
+measured too, and between voices it settles at the same minimum rather than
+letting the other sound back up.
+
+A call that rings here has the unit built before it is answered: while it
+rings and nothing is open, and again when a device is chosen, the echo
+cancellation switched, or a device comes, goes or is made the default
+meanwhile, the engine has `sipral-io-coreaudio::prepare` build it, or move
+the one kept, onto the chosen devices on a thread of its own, and an open
+waits for that as for a teardown; a call placed opens its devices as it is
+placed. The framework builds a new unit on the system's default devices and
+then moves each half: on a USB DECT headset chosen beside the Mac's own
 microphone that took 3.4 seconds, stopped the headset twice and dropped its
 radio link with it, at the start of the call. Prepared, the same open took
 1.1 seconds with the headset started once and never stopped, and through the
 engine the loudspeaker ran 0.4 seconds after the call was attached. The
 interruption to whatever else plays on the devices while the unit is built
-moves with it, to when no call is up; a parked unit holds no device and
-captures nothing. The capture
+moves with it, to while the call rings; the unit made ready captures
+nothing, and a call that rings and goes unanswered lets it go. The capture
 callback renders exactly the frames it is told of, into a buffer that holds
 a whole device slice converted to the stream's rate, or not at all. On iOS
 the route is the audio session's, so only the loudspeaker role is chosen.

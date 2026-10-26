@@ -63,10 +63,11 @@ struct State {
     scheduling: Option<bool>,
     /// The names of the threads that asked for it.
     scheduled: Arc<Mutex<Vec<String>>>,
-    /// How long a preparation takes, for a fake that has one to offer.
+    /// How long a preparation takes, for a fake that has one to offer, and
+    /// so a release of what it kept.
     preparation: Option<Duration>,
     /// What happened, in order: a preparation finished with the devices it
-    /// was for, a stream opened.
+    /// was for, a release, a stream opened.
     history: Arc<Mutex<Vec<String>>>,
 }
 
@@ -302,14 +303,16 @@ impl FakeControl {
     }
 
     /// Offer the engine a preparation that takes `takes`, as macOS builds
-    /// its voice unit ahead of an open, or none for `None`.
+    /// its voice unit ahead of an open, and a release of what it kept, or
+    /// neither for `None`.
     pub fn set_preparation(&self, takes: Option<Duration>) {
         lock(&self.state).preparation = takes;
     }
 
     /// What happened, in order: `prepared <microphone> <speaker>` for each
     /// preparation that finished, `default` standing for the system's
-    /// device, and `opened <identity>` for each stream opened.
+    /// device, `released, <n> alive` for each release with the duplex units
+    /// still alive then, and `opened <identity>` for each stream opened.
     #[must_use]
     pub fn history(&self) -> Vec<String> {
         lock(&self.state)
@@ -628,6 +631,20 @@ impl Backend for FakeBackend {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(entry);
+        }))
+    }
+
+    fn release(&self) -> Option<Preparation> {
+        let state = lock(&self.state);
+        state.preparation?;
+        let history = Arc::clone(&state.history);
+        let units = Arc::clone(&state.units);
+        Some(Box::new(move || {
+            let alive = units.alive.load(Ordering::Acquire);
+            history
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(format!("released, {alive} alive"));
         }))
     }
 

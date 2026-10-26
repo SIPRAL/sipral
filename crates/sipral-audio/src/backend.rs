@@ -159,8 +159,9 @@ pub trait Backend: Send {
     }
 
     /// Work that makes the next [`Backend::open_duplex`] on these devices
-    /// quick, for the engine to run on a thread of its own while nothing is
-    /// open, or nothing where an open has nothing slow to do ahead of time.
+    /// quick, for the engine to run on a thread of its own while a call is
+    /// on its way and nothing is open, or nothing where an open has nothing
+    /// slow to do ahead of time.
     ///
     /// Nothing by default. macOS builds its voice unit here, the seconds an
     /// open would otherwise spend at the start of a call.
@@ -170,6 +171,17 @@ pub trait Backend: Send {
         _speaker: Option<&str>,
         _wanted: Format,
     ) -> Option<Preparation> {
+        None
+    }
+
+    /// Work that lets go of what a [`Backend::preparation`] or a closed
+    /// stream kept for the next open, for the engine to run on a thread of
+    /// its own once no call needs the devices.
+    ///
+    /// Nothing by default. macOS and iOS dispose of the voice unit kept
+    /// between a call's streams here: kept, it goes on lowering what other
+    /// applications play on its loudspeaker.
+    fn release(&self) -> Option<Preparation> {
         None
     }
 
@@ -205,7 +217,8 @@ pub trait Backend: Send {
     }
 }
 
-/// What [`Backend::preparation`] hands the engine to run off its own thread.
+/// What [`Backend::preparation`] and [`Backend::release`] hand the engine to
+/// run off its own thread.
 pub type Preparation = Box<dyn FnOnce() + Send>;
 
 /// A real-time scheduling class the calling thread holds for as long as this

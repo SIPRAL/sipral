@@ -85,6 +85,8 @@ const AUDIO_BUSY_RETRY: Duration = Duration::from_millis(20);
 
 /// A call the audio engine is to take up, with its session, or let go of.
 enum AudioOp {
+    /// A call ringing here, which may be answered.
+    Incoming(SipralHandle),
     /// A call placed or answered, whose media is on its way.
     Expect(SipralHandle),
     Attach(SipralHandle, sipral::SessionShare),
@@ -1749,6 +1751,7 @@ fn run(
         if let Some(mut engine) = held {
             for op in std::mem::take(&mut state.audio_backlog) {
                 match op {
+                    AudioOp::Incoming(handle) => engine.incoming(handle),
                     AudioOp::Expect(handle) => {
                         let _ = engine.expect(handle);
                     }
@@ -1828,6 +1831,14 @@ fn drain(
                         .or_else(|| CallIdentity::of_request(request).map(Arc::new))
                 {
                     state.record_shared_identity(call, identity);
+                }
+                // in device mode the devices are made ready while it rings,
+                // and let go of with the call if it is not answered
+                if let UaEvent::IncomingCall { call, .. } = said
+                    && state.audio.is_some()
+                    && let Ok(handle) = state.calls.name_of(call)
+                {
+                    state.audio_backlog.push(AudioOp::Incoming(handle));
                 }
                 if let UaEvent::CallForked { call, sibling } = said {
                     // a forked branch shares its parent's From, To and Call-ID

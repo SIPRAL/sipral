@@ -40,6 +40,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Fixed
 
+- **Device mode on a Mac no longer lowers every other application's sound while no call is up, and lowers it the least during one.** The stack built its voice-processing unit as it opened and kept it between calls, and the system ducks other applications' audio for as long as such a unit exists: to about -15 dB on a Mac's own speakers, by 60 dB on a virtual device, for as long as the application ran. The unit is now built while an incoming call rings or as a call is placed, and disposed of once no call needs the devices and when the stack is destroyed, on iOS too; in a call it asks for the system's minimum ducking, about -4 dB on the same speakers, from macOS 14 and iOS 17 (`docs/05-media.md`, "The built-in engine: device mode").
 - **`ctutils` 0.4.5**, past RUSTSEC-2026-0385, in the workspace and fuzz lock files.
 - **`crypto-bigint` 0.7.9**, past RUSTSEC-2026-0387 and the yanked 0.7.5, in the workspace and fuzz lock files.
 - **Dart: closing a stack with TLS connections open no longer throws now and then.** `SipralStack.close` walked the map of open connections while destroying them, and a connection's own done or error handler, which `destroy()` can run at once, took it out of that map mid-walk; it now walks a copy.

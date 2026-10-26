@@ -22,11 +22,9 @@ use std::time::{Duration, Instant};
 use sipral_io_common::level::Controls;
 use sipral_io_coreaudio::{Stream, StreamConfig, StreamEvent, StreamFormat, StreamKind};
 
-#[cfg(target_os = "macos")]
-use crate::backend::Preparation;
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
-    Promoted, RawDevice, StreamCommon,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Preparation,
+    Promote, Promoted, RawDevice, StreamCommon,
 };
 use crate::device::Role;
 
@@ -327,6 +325,13 @@ impl Backend for CoreAudioBackend {
         Some(Box::new(move || {
             // a unit that could not be built is built by the open, as before
             let _ = sipral_io_coreaudio::prepare(&config);
+        }))
+    }
+
+    fn release(&self) -> Option<Preparation> {
+        Some(Box::new(|| {
+            // a unit that would not go is gone all the same
+            let _ = sipral_io_coreaudio::release();
         }))
     }
 

@@ -213,6 +213,13 @@ static VOICE_UNIT: Slot = Slot::new();
 ///
 /// Only a cleanly uninitialised unit is kept; one with a lost device, or
 /// under [`Stream::recover`], is disposed of.
+///
+/// A parked unit still lowers what other applications play on its
+/// loudspeaker: the system ducks them from the moment a voice unit is made
+/// until it is disposed of, initialised or not. So the unit is kept between
+/// the streams of a call, and [`release`] disposes of it once nothing needs
+/// it. On macOS 27.0.1 the fault above no longer came back, in 120 units made
+/// one after another under the same guard allocator.
 static SPARE: Spare = Spare::new();
 
 /// Room for one unit put aside.
@@ -1214,6 +1221,20 @@ fn route(unit: sys::Unit, config: &StreamConfig, voice: bool) -> Result<(), Erro
             0,
             &bypassed,
         )?;
+        // the least the system lowers other applications by during a call;
+        // a system before macOS 14 and iOS 17 has no such property, and
+        // lowers them by its own measure
+        let _ = set(
+            unit,
+            "AudioUnitSetProperty (OtherAudioDuckingConfiguration)",
+            abi::PROPERTY_OTHER_AUDIO_DUCKING,
+            abi::SCOPE_GLOBAL,
+            0,
+            &abi::OtherAudioDucking {
+                advanced: 0,
+                level: abi::OTHER_AUDIO_DUCKING_MIN,
+            },
+        );
     }
     Ok(())
 }
@@ -1228,7 +1249,9 @@ fn route(unit: sys::Unit, config: &StreamConfig, voice: bool) -> Result<(), Erro
 /// before a call, the open that follows finds the unit on its devices and
 /// only initialises and starts it, without stopping them. Building the unit
 /// interrupts what else plays on those devices for a few seconds, as the open
-/// did; parked, it holds none of them and captures nothing.
+/// did; parked, it captures nothing, but lowers what other applications play
+/// on its loudspeaker as a call does, until an open takes it or [`release`]
+/// disposes of it. So prepare only when a call is on its way.
 ///
 /// Returns `false`, having done nothing, while a voice stream is open or
 /// another preparation runs: that stream parks its unit on its own devices
@@ -1260,6 +1283,29 @@ pub fn prepare(config: &StreamConfig) -> Result<bool, Error> {
     }
     drop(claim);
     Ok(true)
+}
+
+/// Dispose of the voice unit a closed stream or a [`prepare`] left parked,
+/// so that nothing is lowered any more on its loudspeaker: for when no call
+/// needs the devices. The next open builds a unit again.
+///
+/// Returns whether there was one. `false`, having done nothing, while a
+/// voice stream is open or a preparation runs, which hold the unit.
+///
+/// # Errors
+/// What `AudioComponentInstanceDispose` said; the unit is gone all the same.
+pub fn release() -> Result<bool, Error> {
+    let Some(claim) = VOICE_UNIT.take() else {
+        return Ok(false);
+    };
+    let Some(unit) = SPARE.take() else {
+        return Ok(false);
+    };
+    // SAFETY: parked uninitialised, so it calls no callback, and taken out
+    // of `SPARE` under the room's claim, so nothing else holds it.
+    let disposed = unsafe { sys::dispose_component(unit) };
+    drop(claim);
+    sys::check("AudioComponentInstanceDispose", disposed).map(|()| true)
 }
 
 /// Settable only while uninitialised, hence `Stream::recover` reopens.
@@ -2990,6 +3036,28 @@ mod tests {
         reopening.spare = false;
         reopening.close().expect("disposed of");
         assert_eq!(SPARE.take(), None, "nor is one the stream may not keep");
+    }
+
+    /// On a real voice unit: a parked one is disposed of when released, and
+    /// none is touched while the room is held by a stream or a preparation.
+    #[test]
+    fn a_parked_unit_is_released_and_a_held_room_is_left_alone() {
+        use super::{SPARE, StreamKind, VOICE_UNIT, new_unit, release};
+        let _units = voice_units();
+        // whatever an earlier test left parked
+        let _ = release();
+        let Ok(unit) = new_unit(StreamKind::Voice) else {
+            // a system with no voice-processing unit has nothing to release
+            return;
+        };
+        assert_eq!(SPARE.keep(unit), None);
+        let held = VOICE_UNIT.take().expect("the room is free");
+        assert!(matches!(release(), Ok(false)), "released under a stream");
+        drop(held);
+        assert!(matches!(release(), Ok(true)), "the parked unit was kept");
+        assert_eq!(SPARE.take(), None, "the released unit is still parked");
+        assert!(matches!(release(), Ok(false)), "released twice");
+        assert_eq!(super::voice_units_open(), 0, "the room was kept");
     }
 
     /// A preparation parks a voice unit for the next open, and stands back

@@ -84,7 +84,7 @@ mod stream;
 mod sys;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub use stream::{Capture, Playback, Stream, StreamConfig, StreamKind, voice_units_open};
+pub use stream::{Capture, Playback, Stream, StreamConfig, StreamKind, release, voice_units_open};
 
 #[cfg(target_os = "macos")]
 pub use stream::prepare;

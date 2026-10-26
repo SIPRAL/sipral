@@ -162,6 +162,9 @@ pub struct Engine {
     /// Calls whose media is on its way ([`Engine::expect`]), holding the
     /// devices open until they are detached.
     expected: Vec<CallId>,
+    /// Calls ringing here that may be answered ([`Engine::incoming`]), for
+    /// which the platform gets the devices ready without opening them.
+    incoming: Vec<CallId>,
     /// The attached calls' audio while no pump runs to carry it: a call
     /// attached before a manual activation, and every call across a
     /// deactivation, handed to the next pump when it starts.
@@ -286,7 +289,7 @@ impl Engine {
             speaker: backend.chooses(Role::Speaker),
             ringer: backend.chooses(Role::Ringer),
         };
-        let mut engine = Self {
+        Self {
             backend: Arc::new(Mutex::new(backend)),
             duplex_only,
             chooses,
@@ -302,6 +305,7 @@ impl Engine {
             now,
             attached: Vec::new(),
             expected: Vec::new(),
+            incoming: Vec::new(),
             parked: Vec::new(),
             call_channels: HashMap::new(),
             ringing: false,
@@ -311,9 +315,7 @@ impl Engine {
             generation: 0,
             opening: None,
             wanted: Vec::new(),
-        };
-        engine.prepare();
-        engine
+        }
     }
 
     /// The same, on the system's own clock.
@@ -717,11 +719,25 @@ impl Engine {
         }
     }
 
-    /// Stop carrying it, or expecting it. Under [`Activation::Automatic`]
-    /// the last one closes the devices, unless a ring is playing.
+    /// A call ringing here that may be answered: while nothing is open, the
+    /// platform gets its call devices ready ([`Backend::preparation`]), so
+    /// that an answer has nothing slow left to do. Nothing opens; its detach
+    /// lets go of what was made ready, as for any call.
+    pub fn incoming(&mut self, id: CallId) {
+        if !self.incoming.contains(&id) {
+            self.incoming.push(id);
+        }
+        self.prepare();
+    }
+
+    /// Stop carrying it, expecting it or getting ready for it. Under
+    /// [`Activation::Automatic`] the last one closes the devices, unless a
+    /// ring is playing; once none needs them, the platform lets go of what
+    /// it kept for the next open ([`Backend::release`]).
     pub fn detach(&mut self, id: CallId) {
         self.attached.retain(|attached| *attached != id);
         self.expected.retain(|expected| *expected != id);
+        self.incoming.retain(|incoming| *incoming != id);
         self.parked.retain(|(parked, _)| *parked != id);
         if let Some(pump) = self.pump.as_ref() {
             let _ = pump.sender.send(Command::Detach(id));
@@ -735,14 +751,21 @@ impl Engine {
         &self.attached
     }
 
+    /// Whether a call needs the devices, now or soon.
+    fn calls_waiting(&self) -> bool {
+        !self.attached.is_empty() || !self.expected.is_empty() || !self.incoming.is_empty()
+    }
+
     fn settle(&mut self) {
-        if self.config.activation == Activation::Automatic
-            && self.attached.is_empty()
-            && self.expected.is_empty()
-            && !self.ringing
-        {
+        if self.calls_waiting() || self.ringing {
+            return;
+        }
+        if self.config.activation == Activation::Automatic {
             // called from the stack's poll: do not wait for the devices
             self.stop(None);
+        }
+        if !self.is_active() {
+            self.release();
         }
     }
 
@@ -811,11 +834,16 @@ impl Engine {
     /// [`Config::probe_wait`], so a teardown that needs this thread (macOS
     /// VPIO can wait on the main thread) completes later instead of
     /// deadlocking. Releases already under way are waited for the same way.
+    /// With no call attached, expected or ringing in, the platform then lets
+    /// go of what it kept for the next open, as after a call.
     pub fn deactivate(&mut self) {
         if self.is_active() {
             self.stop(Some(self.config.probe_wait));
         } else {
             self.wait_closed();
+        }
+        if !self.calls_waiting() {
+            self.release();
         }
     }
 
@@ -1003,12 +1031,14 @@ impl Engine {
         self.closing.retain(|closed| !closed.is_set());
     }
 
-    /// While nothing is open, have the platform get its call devices ready
-    /// on the roles' current choices, on a thread of its own
+    /// While a call needs the devices and nothing is open, have the platform
+    /// get them ready on the roles' current choices, on a thread of its own
     /// ([`Backend::preparation`]): an open waits for that to finish as for a
-    /// release, and then has nothing slow left to do.
+    /// release, and then has nothing slow left to do. Not while no call
+    /// does: what is made ready lowers other applications' sound as a call
+    /// does.
     fn prepare(&mut self) {
-        if self.is_active() {
+        if self.is_active() || !self.calls_waiting() {
             return;
         }
         let microphone = self.identity_for(Role::Microphone);
@@ -1050,6 +1080,42 @@ impl Engine {
             });
         if spawned.is_ok() {
             self.closing.push(prepared);
+        }
+    }
+
+    /// Have the platform let go of what it kept for the next open
+    /// ([`Backend::release`]), on a thread of its own, after whatever is
+    /// being let go of or made ready: the voice unit a call's streams leave
+    /// behind goes on lowering other applications' sound until then. An
+    /// open or a preparation asked for meanwhile waits for it.
+    fn release(&mut self) {
+        self.closing.retain(|closed| !closed.is_set());
+        let before = self.closing.clone();
+        let wait = self.config.probe_wait;
+        let backend = Arc::clone(&self.backend);
+        let released = Arc::new(Done::default());
+        let done = Arc::clone(&released);
+        let spawned = std::thread::Builder::new()
+            .name("sipral-audio-release".to_owned())
+            .spawn(move || {
+                let deadline = Instant::now() + wait;
+                for closed in &before {
+                    closed.wait(deadline.saturating_duration_since(Instant::now()));
+                }
+                // taken here rather than tried on the stack's thread: a
+                // release skipped because a probe held the platform would
+                // leave the sound lowered until the next call
+                let job = backend
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .release();
+                if let Some(job) = job {
+                    job();
+                }
+                done.set();
+            });
+        if spawned.is_ok() {
+            self.closing.push(released);
         }
     }
 
@@ -1718,6 +1784,8 @@ impl Drop for Engine {
     fn drop(&mut self) {
         // bounded waits, never for ever
         self.stop(Some(self.config.probe_wait));
+        // a closed stack leaves nothing lowering the sound of the rest
+        self.release();
     }
 }
 
