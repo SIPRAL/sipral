@@ -1285,9 +1285,10 @@ pub fn prepare(config: &StreamConfig) -> Result<bool, Error> {
     Ok(true)
 }
 
-/// Dispose of the voice unit a closed stream or a [`prepare`] left parked,
-/// so that nothing is lowered any more on its loudspeaker: for when no call
-/// needs the devices. The next open builds a unit again.
+/// Dispose of the voice unit a closed stream or, on macOS, a preparation
+/// (`prepare`) left parked, so that nothing is lowered any more on its
+/// loudspeaker: for when no call needs the devices. The next open builds a
+/// unit again.
 ///
 /// Returns whether there was one. `false`, having done nothing, while a
 /// voice stream is open or a preparation runs, which hold the unit.
