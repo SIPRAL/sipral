@@ -810,7 +810,8 @@ mod tests {
     /// that name was looked up with `resolver`.
     fn answered_by_a_name(resolver: super::Resolver) -> (Runtime, Recorder) {
         let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a far end");
-        far.set_read_timeout(Some(Duration::from_secs(2)))
+        // a host's network filter may hold a new flow's first datagram a while
+        far.set_read_timeout(Some(Duration::from_secs(10)))
             .expect("a read timeout");
         let far_address = far.local_addr().expect("its address");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
@@ -888,7 +889,8 @@ mod tests {
     #[test]
     fn a_registrar_given_by_name_is_located_and_registered_with() {
         let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a registrar");
-        far.set_read_timeout(Some(Duration::from_secs(2)))
+        // a host's network filter may hold a new flow's first datagram a while
+        far.set_read_timeout(Some(Duration::from_secs(10)))
             .expect("a read timeout");
         let port = far.local_addr().expect("its address").port();
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");

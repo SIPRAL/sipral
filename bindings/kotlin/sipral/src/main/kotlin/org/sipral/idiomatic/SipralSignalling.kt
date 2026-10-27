@@ -35,6 +35,7 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509ExtendedTrustManager
 import org.sipral.Sipral
+import org.sipral.SipralDomainRules
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
@@ -314,11 +315,14 @@ private class NameMismatch(cause: CertificateException) : CertificateException(c
  * and each one's error is kept for the reason. The name is checked here
  * after the chain is trusted, so a wrong name reads as a mismatch rather
  * than untrusted; and dates are checked on every certificate, including an
- * authority pinned as sole anchor, which PKIX alone does not.
+ * authority pinned as sole anchor, which PKIX alone does not. The name is
+ * read by [rules]: the HTTPS rules with a `sip:` URI naming the domain
+ * accepted besides, or RFC 5922 alone (`sipral_certificate_check_domain`).
  */
 private class Checking(
     private val trust: List<X509ExtendedTrustManager>,
     private val serverName: String,
+    private val rules: SipralDomainRules,
 ) : X509ExtendedTrustManager() {
     override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket?) {
         val refused = ArrayList<CertificateException>()
@@ -335,10 +339,21 @@ private class Checking(
         for (certificate in chain) {
             certificate.checkValidity()
         }
-        try {
+        val https = try {
             checkName(chain[0], serverName)
+            null
         } catch (wrong: CertificateException) {
-            throw NameMismatch(wrong)
+            wrong
+        }
+        if (https == null && rules == SipralDomainRules.PLATFORM) {
+            return
+        }
+        try {
+            Sipral.certificateCheckDomain(
+                chain[0].encoded, serverName, rules.value.toLong(), if (https == null) 1L else 0L,
+            )
+        } catch (refused: SipralException) {
+            throw NameMismatch(https ?: CertificateException(refused.message))
         }
     }
 
@@ -403,11 +418,12 @@ internal class SignallingLink(
     private val serverName: String,
     trust: SipralTlsTrust,
     private val clientCertificate: SipralClientCertificate? = null,
+    rules: SipralDomainRules = SipralDomainRules.PLATFORM,
 ) {
     private val checking: X509ExtendedTrustManager? = when {
         protocol != SipralTransport.TLS -> null
         trust is SipralTlsTrust.Pinned -> PinChecking(trust.digest)
-        else -> Checking(trust.trustManagers(), serverName)
+        else -> Checking(trust.trustManagers(), serverName, rules)
     }
 
     /** What the last attempt's handshake did about a client certificate. */

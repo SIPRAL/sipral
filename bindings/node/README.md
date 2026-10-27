@@ -88,7 +88,12 @@ const stack = await Stack.open({
 `TlsTrust.platform()` (the default), `privateAuthority(pem)`,
 `onlyAuthority(pem)` and `pinned(fingerprint)` -- in any form `openssl x509
 -fingerprint -sha256` prints -- are what a connection trusts; nothing turns
-the check off. A connection refused or lost is a `TransportFailed` naming why
+the check off. Once the chain holds, `tlsDomainRules` reads the name:
+`SipralDomainRules.Platform` (the default) is Node's HTTPS check with a
+`sip:` URI in `subjectAltName` naming the domain accepted besides (RFC 5922
+§7.1), and `Rfc5922` reads RFC 5922 alone and refuses a wildcard
+(`docs/22-tls.md`). An account's own connection is held to `tlsServerName`,
+else to the domain of its `serverUri` (§7.3), else to the address. A connection refused or lost is a `TransportFailed` naming why
 (`fields.tls`: untrusted, another name, expired, a handshake refused), and is
 made again, one second later and twice as long after each failure, up to
 thirty; the accounts register again on it. On a UDP stack an account may have

@@ -3685,6 +3685,57 @@ enum class SipralNetworkTrust(val value: Int) {
 }
 
 /**
+ * Which rules a SIP server's certificate is read by for its name, once the platform has
+ * verified its chain (RFC 5922 §7.1, §7.2; `docs/22-tls.md`).
+ */
+enum class SipralDomainRules(val value: Int) {
+    /**
+     * The platform's, the rules HTTPS uses, with a `sip:` URI in `subjectAltName` that
+     * names the domain accepted besides. What other SIP clients accept, a wildcard
+     * included, is accepted.
+     */
+    PLATFORM(0),
+    /**
+     * RFC 5922 alone: a `sip:` URI that names the domain, or, where the certificate has
+     * none, a `dNSName` that is the domain itself; never a wildcard.
+     */
+    RFC5922(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDomainRules? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * How a certificate names a SIP domain, as RFC 5922 §7.1 and §7.2 read it.
+ */
+enum class SipralDomainIdentity(val value: Int) {
+    /**
+     * Nothing RFC 5922 reads names it: the certificate's `sip:` URIs name other domains,
+     * or neither they nor its `dNSName`s cover it.
+     */
+    UNNAMED(0),
+    /**
+     * A `sip:` URI with no user part in `subjectAltName` names it.
+     */
+    SIP_URI(1),
+    /**
+     * There is no such URI, and a `dNSName` is the domain itself.
+     */
+    DNS_NAME(2),
+    /**
+     * There is no such URI, and only a wildcard `dNSName` covers it.
+     */
+    WILDCARD(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDomainIdentity? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * The version of the ABI this library provides.
  *
  * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -6540,6 +6591,16 @@ class SipralNetworkConfig(
      * Zero.
      */
     val reservedEnd: Long = 0,
+    /**
+     * A SipralDomainRules (ABI 1.8): how a server's certificate is read for its name
+     * once its chain is trusted. Zero is the platform's rules with a `sip:` URI that names
+     * the domain accepted besides.
+     */
+    val domainRules: Long = 0,
+    /**
+     * Zero.
+     */
+    val reservedRules: Long = 0,
 )
 
 /**
@@ -8904,7 +8965,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 7)
+        agree(1, 8)
     }
 
     /**
@@ -9110,6 +9171,7 @@ internal object SipralNative {
     external fun sipral_local_conference_record_stop(conference: Long): Int
     external fun sipral_account_looked_up(stack: Long, account: Long, name: ByteArray, record: Long, answer: Long, records: ByteArray, nowMs: Long): Int
     external fun sipral_account_check_certificate(stack: Long, account: Long, certificate: ByteArray, unixSeconds: Long, pinned: LongArray): Int
+    external fun sipral_certificate_check_domain(certificate: ByteArray, domain: ByteArray, rules: Long, platformMatched: Long, identity: LongArray): Int
     external fun sipral_advertised_address(bound: ByteArray, peer: ByteArray, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_stack_diagnostic_trace(stack: Long, on: Long): Int
     external fun sipral_stack_srtp_suite_order(stack: Long, outSuites: IntArray, count: LongArray): Int
@@ -9121,10 +9183,10 @@ internal object SipralNative {
     external fun sipral_message_isup(message: ByteArray, offset: LongArray, len: LongArray): Int
     external fun sipral_isup_read(body: ByteArray, isup: LongArray): Int
     external fun sipral_isup_number(body: ByteArray, which: Long, buffer: ByteArray, needed: LongArray): Int
-    external fun sipral_network_start(stack: Long, configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, nowMs: Long): Int
+    external fun sipral_network_start(stack: Long, configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, configDomainRules: Long, configReservedRules: Long, nowMs: Long): Int
     external fun sipral_network_run(stack: Long, nowMs: Long, waitMs: Long): Int
     external fun sipral_network_stop(stack: Long): Int
-    external fun sipral_network_locate(configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, serverUri: ByteArray, protocol: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_network_locate(configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, configDomainRules: Long, configReservedRules: Long, serverUri: ByteArray, protocol: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_network_media_open(stack: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_network_media_attach(stack: Long, address: ByteArray, call: Long, media: Long): Int
     external fun sipral_network_media_capture(stack: Long, media: Long, nowMs: Long, samples: ShortArray): Int
@@ -9149,7 +9211,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 7
+    const val ABI_VERSION_MINOR: Long = 8
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9612,7 +9674,7 @@ object Sipral {
         "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
         "sipral_network_test_config_t" to intArrayOf(48, 36, 40),
         "sipral_isup_t" to intArrayOf(72, 68, 68),
-        "sipral_network_config_t" to intArrayOf(120, 68, 68),
+        "sipral_network_config_t" to intArrayOf(128, 76, 76),
     )
 
     /**
@@ -13278,6 +13340,33 @@ object Sipral {
     }
 
     /**
+     * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
+     * (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
+     *
+     * `domain` is the name the connection is checked against: the host of the account's
+     * `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
+     * `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
+     * when it accepted the name, zero when it refused the name alone, everything else having
+     * held. A refusal for any other reason stands and never reaches this call.
+     *
+     * `SIPRAL_STATUS_OK`: accept. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse, as a name
+     * mismatch. Either way `out_identity`, when not null, is how the certificate names the
+     * domain, for the reason given. `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+     * certificate or for `rules` out of range.
+     *
+     * Safety
+     *
+     * `certificate` must be readable for `certificate_len` bytes, `domain` for `domain_len`
+     * bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
+     */
+    fun certificateCheckDomain(certificate: ByteArray, domain: String, rules: Long, platformMatched: Long): Long {
+        val domainBytes = domain.toByteArray(Charsets.UTF_8)
+        val identitySlot = LongArray(1)
+        check(SipralNative.sipral_certificate_check_domain(certificate, domainBytes, rules, platformMatched, identitySlot))
+        return identitySlot[0]
+    }
+
+    /**
      * The `host:port` to advertise for a socket bound at `bound` whose
      * traffic goes to `peer` (both `host:port` addresses, not names),
      * NUL-terminated into `buffer`.
@@ -13504,7 +13593,7 @@ object Sipral {
         val configClientKeyPem = config.clientKeyPem?.toByteArray(Charsets.UTF_8)
         val configNameServers = config.nameServers?.toByteArray(Charsets.UTF_8)
         val configTlsServerName = config.tlsServerName?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_network_start(stack, config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, nowMs))
+        check(SipralNative.sipral_network_start(stack, config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, config.domainRules, config.reservedRules, nowMs))
     }
 
     /**
@@ -13567,7 +13656,7 @@ object Sipral {
         val configTlsServerName = config.tlsServerName?.toByteArray(Charsets.UTF_8)
         val serverUriBytes = serverUri.toByteArray(Charsets.UTF_8)
         val neededSlot = LongArray(1)
-        check(SipralNative.sipral_network_locate(config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, serverUriBytes, protocol, buffer, neededSlot))
+        check(SipralNative.sipral_network_locate(config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, config.domainRules, config.reservedRules, serverUriBytes, protocol, buffer, neededSlot))
         return neededSlot[0]
     }
 

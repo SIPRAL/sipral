@@ -16,6 +16,7 @@ import { after, describe, test } from 'node:test';
 import {
   type Call,
   SipralCallEndReason,
+  SipralDomainRules,
   SipralError,
   SipralEventKind,
   SipralRegistrationState,
@@ -26,8 +27,9 @@ import {
   Stack,
   type StackOptions,
   TlsTrust,
+  sipDomainOf,
 } from '../index.js';
-import { Peer, SERVER_NAME, StreamServer, answer, certificates, header, kind, until } from './helpers.js';
+import { Peer, SERVER_NAME, StreamServer, answer, certificateNaming, certificates, header, kind, until } from './helpers.js';
 
 const made = certificates();
 const opened: Stack[] = [];
@@ -171,6 +173,46 @@ describe('a stack signalling over TLS', { skip: made === null ? 'no openssl comm
       assert.equal(event.fields.tls, expected, String(event.fields.detail));
       assert.ok(typeof event.fields.detail === 'string' && event.fields.detail.length > 0);
     }
+  });
+
+  test('takes a sip: URI naming the domain, and refuses a wildcard under RFC 5922 alone', async () => {
+    // RFC 5922 §7.1's own form, which Node's check never reads
+    const byUri = certificateNaming(`URI:sip:${SERVER_NAME}`);
+    const wildcard = certificateNaming('DNS:*.sipral.test');
+    assert.ok(byUri !== null && wildcard !== null);
+    const uriServer = await server(byUri);
+    for (const rules of [SipralDomainRules.Platform, SipralDomainRules.Rfc5922]) {
+      const alice = await stack({
+        signalling: SipralTransport.Tls,
+        signallingServer: uriServer.address,
+        tlsServerName: SERVER_NAME,
+        tlsTrust: TlsTrust.onlyAuthority(byUri.cert),
+        tlsDomainRules: rules,
+      });
+      assert.ok(alice.connected, `rules ${rules} refused a sip: URI naming the domain`);
+    }
+    const wildcardServer = await server(wildcard);
+    const accepted = await stack({
+      signalling: SipralTransport.Tls,
+      signallingServer: wildcardServer.address,
+      tlsServerName: SERVER_NAME,
+      tlsTrust: TlsTrust.onlyAuthority(wildcard.cert),
+    });
+    assert.ok(accepted.connected);
+    const strict = await Stack.open({
+      signalling: SipralTransport.Tls,
+      signallingServer: wildcardServer.address,
+      tlsServerName: SERVER_NAME,
+      tlsTrust: TlsTrust.onlyAuthority(wildcard.cert),
+      tlsDomainRules: SipralDomainRules.Rfc5922,
+    });
+    opened.push(strict);
+    const event = await kind(strict, SipralEventKind.TransportFailed);
+    assert.equal(event.fields.tls, SipralTlsFailure.NameMismatch, String(event.fields.detail));
+    assert.match(String(event.fields.detail), /wildcard/);
+    assert.equal(sipDomainOf('sips:alice@pbx.example.com:5061;transport=tls'), 'pbx.example.com');
+    assert.equal(sipDomainOf('sips:198.51.100.7:5061'), null);
+    assert.equal(sipDomainOf('sip:[2001:db8::7]:5061'), null);
   });
 
   test('options that check nothing are refused', () => {

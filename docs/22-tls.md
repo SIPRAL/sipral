@@ -41,9 +41,9 @@ Two things follow from the table that are easy to miss:
   a stack keeps one connection to the server it was given, carries every
   account and call on it, reads the server's own requests off it, and
   connects again when it is lost (see "SIP over TLS in the four layers"
-  below). The name those layers check is the one HTTPS checks, as the
-  platform applies it; an application that wants RFC 5922's reading, below,
-  drives the stream itself through the C ABI, the way the C sample does.
+  below). The name those layers check is read as the next section says: the
+  HTTPS rules with a `sip:` URI accepted besides, or RFC 5922 alone when
+  asked.
 - **Nothing in any binding turns checking off.** None of them takes a
   "verify: false"; a certificate that fails is a relay that is not made.
   With roots handed over, those roots replace the platform's rather than
@@ -77,8 +77,9 @@ domain's certificate is read.
 
 - **Which identities count** (§7.1). A `sip:` URI in `subjectAltName` with
   no user part names a SIP domain. A `dNSName` counts only when there is no
-  such URI. The subject's CN counts only when there is no `subjectAltName`
-  at all.
+  such URI. The subject's CN may count when there is no `subjectAltName` at
+  all; Sipral never reads it, as no platform does any more, because a name
+  constraint on an intermediate does not reach it.
 - **How they compare** (§7.2). As whole DNS names, case-insensitively. No
   suffix matching, and **no wildcard**: `*.example.com` matches only the
   literal `*.example.com`.
@@ -89,11 +90,48 @@ domain's certificate is read.
 
 So a platform check alone accepts `*.lab.sipral.test` for
 `turn.lab.sipral.test` — Python's default context did exactly that when this
-document was checked — and never looks at a `sip:` URI. An application that
-wants RFC 5922 behaviour runs its own check after the handshake has
-verified the chain. The C sample below does; the same check in C# and in
+document was checked — and never looks at a `sip:` URI.
+
+**What Sipral does with it.** Once the platform has verified the chain,
+every connection to a SIP server has its name read by one rule, in the core
+(`sipral_core::domain_certificate`; `sipral_certificate_check_domain` in
+the C ABI, ABI 1.8), under one of two settings:
+
+| `domain_rules` | A `sip:` URI naming the domain | A `dNSName` that is the domain | A wildcard covering it | A `dNSName` beside a `sip:` URI for another domain |
+|---|---|---|---|---|
+| `SIPRAL_DOMAIN_RULES_PLATFORM` (0, the default) | accepted | accepted | accepted, as the platform accepts it | accepted, as the platform accepts it |
+| `SIPRAL_DOMAIN_RULES_RFC5922` (1) | accepted | accepted | refused | refused |
+
+The default accepts what every other SIP client accepts, wildcards included
+— a hosted PBX on a provider's subdomain often has one — and adds RFC 5922's
+own form, the `sip:` URI, which no platform reads. `RFC5922` is for the
+deployment that wants RFC 5922 and nothing else; a refusal under it is a
+name mismatch, `SIPRAL_TLS_FAILURE_NAME_MISMATCH`, its detail saying which
+reading refused it. The C entry point takes the leaf's DER, the domain, the
+rules and whether the platform's own check accepted the name, so an
+application's verifier needs nothing else: `SIPRAL_STATUS_OK` accepts,
+`SIPRAL_STATUS_CERTIFICATE_REFUSED` refuses. The C sample below runs its own
+check, written before the entry point existed; the same check in C# and in
 Kotlin is further down, and all three refused the wildcard certificate and
 took the `sip:` URI one when they were run.
+
+Each layer takes the setting where it takes its trust, and applies it to its
+own signalling connection and to every account's own connection:
+
+| Layer | Setting | Notes |
+|---|---|---|
+| C, networking component | `sipral_network_config_t::domain_rules` | rustls's verifier refuses the name only after the chain, the dates and revocation held, which is when a `sip:` URI is still read |
+| Swift | `SipralStack(tlsDomainRules:)` | `SecTrust` evaluated again without a name when it refused the name alone |
+| Kotlin | `SipralClient.open(tlsDomainRules = ...)` | the binding's own HTTPS name check, then the core's |
+| .NET | `new SipralStack(tlsDomainRules: ...)` | `SslPolicyErrors.RemoteCertificateNameMismatch` alone, after the chain held |
+| Python | `Stack(tls_domain_rules=...)` | contexts `TlsTrust` builds verify the chain in the handshake and leave the name to the binding; a context the application gave (`TlsTrust.from_context`) checks the name itself, and the rule can only refuse more after it |
+| Node.js | `Stack.open({ tlsDomainRules })` | in `checkServerIdentity`, after Node's own check |
+| React Native | none | the Swift and Kotlin layers beneath, with the default, as with the trust: the package takes a pin and nothing else |
+| Dart | none | `dart:io` refuses a name before the layer could tell it from a refused chain, so a `sip:` URI alone is refused there and the RFC 5922 reading is not offered |
+
+An account's own connection is held to `tls_server_name` when one was given,
+else to the domain of the account's `server_uri` (§7.3), else to the address
+connected to, in every layer.
 
 ## A PBX's own certificate, pinned
 

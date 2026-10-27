@@ -118,6 +118,29 @@ String routeHost(String? peer, {Sipral? library}) {
   }
 }
 
+/// The domain a `sip:` or `sips:` [uri] names (`sips:example.com:5061` and
+/// `sip:example.com;transport=tls` both give `example.com`), the name RFC
+/// 5922 §7.3 checks a server's certificate against; null for an IP address,
+/// which is then the destination itself, or for no such URI.
+String? sipDomainOf(String? uri) {
+  final colon = uri?.indexOf(':') ?? -1;
+  if (uri == null ||
+      colon < 0 ||
+      !const {'sip', 'sips'}.contains(uri.substring(0, colon).toLowerCase())) {
+    return null;
+  }
+  final rest = uri.substring(colon + 1).split(RegExp('[;?]')).first;
+  final hostPort = rest.substring(rest.lastIndexOf('@') + 1);
+  if (hostPort.startsWith('[')) {
+    return null;
+  }
+  var host = hostPort.split(':').first;
+  if (host.endsWith('.')) {
+    host = host.substring(0, host.length - 1);
+  }
+  return host.isEmpty || InternetAddress.tryParse(host) != null ? null : host;
+}
+
 /// What `sipral_account_check_certificate` found in the certificate an
 /// account pins: its dates, in seconds since 1970 (zero when its DER could
 /// not be read that far), and whether the clock is past or before them.

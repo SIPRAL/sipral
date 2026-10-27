@@ -284,6 +284,13 @@ fn settings_rest(
     if config.connect_timeout_ms != 0 {
         network.connect_timeout = Duration::from_millis(u64::from(config.connect_timeout_ms));
     }
+    network.domain_rules = crate::pin::domain_rules(config.domain_rules).ok_or_else(|| {
+        invalid(format!(
+            "domain_rules is {}, and the rules are 0 for the platform's with a sip: URI accepted \
+             besides, or 1 for RFC 5922 alone",
+            config.domain_rules
+        ))
+    })?;
     let server_name = unsafe {
         text(
             config.tls_server_name,

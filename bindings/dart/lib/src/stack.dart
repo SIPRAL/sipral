@@ -42,8 +42,12 @@ final class SipralStack {
   /// a secret. [diagnosticTrace] writes whole SIP messages at trace level,
   /// credentials removed. [resolver] answers `SipralEventKind.lookupWanted`
   /// ([SipralDns.platform] by default). [tlsServerName] is checked on an
-  /// account's own TLS connection when it has no `tlsPin`;
-  /// [clientCertificate] is what that connection presents when the server
+  /// account's own TLS connection when it has no `tlsPin`, else the domain of
+  /// its `serverUri` (RFC 5922 §7.3), else the address connected to, by the
+  /// HTTPS rules `dart:io` applies: it refuses a certificate that names the
+  /// domain only as a `sip:` URI before this layer could tell a name it
+  /// refused from a chain it refused, so RFC 5922's reading is not offered
+  /// here. [clientCertificate] is what that connection presents when the server
   /// asks for one and the account names none of its own. [heldAudio] is a
   /// `SipralHeldAudio` value: silence by default while holding, since the
   /// frames may be a microphone's; `application` sends what the application
@@ -834,9 +838,13 @@ final class SipralStack {
       plain.setOption(SocketOption.tcpNoDelay, true);
       if (tls) {
         final began = DateTime.now();
+        final name =
+            _tlsServerName ??
+            sipDomainOf(account?.serverUri) ??
+            address.$1.address;
         final secured = await SecureSocket.secure(
           plain,
-          host: _tlsServerName ?? address.$1.address,
+          host: name,
           // with a pin, no authority is trusted. The pin is checked below on
           // the leaf: this callback sees the failing chain certificate, so a
           // server sending the pinned one above its own leaf would pass here

@@ -147,11 +147,11 @@ final class SignallingTests: XCTestCase {
 
     private func stack(
         _ server: String, _ signalling: SipralTransport = .tls, name: String? = serverName,
-        trust: TLSTrust = .platform
+        trust: TLSTrust = .platform, rules: SipralDomainRules = .platform
     ) throws -> SipralStack {
         try SipralStack(
             audio: .application, signalling: signalling, signallingServer: server, tlsServerName: name,
-            tlsTrust: trust
+            tlsTrust: trust, tlsDomainRules: rules
         )
     }
 
@@ -280,6 +280,34 @@ final class SignallingTests: XCTestCase {
         defer { stack.close() }
         let failed = try await refusal(stack)
         XCTAssertEqual(failed.tls, .nameMismatch, failed.detail ?? "")
+    }
+
+    /// RFC 5922's own form: the domain named only by a `sip:` URI, which
+    /// the platform's check never reads.
+    func testACertificateNamingTheDomainOnlyAsASipUriIsTrusted() async throws {
+        let (identity, der) = try Self.certificate("uri", names: "URI:sip:\(Self.serverName)")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        for rules in [SipralDomainRules.platform, .rfc5922] {
+            let stack = try stack(registrar.address, trust: .onlyAuthority(der), rules: rules)
+            defer { stack.close() }
+            XCTAssertTrue(stack.connected, "\(rules)")
+        }
+    }
+
+    /// A wildcard is the platform's to accept, and RFC 5922 alone refuses it.
+    func testAWildcardIsTrustedUnlessRfc5922AloneIsAsked() async throws {
+        let (identity, der) = try Self.certificate("wildcard", names: "DNS:*.sipral.test")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        let accepted = try stack(registrar.address, trust: .onlyAuthority(der))
+        XCTAssertTrue(accepted.connected)
+        accepted.close()
+        let strict = try stack(registrar.address, trust: .onlyAuthority(der), rules: .rfc5922)
+        defer { strict.close() }
+        let failed = try await refusal(strict)
+        XCTAssertEqual(failed.tls, .nameMismatch, failed.detail ?? "")
+        XCTAssertTrue(failed.detail?.contains("wildcard") == true, failed.detail ?? "")
     }
 
     func testAnExpiredCertificateIsExpired() async throws {
@@ -438,9 +466,12 @@ final class SignallingTests: XCTestCase {
         XCTAssertEqual(InviteLimit.standard, InviteLimit(burst: 10, everyMs: 2000))
     }
 
-    /// A key and a certificate for `serverName`, made with the `openssl`
-    /// command and imported into memory alone -- never into a keychain.
-    static func certificate(_ name: String, _ dates: [String] = ["-days", "1"]) throws -> (SecIdentity, [UInt8]) {
+    /// A key and a certificate for `serverName`, or whatever `names` puts in
+    /// its `subjectAltName`, made with the `openssl` command and imported
+    /// into memory alone -- never into a keychain.
+    static func certificate(
+        _ name: String, _ dates: [String] = ["-days", "1"], names: String = "DNS:\(serverName)"
+    ) throws -> (SecIdentity, [UInt8]) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("sipral-\(name)-\(UInt32.random(in: 0...UInt32.max))")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -451,7 +482,7 @@ final class SignallingTests: XCTestCase {
         let p12 = directory.appendingPathComponent("\(name).p12").path
         try openssl([
             "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-            "-subj", "/CN=\(serverName)", "-addext", "subjectAltName=DNS:\(serverName)",
+            "-subj", "/CN=\(serverName)", "-addext", "subjectAltName=\(names)",
             "-addext", "extendedKeyUsage=serverAuth",
             "-keyout", key, "-out", pem,
         ] + dates)

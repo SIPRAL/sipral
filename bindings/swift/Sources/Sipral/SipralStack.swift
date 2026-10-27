@@ -74,6 +74,8 @@ public final class SipralStack: @unchecked Sendable {
     private let signallingServer: String?
     private let tlsServerName: String
     private let tlsTrust: TLSTrust
+    /// How every TLS server's name is read once its chain is trusted.
+    private let tlsDomainRules: SipralDomainRules
     /// Presented on every TLS connection the stack opens, unless an account
     /// names its own.
     private let tlsClientIdentity: ClientIdentity?
@@ -280,7 +282,11 @@ public final class SipralStack: @unchecked Sendable {
     /// needs Network.framework (`.notSupported` elsewhere) and checks the
     /// certificate against `tlsServerName` (default: the host of
     /// `signallingServer`) with `tlsTrust` (`docs/22-tls.md`). The check
-    /// cannot be turned off. `tlsClientIdentity` is the certificate presented
+    /// cannot be turned off. Once the chain is trusted the name is read by
+    /// `tlsDomainRules`: by default the platform's rules, with a `sip:` URI
+    /// naming the domain accepted besides (RFC 5922 §7.1); `.rfc5922` reads
+    /// RFC 5922 alone and refuses a wildcard. The same goes for an account's
+    /// own connection. `tlsClientIdentity` is the certificate presented
     /// when the server asks for one, its key signing inside the platform;
     /// one that cannot be used is a `transportFailed` with
     /// `.clientKeyUnavailable` or `.clientCertificateExpired` and no
@@ -373,6 +379,7 @@ public final class SipralStack: @unchecked Sendable {
         signallingServer: String? = nil,
         tlsServerName: String? = nil,
         tlsTrust: TLSTrust = .platform,
+        tlsDomainRules: SipralDomainRules = .platform,
         tlsClientIdentity: ClientIdentity? = nil,
         inviteLimit: InviteLimit? = nil,
         streamFallback: Bool = true,
@@ -401,6 +408,7 @@ public final class SipralStack: @unchecked Sendable {
         self.givenTlsServerName = tlsServerName
         self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost ?? ""
         self.tlsTrust = tlsTrust
+        self.tlsDomainRules = tlsDomainRules
         self.tlsClientIdentity = tlsClientIdentity
         self.linkHost = bindHost
         self.chosenPort = bindPort
@@ -416,8 +424,8 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 let made = try SignallingConnection(
                     server: signallingServer!, bindHost: bindHost, transport: signalling,
-                    serverName: self.tlsServerName, trust: tlsTrust, identity: tlsClientIdentity,
-                    patienceMs: Self.patienceMs
+                    serverName: self.tlsServerName, trust: tlsTrust, domainRules: tlsDomainRules,
+                    identity: tlsClientIdentity, patienceMs: Self.patienceMs
                 )
                 firstLink = made
                 bound = made.local
@@ -682,8 +690,8 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 made = try SignallingConnection(
                     server: server, bindHost: signallingQueue.sync { linkHost }, transport: signalling,
-                    serverName: tlsServerName, trust: tlsTrust, identity: tlsClientIdentity,
-                    patienceMs: Self.patienceMs
+                    serverName: tlsServerName, trust: tlsTrust, domainRules: tlsDomainRules,
+                    identity: tlsClientIdentity, patienceMs: Self.patienceMs
                 )
             } catch let refusal as SignallingRefusal {
                 report(refusal)
@@ -916,7 +924,7 @@ public final class SipralStack: @unchecked Sendable {
             made = try SignallingConnection(
                 server: server, bindHost: signallingQueue.sync { linkHost }, transport: over,
                 serverName: over == .tls ? streamServerName(to: destination) : UDPSocket.parse(server).host,
-                trust: over == .tls ? streamTrust(to: destination) : .platform,
+                trust: over == .tls ? streamTrust(to: destination) : .platform, domainRules: tlsDomainRules,
                 identity: over == .tls ? streamIdentity(to: destination) : nil, patienceMs: Self.patienceMs
             )
         } catch {
@@ -2090,8 +2098,8 @@ public final class SipralStack: @unchecked Sendable {
                 do {
                     let made = try SignallingConnection(
                         server: signallingServer!, bindHost: host, transport: signalling,
-                        serverName: tlsServerName, trust: tlsTrust, identity: tlsClientIdentity,
-                        patienceMs: Self.patienceMs
+                        serverName: tlsServerName, trust: tlsTrust, domainRules: tlsDomainRules,
+                        identity: tlsClientIdentity, patienceMs: Self.patienceMs
                     )
                     try install(made)
                     rebound = made.local

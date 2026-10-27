@@ -4281,3 +4281,30 @@ an announcement reading as RFC 3323's `sip:anonymous@anonymous.invalid`
 `SipralAccount.announce(null)` and Node.js's `account.announce(null)` reach
 it, and the Swift and Kotlin push bridges use it for a push whose fields name
 no caller.
+
+## What ABI 1.8 added
+
+### A SIP server's certificate read as RFC 5922 reads it
+
+One entry point, two enumerations, and two members appended to
+`sipral_network_config_t`, whose pinned length stays where 1.6 ended it, so
+`bindings/c/abi-sizes.txt` gains only its new length. A binding printed at
+1.7 loads against a 1.8 library and works as it did; one printed at 1.8 is
+refused by a 1.7 library, with both versions named.
+
+`sipral_certificate_check_domain(certificate,
+certificate_len, domain, domain_len, rules, platform_matched, out_identity)`
+reads a TLS server's leaf certificate, once the application's TLS library
+has verified its chain, for the SIP domain `domain` under `rules`, a
+`sipral_domain_rules_t`: `SIPRAL_DOMAIN_RULES_PLATFORM` (0) keeps the
+platform's verdict on the name (`platform_matched`) and accepts a `sip:` URI
+in `subjectAltName` that names the domain besides; `SIPRAL_DOMAIN_RULES_RFC5922`
+(1) reads RFC 5922 §7.1 and §7.2 alone, and refuses a wildcard. It answers
+`SIPRAL_STATUS_OK` to accept and `SIPRAL_STATUS_CERTIFICATE_REFUSED` to
+refuse, writing in both cases how the certificate names the domain, a
+`sipral_domain_identity_t` (unnamed, by a `sip:` URI, by a `dNSName`, by a
+wildcard alone). `sipral_network_config_t::domain_rules` takes the same
+value for the networking component, followed by `reserved_rules`, zero; a
+caller compiled against 1.7 sends neither, and reads as the default.
+`22-tls.md`, "What the platform checks, and what RFC 5922 adds", has the
+reasoning and every layer's setting.

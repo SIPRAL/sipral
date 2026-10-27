@@ -27,6 +27,7 @@ export 'src/idiomatic.dart'
         SipralStackEvent,
         advertisedAddress,
         routeHost,
+        sipDomainOf,
         sipralPinDigest;
 export 'src/sipral_abi.dart'
     show

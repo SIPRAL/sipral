@@ -281,37 +281,23 @@ export class StreamServer {
 /** The name every certificate made here is for. */
 export const SERVER_NAME = 'pbx.sipral.test';
 
+/** A self-signed certificate valid for a day whose `subjectAltName` is `names` (`URI:sip:...`, `DNS:*.example`), or null without `openssl`. */
+export function certificateNaming(names: string): { cert: Buffer; key: Buffer } | null {
+  const directory = mkdtempSync(join(tmpdir(), 'sipral-tls-'));
+  try {
+    return selfSigned(directory, 'named', ['-days', '1'], names);
+  } catch {
+    return null;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** Self-signed certificates for {@link SERVER_NAME}, made with the `openssl` command, or null without one. */
 export function certificates(): { good: { cert: Buffer; key: Buffer }; expired: { cert: Buffer; key: Buffer } } | null {
   const directory = mkdtempSync(join(tmpdir(), 'sipral-tls-'));
   try {
-    const make = (name: string, extra: string[]): { cert: Buffer; key: Buffer } => {
-      execFileSync(
-        'openssl',
-        [
-          'req',
-          '-x509',
-          '-newkey',
-          'ec',
-          '-pkeyopt',
-          'ec_paramgen_curve:prime256v1',
-          '-nodes',
-          '-subj',
-          `/CN=${SERVER_NAME}`,
-          '-addext',
-          `subjectAltName=DNS:${SERVER_NAME}`,
-          '-addext',
-          'extendedKeyUsage=serverAuth',
-          '-keyout',
-          join(directory, `${name}.key`),
-          '-out',
-          join(directory, `${name}.pem`),
-          ...extra,
-        ],
-        { stdio: 'ignore' },
-      );
-      return { cert: readFileSync(join(directory, `${name}.pem`)), key: readFileSync(join(directory, `${name}.key`)) };
-    };
+    const make = (name: string, extra: string[]): { cert: Buffer; key: Buffer } => selfSigned(directory, name, extra);
     return {
       good: make('good', ['-days', '1']),
       expired: make('expired', ['-not_before', '20200101000000Z', '-not_after', '20200102000000Z']),
@@ -321,6 +307,35 @@ export function certificates(): { good: { cert: Buffer; key: Buffer }; expired: 
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+/** One self-signed certificate for {@link SERVER_NAME} made in `directory`, `names` its `subjectAltName`. */
+function selfSigned(directory: string, name: string, extra: string[], names = `DNS:${SERVER_NAME}`): { cert: Buffer; key: Buffer } {
+  execFileSync(
+    'openssl',
+    [
+      'req',
+      '-x509',
+      '-newkey',
+      'ec',
+      '-pkeyopt',
+      'ec_paramgen_curve:prime256v1',
+      '-nodes',
+      '-subj',
+      `/CN=${SERVER_NAME}`,
+      '-addext',
+      `subjectAltName=${names}`,
+      '-addext',
+      'extendedKeyUsage=serverAuth',
+      '-keyout',
+      join(directory, `${name}.key`),
+      '-out',
+      join(directory, `${name}.pem`),
+      ...extra,
+    ],
+    { stdio: 'ignore' },
+  );
+  return { cert: readFileSync(join(directory, `${name}.pem`)), key: readFileSync(join(directory, `${name}.key`)) };
 }
 
 /** A client certificate and the authority that signed it, as PEM, with the key's password where it has one. */

@@ -8,6 +8,7 @@
 //! its DER. Nothing here turns checking off.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,6 +22,7 @@ use rustls::sign::CertifiedKey;
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
+use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity};
 use sipral_core::endpoint::TransportErrorKind;
 use sipral_core::pin::CertificatePin;
 
@@ -202,12 +204,14 @@ impl PlatformRoots {
     }
 }
 
-/// The configuration for one connection: `pin` (an account's) wins over `trust`.
+/// The configuration for one connection: `pin` (an account's) wins over `trust`, and a chain
+/// that `trust` vouches for has its name read by `rules`.
 pub(crate) fn prepare(
     trust: &Trust,
     pin: Option<&CertificatePin>,
     client: Option<&ClientCertificate>,
     platform: &PlatformRoots,
+    rules: DomainRules,
 ) -> Result<Prepared, Failure> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let refused = |why: &str| {
@@ -242,9 +246,11 @@ pub(crate) fn prepare(
                      can read; trust a private authority or pin the server's certificate",
                 ));
             }
-            WebPkiServerVerifier::builder_with_provider(Arc::new(store), Arc::clone(&provider))
-                .build()
-                .map_err(|error| refused(&error.to_string()))?
+            let chain =
+                WebPkiServerVerifier::builder_with_provider(Arc::new(store), Arc::clone(&provider))
+                    .build()
+                    .map_err(|error| refused(&error.to_string()))?;
+            Arc::new(SipDomainServer { chain, rules })
         }
     };
     let key = match client {
@@ -288,6 +294,83 @@ impl ResolvesClientCert for Presenter {
 
     fn has_certs(&self) -> bool {
         self.key.is_some()
+    }
+}
+
+/// The platform's verifier, with the server's name read as RFC 5922 reads a SIP server's
+/// ([`DomainRules`]).
+///
+/// rustls checks the chain, the dates and revocation before the name, so a refusal for the name
+/// alone means everything else held: that is when a `sip:` URI naming the domain is still
+/// accepted. Under [`DomainRules::Rfc5922`] a name the HTTPS rules matched is refused unless RFC
+/// 5922 reads it too, a wildcard above all.
+#[derive(Debug)]
+struct SipDomainServer {
+    chain: Arc<WebPkiServerVerifier>,
+    rules: DomainRules,
+}
+
+impl ServerCertVerifier for SipDomainServer {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let platform = self.chain.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        );
+        let matched = match platform {
+            Ok(_) => true,
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
+            )) => false,
+            Err(_) => return platform,
+        };
+        let domain = match *server_name {
+            ServerName::DnsName(ref name) => name.as_ref().to_owned(),
+            ServerName::IpAddress(address) => IpAddr::from(address).to_string(),
+            _ => return platform,
+        };
+        let identity =
+            domain_identity(end_entity.as_ref(), &domain).unwrap_or(DomainIdentity::Unnamed);
+        if identity.accepted(self.rules, matched) {
+            Ok(ServerCertVerified::assertion())
+        } else if matched {
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::NotValidForName,
+            ))
+        } else {
+            platform
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.chain.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.chain.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.chain.supported_verify_schemes()
     }
 }
 
@@ -358,12 +441,19 @@ impl ServerCertVerifier for PinnedServer {
 mod tests {
     use super::{ClientCertificate, PlatformRoots, Prepared, Trust, TrustError, prepare};
     use crate::{Failure, TlsFailure};
+    use sipral_core::domain_certificate::DomainRules;
     use sipral_core::pin::CertificatePin;
 
     /// Prepared with a pin, so that no test reads the platform's store.
     fn presenting(client: &ClientCertificate) -> Result<Prepared, Failure> {
         let pinned = Trust::Pinned(CertificatePin::from_sha256([7; 32]));
-        prepare(&pinned, None, Some(client), &PlatformRoots::default())
+        prepare(
+            &pinned,
+            None,
+            Some(client),
+            &PlatformRoots::default(),
+            DomainRules::Platform,
+        )
     }
 
     #[test]

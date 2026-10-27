@@ -142,6 +142,22 @@ void main() {
     expect(routeHost('pbx.example.com:5060'), '127.0.0.1');
   });
 
+  test(
+    'the SIP domain a server URI names is the one its certificate is held to',
+    () {
+      // RFC 5922 §7.3: the domain configured, not the address SRV led to
+      expect(
+        sipDomainOf('sips:alice@pbx.example.com:5061;transport=tls'),
+        'pbx.example.com',
+      );
+      expect(sipDomainOf('sip:example.com.'), 'example.com');
+      expect(sipDomainOf('sips:198.51.100.7:5061'), isNull);
+      expect(sipDomainOf('sip:[2001:db8::7]:5061'), isNull);
+      expect(sipDomainOf('tel:+40721000000'), isNull);
+      expect(sipDomainOf(null), isNull);
+    },
+  );
+
   test('an account on loopback registers from loopback', () async {
     final server = await registrar();
     final client = await stack();

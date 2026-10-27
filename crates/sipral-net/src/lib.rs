@@ -60,9 +60,10 @@
 //! A TLS connection is checked by rustls's `webpki` against the authorities of the platform's
 //! trust store (read with `rustls-native-certs`), beside or instead of the application's own,
 //! against the server name the caller gives, by the rules HTTPS uses: that is what every binding
-//! checks too (`docs/22-tls.md`). RFC 5922's stricter reading of a SIP certificate — `sip:` URIs
-//! in `subjectAltName` first, no wildcard — is not applied here yet. A pin replaces the chain, the
-//! name and the dates, and the handshake signature is still verified. On iOS and Android the
+//! checks too (`docs/22-tls.md`), and a `sip:` URI in `subjectAltName` naming the domain is
+//! accepted besides, as RFC 5922 §7.1 reads one. With [`DomainRules::Rfc5922`] the name is read by
+//! RFC 5922 alone: while a `sip:` URI is there no `dNSName` counts, and no wildcard ever does. A
+//! pin replaces the chain, the name and the dates, and the handshake signature is still verified. On iOS and Android the
 //! platform's store cannot be read this way, so a connection there trusts a private authority or
 //! a pin, or the Swift and Kotlin layers' own TLS.
 
@@ -86,4 +87,5 @@ mod trust;
 pub use failure::{Failure, TlsFailure};
 pub use network::{Happening, MediaSender, Network, NetworkConfig, StreamTarget};
 pub use resolver::Resolver;
+pub use sipral_core::domain_certificate::DomainRules;
 pub use trust::{ClientCertificate, ClientCertificateError, Trust, TrustError};

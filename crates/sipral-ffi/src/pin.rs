@@ -2,20 +2,75 @@
 // Copyright (c) 2026 Sytek
 
 //! A TLS server certificate an account trusts by its SHA-256 fingerprint
-//! (ABI 0.34).
+//! (ABI 0.34), and the SIP domain a certificate names (ABI 1.8).
 //!
 //! The application runs TLS (`docs/22-tls.md`); its verifier calls
 //! [`sipral_account_check_certificate`] with the leaf's DER. With a pin the
 //! fingerprint is the whole verdict: no chain, anchor or host name, and an
-//! expired match is accepted but flagged.
+//! expired match is accepted but flagged. Without one, once the platform has
+//! verified the chain, [`sipral_certificate_check_domain`] reads the leaf's
+//! name as RFC 5922 reads a SIP server's.
 
-use crate::abi::record;
+use std::ffi::c_char;
+
+use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity};
+
+use crate::abi::{Number, codes, record};
 use crate::error::{entry, fail};
 use crate::handle::SipralHandle;
 use crate::stack::{handle_failed, with_stack};
 use crate::status::SipralStatus;
-use crate::text::bytes;
+use crate::text::{bytes, required_text};
 use crate::versioned::{Versioned, read_versioned, write_versioned};
+
+codes! {
+    /// Which rules a SIP server's certificate is read by for its name, once the platform has
+    /// verified its chain (RFC 5922 §7.1, §7.2; `docs/22-tls.md`).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralDomainRules: u32 {
+        /// The platform's, the rules HTTPS uses, with a `sip:` URI in `subjectAltName` that
+        /// names the domain accepted besides. What other SIP clients accept, a wildcard
+        /// included, is accepted.
+        Platform = 0,
+        /// RFC 5922 alone: a `sip:` URI that names the domain, or, where the certificate has
+        /// none, a `dNSName` that is the domain itself; never a wildcard.
+        Rfc5922 = 1,
+    }
+}
+
+codes! {
+    /// How a certificate names a SIP domain, as RFC 5922 §7.1 and §7.2 read it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralDomainIdentity: u32 {
+        /// Nothing RFC 5922 reads names it: the certificate's `sip:` URIs name other domains,
+        /// or neither they nor its `dNSName`s cover it.
+        Unnamed = 0,
+        /// A `sip:` URI with no user part in `subjectAltName` names it.
+        SipUri = 1,
+        /// There is no such URI, and a `dNSName` is the domain itself.
+        DnsName = 2,
+        /// There is no such URI, and only a wildcard `dNSName` covers it.
+        Wildcard = 3,
+    }
+}
+
+/// A [`SipralDomainRules`] as a caller wrote it.
+pub(crate) fn domain_rules(value: u32) -> Option<DomainRules> {
+    match value {
+        0 => Some(DomainRules::Platform),
+        1 => Some(DomainRules::Rfc5922),
+        _ => None,
+    }
+}
+
+const fn identity_code(identity: DomainIdentity) -> SipralDomainIdentity {
+    match identity {
+        DomainIdentity::SipUri => SipralDomainIdentity::SipUri,
+        DomainIdentity::DnsName => SipralDomainIdentity::DnsName,
+        DomainIdentity::Wildcard => SipralDomainIdentity::Wildcard,
+        _ => SipralDomainIdentity::Unnamed,
+    }
+}
 
 record! {
     /// What [`sipral_account_check_certificate`] found: whether the account's
@@ -112,9 +167,76 @@ entry! {
     }
 }
 
+entry! {
+    /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
+    /// (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
+    ///
+    /// `domain` is the name the connection is checked against: the host of the account's
+    /// `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
+    /// `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
+    /// when it accepted the name, zero when it refused the name alone, everything else having
+    /// held. A refusal for any other reason stands and never reaches this call.
+    ///
+    /// `SIPRAL_STATUS_OK`: accept. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse, as a name
+    /// mismatch. Either way `out_identity`, when not null, is how the certificate names the
+    /// domain, for the reason given. `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+    /// certificate or for `rules` out of range.
+    ///
+    /// # Safety
+    ///
+    /// `certificate` must be readable for `certificate_len` bytes, `domain` for `domain_len`
+    /// bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
+    fn sipral_certificate_check_domain(
+        certificate: *const u8,
+        certificate_len: usize,
+        domain: *const c_char,
+        domain_len: usize,
+        rules: Number<SipralDomainRules>,
+        platform_matched: u32,
+        out_identity: *mut Number<SipralDomainIdentity>,
+    ) {
+        let Some(leaf) = (unsafe { bytes(certificate, certificate_len, "certificate") })? else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "certificate is required and was not given",
+            ));
+        };
+        let domain = unsafe { required_text(domain, domain_len, "domain") }?;
+        let Some(rules) = domain_rules(rules) else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "rules is {rules}, and the rules are 0 for the platform's with a sip: URI \
+                     accepted besides, or 1 for RFC 5922 alone"
+                ),
+            ));
+        };
+        let identity = domain_identity(leaf, domain).map_err(|error| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("certificate: {error}"),
+            )
+        })?;
+        if !out_identity.is_null() {
+            unsafe { out_identity.write(identity_code(identity) as u32) };
+        }
+        if identity.accepted(rules, platform_matched != 0) {
+            Ok(())
+        } else {
+            Err(fail(
+                SipralStatus::CertificateRefused,
+                format!("the server's certificate does not name {domain:?}: {identity}"),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SipralPinnedCertificate, sipral_account_check_certificate};
+    use super::{
+        SipralDomainIdentity, SipralDomainRules, SipralPinnedCertificate,
+        sipral_account_check_certificate, sipral_certificate_check_domain,
+    };
     use crate::account::sipral_account_add;
     use crate::account::tests::account_config;
     use crate::call::tests::account_on;
@@ -279,5 +401,121 @@ mod tests {
             )
         };
         assert_eq!(status, SipralStatus::InvalidArgument);
+    }
+
+    /// A self-signed certificate whose `subjectAltName` is `names`: the chain is the
+    /// platform's to judge, and only the name is read here.
+    fn naming(names: Vec<rcgen::SanType>) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.subject_alt_names = names;
+        params.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    fn domain(
+        certificate: &[u8],
+        name: &str,
+        rules: SipralDomainRules,
+        matched: bool,
+    ) -> (SipralStatus, u32) {
+        let mut identity = u32::MAX;
+        let status = unsafe {
+            sipral_certificate_check_domain(
+                certificate.as_ptr(),
+                certificate.len(),
+                name.as_ptr().cast(),
+                name.len(),
+                rules as u32,
+                u32::from(matched),
+                &raw mut identity,
+            )
+        };
+        (status, identity)
+    }
+
+    #[test]
+    fn a_sip_uri_is_accepted_and_a_wildcard_refused_by_rfc_5922_alone() {
+        let uri = |text: &str| rcgen::SanType::URI(text.try_into().unwrap());
+        let dns = |text: &str| rcgen::SanType::DnsName(text.try_into().unwrap());
+
+        let by_uri = naming(vec![uri("sip:example.com")]);
+        assert_eq!(
+            domain(&by_uri, "example.com", SipralDomainRules::Platform, false),
+            (SipralStatus::Ok, SipralDomainIdentity::SipUri as u32),
+            "the platform refused a name it never reads"
+        );
+
+        let wildcard = naming(vec![dns("*.example.com")]);
+        assert_eq!(
+            domain(
+                &wildcard,
+                "pbx.example.com",
+                SipralDomainRules::Platform,
+                true
+            ),
+            (SipralStatus::Ok, SipralDomainIdentity::Wildcard as u32)
+        );
+        assert_eq!(
+            domain(
+                &wildcard,
+                "pbx.example.com",
+                SipralDomainRules::Rfc5922,
+                true
+            ),
+            (
+                SipralStatus::CertificateRefused,
+                SipralDomainIdentity::Wildcard as u32
+            )
+        );
+        assert!(
+            last_error_text().contains("wildcard"),
+            "{}",
+            last_error_text()
+        );
+
+        let exact = naming(vec![dns("example.com")]);
+        assert_eq!(
+            domain(&exact, "example.com", SipralDomainRules::Rfc5922, true),
+            (SipralStatus::Ok, SipralDomainIdentity::DnsName as u32)
+        );
+        assert_eq!(
+            domain(&exact, "other.example", SipralDomainRules::Platform, false),
+            (
+                SipralStatus::CertificateRefused,
+                SipralDomainIdentity::Unnamed as u32
+            ),
+            "the platform's refusal stands"
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_certificate_or_not_a_rule_is_a_bad_argument() {
+        let (status, identity) = domain(LEAF, "example.com", SipralDomainRules::Platform, true);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(
+            identity,
+            u32::MAX,
+            "nothing is written for bytes that say nothing"
+        );
+        let certificate = naming(vec![rcgen::SanType::DnsName(
+            "example.com".try_into().unwrap(),
+        )]);
+        let status = unsafe {
+            sipral_certificate_check_domain(
+                certificate.as_ptr(),
+                certificate.len(),
+                "example.com".as_ptr().cast(),
+                11,
+                2,
+                1,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("rules is 2"),
+            "{}",
+            last_error_text()
+        );
     }
 }

@@ -19,6 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
+use sipral_core::domain_certificate::DomainRules;
 use sipral_core::endpoint::{Answer, Query, TransportErrorKind, TransportId, TransportProtocol};
 use sipral_core::pin::CertificatePin;
 
@@ -45,6 +46,9 @@ pub struct NetworkConfig {
     pub name_servers: Vec<SocketAddr>,
     /// How long connecting, and then the TLS handshake, may each take.
     pub connect_timeout: Duration,
+    /// How a server's certificate is read for its name, once its chain is trusted: the
+    /// platform's rules with a `sip:` URI accepted besides, or RFC 5922 alone.
+    pub domain_rules: DomainRules,
 }
 
 impl Default for NetworkConfig {
@@ -54,6 +58,7 @@ impl Default for NetworkConfig {
             client_certificate: None,
             name_servers: Vec::new(),
             connect_timeout: Duration::from_secs(8),
+            domain_rules: DomainRules::Platform,
         }
     }
 }
@@ -402,6 +407,7 @@ impl Network {
         let tls = matches!(protocol, TransportProtocol::Tls | TransportProtocol::Wss);
         let trust = self.config.trust.clone();
         let client = self.config.client_certificate.clone();
+        let rules = self.config.domain_rules;
         let patience = self.config.connect_timeout;
         let platform = Arc::clone(&self.platform);
         let postbox = self.postbox.clone();
@@ -428,6 +434,7 @@ impl Network {
                             pin: target.pin.as_ref(),
                             client: client.as_ref(),
                             platform: &platform,
+                            rules,
                         }),
                         patience,
                     })

@@ -14,6 +14,7 @@ import datetime
 import errno
 import hashlib
 import hmac
+import ipaddress
 import os
 import select
 import socket
@@ -21,11 +22,13 @@ import ssl
 import time
 from typing import Callable, Union
 
-from ._sipral_cffi import lib
+from ._sipral_cffi import ffi, lib
+from .errors import _last_error_message
 
 __all__ = [
     "ClientCertificateUnusable",
     "InviteLimit",
+    "NameRefused",
     "PinRefused",
     "TlsClientCertificate",
     "TlsTrust",
@@ -58,12 +61,20 @@ class TlsTrust:
     """
 
     def __init__(
-        self, build: Callable[[], ssl.SSLContext], description: str, pin: bytes | None = None
+        self,
+        build: Callable[[], ssl.SSLContext],
+        description: str,
+        pin: bytes | None = None,
+        names_here: bool = True,
     ) -> None:
         self._build = build
         self.description = description
         #: The pinned SHA-256 digest, or ``None``.
         self.pin = pin
+        #: Whether :func:`connect` reads the server's name, rather than
+        #: OpenSSL during the handshake: for every context this class builds,
+        #: so that a ``sip:`` URI can name the domain (RFC 5922 Section 7.1).
+        self._names_here = names_here
 
     @classmethod
     def pinned(cls, fingerprint: str) -> "TlsTrust":
@@ -110,16 +121,22 @@ class TlsTrust:
     @classmethod
     def from_context(cls, context: ssl.SSLContext) -> "TlsTrust":
         """A context the application built. It must verify the server
-        (``CERT_REQUIRED`` and ``check_hostname``), or this refuses it."""
+        (``CERT_REQUIRED`` and ``check_hostname``), or this refuses it. Its
+        own check reads the name; the stack's domain rules can only refuse
+        more after it, never accept a ``sip:`` URI it refused."""
         if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
             raise ValueError("a TLS context for SIP must verify the server's certificate and name")
-        return cls(lambda: context, "the application's own context")
+        return cls(lambda: context, "the application's own context", names_here=False)
 
     def context(self) -> ssl.SSLContext:
-        """The context a connection is made with; at least TLS 1.2."""
+        """The context a connection is made with; at least TLS 1.2. One this
+        class built verifies the chain during the handshake and leaves the
+        name to :func:`connect`, which reads it before anything is sent."""
         context = self._build()
         if context.minimum_version < ssl.TLSVersion.TLSv1_2:
             context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if self._names_here and context.verify_mode == ssl.CERT_REQUIRED:
+            context.check_hostname = False
         return context
 
 
@@ -322,6 +339,63 @@ class PinRefused(ssl.SSLCertVerificationError):
         self.verify_message = "the server's certificate is not the pinned one"
 
 
+class NameRefused(ssl.SSLCertVerificationError):
+    """The server's certificate was trusted, and does not name the server
+    as the stack's domain rules read a name; reported as a name mismatch."""
+
+    def __init__(self, sentence: str) -> None:
+        super().__init__(sentence)
+        self.reason = "CERTIFICATE_VERIFY_FAILED"
+        # X509_V_ERR_HOSTNAME_MISMATCH, as OpenSSL's own check reports one
+        self.verify_code = 62
+        self.verify_message = sentence
+
+
+def https_names(certificate: dict, name: str) -> bool:
+    """Whether a verified certificate (``getpeercert()``) names ``name`` by
+    the rules HTTPS uses, as OpenSSL's own check reads them: a DNS name equal
+    to it without regard to case, a leading ``*.`` standing for one whole
+    label under at least two more; an IP address against an IP address
+    entry. The ``commonName`` is not read."""
+    try:
+        address = ipaddress.ip_address(name.strip("[]"))
+    except ValueError:
+        address = None
+    wanted = name.rstrip(".").lower()
+    for kind, value in certificate.get("subjectAltName", ()):
+        if address is not None and kind == "IP Address":
+            try:
+                if ipaddress.ip_address(value.strip()) == address:
+                    return True
+            except ValueError:
+                continue
+        elif address is None and kind == "DNS":
+            pattern = value.rstrip(".").lower()
+            if pattern == wanted:
+                return True
+            label, _, rest = wanted.partition(".")
+            if pattern.startswith("*.") and pattern.count(".") >= 2 and label and rest == pattern[2:]:
+                return True
+    return False
+
+
+def check_name(sock: ssl.SSLSocket, server_name: str, rules: int, matched_already: bool) -> None:
+    """Hold a connection whose chain was trusted to ``server_name`` under
+    ``rules`` (a `SipralDomainRules`): by default the HTTPS rules, with a
+    ``sip:`` URI that names the domain accepted besides; RFC 5922 alone
+    with ``SIPRAL_DOMAIN_RULES_RFC5922`` (``sipral_certificate_check_domain``).
+    ``matched_already`` says OpenSSL checked the name itself and it held.
+    Raises :class:`NameRefused`."""
+    leaf = sock.getpeercert(binary_form=True) or b""
+    matched = matched_already or https_names(sock.getpeercert() or {}, server_name)
+    if matched and rules == lib.SIPRAL_DOMAIN_RULES_PLATFORM:
+        return
+    domain = server_name.encode("utf-8")
+    status = lib.sipral_certificate_check_domain(leaf, len(leaf), domain, len(domain), rules, int(matched), ffi.NULL)
+    if status != lib.SIPRAL_STATUS_OK:
+        raise NameRefused(_last_error_message() or f"no name in the server's certificate is {server_name}")
+
+
 class InviteLimit(tuple):
     """Per-address INVITE rate: ``burst`` at once, then one per ``every_ms``.
 
@@ -467,12 +541,13 @@ def connect(
     timeout: float,
     pin: bytes | None = None,
     client: TlsClientCertificate | None = None,
+    domain_rules: int = lib.SIPRAL_DOMAIN_RULES_PLATFORM,
 ) -> socket.socket:
     """Connect to ``server``, over TLS when ``context`` is given (checked
-    against ``server_name``, or ``pin`` alone), presenting ``client`` when
-    the server asks for a certificate. Raises the failure for
-    :func:`classify`; a client certificate that cannot be presented raises
-    before anything is sent."""
+    against ``server_name`` under ``domain_rules``, or ``pin`` alone),
+    presenting ``client`` when the server asks for a certificate. Raises the
+    failure for :func:`classify`; a client certificate that cannot be
+    presented raises before anything is sent."""
     if context is not None and client is not None:
         client.present_with(context)
     raw = socket.socket(socket.AF_INET6 if ":" in server[0] else socket.AF_INET, socket.SOCK_STREAM)
@@ -493,4 +568,10 @@ def connect(
         if not hmac.compare_digest(hashlib.sha256(leaf).digest(), pin):
             wrapped.close()
             raise PinRefused()
+    elif context.verify_mode == ssl.CERT_REQUIRED and server_name is not None:
+        try:
+            check_name(wrapped, server_name, domain_rules, context.check_hostname)
+        except BaseException:
+            wrapped.close()
+            raise
     return wrapped

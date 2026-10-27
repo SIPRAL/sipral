@@ -98,6 +98,8 @@ export {
   SipralDialogPhase,
   SipralDnsAnswer,
   SipralDnsRecordType,
+  SipralDomainIdentity,
+  SipralDomainRules,
   SipralDtmf,
   SipralDtmfDetection,
   SipralEndpointStatus,
@@ -156,4 +158,4 @@ export {
   systemResolver,
 } from './stack.js';
 export { type ConferencePicture, type Participant, Subscription, type WatchedDialog } from './subscription.js';
-export { type ClientCertificate, type ConnectOptions, type Refusal, TlsTrust, classify, parsePin } from './tls.js';
+export { type ClientCertificate, type ConnectOptions, type Refusal, TlsTrust, classify, parsePin, sipDomainOf } from './tls.js';

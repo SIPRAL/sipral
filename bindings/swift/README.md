@@ -748,7 +748,11 @@ this layer writes names the transport. TLS is Network.framework's, on Apple
 platforms only: the certificate is evaluated by `SecTrust` with the SSL
 policy for `tlsServerName` (the server's host when `nil`), under `tlsTrust`
 — `.platform` (the default), `.privateAuthority(der)` beside it, or
-`.onlyAuthority(der)` alone. On Linux `.tls` throws `.notSupported` and
+`.onlyAuthority(der)` alone. Once the chain holds, the name is read by
+`tlsDomainRules`: `.platform` (the default) keeps `SecTrust`'s verdict and
+accepts a `sip:` URI in `subjectAltName` naming the domain besides, which
+`SecTrust` never reads (RFC 5922 §7.1); `.rfc5922` reads RFC 5922 alone and
+refuses a wildcard (`docs/22-tls.md`). On Linux `.tls` throws `.notSupported` and
 `.tcp` works on a plain socket. The first connection is made in the
 initializer. One that fails, or breaks later, arrives as
 `SipralEventKind.transportFailed` with `transportFailedData`: `tls`

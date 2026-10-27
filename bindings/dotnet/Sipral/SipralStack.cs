@@ -235,7 +235,14 @@ public sealed partial class SipralStack : IDisposable
     /// 5061 for TLS by convention) shared by every account and call. Over TLS
     /// the certificate is checked against <paramref name="tlsServerName"/>
     /// (default: the server's host) with <paramref name="tlsTrust"/>
-    /// (<c>docs/22-tls.md</c>); the check cannot be turned off.
+    /// (<c>docs/22-tls.md</c>); the check cannot be turned off. Once the
+    /// chain is trusted the name is read by <paramref name="tlsDomainRules"/>,
+    /// here and on every account's own connection: by default the HTTPS
+    /// rules with a <c>sip:</c> URI naming the domain accepted besides (RFC
+    /// 5922 §7.1); <see cref="SipralDomainRules.Rfc5922"/> reads RFC 5922
+    /// alone and refuses a wildcard. An account's own connection is checked
+    /// against <paramref name="tlsServerName"/> when given, else the domain of
+    /// its <c>serverUri</c> (RFC 5922 §7.3), else the address.
     /// <paramref name="tlsClientCertificate"/> is the certificate presented
     /// when the server asks for one, on that connection and on every
     /// account's own TLS or WSS connection that names none of its own: its
@@ -367,9 +374,11 @@ public sealed partial class SipralStack : IDisposable
         SipralHeldAudio heldAudio = SipralHeldAudio.Default,
         SipralIceTrickle iceTrickle = 0,
         SipralClientCertificate? tlsClientCertificate = null,
-        SipralClientCertificate? turnClientCertificate = null)
+        SipralClientCertificate? turnClientCertificate = null,
+        SipralDomainRules tlsDomainRules = SipralDomainRules.Platform)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
+        _tlsDomainRules = tlsDomainRules;
         _chosenPort = bindPort;
         _streamFallback = streamFallback;
         _streamServer = streamServer;

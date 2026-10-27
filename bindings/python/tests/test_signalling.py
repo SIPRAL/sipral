@@ -29,7 +29,17 @@ from sipral import InviteLimit, Stack, TlsTrust
 from sipral._sipral_cffi import lib
 from sipral.errors import SipralError
 from sipral.errors import call as retry_busy
-from sipral.enums import AudioMode, EventKind, RegistrationState, TlsFailure, Transport, TransportError
+from sipral.enums import (
+    AudioMode,
+    DnsAnswer,
+    DnsRecordType,
+    EventKind,
+    RegistrationState,
+    TlsFailure,
+    Transport,
+    TransportError,
+)
+from sipral.stack import sip_domain_of
 
 _SERVER_NAME = "registrar.sipral.test"
 
@@ -41,8 +51,11 @@ def _header(name: str, message: str) -> str | None:
     return None
 
 
-def _certificate(directory: str, name: str, *extra: str) -> tuple[str, str] | None:
-    """A self-signed certificate and key via `openssl`, or `None`."""
+def _certificate(
+    directory: str, name: str, *extra: str, names: str = f"DNS:{_SERVER_NAME}"
+) -> tuple[str, str] | None:
+    """A self-signed certificate and key via `openssl`, or `None`; ``names``
+    is its ``subjectAltName``."""
     openssl = shutil.which("openssl")
     if openssl is None:
         return None
@@ -52,7 +65,7 @@ def _certificate(directory: str, name: str, *extra: str) -> tuple[str, str] | No
         [
             openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
             "-nodes", "-subj", f"/CN={_SERVER_NAME}",
-            "-addext", f"subjectAltName=DNS:{_SERVER_NAME}",
+            "-addext", f"subjectAltName={names}",
             "-addext", "extendedKeyUsage=serverAuth",
             "-keyout", key, "-out", certificate, *extra,
         ],
@@ -357,6 +370,74 @@ class ATlsRefusalSaysWhy(_OverAConnection):
         stack = self.stack(registrar.address, tls_server_name=_SERVER_NAME)
         event = await self.refused(stack)
         self.assertEqual(event.fields["tls"], TlsFailure.HANDSHAKE_REFUSED, event.fields)
+
+    async def test_a_certificate_naming_the_domain_only_as_a_sip_uri_is_trusted(self) -> None:
+        # RFC 5922 Section 7.1's own form, which OpenSSL's check never reads
+        by_uri = _certificate(self._directory, "uri", names=f"URI:sip:{_SERVER_NAME}")
+        if by_uri is None:
+            self.skipTest("no openssl command to make the registrar's certificate with")
+        registrar = self.registrar(by_uri)
+        for rules in (lib.SIPRAL_DOMAIN_RULES_PLATFORM, lib.SIPRAL_DOMAIN_RULES_RFC5922):
+            stack = self.stack(
+                registrar.address,
+                tls_server_name=_SERVER_NAME,
+                tls_trust=TlsTrust.only_authority(by_uri[0]),
+                tls_domain_rules=rules,
+            )
+            self.assertTrue(stack.connected, f"rules {rules} refused a sip: URI naming the domain")
+
+    async def test_a_wildcard_is_trusted_unless_rfc_5922_alone_is_asked(self) -> None:
+        wildcard = _certificate(self._directory, "wildcard", names="DNS:*.sipral.test")
+        if wildcard is None:
+            self.skipTest("no openssl command to make the registrar's certificate with")
+        registrar = self.registrar(wildcard)
+        accepted = self.stack(
+            registrar.address, tls_server_name=_SERVER_NAME, tls_trust=TlsTrust.only_authority(wildcard[0])
+        )
+        self.assertTrue(accepted.connected)
+        strict = self.stack(
+            registrar.address,
+            tls_server_name=_SERVER_NAME,
+            tls_trust=TlsTrust.only_authority(wildcard[0]),
+            tls_domain_rules=lib.SIPRAL_DOMAIN_RULES_RFC5922,
+        )
+        event = await self.refused(strict)
+        self.assertEqual(event.fields["tls"], TlsFailure.NAME_MISMATCH, event.fields)
+        self.assertIn("wildcard", event.fields["detail"])
+
+    async def test_an_account_located_by_srv_is_held_to_its_sip_domain_not_the_address(self) -> None:
+        # RFC 5922 Section 7.3: the domain the user configured, not where SRV led
+        certificate = self.good()
+        registrar = self.registrar(certificate)
+        port = registrar.address.rpartition(":")[2]
+
+        def resolver(name: str, record: int) -> tuple[int, list[str]]:
+            if record == DnsRecordType.SRV and name == f"_sips._tcp.{_SERVER_NAME}":
+                return DnsAnswer.RECORDS, [f"300 10 60 {port} host.sipral.test"]
+            if record == DnsRecordType.A and name == "host.sipral.test":
+                return DnsAnswer.RECORDS, ["300 127.0.0.1"]
+            return DnsAnswer.NOTHING, []
+
+        stack = Stack(
+            loop=asyncio.get_running_loop(),
+            audio=AudioMode.APPLICATION,
+            bind_host="127.0.0.1",
+            tls_trust=TlsTrust.only_authority(certificate[0]),
+            resolver=resolver,
+        )
+        self.addAsyncCleanup(asyncio.to_thread, stack.close)
+        account = stack.add_account(
+            f"sip:bob@{_SERVER_NAME}",
+            registrar=f"sips:{_SERVER_NAME}",
+            server_uri=f"sips:{_SERVER_NAME}",
+            stream_protocol=Transport.TLS,
+        )
+        account.register()
+        await self.registered(stack)
+        self.assertEqual(account.registrar_address, registrar.address)
+        self.assertEqual(sip_domain_of("sips:alice@pbx.example.com:5061;transport=tls"), "pbx.example.com")
+        self.assertIsNone(sip_domain_of("sips:198.51.100.7:5061"))
+        self.assertIsNone(sip_domain_of("sip:[2001:db8::7]:5061"))
 
     async def test_nobody_listening_is_a_refused_connection_and_no_tls_reason(self) -> None:
         nobody = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

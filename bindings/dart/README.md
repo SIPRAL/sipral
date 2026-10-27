@@ -95,7 +95,12 @@ every request of its calls go over it, its `Contact` names the protocol,
 and a connection that closes is opened again and the account registered
 again. A TLS one with a `tlsPin` trusts that certificate alone, by the
 library's own verdict (`checkCertificate`); without one, the platform's
-authorities under `SipralStack.open(tlsServerName:)` or the server's host.
+authorities under `SipralStack.open(tlsServerName:)`, else the domain of the
+account's `serverUri` (RFC 5922 §7.3), else the server's address, by the
+HTTPS rules `dart:io` applies. A certificate that names the domain only as a
+`sip:` URI is refused here, and RFC 5922's stricter reading is not offered:
+`dart:io` refuses a name before this layer could tell it from a refused chain
+(`docs/22-tls.md`).
 
 A server that requires a client certificate (mutual TLS) is given one as
 `clientCertificate`, on the account or, for every account that names none,

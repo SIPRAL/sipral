@@ -26,7 +26,7 @@ use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, SRV};
 use hickory_proto::rr::{Name, RData, Record as DnsRecord, RecordType as DnsType};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
     date_time_ymd,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -39,8 +39,8 @@ use sipral_core::endpoint::{
 use sipral_core::msg::Uri;
 use sipral_core::pin::CertificatePin;
 use sipral_net::{
-    ClientCertificate, Failure, Happening, Network, NetworkConfig, Resolver, StreamTarget,
-    TlsFailure, Trust,
+    ClientCertificate, DomainRules, Failure, Happening, Network, NetworkConfig, Resolver,
+    StreamTarget, TlsFailure, Trust,
 };
 
 const NAME: &str = "pbx.test";
@@ -75,6 +75,16 @@ impl Pki {
     fn leaf(&self, names: &[&str], expired: bool) -> (Vec<CertificateDer<'static>>, KeyPair) {
         let (chain, key, _) = self.leaf_pem(names, expired);
         (chain, key)
+    }
+
+    /// A leaf whose `subjectAltName` is `names`, as they are, valid now.
+    fn leaf_naming(&self, names: Vec<SanType>) -> (Vec<CertificateDer<'static>>, KeyPair) {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.subject_alt_names = names;
+        let issuer = Issuer::from_params(&self.params, &self.key);
+        let certificate = params.signed_by(&key, &issuer).unwrap();
+        (vec![certificate.der().clone()], key)
     }
 
     fn leaf_pem(
@@ -326,6 +336,71 @@ fn every_refused_server_certificate_says_why() {
     )
     .unwrap_err();
     assert_eq!(refused.tls, TlsFailure::Untrusted, "{refused}");
+}
+
+#[test]
+fn a_sip_uri_names_the_domain_and_rfc_5922_alone_refuses_a_wildcard() {
+    let pki = Pki::new("Sipral test authority");
+    let uri = |text: &str| SanType::URI(text.try_into().unwrap());
+    let dns = |text: &str| SanType::DnsName(text.try_into().unwrap());
+    let serve = |names: Vec<SanType>| {
+        let (chain, key) = pki.leaf_naming(names);
+        tls_server(Serving {
+            chain,
+            key,
+            clients: None,
+            tls12_only: false,
+        })
+    };
+    let under = |rules: DomainRules| {
+        let mut config = NetworkConfig::default();
+        config.trust = Trust::Only(vec![pki.der.clone()]);
+        config.connect_timeout = Duration::from_secs(5);
+        config.domain_rules = rules;
+        Network::new(config).unwrap()
+    };
+    let verdict = |server: SocketAddr, name: &str, rules: DomainRules| {
+        dial(
+            &mut under(rules),
+            TransportProtocol::Tls,
+            server,
+            named(name),
+        )
+        .map(|_| ())
+    };
+    let mismatch = |outcome: Result<(), Failure>, what: &str| match outcome {
+        Err(refused) => assert_eq!(refused.tls, TlsFailure::NameMismatch, "{what}: {refused}"),
+        Ok(()) => panic!("{what} was accepted"),
+    };
+
+    // RFC 5922's own form, which the HTTPS rules never read
+    let by_uri = serve(vec![uri("sip:pbx.test")]);
+    for rules in [DomainRules::Platform, DomainRules::Rfc5922] {
+        verdict(by_uri, NAME, rules).unwrap_or_else(|refused| panic!("{rules:?}: {refused}"));
+    }
+
+    let wildcard = serve(vec![dns("*.example.test")]);
+    verdict(wildcard, "pbx.example.test", DomainRules::Platform).unwrap();
+    mismatch(
+        verdict(wildcard, "pbx.example.test", DomainRules::Rfc5922),
+        "a wildcard under RFC 5922 alone",
+    );
+
+    // while a sip: URI is there, RFC 5922 counts no DNS name
+    let elsewhere = serve(vec![uri("sip:other.test"), dns(NAME)]);
+    verdict(elsewhere, NAME, DomainRules::Platform).unwrap();
+    mismatch(
+        verdict(elsewhere, NAME, DomainRules::Rfc5922),
+        "a DNS name beside a sip: URI for another domain",
+    );
+
+    let by_dns = serve(vec![dns(NAME)]);
+    verdict(by_dns, NAME, DomainRules::Rfc5922).unwrap();
+
+    let other = serve(vec![uri("sip:other.test")]);
+    for rules in [DomainRules::Platform, DomainRules::Rfc5922] {
+        mismatch(verdict(other, NAME, rules), "a sip: URI for another domain");
+    }
 }
 
 #[test]

@@ -174,6 +174,51 @@ public sealed partial class SipralStack
         return own?.ClientCertificate ?? _tlsClientCertificate;
     }
 
+    // The name a TLS connection to destination checks the certificate
+    // against: tlsServerName when given; else the domain of the serverUri of
+    // an account on its own connection there, the SIP domain the user
+    // configured rather than the host its SRV record named (RFC 5922 §7.3);
+    // else host, the address connected to.
+    private string StreamServerName(string destination, string host)
+    {
+        if (_givenTlsServerName is { } given)
+        {
+            return given;
+        }
+        lock (_accounts)
+        {
+            return _accounts
+                .Where(account => account.StreamProtocol is SipralTransport.Tls or SipralTransport.Wss
+                    && account.RegistrarAddress == destination)
+                .Select(account => SipDomainOf(account.ServerUri))
+                .FirstOrDefault(domain => domain is not null) ?? host;
+        }
+    }
+
+    // The domain a sip: or sips: URI names (sips:example.com:5061 and
+    // sip:example.com;transport=tls both give example.com); null for an IP
+    // address, which is the destination itself, or for no such URI.
+    internal static string? SipDomainOf(string? uri)
+    {
+        var colon = uri?.IndexOf(':') ?? -1;
+        if (uri is null || colon < 0
+            || !(uri[..colon].Equals("sip", StringComparison.OrdinalIgnoreCase)
+                || uri[..colon].Equals("sips", StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+        var rest = uri[(colon + 1)..].Split(';', '?')[0];
+        var hostPort = rest[(rest.LastIndexOf('@') + 1)..];
+        if (hostPort.StartsWith('['))
+        {
+            return null;
+        }
+        var host = hostPort.Split(':')[0].TrimEnd('.');
+        return host.Length == 0 || System.Text.RegularExpressions.Regex.IsMatch(host, @"^\d{1,3}(\.\d{1,3}){3}$")
+            ? null
+            : host;
+    }
+
     // Connects (to streamServer instead, for TCP, when given), binds it as
     // the stream to destination, as `bound` (WS/WSS for a WebSocket), and
     // reads it. A failure is reported on the same transport id, which ends
@@ -209,8 +254,8 @@ public sealed partial class SipralStack
             {
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
                 var verdict = new SipralTlsTrust.Verdict();
-                var options = new SslClientAuthenticationOptions { TargetHost = _givenTlsServerName ?? host };
-                StreamTrust(destination).Apply(options, verdict);
+                var options = new SslClientAuthenticationOptions { TargetHost = StreamServerName(destination, host) };
+                StreamTrust(destination).Apply(options, verdict, _tlsDomainRules);
                 use!.Apply(options);
                 var began = Stopwatch.GetTimestamp();
                 try

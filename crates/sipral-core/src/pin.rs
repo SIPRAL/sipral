@@ -243,7 +243,7 @@ fn equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
 
 /// The tag and the contents of the DER element at the front of `bytes`, and
 /// what follows it (X.690 §8.1, definite lengths only, as DER requires).
-fn element(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+pub(crate) fn element(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let (&tag, rest) = bytes.split_first()?;
     let (&first, rest) = rest.split_first()?;
     let (length, rest) = if first & 0x80 == 0 {

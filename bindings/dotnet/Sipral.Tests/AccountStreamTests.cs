@@ -97,6 +97,43 @@ public sealed class AccountStreamTests
         }
     }
 
+    /// <summary>RFC 5922 §7.3: an account located by SRV is held to the SIP
+    /// domain it was configured with, not to the address the lookup led
+    /// to.</summary>
+    [Fact]
+    public async Task AnAccountLocatedBySrvIsHeldToItsSipDomainNotTheAddress()
+    {
+        using var certificate = SignallingTests.Good();
+        using var registrar = new SignallingTests.Registrar(certificate);
+        var port = registrar.Address.Split(':')[1];
+        using var stack = new SipralStack(audio: SipralAudio.Application, bindHost: "127.0.0.1",
+            tlsTrust: SipralTlsTrust.OnlyAuthority(certificate),
+            resolver: (name, record) => (record, name) switch
+            {
+                (SipralDnsRecordType.Srv, $"_sips._tcp.{ServerName}") =>
+                    new SipralLookup(SipralDnsAnswer.Records, new[] { $"300 10 60 {port} host.sipral.test" }),
+                (SipralDnsRecordType.A, "host.sipral.test") =>
+                    new SipralLookup(SipralDnsAnswer.Records, new[] { "300 127.0.0.1" }),
+                _ => SipralLookup.Nothing,
+            });
+        var failed = new ConcurrentQueue<string>();
+        stack.EventReceived += (_, args) =>
+        {
+            if (args.TransportFailed is { } one)
+            {
+                failed.Enqueue(one.Detail ?? "");
+            }
+        };
+        var account = stack.AddAccount($"sip:bob@{ServerName}", registrar: $"sips:{ServerName}",
+            serverUri: $"sips:{ServerName}", streamProtocol: SipralTransport.Tls);
+        account.Register();
+        Assert.True(await Registered(account), $"refused: {string.Join("; ", failed)}");
+        Assert.Equal(registrar.Address, account.RegistrarAddress);
+        Assert.Equal("pbx.example.com", SipralStack.SipDomainOf("sips:alice@pbx.example.com:5061;transport=tls"));
+        Assert.Null(SipralStack.SipDomainOf("sips:198.51.100.7:5061"));
+        Assert.Null(SipralStack.SipDomainOf("sip:[2001:db8::7]:5061"));
+    }
+
     [Fact]
     public async Task AnAccountOverTcpIsOpenedAgainWhenItsServerDropsTheConnection()
     {

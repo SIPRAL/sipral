@@ -167,10 +167,11 @@ final class SignallingConnection: @unchecked Sendable {
 
     /// Connect from `bindHost` (default: the route toward `server`); throws
     /// the refusal. Over TLS, `identity` is presented when the server asks
-    /// for a client certificate, after it is checked usable here.
+    /// for a client certificate, after it is checked usable here, and a
+    /// chain `trust` vouches for has its name read by `domainRules`.
     init(
         server: String, bindHost: String?, transport: SipralTransport, serverName: String, trust: TLSTrust,
-        identity: ClientIdentity? = nil, patienceMs: Int
+        domainRules: SipralDomainRules = .platform, identity: ClientIdentity? = nil, patienceMs: Int
     ) throws {
         let (host, port) = UDPSocket.parse(server)
         #if canImport(Network)
@@ -238,6 +239,33 @@ final class SignallingConnection: @unchecked Sendable {
                 }
                 var failure: CFError?
                 let trusted = SecTrustEvaluateWithError(evaluated, &failure)
+                let nameAlone = failure.map { CFErrorGetCode($0) == Int(errSecHostNameMismatch) } ?? false
+                if (trusted && domainRules == .rfc5922) || nameAlone {
+                    // the name as RFC 5922 reads it, over a chain trusted without one
+                    var chainHeld = trusted
+                    if nameAlone {
+                        SecTrustSetPolicies(evaluated, SecPolicyCreateSSL(true, nil))
+                        chainHeld = SecTrustEvaluateWithError(evaluated, nil)
+                    }
+                    let chain = SecTrustCopyCertificateChain(evaluated) as? [SecCertificate] ?? []
+                    let leaf = chain.first.map { [UInt8](SecCertificateCopyData($0) as Data) } ?? []
+                    if chainHeld {
+                        do {
+                            _ = try Sipral.certificateCheckDomain(
+                                certificate: leaf, domain: serverName, rules: domainRules.rawValue,
+                                platformMatched: trusted ? 1 : 0
+                            )
+                            complete(true)
+                        } catch {
+                            verdict.keep(SignallingRefusal(
+                                error: .connectionReset, tls: .nameMismatch,
+                                detail: SignallingRefusal.sentence((error as? SipralError)?.message ?? "\(error)")
+                            ))
+                            complete(false)
+                        }
+                        return
+                    }
+                }
                 if !trusted {
                     verdict.keep(Self.refusal(failure))
                 }

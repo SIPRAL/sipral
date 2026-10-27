@@ -576,7 +576,13 @@ the registrar or the outbound proxy, and every account and call rides on it;
 a `Contact` this layer writes names the transport. Over TLS, `SslStream`
 checks the certificate against `tlsServerName` (the server's host when
 `null`) with `tlsTrust`: `SipralTlsTrust.Platform` (the default),
-`PrivateAuthority(cert)` beside it, or `OnlyAuthority(cert)` alone. The
+`PrivateAuthority(cert)` beside it, or `OnlyAuthority(cert)` alone. Once the
+chain holds, `tlsDomainRules` reads the name: `SipralDomainRules.Platform`
+(the default) keeps `SslStream`'s verdict and accepts a `sip:` URI in
+`subjectAltName` naming the domain besides (RFC 5922 §7.1), and `Rfc5922`
+reads RFC 5922 alone and refuses a wildcard (`docs/22-tls.md`). An account's
+own connection is held to `tlsServerName`, else to the domain of its
+`serverUri` (RFC 5922 §7.3), else to the address. The
 first connection is made in the constructor. One that fails, or breaks
 later, arrives as `SipralEventKind.TransportFailed` with
 `args.TransportFailed` — `Tls` `Untrusted`, `NameMismatch`, `Expired`,

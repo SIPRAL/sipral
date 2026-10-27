@@ -550,6 +550,14 @@ checks the certificate against `tls_server_name` (the server's host when
 left out) with `tls_trust`: `TlsTrust.platform()` (the default),
 `TlsTrust.private_authority(cafile)` beside it, `TlsTrust.only_authority(cafile)`
 alone, or `TlsTrust.from_context(context)` for a context that verifies.
+Once the chain holds, `tls_domain_rules` reads the name:
+`SIPRAL_DOMAIN_RULES_PLATFORM` (the default) is the HTTPS rules with a
+`sip:` URI in `subjectAltName` naming the domain accepted besides (RFC 5922
+Section 7.1), and `SIPRAL_DOMAIN_RULES_RFC5922` reads RFC 5922 alone and
+refuses a wildcard (`docs/22-tls.md`); a context of the application's own
+checks the name itself, and the rule can only refuse more after it. An
+account's own connection is held to `tls_server_name`, else to the domain of
+its `server_uri` (Section 7.3), else to the address.
 The first connection is made in the constructor. One that fails, or breaks
 later, arrives as `EventKind.TRANSPORT_FAILED` with `fields["tls"]` —
 `TlsFailure.UNTRUSTED`, `NAME_MISMATCH`, `EXPIRED` or `HANDSHAKE_REFUSED` —

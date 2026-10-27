@@ -779,9 +779,10 @@ C++ softphones that would move off another stack, and three pieces close it:
   in `deny.toml`. *Built*: `sipral-net`, and `sipral_network_*` behind
   `sipral-ffi`'s `network` feature (ABI 1.6, `26-network.md`); a C program
   with no networking code registers over TLS to a name found by NAPTR and
-  SRV, holds and resumes a call at Asterisk in `scripts/lab.sh network`. Not
-  yet: the platform's trust store on iOS and Android, RFC 5922's certificate
-  rules, TURN over TCP or TLS.
+  SRV, holds and resumes a call at Asterisk in `scripts/lab.sh network`.
+  RFC 5922's certificate rules are read there and in every binding but
+  Dart's (ABI 1.8, `22-tls.md`). Not yet: the platform's trust store on iOS
+  and Android, TURN over TCP or TLS.
 - **A C++ API.** Classes over the C ABI for the stack, accounts, calls and
   events, with lifetimes tied to scope, in a header shipped beside
   `sipral.h`. *Built*: `bindings/cpp/include/sipral.hpp`, C++17, header only

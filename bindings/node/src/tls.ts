@@ -23,7 +23,15 @@ import {
   rootCertificates,
 } from 'node:tls';
 
-import { SIPRAL_TRANSPORT_DETAIL_BYTES, SipralTlsFailure, SipralTransportError } from './sipral_abi.js';
+import { lastError, text } from './internal.js';
+import {
+  SIPRAL_TRANSPORT_DETAIL_BYTES,
+  type Sipral,
+  SipralDomainRules,
+  SipralStatus,
+  SipralTlsFailure,
+  SipralTransportError,
+} from './sipral_abi.js';
 
 /** The prefixes a fingerprint may come after, lower case. */
 const PIN_PREFIXES = ['sha256 fingerprint=', 'sha-256 ', 'sha256='];
@@ -336,6 +344,58 @@ export interface ConnectOptions {
   clientCertificate?: ClientCertificate | null | undefined;
   /** How long the connection and its handshake may take. */
   timeoutMs?: number;
+  /**
+   * Over TLS to a SIP server, the library that reads its certificate for the
+   * name once the chain is trusted (`sipral_certificate_check_domain`), by
+   * {@link domainRules}. Left out, as for a TURN server, the HTTPS rules
+   * Node applies are the whole check.
+   */
+  sipral?: Sipral | undefined;
+  /** How that name is read, a `SipralDomainRules`: by default the HTTPS rules, with a `sip:` URI naming the domain accepted besides. */
+  domainRules?: number | undefined;
+}
+
+/**
+ * The domain a `sip:` or `sips:` URI names (`sips:example.com:5061` and
+ * `sip:example.com;transport=tls` both give `example.com`), the name RFC
+ * 5922 §7.3 checks a server's certificate against; null for an IP address,
+ * which is then the destination itself, or for no such URI.
+ */
+export function sipDomainOf(uri: string | null): string | null {
+  const colon = uri?.indexOf(':') ?? -1;
+  if (uri === null || colon < 0 || !['sip', 'sips'].includes(uri.slice(0, colon).toLowerCase())) {
+    return null;
+  }
+  const rest = uri.slice(colon + 1).split(/[;?]/)[0] ?? '';
+  const hostPort = rest.slice(rest.lastIndexOf('@') + 1);
+  if (hostPort.startsWith('[')) {
+    return null;
+  }
+  const host = (hostPort.split(':')[0] ?? '').replace(/\.$/, '');
+  return host === '' || isIP(host) !== 0 ? null : host;
+}
+
+/**
+ * Whether a trusted `certificate` names `name`, the SIP domain: Node's own
+ * check by the HTTPS rules, then RFC 5922's reading under `rules`, which
+ * accepts a `sip:` URI naming the domain and, with
+ * `SipralDomainRules.Rfc5922`, refuses a wildcard. The refusal Node raises,
+ * or one that says why.
+ */
+function domainNamed(sipral: Sipral, name: string, certificate: PeerCertificate, rules: number): Error | undefined {
+  const https = checkServerIdentity(name, certificate);
+  if (https === undefined && rules === SipralDomainRules.Platform) {
+    return undefined;
+  }
+  const [domain, length] = text(name);
+  const raw = certificate.raw ?? Buffer.alloc(0);
+  const status = sipral.sipral_certificate_check_domain(raw, raw.length, domain, length, rules, https === undefined ? 1 : 0, null);
+  if (status === SipralStatus.Ok) {
+    return undefined;
+  }
+  const refused = new Error(lastError(sipral) || `the server's certificate does not name ${name}`) as NodeJS.ErrnoException;
+  refused.code = 'ERR_TLS_CERT_ALTNAME_INVALID';
+  return refused;
 }
 
 /**
@@ -396,9 +456,11 @@ export function openStream(host: string, port: number, options: ConnectOptions =
       ...local,
       ...(isIP(name) === 0 ? { servername: name } : {}),
     };
-    if (trust.pin === null && options.serverName !== undefined && tlsOptions.checkServerIdentity === undefined) {
+    if (trust.pin === null && tlsOptions.checkServerIdentity === undefined) {
+      const sipral = options.sipral;
+      const rules = options.domainRules ?? SipralDomainRules.Platform;
       tlsOptions.checkServerIdentity = (_host: string, certificate: PeerCertificate) =>
-        checkServerIdentity(name, certificate);
+        sipral === undefined ? checkServerIdentity(name, certificate) : domainNamed(sipral, name, certificate, rules);
     }
     const began = Date.now();
     const secure: TLSSocket = connectTls(tlsOptions, () => {

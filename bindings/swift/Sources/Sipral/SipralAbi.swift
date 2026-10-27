@@ -1952,6 +1952,31 @@ public enum SipralNetworkTrust: UInt32, Sendable {
     case pinned = 3
 }
 
+/// Which rules a SIP server's certificate is read by for its name, once the platform has
+/// verified its chain (RFC 5922 §7.1, §7.2; `docs/22-tls.md`).
+public enum SipralDomainRules: UInt32, Sendable {
+    /// The platform's, the rules HTTPS uses, with a `sip:` URI in `subjectAltName` that
+    /// names the domain accepted besides. What other SIP clients accept, a wildcard
+    /// included, is accepted.
+    case platform = 0
+    /// RFC 5922 alone: a `sip:` URI that names the domain, or, where the certificate has
+    /// none, a `dNSName` that is the domain itself; never a wildcard.
+    case rfc5922 = 1
+}
+
+/// How a certificate names a SIP domain, as RFC 5922 §7.1 and §7.2 read it.
+public enum SipralDomainIdentity: UInt32, Sendable {
+    /// Nothing RFC 5922 reads names it: the certificate's `sip:` URIs name other domains,
+    /// or neither they nor its `dNSName`s cover it.
+    case unnamed = 0
+    /// A `sip:` URI with no user part in `subjectAltName` names it.
+    case sipUri = 1
+    /// There is no such URI, and a `dNSName` is the domain itself.
+    case dnsName = 2
+    /// There is no such URI, and only a wildcard `dNSName` covers it.
+    case wildcard = 3
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2526,7 +2551,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 7
+    public static let abiVersionMinor: UInt32 = 8
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2930,7 +2955,7 @@ public enum Sipral {
         ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
         ("sipral_network_test_config_t", MemoryLayout<sipral_network_test_config_t>.size, 48, 36, 40),
         ("sipral_isup_t", MemoryLayout<sipral_isup_t>.size, 72, 68, 68),
-        ("sipral_network_config_t", MemoryLayout<sipral_network_config_t>.size, 120, 68, 68),
+        ("sipral_network_config_t", MemoryLayout<sipral_network_config_t>.size, 128, 76, 76),
     ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
@@ -6769,6 +6794,39 @@ public enum Sipral {
             }
         try check(status)
         return pinned
+    }
+
+    /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
+    /// (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
+    ///
+    /// `domain` is the name the connection is checked against: the host of the account's
+    /// `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
+    /// `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
+    /// when it accepted the name, zero when it refused the name alone, everything else having
+    /// held. A refusal for any other reason stands and never reaches this call.
+    ///
+    /// `SIPRAL_STATUS_OK`: accept. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse, as a name
+    /// mismatch. Either way `out_identity`, when not null, is how the certificate names the
+    /// domain, for the reason given. `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+    /// certificate or for `rules` out of range.
+    ///
+    /// Safety
+    ///
+    /// `certificate` must be readable for `certificate_len` bytes, `domain` for `domain_len`
+    /// bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
+    public static func certificateCheckDomain(certificate: [UInt8], domain: String, rules: UInt32, platformMatched: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var identity = UInt32()
+        let status =
+            certificate.withUnsafeBufferPointer { p0 in
+                Array(domain.utf8).withUnsafeBufferPointer { raw1 in
+                    raw1.withMemoryRebound(to: CChar.self) { p1 in
+                        sipral_certificate_check_domain(p0.baseAddress, p0.count, p1.baseAddress, p1.count, rules, platformMatched, &identity)
+                    }
+                }
+            }
+        try check(status)
+        return identity
     }
 
     /// The `host:port` to advertise for a socket bound at `bound` whose

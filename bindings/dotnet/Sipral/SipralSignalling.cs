@@ -86,7 +86,11 @@ public sealed class SipralTlsTrust
     public static SipralTlsTrust OnlyAuthority(X509Certificate2 authority) =>
         new(new X509Certificate2Collection(authority), only: true);
 
-    internal void Apply(SslClientAuthenticationOptions options, Verdict verdict)
+    /// <summary>The checks for one handshake to <c>options.TargetHost</c>; a
+    /// chain this trust vouches for has its name read by
+    /// <paramref name="rules"/> (<c>sipral_certificate_check_domain</c>).</summary>
+    internal void Apply(
+        SslClientAuthenticationOptions options, Verdict verdict, SipralDomainRules rules = SipralDomainRules.Platform)
     {
         if (_pin is { } pin)
         {
@@ -117,6 +121,7 @@ public sealed class SipralTlsTrust
             options.CertificateChainPolicy = policy;
         }
         var extra = _only ? null : _authorities;
+        var domain = options.TargetHost ?? string.Empty;
         options.RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
         {
             if (extra is { Count: > 0 } && errors.HasFlag(SslPolicyErrors.RemoteCertificateChainErrors)
@@ -132,15 +137,38 @@ public sealed class SipralTlsTrust
                 var rest = errors & ~SslPolicyErrors.RemoteCertificateChainErrors;
                 if (again.Build(new X509Certificate2(certificate)))
                 {
-                    verdict.Record(rest, again);
-                    return rest == SslPolicyErrors.None;
+                    return Named(rest, again, certificate);
                 }
                 verdict.Record(errors, again);
                 return false;
             }
-            verdict.Record(errors, chain);
-            return errors == SslPolicyErrors.None;
+            return Named(errors, chain, certificate);
         };
+
+        // the chain held: the name as `rules` read it, RFC 5922's sip: URI
+        // included, which the platform never reads
+        bool Named(SslPolicyErrors errors, X509Chain? chain, X509Certificate? certificate)
+        {
+            var nameAlone = errors == SslPolicyErrors.RemoteCertificateNameMismatch;
+            var strict = errors == SslPolicyErrors.None && rules == SipralDomainRules.Rfc5922;
+            if (certificate is null || !(nameAlone || strict))
+            {
+                verdict.Record(errors, chain);
+                return errors == SslPolicyErrors.None;
+            }
+            try
+            {
+                global::Sipral.Sipral.CertificateCheckDomain(
+                    certificate.GetRawCertData(), domain, (uint)rules, nameAlone ? 0u : 1u);
+                verdict.Record(SslPolicyErrors.None, chain);
+                return true;
+            }
+            catch (SipralException refused)
+            {
+                verdict.RecordNameRefused(refused.Message);
+                return false;
+            }
+        }
     }
 
     // Kept to explain a refused handshake.
@@ -156,6 +184,14 @@ public sealed class SipralTlsTrust
             Errors = SslPolicyErrors.RemoteCertificateChainErrors;
             Chain = X509ChainStatusFlags.UntrustedRoot;
             Detail = "the server's certificate is not the pinned one";
+        }
+
+        /// <summary>A trusted chain whose name the domain rules refused.</summary>
+        internal void RecordNameRefused(string why)
+        {
+            Errors = SslPolicyErrors.RemoteCertificateNameMismatch;
+            Chain = X509ChainStatusFlags.NoError;
+            Detail = why;
         }
 
         internal void Record(SslPolicyErrors errors, X509Chain? chain)
@@ -218,6 +254,8 @@ public sealed partial class SipralStack
     private (string Host, int Port)? _server;
     private string? _serverName;
     private SipralTlsTrust _tlsTrust = SipralTlsTrust.Platform;
+    // How every TLS server's name is read once its chain is trusted.
+    private SipralDomainRules _tlsDomainRules = SipralDomainRules.Platform;
     private SipralClientCertificate? _tlsClientCertificate;
     private string? _bindHost;
     private Link? _link;
@@ -338,7 +376,7 @@ public sealed partial class SipralStack
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
                 var verdict = new SipralTlsTrust.Verdict();
                 var options = new SslClientAuthenticationOptions { TargetHost = _serverName };
-                _tlsTrust.Apply(options, verdict);
+                _tlsTrust.Apply(options, verdict, _tlsDomainRules);
                 use!.Apply(options);
                 var began = Stopwatch.GetTimestamp();
                 try

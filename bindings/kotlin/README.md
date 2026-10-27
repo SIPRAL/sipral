@@ -560,7 +560,10 @@ it; a `Contact` this layer writes names the transport. Over TLS the chain is
 checked by the platform's trust managers — `SipralTlsTrust.Platform` (the
 default), `PrivateAuthority(cert)` beside them, or `OnlyAuthority(cert)`
 alone, on the JVM and on Android alike — and the name, `tlsServerName` or
-the server's host, by the HTTPS rules. The first connection is made in
+the server's host, by `tlsDomainRules`: `SipralDomainRules.PLATFORM` (the
+default) is the HTTPS rules with a `sip:` URI in `subjectAltName` naming the
+domain accepted besides (RFC 5922 §7.1), and `RFC5922` reads RFC 5922 alone
+and refuses a wildcard (`docs/22-tls.md`). The first connection is made in
 `open`. One that fails, or breaks later, arrives as
 `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, read with `transportFailedOf(event)`:
 `tls` untrusted, name mismatch, expired or handshake refused, the `error`,

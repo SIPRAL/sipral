@@ -698,6 +698,8 @@ pub const SURFACE: Surface = Surface {
         crate::media::SipralIceTrickle::ABI,
         crate::isup::SipralIsupNumber::ABI,
         crate::network::SipralNetworkTrust::ABI,
+        crate::pin::SipralDomainRules::ABI,
+        crate::pin::SipralDomainIdentity::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -975,6 +977,7 @@ pub const SURFACE: Surface = Surface {
         crate::local_conference::sipral_local_conference_record_stop::ABI,
         crate::locate::sipral_account_looked_up::ABI,
         crate::pin::sipral_account_check_certificate::ABI,
+        crate::pin::sipral_certificate_check_domain::ABI,
         crate::advertise::sipral_advertised_address::ABI,
         crate::log::sipral_stack_diagnostic_trace::ABI,
         crate::stack::sipral_stack_srtp_suite_order::ABI,

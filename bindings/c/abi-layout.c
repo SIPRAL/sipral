@@ -1082,7 +1082,7 @@ _Static_assert(offsetof(sipral_isup_t, original_redirecting_reason) == SIPRAL_LA
 _Static_assert(offsetof(sipral_isup_t, calling_category) == SIPRAL_LAYOUT(68, 64, 64), "sipral_isup_t::calling_category");
 _Static_assert(offsetof(sipral_isup_t, calling_category) + sizeof(((sipral_isup_t *)0)->calling_category) == SIPRAL_LAYOUT(72, 68, 68), "sipral_isup_t is pinned through calling_category");
 
-_Static_assert(sizeof(sipral_network_config_t) == SIPRAL_LAYOUT(120, 68, 68), "sipral_network_config_t");
+_Static_assert(sizeof(sipral_network_config_t) == SIPRAL_LAYOUT(128, 76, 76), "sipral_network_config_t");
 _Static_assert(offsetof(sipral_network_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_network_config_t::size");
 _Static_assert(offsetof(sipral_network_config_t, trust) == SIPRAL_LAYOUT(8, 4, 4), "sipral_network_config_t::trust");
 _Static_assert(offsetof(sipral_network_config_t, reserved) == SIPRAL_LAYOUT(12, 8, 8), "sipral_network_config_t::reserved");
@@ -1100,5 +1100,7 @@ _Static_assert(offsetof(sipral_network_config_t, tls_server_name) == SIPRAL_LAYO
 _Static_assert(offsetof(sipral_network_config_t, tls_server_name_len) == SIPRAL_LAYOUT(104, 56, 56), "sipral_network_config_t::tls_server_name_len");
 _Static_assert(offsetof(sipral_network_config_t, connect_timeout_ms) == SIPRAL_LAYOUT(112, 60, 60), "sipral_network_config_t::connect_timeout_ms");
 _Static_assert(offsetof(sipral_network_config_t, reserved_end) == SIPRAL_LAYOUT(116, 64, 64), "sipral_network_config_t::reserved_end");
+_Static_assert(offsetof(sipral_network_config_t, domain_rules) == SIPRAL_LAYOUT(120, 68, 68), "sipral_network_config_t::domain_rules");
+_Static_assert(offsetof(sipral_network_config_t, reserved_rules) == SIPRAL_LAYOUT(124, 72, 72), "sipral_network_config_t::reserved_rules");
 _Static_assert(offsetof(sipral_network_config_t, reserved_end) + sizeof(((sipral_network_config_t *)0)->reserved_end) == SIPRAL_LAYOUT(120, 68, 68), "sipral_network_config_t is pinned through reserved_end");
 

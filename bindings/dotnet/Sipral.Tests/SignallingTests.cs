@@ -33,12 +33,15 @@ public sealed class SignallingTests
             .FirstOrDefault(line => line.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
             ?.Split(':', 2)[1].Trim();
 
-    private static X509Certificate2 Certificate(DateTimeOffset from, DateTimeOffset until)
+    // Self-signed for ServerName, or for whatever `named` puts in its
+    // subjectAltName.
+    private static X509Certificate2 Certificate(
+        DateTimeOffset from, DateTimeOffset until, Action<SubjectAlternativeNameBuilder>? named = null)
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var request = new CertificateRequest($"CN={ServerName}", key, HashAlgorithmName.SHA256);
         var names = new SubjectAlternativeNameBuilder();
-        names.AddDnsName(ServerName);
+        (named ?? (builder => builder.AddDnsName(ServerName)))(names);
         request.CertificateExtensions.Add(names.Build());
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
             new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
@@ -226,9 +229,44 @@ public sealed class SignallingTests
     }
 
     private static SipralStack Over(string server, SipralTransport signalling = SipralTransport.Tls,
-        string? name = ServerName, SipralTlsTrust? trust = null) =>
+        string? name = ServerName, SipralTlsTrust? trust = null,
+        SipralDomainRules rules = SipralDomainRules.Platform) =>
         new(audio: SipralAudio.Application, signalling: signalling, signallingServer: server,
-            tlsServerName: name, tlsTrust: trust);
+            tlsServerName: name, tlsTrust: trust, tlsDomainRules: rules);
+
+    /// <summary>RFC 5922 §7.1's own form, a <c>sip:</c> URI the platform's
+    /// check never reads, names the domain.</summary>
+    [Fact]
+    public void ACertificateNamingTheDomainOnlyAsASipUriIsTrusted()
+    {
+        using var certificate = Certificate(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1),
+            names => names.AddUri(new Uri($"sip:{ServerName}")));
+        using var registrar = new Registrar(certificate);
+        foreach (var rules in new[] { SipralDomainRules.Platform, SipralDomainRules.Rfc5922 })
+        {
+            using var stack = Over(registrar.Address, trust: SipralTlsTrust.OnlyAuthority(certificate), rules: rules);
+            Assert.True(stack.Connected, $"{rules} refused a sip: URI naming the domain");
+        }
+    }
+
+    /// <summary>A wildcard is the platform's to accept, and RFC 5922 alone
+    /// refuses it.</summary>
+    [Fact]
+    public async Task AWildcardIsTrustedUnlessRfc5922AloneIsAsked()
+    {
+        using var certificate = Certificate(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1),
+            names => names.AddDnsName("*.sipral.test"));
+        using var registrar = new Registrar(certificate);
+        using (var accepted = Over(registrar.Address, trust: SipralTlsTrust.OnlyAuthority(certificate)))
+        {
+            Assert.True(accepted.Connected);
+        }
+        using var strict = Over(registrar.Address, trust: SipralTlsTrust.OnlyAuthority(certificate),
+            rules: SipralDomainRules.Rfc5922);
+        var failed = await Refused(strict);
+        Assert.Equal(SipralTlsFailure.NameMismatch, failed.Tls);
+        Assert.Contains("wildcard", failed.Detail);
+    }
 
     [Fact]
     public async Task ARegistrarWhoseAuthorityIsPinnedRegistersTheAccountOverTls()

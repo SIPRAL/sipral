@@ -44,6 +44,7 @@ use crate::error::entry;
 #[cfg(not(feature = "network"))]
 use crate::error::fail;
 use crate::handle::SipralHandle;
+use crate::pin::SipralDomainRules;
 use crate::stack::SipralTransport;
 #[cfg(not(feature = "network"))]
 use crate::status::SipralStatus;
@@ -118,6 +119,12 @@ record! {
         pub connect_timeout_ms: u32,
         /// Zero.
         pub reserved_end: u32,
+        /// A [`SipralDomainRules`] (ABI 1.8): how a server's certificate is read for its name
+        /// once its chain is trusted. Zero is the platform's rules with a `sip:` URI that names
+        /// the domain accepted besides.
+        pub domain_rules: Number<SipralDomainRules>,
+        /// Zero.
+        pub reserved_rules: u32,
     }
 }
 

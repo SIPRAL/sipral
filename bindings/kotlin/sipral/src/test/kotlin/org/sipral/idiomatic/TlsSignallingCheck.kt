@@ -35,6 +35,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.sipral.Sipral
+import org.sipral.SipralDomainRules
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralRegistrationState
@@ -50,8 +51,15 @@ private fun header(name: String, message: String): String? =
         ?.substringAfter(':')?.trim()
 
 /** A key store holding one self-signed certificate for [SERVER_NAME], made
- * with keytool; [start] dates it, as keytool reads `-startdate`. */
-private class Credential(directory: File, name: String, start: String?, days: Int) {
+ * with keytool; [start] dates it, as keytool reads `-startdate`, and
+ * [names] is its `subjectAltName` as keytool writes one. */
+private class Credential(
+    directory: File,
+    name: String,
+    start: String?,
+    days: Int,
+    names: String = "dns:$SERVER_NAME",
+) {
     val store: KeyStore
     val certificate: X509Certificate
 
@@ -60,7 +68,7 @@ private class Credential(directory: File, name: String, start: String?, days: In
         val keytool = File(System.getProperty("java.home"), "bin/keytool").path
         val command = mutableListOf(
             keytool, "-genkeypair", "-alias", "registrar", "-keyalg", "EC", "-groupname", "secp256r1",
-            "-dname", "CN=$SERVER_NAME", "-ext", "SAN=dns:$SERVER_NAME", "-ext", "EKU=serverAuth",
+            "-dname", "CN=$SERVER_NAME", "-ext", "SAN=$names", "-ext", "EKU=serverAuth",
             "-validity", days.toString(), "-storetype", "PKCS12", "-keystore", file.path,
             "-storepass", "changeit", "-keypass", "changeit",
         )
@@ -233,12 +241,14 @@ private fun over(
     name: String? = SERVER_NAME,
     trust: SipralTlsTrust = SipralTlsTrust.Platform,
     certificate: SipralClientCertificate? = null,
+    rules: SipralDomainRules = SipralDomainRules.PLATFORM,
 ): SipralClient = SipralClient.open(
     audio = SipralAudioMode.Application,
     signalling = signalling,
     signallingServer = server,
     tlsServerName = name,
     tlsTrust = trust,
+    tlsDomainRules = rules,
     clientCertificate = certificate,
 )
 
@@ -391,6 +401,34 @@ private suspend fun eachRefusalSaysWhy(good: Credential, expired: Credential): S
         assertEquals(SipralTlsFailure.NONE.value.toLong(), failed.tls)
     }
     return "untrusted, name mismatch, expired, handshake refused and refused each say so"
+}
+
+/** RFC 5922 §7.1's own form, a `sip:` URI the HTTPS rules never read, is
+ * trusted; a wildcard is, unless RFC 5922 alone is asked for. */
+private suspend fun aSipUriNamesTheDomainAndRfc5922AloneRefusesAWildcard(directory: File): String {
+    val byUri = Credential(directory, "uri", null, 1, names = "uri:sip:$SERVER_NAME")
+    Registrar(byUri).use { registrar ->
+        for (rules in SipralDomainRules.entries) {
+            over(registrar.address, trust = SipralTlsTrust.OnlyAuthority(byUri.certificate), rules = rules).use {
+                assertTrue(it.connected, "$rules refused a sip: URI naming the domain")
+            }
+        }
+    }
+    val wildcard = Credential(directory, "wildcard", null, 1, names = "dns:*.sipral.test")
+    Registrar(wildcard).use { registrar ->
+        over(registrar.address, trust = SipralTlsTrust.OnlyAuthority(wildcard.certificate)).use {
+            assertTrue(it.connected, "the HTTPS rules' wildcard was refused")
+        }
+        over(
+            registrar.address, trust = SipralTlsTrust.OnlyAuthority(wildcard.certificate),
+            rules = SipralDomainRules.RFC5922,
+        ).use {
+            val failed = refusal(it)
+            assertEquals(SipralTlsFailure.NAME_MISMATCH.value.toLong(), failed.tls)
+            assertTrue(failed.detail?.contains("wildcard") == true, failed.detail ?: "")
+        }
+    }
+    return "a sip: URI naming the domain is trusted, and a wildcard is refused under RFC 5922 alone"
 }
 
 private suspend fun aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(): String {
@@ -927,6 +965,7 @@ internal suspend fun tlsSignallingChecks(): String {
             thePinnedCertificateIsTrustedWhateverItsNameAndSigner(good),
             everyFormAnAdministratorCopiesIsRead(),
             eachRefusalSaysWhy(good, expired),
+            aSipUriNamesTheDomainAndRfc5922AloneRefusesAWildcard(directory),
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
             aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),

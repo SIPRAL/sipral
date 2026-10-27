@@ -35,6 +35,7 @@ import org.sipral.SipralCallConfig
 import org.sipral.SipralCallEvent
 import org.sipral.SipralCounters
 import org.sipral.SipralDnsRecordType
+import org.sipral.SipralDomainRules
 import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
 import org.sipral.SipralRegistrationState
@@ -296,7 +297,11 @@ class SipralClient private constructor(
          * (`host:port`), shared by every account and call. Over TLS the
          * certificate is checked against [tlsServerName] (default: the host of
          * [signallingServer]) with [tlsTrust] (`docs/22-tls.md`); the check
-         * cannot be turned off. [clientCertificate] is presented when the
+         * cannot be turned off. Once the chain is trusted, [tlsDomainRules]
+         * reads the name, here and on every account's own connection: by
+         * default the HTTPS rules with a `sip:` URI naming the domain accepted
+         * besides (RFC 5922 §7.1); `RFC5922` reads RFC 5922 alone and refuses
+         * a wildcard. [clientCertificate] is presented when the
          * server asks for one, on that connection and on every account's own
          * TLS or WSS connection that names none of its own; its key stays in
          * the Android Keystore or the [java.security.KeyStore] it came from.
@@ -392,6 +397,7 @@ class SipralClient private constructor(
             signallingServer: String? = null,
             tlsServerName: String? = null,
             tlsTrust: SipralTlsTrust = SipralTlsTrust.Platform,
+            tlsDomainRules: SipralDomainRules = SipralDomainRules.PLATFORM,
             clientCertificate: SipralClientCertificate? = null,
             inviteLimit: SipralInviteLimit? = null,
             streamFallback: Boolean = true,
@@ -429,6 +435,7 @@ class SipralClient private constructor(
                 SignallingLink(
                     signalling, parseHostPort(server),
                     tlsServerName ?: server.substring(0, server.lastIndexOf(':')), tlsTrust, clientCertificate,
+                    tlsDomainRules,
                 ).also { made ->
                     made.bindHost = bindHost
                     try {
@@ -450,6 +457,7 @@ class SipralClient private constructor(
             client.streamFallback = streamFallback
             client.streamServer = streamServer
             client.streamTlsTrust = tlsTrust
+            client.streamDomainRules = tlsDomainRules
             client.streamClientCertificate = clientCertificate
             client.givenTlsServerName = tlsServerName
             client.routes = bindHost == null
@@ -1598,6 +1606,10 @@ class SipralClient private constructor(
     private var streamTlsTrust: SipralTlsTrust = SipralTlsTrust.Platform
     private var givenTlsServerName: String? = null
 
+    /** How every TLS server's name is read once its chain is trusted:
+     * [open]'s `tlsDomainRules`. */
+    private var streamDomainRules: SipralDomainRules = SipralDomainRules.PLATFORM
+
     /** The certificate an account's own TLS connection presents when the
      * account names none: [open]'s `clientCertificate`. */
     private var streamClientCertificate: SipralClientCertificate? = null
@@ -1716,7 +1728,7 @@ class SipralClient private constructor(
                 SignallingLink(
                     SipralTransport.TLS, parseHostPort(destination),
                     streamServerName(destination), streamTrust(destination),
-                    streamCertificate(destination),
+                    streamCertificate(destination), streamDomainRules,
                 ).also { secured = it }.connect(currentHost).first
             } else {
                 Socket().also { plain ->

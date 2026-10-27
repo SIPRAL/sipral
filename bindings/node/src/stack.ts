@@ -60,6 +60,7 @@ import {
   SipralAudio,
   SipralDnsAnswer,
   SipralDnsRecordType,
+  SipralDomainRules,
   SipralEventKind,
   SipralLink,
   SipralLogLevel,
@@ -75,7 +76,7 @@ import {
   sipral_message_hook_callback_t,
   sipral_screen_callback_t,
 } from './sipral_abi.js';
-import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream } from './tls.js';
+import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream, sipDomainOf } from './tls.js';
 import type { EnginePacket } from './transmit-worker.js';
 
 /** How one connection attempt, the TLS handshake included, may take. */
@@ -195,6 +196,16 @@ export interface StackOptions {
   tlsServerName?: string;
   /** Which authorities a TLS connection trusts; the platform's by default. */
   tlsTrust?: TlsTrust;
+  /**
+   * How a TLS server's certificate is read for its name once its chain is
+   * trusted, here and on every account's own connection, a
+   * `SipralDomainRules`: by default the HTTPS rules, with a `sip:` URI naming
+   * the domain accepted besides (RFC 5922 §7.1); `Rfc5922` reads RFC 5922
+   * alone and refuses a wildcard. An account's own connection is checked
+   * against `tlsServerName` when given, else the domain of its `serverUri`
+   * (RFC 5922 §7.3), else the address.
+   */
+  tlsDomainRules?: number;
   /**
    * The certificate a TLS connection presents when its server asks for one:
    * the signalling connection's, and that of an account on a TLS connection
@@ -580,6 +591,8 @@ export class Stack extends EventEmitter<StackEvents> {
   private readonly server: { host: string; port: number } | null;
   private readonly serverName: string | undefined;
   private readonly tlsTrust: TlsTrust;
+  /** How every TLS server's name is read once its chain is trusted. */
+  private readonly tlsDomainRules: number;
   private readonly clientCertificate: ClientCertificate | null;
   private readonly givenServerName: string | undefined;
   private readonly streamFallback: boolean;
@@ -623,6 +636,7 @@ export class Stack extends EventEmitter<StackEvents> {
     this.serverName = options.tlsServerName ?? this.server?.host;
     this.givenServerName = options.tlsServerName;
     this.tlsTrust = options.tlsTrust ?? TlsTrust.platform();
+    this.tlsDomainRules = options.tlsDomainRules ?? SipralDomainRules.Platform;
     this.clientCertificate = options.clientCertificate ?? null;
     this.streamFallback = options.streamFallback ?? true;
     this.streamServer = options.streamServer === undefined ? null : split(options.streamServer);
@@ -684,6 +698,8 @@ export class Stack extends EventEmitter<StackEvents> {
           serverName: options.tlsServerName,
           clientCertificate: options.clientCertificate,
           timeoutMs: STREAM_PATIENCE_MS,
+          sipral,
+          domainRules: options.tlsDomainRules,
         });
         address = formatAddress(link.localAddress ?? '127.0.0.1', link.localPort ?? 0);
       } catch (error) {
@@ -2444,6 +2460,8 @@ export class Stack extends EventEmitter<StackEvents> {
             serverName: this.serverName,
             clientCertificate: this.clientCertificate,
             timeoutMs: STREAM_PATIENCE_MS,
+            sipral: this.sipral,
+            domainRules: this.tlsDomainRules,
           });
           this.reconnectTimer = undefined;
           if (this.closed) {
@@ -2502,6 +2520,8 @@ export class Stack extends EventEmitter<StackEvents> {
         serverName: this.serverName,
         clientCertificate: this.clientCertificate,
         timeoutMs: STREAM_PATIENCE_MS,
+        sipral: this.sipral,
+        domainRules: this.tlsDomainRules,
       });
       this.installLink(link);
     } catch (error) {
@@ -2534,6 +2554,26 @@ export class Stack extends EventEmitter<StackEvents> {
     void this.openSipStream(transport, destination, over, bound);
   }
 
+  /**
+   * The name a TLS connection to `destination` checks the certificate
+   * against: `tlsServerName` when given; else the domain of the `serverUri`
+   * of an account on its own connection there, the SIP domain the user
+   * configured rather than the host its SRV record named (RFC 5922 §7.3);
+   * else `host`, the address connected to.
+   */
+  private streamServerName(destination: string, host: string): string {
+    if (this.givenServerName !== undefined) {
+      return this.givenServerName;
+    }
+    for (const account of this.accounts.values()) {
+      const domain = account.overTls && account.registrarAddress === destination ? sipDomainOf(account.serverUri) : null;
+      if (domain !== null) {
+        return domain;
+      }
+    }
+    return host;
+  }
+
   /** What a TLS connection to `destination` trusts: the pin of an account on it, else the stack's trust. */
   private streamTrust(destination: string): TlsTrust {
     for (const account of this.accounts.values()) {
@@ -2562,9 +2602,11 @@ export class Stack extends EventEmitter<StackEvents> {
     try {
       socket = await openStream(target.host, target.port, {
         trust: tls ? this.streamTrust(destination) : null,
-        serverName: this.givenServerName ?? target.host,
+        serverName: this.streamServerName(destination, target.host),
         clientCertificate: certificate,
         timeoutMs: STREAM_PATIENCE_MS,
+        sipral: this.sipral,
+        domainRules: this.tlsDomainRules,
       });
     } catch (error) {
       this.streamsOpening.delete(destination);

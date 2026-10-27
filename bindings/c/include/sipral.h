@@ -136,7 +136,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)7)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)8)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -3901,6 +3901,49 @@ enum {
      * dates are not checked (`docs/22-tls.md`).
      */
     SIPRAL_NETWORK_TRUST_PINNED = 3,
+};
+
+/**
+ * Which rules a SIP server's certificate is read by for its name, once the platform has
+ * verified its chain (RFC 5922 §7.1, §7.2; `docs/22-tls.md`).
+ */
+typedef uint32_t sipral_domain_rules_t;
+enum {
+    /**
+     * The platform's, the rules HTTPS uses, with a `sip:` URI in `subjectAltName` that
+     * names the domain accepted besides. What other SIP clients accept, a wildcard
+     * included, is accepted.
+     */
+    SIPRAL_DOMAIN_RULES_PLATFORM = 0,
+    /**
+     * RFC 5922 alone: a `sip:` URI that names the domain, or, where the certificate has
+     * none, a `dNSName` that is the domain itself; never a wildcard.
+     */
+    SIPRAL_DOMAIN_RULES_RFC5922 = 1,
+};
+
+/**
+ * How a certificate names a SIP domain, as RFC 5922 §7.1 and §7.2 read it.
+ */
+typedef uint32_t sipral_domain_identity_t;
+enum {
+    /**
+     * Nothing RFC 5922 reads names it: the certificate's `sip:` URIs name other domains,
+     * or neither they nor its `dNSName`s cover it.
+     */
+    SIPRAL_DOMAIN_IDENTITY_UNNAMED = 0,
+    /**
+     * A `sip:` URI with no user part in `subjectAltName` names it.
+     */
+    SIPRAL_DOMAIN_IDENTITY_SIP_URI = 1,
+    /**
+     * There is no such URI, and a `dNSName` is the domain itself.
+     */
+    SIPRAL_DOMAIN_IDENTITY_DNS_NAME = 2,
+    /**
+     * There is no such URI, and only a wildcard `dNSName` covers it.
+     */
+    SIPRAL_DOMAIN_IDENTITY_WILDCARD = 3,
 };
 
 /**
@@ -8592,6 +8635,16 @@ struct sipral_network_config {
      * Zero.
      */
     uint32_t reserved_end;
+    /**
+     * A sipral_domain_rules_t (ABI 1.8): how a server's certificate is read for its name
+     * once its chain is trusted. Zero is the platform's rules with a `sip:` URI that names
+     * the domain accepted besides.
+     */
+    sipral_domain_rules_t domain_rules;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_rules;
 };
 
 /**
@@ -11508,6 +11561,28 @@ sipral_status_t sipral_account_looked_up(sipral_handle_t stack, sipral_handle_t 
  * `size` member says how long it is.
  */
 sipral_status_t sipral_account_check_certificate(sipral_handle_t stack, sipral_handle_t account, const uint8_t *certificate, size_t certificate_len, uint64_t unix_seconds, sipral_pinned_certificate_t *out_pinned);
+
+/**
+ * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
+ * (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
+ *
+ * `domain` is the name the connection is checked against: the host of the account's
+ * `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
+ * `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
+ * when it accepted the name, zero when it refused the name alone, everything else having
+ * held. A refusal for any other reason stands and never reaches this call.
+ *
+ * `SIPRAL_STATUS_OK`: accept. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse, as a name
+ * mismatch. Either way `out_identity`, when not null, is how the certificate names the
+ * domain, for the reason given. `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+ * certificate or for `rules` out of range.
+ *
+ * Safety
+ *
+ * `certificate` must be readable for `certificate_len` bytes, `domain` for `domain_len`
+ * bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
+ */
+sipral_status_t sipral_certificate_check_domain(const uint8_t *certificate, size_t certificate_len, const char *domain, size_t domain_len, sipral_domain_rules_t rules, uint32_t platform_matched, sipral_domain_identity_t *out_identity);
 
 /**
  * The `host:port` to advertise for a socket bound at `bound` whose

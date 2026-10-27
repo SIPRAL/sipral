@@ -115,9 +115,11 @@ connections to its server. The name is checked by the rules HTTPS uses, as
 every binding checks it: `tls_server_name` when the configuration gives one;
 else the host of the `server_uri` of the account whose located addresses
 include the one connected to — the SIP domain the user configured, not the
-host its SRV record named (RFC 5922 §7.3); else the address itself. RFC 5922's
-stricter reading of a SIP certificate (a `sip:` URI in `subjectAltName` first,
-no wildcard) is not applied yet, as it is not in any binding.
+host its SRV record named (RFC 5922 §7.3); else the address itself. A `sip:`
+URI in `subjectAltName` naming that domain is accepted besides (RFC 5922
+§7.1), and with `domain_rules` `SIPRAL_DOMAIN_RULES_RFC5922` the name is read
+by RFC 5922 alone, which refuses a wildcard (`22-tls.md`, "What the platform
+checks, and what RFC 5922 adds").
 
 A client certificate (`client_certificate_pem`, `client_key_pem`) is presented
 when a server asks for one; read before every connection, a key that does not
@@ -171,7 +173,6 @@ is not carried yet; relayed media over UDP is.
   `UNTRUSTED` ("the platform's trust store holds no authority this library can
   read"); a private authority or a pin works. The Swift and Kotlin layers'
   own TLS is the platform's.
-- **RFC 5922's certificate rules**, as above.
 - **TURN over TCP or TLS, and a main transport on TCP or TLS**, as above.
 - **`ResolveNeeded`** is left to the application: a dialog keeps the flow its
   INVITE used, which is the one that survives a NAT.

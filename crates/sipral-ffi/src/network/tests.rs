@@ -394,6 +394,8 @@ fn a_stack_registers_over_tls_at_a_domain_found_by_srv_and_holds_a_call_with_no_
         tls_server_name_len: 0,
         connect_timeout_ms: 0,
         reserved_end: 0,
+        domain_rules: 0,
+        reserved_rules: 0,
     };
 
     // RFC 3263 before any stack: the domain is found by SRV alone
@@ -631,6 +633,8 @@ fn a_server_whose_certificate_is_not_trusted_is_reported_with_the_reason() {
         tls_server_name_len: 0,
         connect_timeout_ms: 0,
         reserved_end: 0,
+        domain_rules: 0,
+        reserved_rules: 0,
     };
     let mut observed = Observed::default();
     let mut stack_config = config(record, &mut observed);
@@ -701,6 +705,8 @@ fn a_configuration_that_cannot_be_read_says_which_member() {
         tls_server_name_len: 0,
         connect_timeout_ms: 0,
         reserved_end: 0,
+        domain_rules: 0,
+        reserved_rules: 0,
     };
     assert_eq!(
         unsafe { sipral_network_start(stack, &raw const broken, 0) },
@@ -708,6 +714,20 @@ fn a_configuration_that_cannot_be_read_says_which_member() {
     );
     assert!(
         last_error_text().contains("authority_pem"),
+        "{}",
+        last_error_text()
+    );
+    let unknown_rules = SipralNetworkConfig {
+        trust: super::SipralNetworkTrust::Platform as u32,
+        domain_rules: 2,
+        ..broken
+    };
+    assert_eq!(
+        unsafe { sipral_network_start(stack, &raw const unknown_rules, 0) },
+        SipralStatus::InvalidArgument
+    );
+    assert!(
+        last_error_text().contains("domain_rules is 2"),
         "{}",
         last_error_text()
     );

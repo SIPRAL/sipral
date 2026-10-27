@@ -3324,6 +3324,49 @@ public enum SipralNetworkTrust : uint
 }
 
 /// <summary>
+/// Which rules a SIP server's certificate is read by for its name, once the platform has
+/// verified its chain (RFC 5922 §7.1, §7.2; `docs/22-tls.md`).
+/// </summary>
+public enum SipralDomainRules : uint
+{
+    /// <summary>
+    /// The platform's, the rules HTTPS uses, with a `sip:` URI in `subjectAltName` that
+    /// names the domain accepted besides. What other SIP clients accept, a wildcard
+    /// included, is accepted.
+    /// </summary>
+    Platform = 0,
+    /// <summary>
+    /// RFC 5922 alone: a `sip:` URI that names the domain, or, where the certificate has
+    /// none, a `dNSName` that is the domain itself; never a wildcard.
+    /// </summary>
+    Rfc5922 = 1,
+}
+
+/// <summary>
+/// How a certificate names a SIP domain, as RFC 5922 §7.1 and §7.2 read it.
+/// </summary>
+public enum SipralDomainIdentity : uint
+{
+    /// <summary>
+    /// Nothing RFC 5922 reads names it: the certificate's `sip:` URIs name other domains,
+    /// or neither they nor its `dNSName`s cover it.
+    /// </summary>
+    Unnamed = 0,
+    /// <summary>
+    /// A `sip:` URI with no user part in `subjectAltName` names it.
+    /// </summary>
+    SipUri = 1,
+    /// <summary>
+    /// There is no such URI, and a `dNSName` is the domain itself.
+    /// </summary>
+    DnsName = 2,
+    /// <summary>
+    /// There is no such URI, and only a wildcard `dNSName` covers it.
+    /// </summary>
+    Wildcard = 3,
+}
+
+/// <summary>
 /// The one callback a stack has.
 ///
 /// Called inside `sipral_stack_poll` on its thread, never concurrently
@@ -8596,6 +8639,16 @@ public struct SipralNetworkConfig
     /// Zero.
     /// </summary>
     public uint ReservedEnd;
+    /// <summary>
+    /// A SipralDomainRules (ABI 1.8): how a server's certificate is read for its name
+    /// once its chain is trusted. Zero is the platform's rules with a `sip:` URI that names
+    /// the domain accepted besides.
+    /// </summary>
+    public uint DomainRules;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint ReservedRules;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -9302,6 +9355,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_account_check_certificate(ulong stack, ulong account, byte[] certificate, nuint certificateLen, ulong unixSeconds, ref SipralPinnedCertificate outPinned);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_certificate_check_domain(byte[] certificate, nuint certificateLen, sbyte[] domain, nuint domainLen, uint rules, uint platformMatched, out uint identity);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_advertised_address(sbyte[] bound, nuint boundLen, sbyte[] peer, nuint peerLen, sbyte[] buffer, nuint capacity, out nuint needed);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -9411,7 +9467,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 7;
+    public const uint AbiVersionMinor = 8;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9872,7 +9928,7 @@ public static partial class Sipral
         ("sipral_pinned_certificate_t", Marshal.SizeOf<SipralPinnedCertificate>(), 40, 36, 40),
         ("sipral_network_test_config_t", Marshal.SizeOf<SipralNetworkTestConfig>(), 48, 36, 40),
         ("sipral_isup_t", Marshal.SizeOf<SipralIsup>(), 72, 68, 68),
-        ("sipral_network_config_t", Marshal.SizeOf<SipralNetworkConfig>(), 120, 68, 68),
+        ("sipral_network_config_t", Marshal.SizeOf<SipralNetworkConfig>(), 128, 76, 76),
     };
 
     /// <summary>The calling thread's last error, or an empty string
@@ -13643,6 +13699,35 @@ public static partial class Sipral
         var pinned = SipralPinnedCertificate.Sized();
         Check(NativeMethods.sipral_account_check_certificate(stack, account, certificate, (nuint)certificate.Length, unixSeconds, ref pinned));
         return pinned;
+    }
+
+    /// <summary>
+    /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
+    /// (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
+    ///
+    /// `domain` is the name the connection is checked against: the host of the account's
+    /// `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
+    /// `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
+    /// when it accepted the name, zero when it refused the name alone, everything else having
+    /// held. A refusal for any other reason stands and never reaches this call.
+    ///
+    /// `SIPRAL_STATUS_OK`: accept. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse, as a name
+    /// mismatch. Either way `out_identity`, when not null, is how the certificate names the
+    /// domain, for the reason given. `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+    /// certificate or for `rules` out of range.
+    ///
+    /// Safety
+    ///
+    /// `certificate` must be readable for `certificate_len` bytes, `domain` for `domain_len`
+    /// bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
+    /// </summary>
+    public static uint CertificateCheckDomain(byte[] certificate, string domain, uint rules, uint platformMatched)
+    {
+        var domainBytes = Encoding.UTF8.GetBytes(domain);
+        var domainSigned = new sbyte[domainBytes.Length];
+        Buffer.BlockCopy(domainBytes, 0, domainSigned, 0, domainBytes.Length);
+        Check(NativeMethods.sipral_certificate_check_domain(certificate, (nuint)certificate.Length, domainSigned, (nuint)domainSigned.Length, rules, platformMatched, out var identity));
+        return identity;
     }
 
     /// <summary>

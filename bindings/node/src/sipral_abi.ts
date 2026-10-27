@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 7;
+export const SIPRAL_ABI_VERSION_MINOR = 8;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -3745,6 +3745,49 @@ export const SipralNetworkTrust = Object.freeze({
   Pinned: 3,
 } as const);
 koffi.alias('sipral_network_trust_t', 'uint32_t');
+
+/**
+ * Which rules a SIP server's certificate is read by for its name, once the platform has
+ * verified its chain (RFC 5922 §7.1, §7.2; `docs/22-tls.md`).
+ */
+export const SipralDomainRules = Object.freeze({
+  /**
+   * The platform's, the rules HTTPS uses, with a `sip:` URI in `subjectAltName` that
+   * names the domain accepted besides. What other SIP clients accept, a wildcard
+   * included, is accepted.
+   */
+  Platform: 0,
+  /**
+   * RFC 5922 alone: a `sip:` URI that names the domain, or, where the certificate has
+   * none, a `dNSName` that is the domain itself; never a wildcard.
+   */
+  Rfc5922: 1,
+} as const);
+koffi.alias('sipral_domain_rules_t', 'uint32_t');
+
+/**
+ * How a certificate names a SIP domain, as RFC 5922 §7.1 and §7.2 read it.
+ */
+export const SipralDomainIdentity = Object.freeze({
+  /**
+   * Nothing RFC 5922 reads names it: the certificate's `sip:` URIs name other domains,
+   * or neither they nor its `dNSName`s cover it.
+   */
+  Unnamed: 0,
+  /**
+   * A `sip:` URI with no user part in `subjectAltName` names it.
+   */
+  SipUri: 1,
+  /**
+   * There is no such URI, and a `dNSName` is the domain itself.
+   */
+  DnsName: 2,
+  /**
+   * There is no such URI, and only a wildcard `dNSName` covers it.
+   */
+  Wildcard: 3,
+} as const);
+koffi.alias('sipral_domain_identity_t', 'uint32_t');
 
 /**
  * The version of the ABI this library provides.
@@ -9370,6 +9413,16 @@ export interface SipralNetworkConfig {
    * Zero.
    */
   reserved_end: number;
+  /**
+   * A sipral_domain_rules_t (ABI 1.8): how a server's certificate is read for its name
+   * once its chain is trusted. Zero is the platform's rules with a `sip:` URI that names
+   * the domain accepted besides.
+   */
+  domain_rules: number;
+  /**
+   * Zero.
+   */
+  reserved_rules: number;
 }
 koffi.struct('sipral_network_config_t', {
   size: 'size_t',
@@ -9389,6 +9442,8 @@ koffi.struct('sipral_network_config_t', {
   tls_server_name_len: 'size_t',
   connect_timeout_ms: 'uint32_t',
   reserved_end: 'uint32_t',
+  domain_rules: 'sipral_domain_rules_t',
+  reserved_rules: 'uint32_t',
 });
 
 /**
@@ -12457,6 +12512,28 @@ export class Sipral {
   readonly sipral_account_check_certificate: (stack: Wide, account: Wide, certificate: Pointer, certificate_len: number, unix_seconds: Wide, out_pinned: Pointer) => number;
 
   /**
+   * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
+   * (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
+   *
+   * `domain` is the name the connection is checked against: the host of the account's
+   * `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
+   * `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
+   * when it accepted the name, zero when it refused the name alone, everything else having
+   * held. A refusal for any other reason stands and never reaches this call.
+   *
+   * `SIPRAL_STATUS_OK`: accept. `SIPRAL_STATUS_CERTIFICATE_REFUSED`: refuse, as a name
+   * mismatch. Either way `out_identity`, when not null, is how the certificate names the
+   * domain, for the reason given. `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+   * certificate or for `rules` out of range.
+   *
+   * Safety
+   *
+   * `certificate` must be readable for `certificate_len` bytes, `domain` for `domain_len`
+   * bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
+   */
+  readonly sipral_certificate_check_domain: (certificate: Pointer, certificate_len: number, domain: Pointer, domain_len: number, rules: number, platform_matched: number, out_identity: Pointer) => number;
+
+  /**
    * The `host:port` to advertise for a socket bound at `bound` whose
    * traffic goes to `peer` (both `host:port` addresses, not names),
    * NUL-terminated into `buffer`.
@@ -12936,6 +13013,7 @@ export class Sipral {
     this.sipral_local_conference_record_stop = library.func('sipral_status_t sipral_local_conference_record_stop(sipral_handle_t conference)');
     this.sipral_account_looked_up = library.func('sipral_status_t sipral_account_looked_up(sipral_handle_t stack, sipral_handle_t account, const char *name, size_t name_len, sipral_dns_record_type_t record, sipral_dns_answer_t answer, const char *records, size_t records_len, uint64_t now_ms)');
     this.sipral_account_check_certificate = library.func('sipral_status_t sipral_account_check_certificate(sipral_handle_t stack, sipral_handle_t account, const uint8_t *certificate, size_t certificate_len, uint64_t unix_seconds, sipral_pinned_certificate_t *out_pinned)');
+    this.sipral_certificate_check_domain = library.func('sipral_status_t sipral_certificate_check_domain(const uint8_t *certificate, size_t certificate_len, const char *domain, size_t domain_len, sipral_domain_rules_t rules, uint32_t platform_matched, sipral_domain_identity_t *out_identity)');
     this.sipral_advertised_address = library.func('sipral_status_t sipral_advertised_address(const char *bound, size_t bound_len, const char *peer, size_t peer_len, char *buffer, size_t capacity, size_t *out_needed)');
     this.sipral_stack_diagnostic_trace = library.func('sipral_status_t sipral_stack_diagnostic_trace(sipral_handle_t stack, sipral_toggle_t on)');
     this.sipral_stack_srtp_suite_order = library.func('sipral_status_t sipral_stack_srtp_suite_order(sipral_handle_t stack, sipral_srtp_suite_t *out_suites, size_t capacity, size_t *out_count)');
@@ -13040,5 +13118,5 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_pinned_certificate_t: [40, 36, 40],
   sipral_network_test_config_t: [48, 36, 40],
   sipral_isup_t: [72, 68, 68],
-  sipral_network_config_t: [120, 68, 68],
+  sipral_network_config_t: [128, 76, 76],
 };

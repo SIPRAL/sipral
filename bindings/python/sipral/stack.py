@@ -131,6 +131,28 @@ def parse_address(text: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def sip_domain_of(uri: str | None) -> str | None:
+    """The domain a ``sip:`` or ``sips:`` URI names (``sips:example.com:5061``
+    and ``sip:example.com;transport=tls`` both give ``example.com``), the
+    name RFC 5922 Section 7.3 checks a server's certificate against; ``None``
+    for an IP address, which is then the destination itself, or for no such
+    URI."""
+    if uri is None:
+        return None
+    scheme, colon, rest = uri.partition(":")
+    if not colon or scheme.lower() not in ("sip", "sips"):
+        return None
+    host_port = rest.split(";", 1)[0].split("?", 1)[0].rpartition("@")[2]
+    if host_port.startswith("["):
+        return None
+    host = host_port.split(":", 1)[0].rstrip(".")
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        return host or None
+
+
 def _is_address(text: str) -> bool:
     """Whether ``text`` is ``host:port`` with an IP address for its host."""
     try:
@@ -247,6 +269,7 @@ class Stack:
         signalling_server: str | None = None,
         tls_server_name: str | None = None,
         tls_trust: TlsTrust | None = None,
+        tls_domain_rules: int = lib.SIPRAL_DOMAIN_RULES_PLATFORM,
         tls_client_certificate: TlsClientCertificate | None = None,
         invite_limit: InviteLimit | tuple[int, int] | None = None,
         stream_fallback: bool = True,
@@ -277,7 +300,15 @@ class Stack:
         against ``tls_server_name`` (default: the host of
         ``signalling_server``) with ``tls_trust``
         (:class:`sipral.signalling.TlsTrust`, default the platform's
-        authorities; `docs/22-tls.md`). The check cannot be turned off.
+        authorities; `docs/22-tls.md`). The check cannot be turned off. Once
+        the chain is trusted, ``tls_domain_rules`` reads the name, here and on
+        every account's own connection: by default
+        (``SIPRAL_DOMAIN_RULES_PLATFORM``) the HTTPS rules with a ``sip:`` URI
+        naming the domain accepted besides (RFC 5922 Section 7.1);
+        ``SIPRAL_DOMAIN_RULES_RFC5922`` reads RFC 5922 alone and refuses a
+        wildcard. An account's own connection is checked against
+        ``tls_server_name`` when given, else the domain of its
+        ``server_uri`` (RFC 5922 Section 7.3), else the address.
         ``tls_client_certificate``
         (:class:`sipral.signalling.TlsClientCertificate`) is presented when
         the server asks for one, on that connection and on every account's
@@ -515,6 +546,8 @@ class Stack:
         #: account pins nothing.
         self._tls_trust = tls_trust or TlsTrust.platform()
         self._given_tls_server_name = tls_server_name
+        #: How every TLS server's name is read once its chain is trusted.
+        self._tls_domain_rules = tls_domain_rules
         #: The certificate presented on the signalling connection and on an
         #: account's own TLS connection that has none of its own.
         self._tls_client = tls_client_certificate
@@ -2356,6 +2389,26 @@ class Stack:
                 return TlsTrust.pinned(account.tls_pin)
         return self._tls_trust
 
+    def _stream_server_name(self, destination: str, host: str) -> str:
+        """The name a TLS connection to ``destination`` checks the
+        certificate against: ``tls_server_name`` when given; else the domain
+        of the ``server_uri`` of a TLS account on ``destination``, the SIP
+        domain the user configured rather than the host its SRV record named
+        (RFC 5922 Section 7.3); else ``host``, the address connected to."""
+        if self._given_tls_server_name is not None:
+            return self._given_tls_server_name
+        with self._lock:
+            accounts = list(self._accounts)
+        for account in accounts:
+            if (
+                account.stream_protocol in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
+                and account.registrar_address == destination
+            ):
+                domain = sip_domain_of(account.server_uri)
+                if domain is not None:
+                    return domain
+        return host
+
     def _stream_client(self, destination: str) -> TlsClientCertificate | None:
         """The client certificate of a TLS account on ``destination``, else the stack's."""
         with self._lock:
@@ -2387,10 +2440,11 @@ class Stack:
                     (host, port),
                     bind_host=None,
                     context=trust.context(),
-                    server_name=self._given_tls_server_name or host,
+                    server_name=self._stream_server_name(destination, host),
                     timeout=_SIGNALLING_PATIENCE,
                     pin=trust.pin,
                     client=client,
+                    domain_rules=self._tls_domain_rules,
                 )
                 try:
                     early = settle(sock, settle_seconds(time.monotonic() - started))
@@ -2619,6 +2673,7 @@ class Stack:
             timeout=_SIGNALLING_PATIENCE,
             pin=self._tls_pin,
             client=self._tls_client,
+            domain_rules=self._tls_domain_rules,
         )
         try:
             return sock, settle(sock, settle_seconds(time.monotonic() - started))

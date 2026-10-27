@@ -32,6 +32,7 @@
 pub mod auth;
 pub mod diag;
 pub mod dialog;
+pub mod domain_certificate;
 pub mod endpoint;
 pub mod isup;
 pub mod msg;

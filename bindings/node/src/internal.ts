@@ -49,7 +49,7 @@ export class SipralError extends Error {
 }
 
 /** What the library said about the last call that failed on this thread. */
-function lastError(sipral: Sipral): string {
+export function lastError(sipral: Sipral): string {
   const buffer = Buffer.alloc(1024);
   const length = new BigUint64Array(1);
   if (sipral.sipral_last_error_message(buffer, buffer.length, length) !== SipralStatus.Ok) {

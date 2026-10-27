@@ -5666,6 +5666,30 @@ Java_org_sipral_SipralNative_sipral_1account_1check_1certificate(JNIEnv *env, jo
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1certificate_1check_1domain(JNIEnv *env, jobject self, jbyteArray certificate, jbyteArray domain, jlong rules, jlong platformMatched, jlongArray identity)
+{
+    (void)env;
+    (void)self;
+    jbyte *certificate_data = certificate ? (*env)->GetByteArrayElements(env, certificate, NULL) : NULL;
+    jsize certificate_size = certificate ? (*env)->GetArrayLength(env, certificate) : 0;
+    jbyte *domain_data = domain ? (*env)->GetByteArrayElements(env, domain, NULL) : NULL;
+    jsize domain_size = domain ? (*env)->GetArrayLength(env, domain) : 0;
+    sipral_domain_identity_t identity_value = 0;
+    sipral_status_t status = sipral_certificate_check_domain((const uint8_t *)certificate_data, (size_t)certificate_size, (const char *)domain_data, (size_t)domain_size, (sipral_domain_rules_t)rules, (uint32_t)platformMatched, &identity_value);
+    if (certificate) {
+        (*env)->ReleaseByteArrayElements(env, certificate, certificate_data, JNI_ABORT);
+    }
+    if (domain) {
+        (*env)->ReleaseByteArrayElements(env, domain, domain_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)identity_value;
+        (*env)->SetLongArrayRegion(env, identity, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1advertised_1address(JNIEnv *env, jobject self, jbyteArray bound, jbyteArray peer, jbyteArray buffer, jlongArray needed)
 {
     (void)env;
@@ -5869,7 +5893,7 @@ Java_org_sipral_SipralNative_sipral_1isup_1number(JNIEnv *env, jobject self, jby
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, jlong stack, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, jlong stack, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong configDomainRules, jlong configReservedRules, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -5904,6 +5928,8 @@ Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, j
     config_value.tls_server_name_len = (size_t)configTlsServerName_size;
     config_value.connect_timeout_ms = (uint32_t)configConnectTimeoutMs;
     config_value.reserved_end = (uint32_t)configReservedEnd;
+    config_value.domain_rules = (sipral_domain_rules_t)configDomainRules;
+    config_value.reserved_rules = (uint32_t)configReservedRules;
     sipral_status_t status = sipral_network_start((sipral_handle_t)stack, &config_value, (uint64_t)nowMs);
     if (configAuthorityPem) {
         (*env)->ReleaseByteArrayElements(env, configAuthorityPem, configAuthorityPem_data, JNI_ABORT);
@@ -5945,7 +5971,7 @@ Java_org_sipral_SipralNative_sipral_1network_1stop(JNIEnv *env, jobject self, jl
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jbyteArray serverUri, jlong protocol, jbyteArray buffer, jlongArray needed)
+Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong configDomainRules, jlong configReservedRules, jbyteArray serverUri, jlong protocol, jbyteArray buffer, jlongArray needed)
 {
     (void)env;
     (void)self;
@@ -5980,6 +6006,8 @@ Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, 
     config_value.tls_server_name_len = (size_t)configTlsServerName_size;
     config_value.connect_timeout_ms = (uint32_t)configConnectTimeoutMs;
     config_value.reserved_end = (uint32_t)configReservedEnd;
+    config_value.domain_rules = (sipral_domain_rules_t)configDomainRules;
+    config_value.reserved_rules = (uint32_t)configReservedRules;
     jbyte *serverUri_data = serverUri ? (*env)->GetByteArrayElements(env, serverUri, NULL) : NULL;
     jsize serverUri_size = serverUri ? (*env)->GetArrayLength(env, serverUri) : 0;
     jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;

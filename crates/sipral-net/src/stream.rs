@@ -46,6 +46,8 @@ pub(crate) struct TlsDial<'a> {
     pub(crate) pin: Option<&'a sipral_core::pin::CertificatePin>,
     pub(crate) client: Option<&'a ClientCertificate>,
     pub(crate) platform: &'a PlatformRoots,
+    /// How the server's name is read.
+    pub(crate) rules: sipral_core::domain_certificate::DomainRules,
 }
 
 /// What the TLS handshake learnt that the first reads still need.
@@ -86,7 +88,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
     // reaches the server
     let prepared = match dial.tls {
         Some(ref tls) => Some((
-            prepare(tls.trust, tls.pin, tls.client, tls.platform)?,
+            prepare(tls.trust, tls.pin, tls.client, tls.platform, tls.rules)?,
             tls.name.clone(),
         )),
         None => None,
