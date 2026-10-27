@@ -350,10 +350,12 @@ final class SipralStack {
   /// [streamProtocol] (`SipralTransport.tcp`, `tls`, `ws` or `wss`) puts the
   /// account on its own connection to its server; the stack asks for it with
   /// `SipralEventKind.transportWanted` and this layer opens it, reopening it
-  /// when it closes. With a [tlsPin] only the pinned certificate is trusted;
-  /// otherwise the platform's authorities under `tlsServerName` or the
-  /// server's host. Until it is open, placing a call throws
-  /// `SipralStatus.transportDown`. Any other value is an [ArgumentError].
+  /// when it closes or when the stack lets it go, as it does when the server
+  /// stops answering keep-alive pings. With a [tlsPin] only the pinned
+  /// certificate is trusted; otherwise the platform's authorities under
+  /// `tlsServerName` or the server's host. Until it is open, placing a call
+  /// throws `SipralStatus.transportDown`. Any other value is an
+  /// [ArgumentError].
   /// `ws`/`wss` run a WebSocket (RFC 7118) asking for [websocketResource]
   /// (`/ws`) with [websocketHost] as `Host` (the server's address).
   ///
@@ -1397,6 +1399,16 @@ final class SipralStack {
       if (event.kind == SipralEventKind.lookupWanted && name != null) {
         // nothing may call back into the stack from inside its callback
         unawaited(_lookUp(event.account, name, event.lookupRecord ?? 0));
+      }
+      // the stack retired a connection itself, as one whose server stopped
+      // answering its keep-alive pings: the socket goes too, before the
+      // stack's next ask for the same server finds it still held. The stack
+      // is not told again; it knows. One this layer reported itself is no
+      // longer held, so nothing happens for it
+      final retired = event.transport;
+      if (event.kind == SipralEventKind.transportFailed && retired != null) {
+        _streamDestinations.remove(retired);
+        _streams.remove(retired)?.destroy();
       }
       if (event.kind == SipralEventKind.transportWanted) {
         final wanted = raw.ref.payload.transportWanted;

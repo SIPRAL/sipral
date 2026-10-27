@@ -356,6 +356,50 @@ void main() {
     },
   );
 
+  test(
+    'an account over TCP is opened again when the stack lets its connection go',
+    () async {
+      final registrar = await StreamRegistrar.open();
+      addTearDown(registrar.close);
+      final client = await stack();
+      final failed = <SipralStackEvent>[];
+      final watching = client.events.listen((event) {
+        if (event.kind == SipralEventKind.transportFailed) {
+          failed.add(event);
+        }
+      });
+      addTearDown(watching.cancel);
+      final account = client.addAccount(
+        'sip:alice@$serverName',
+        registrarAddress: registrar.address,
+        registrar: 'sip:$serverName',
+        streamProtocol: SipralTransport.tcp,
+      );
+      await account.registered();
+      expect(registrar.registers.single.$1, 1);
+
+      // the stack retires a connection whose server stopped answering its
+      // keep-alive pings (RFC 5626 §4.4.1) and asks for another at once; the
+      // server never closes the old one, so nothing but that event says it
+      // is gone. 64 is the first number this layer binds a connection under
+      const first = 64;
+      expect(
+        Sipral.open().stackTransportFailed(
+          client.handle,
+          first,
+          SipralTransportError.timedOut,
+          client.nowMs(),
+        ),
+        SipralStatus.ok,
+      );
+      await reach.until(
+        () => registrar.registers.any((one) => one.$1 == 2),
+        within: const Duration(seconds: 10),
+      );
+      expect(failed.map((event) => event.transport), contains(first));
+    },
+  );
+
   test('an account over a WebSocket asks for its resource and Host', () async {
     final server = await StreamRegistrar.open();
     addTearDown(server.close);
