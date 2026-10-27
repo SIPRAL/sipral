@@ -12,6 +12,7 @@ import android.telecom.CallEndpoint
 import android.telecom.CallEndpointException
 import android.telecom.Connection
 import android.telecom.DisconnectCause
+import android.telecom.TelecomManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.sipral.telecom.AudioRoute
@@ -82,6 +83,13 @@ class SipralConnection internal constructor(
             main.post {
                 destroy()
                 SipralTelecom.destroyed(id)
+            }
+        }
+
+        override fun setCaller(caller: String, displayName: String?) = onMain {
+            self.setAddress(addressOf(caller), TelecomManager.PRESENTATION_ALLOWED)
+            if (displayName != null) {
+                self.setCallerDisplayName(displayName, TelecomManager.PRESENTATION_ALLOWED)
             }
         }
     }

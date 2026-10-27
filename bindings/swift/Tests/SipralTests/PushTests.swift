@@ -204,7 +204,9 @@ final class PushTests: XCTestCase {
         let bobEvents: Recorder<SipralEvent>
     }
 
-    private func woken(callId: String? = nil, callerName: String? = nil) async throws -> Woken {
+    private func woken(
+        callerId: String = "sip:alice@sipral.invalid", callId: String? = nil, callerName: String? = nil
+    ) async throws -> Woken {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
         let aliceAccount = try alice.addAccount(
@@ -215,9 +217,7 @@ final class PushTests: XCTestCase {
         let callKit = CallKitBridge(provider: provider)
         let pushKit = PushKitBridge(callKit: callKit)
         let bobEvents = Recorder(bob.events())
-        let pending = try await pushKit.handle(
-            push: VoipPush(callerId: "sip:alice@sipral.invalid", callId: callId), account: bobAccount
-        )
+        let pending = try await pushKit.handle(push: VoipPush(callerId: callerId, callId: callId), account: bobAccount)
         return Woken(
             alice: alice, aliceAccount: aliceAccount, bob: bob, provider: provider, callKit: callKit,
             pushKit: pushKit, pending: pending, bobEvents: bobEvents
@@ -331,6 +331,31 @@ final class PushTests: XCTestCase {
         let given = await phone.provider.named
         XCTAssertEqual(given.map(\.uuid), [phone.pending.uuid])
         XCTAssertEqual(given.map(\.displayName), ["Alice Liddell"])
+    }
+
+    /// A push that named nobody: the stack matches Alice's INVITE on the
+    /// account alone, the screen raised as `Unknown` is answered by it, and
+    /// is then given Alice's URI and name.
+    func testAPushThatNamesNobodyIsAnsweredByTheCallOnItsAccount() async throws {
+        let phone = try await woken(callerId: "", callerName: "Alice Liddell")
+        defer { phone.alice.close(); phone.bob.close() }
+        let shown = await phone.provider.reported
+        XCTAssertEqual(shown.map(\.callerId), ["Unknown"])
+        XCTAssertNotNil(phone.pending.announcement)
+        let outcome = Outcome()
+        phone.callKit.handleAnswer(uuid: phone.pending.uuid) { outcome.record($0) }
+
+        let (aliceCall, bobCall, aliceEvents) = try await inviteArrives(phone)
+        defer { aliceCall.close(); bobCall.close() }
+        let confirmed = await aliceEvents.first(within: 5) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(confirmed, "the caller never saw the answer")
+        XCTAssertEqual(outcome.all, ["answered"])
+        let identified = await eventually(within: 5) { await !phone.provider.identified.isEmpty }
+        XCTAssertTrue(identified, "the screen was left showing nobody")
+        let given = await phone.provider.identified
+        XCTAssertEqual(given.map(\.uuid), [phone.pending.uuid])
+        XCTAssertEqual(given.first?.callerId.hasPrefix("sip:alice@"), true, "\(given)")
+        XCTAssertEqual(given.first?.displayName, "Alice Liddell")
     }
 
     // MARK: - the application ends a screen

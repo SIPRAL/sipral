@@ -161,8 +161,9 @@ class Phone(private val app: Application) {
      * Open the stack on this device's own address, add the account, and
      * register it: by carrying on the registration the last process wrote
      * down when there is one (C3), and from the beginning otherwise. [push]
-     * names a caller a push announced: the call is shown ringing as soon as
-     * the account exists, before the network has answered anything (C1).
+     * names a caller a push announced, empty when it named nobody: the call
+     * is shown ringing as soon as the account exists, before the network
+     * has answered anything (C1).
      */
     fun start(trigger: String, push: String? = null): Job {
         starting?.takeIf { it.isActive }?.let { running ->
@@ -267,8 +268,8 @@ class Phone(private val app: Application) {
                         // C1 then C3: the call rings first, then the binding the
                         // last process wrote down is carried on by the announce's
                         // refresh (or a registration from the beginning)
-                        val wake = wakeForPush(opened, added, bridge!!, lifecycle, key, push)
-                        note("announced $push: ringing before the INVITE")
+                        val wake = wakeForPush(opened, added, bridge!!, lifecycle, key, push.ifEmpty { null })
+                        note("announced ${push.ifEmpty { "on the account alone" }}: ringing before the INVITE")
                         wake.restored
                     } else {
                         // the record says where the binding stood; only an answer
@@ -505,7 +506,8 @@ class Phone(private val app: Application) {
      * INVITE's `Call-ID` when the push carries one (`call-id`).
      */
     fun pushArrived(caller: String, callId: String? = null, done: () -> Unit = {}) {
-        note("push: $caller is calling" + (callId?.let { ", Call-ID $it" } ?: ""))
+        val who = if (caller.isEmpty()) "a caller it did not name" else caller
+        note("push: $who is calling" + (callId?.let { ", Call-ID $it" } ?: ""))
         pushCallId = callId
         val job = start("woken by a push", caller)
         scope.launch {
@@ -518,8 +520,8 @@ class Phone(private val app: Application) {
         val added = account ?: return
         val callId = pushCallId
         pushCallId = null
-        bridge?.pushArrived(added.handle, caller, callId = callId)
-        note("announced $caller: ringing before the INVITE")
+        bridge?.pushArrived(added.handle, caller.ifEmpty { null }, callId = callId)
+        note("announced ${caller.ifEmpty { "on the account alone" }}: ringing before the INVITE")
     }
 
     fun answer(id: String) {

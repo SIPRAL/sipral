@@ -47,6 +47,11 @@ interface TelecomConnection {
     /** The call is over as far as the framework is concerned; the
      * connection is destroyed after this and told nothing more. */
     fun setDisconnected(cause: TelecomDisconnect)
+
+    /** Who is calling, for a call a push raised without naming them: the
+     * INVITE's `From` URI and, when known, its name. Nothing, for a
+     * framework that cannot change a call it already shows. */
+    fun setCaller(caller: String, displayName: String?) = Unit
 }
 
 /** Why a call left the framework. One for each `DisconnectCause` code a
@@ -83,8 +88,8 @@ enum class TelecomDisconnect {
  */
 interface SipCalls {
     /** `sipral_account_announce`, or `sipral_account_announce_call` with the
-     * push's [callId]. */
-    fun announce(account: Long, caller: String, callId: String? = null): SipralAnnounced
+     * push's [callId]; `sipral_account_announce_any` when [caller] is null. */
+    fun announce(account: Long, caller: String?, callId: String? = null): SipralAnnounced
 
     /** `sipral_announcement_forget`. Throws `SipralException` with
      * `WRONG_STATE` when the announcement was already fulfilled or had

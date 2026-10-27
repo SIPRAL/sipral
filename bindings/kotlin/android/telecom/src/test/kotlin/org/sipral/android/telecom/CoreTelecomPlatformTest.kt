@@ -47,7 +47,7 @@ class CoreTelecomPlatformTest {
     private class Sip : SipCalls {
         val asked = CopyOnWriteArrayList<String>()
 
-        override fun announce(account: Long, caller: String, callId: String?): SipralAnnounced = SipralAnnounced.Waiting(1)
+        override fun announce(account: Long, caller: String?, callId: String?): SipralAnnounced = SipralAnnounced.Waiting(1)
         override fun forgetAnnouncement(announcement: Long) {
             asked += "forget $announcement"
         }

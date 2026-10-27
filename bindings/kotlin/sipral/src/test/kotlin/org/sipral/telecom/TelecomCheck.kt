@@ -128,6 +128,10 @@ internal class FakeConnection(val id: String, val log: Log) : TelecomConnection 
     override fun setDisconnected(cause: TelecomDisconnect) {
         state = "disconnected"; this.cause = cause; log.add("conn $id disconnected $cause")
     }
+
+    override fun setCaller(caller: String, displayName: String?) {
+        log.add("conn $id caller $caller ${displayName ?: "-"}")
+    }
 }
 
 internal class FakeSip(val log: Log) : SipCalls {
@@ -137,8 +141,9 @@ internal class FakeSip(val log: Log) : SipCalls {
     var nextCall = 500L
     var hold: Pair<Boolean, Boolean> = false to false
 
-    override fun announce(account: Long, caller: String, callId: String?): SipralAnnounced {
-        log.add(if (callId == null) "announce $account $caller" else "announce $account $caller $callId")
+    override fun announce(account: Long, caller: String?, callId: String?): SipralAnnounced {
+        val who = caller ?: "anybody"
+        log.add(if (callId == null) "announce $account $who" else "announce $account $who $callId")
         if (announceFails) {
             throw SipralException(SipralStatus.STALE_HANDLE, "no such account")
         }
@@ -181,13 +186,20 @@ private class Rig {
 
 internal const val ACCOUNT = 7L
 
-internal fun event(kind: SipralEventKind, call: Long = 0, account: Long = 0, message: String? = null) = SipralEvent(
+internal fun event(
+    kind: SipralEventKind,
+    call: Long = 0,
+    account: Long = 0,
+    message: String? = null,
+    announcement: Long = 0,
+) = SipralEvent(
     size = 0,
     stack = 1,
     kind = kind.value.toLong(),
     account = account,
     call = call,
     message = message?.toByteArray(Charsets.UTF_8),
+    payloadAnnounceNumbers = longArrayOf(announcement, 0),
 )
 
 internal fun invite(from: String) =
@@ -313,6 +325,43 @@ private fun fakeSequences(): String {
         assertEquals(null, carolConn.cause)
         assertEquals(listOf(carol), bridge.calls.value.map { it.id })
         assertEquals("Carol", bridge.calls.value.single().displayName)
+        ran++
+    }
+
+    // A push that named nobody, beside one naming Bob: the framework is shown
+    // no address, the call is announced on the account alone, and the INVITE
+    // the library matched to that announcement takes its screen, by the
+    // announcement's handle rather than by age, and tells the connection who
+    // is calling.
+    Rig().run {
+        val bob = bridge.pushArrived(ACCOUNT, "sip:bob@example.invalid")
+        val nobody = bridge.pushArrived(ACCOUNT, null)
+        assertEquals(1, log.count("report $nobody "), log.snapshot().toString())
+        assertEquals(1, log.count("announce $ACCOUNT anybody"), log.snapshot().toString())
+        platform.create(bob)
+        platform.create(nobody)
+        // 100 went to Bob's push and 101 to this one
+        bridge.onEvent(event(SipralEventKind.CALL_ANNOUNCED, call = 905, announcement = 101))
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 905, account = ACCOUNT, message = invite("Carol <sip:carol@example.invalid>")))
+        assertEquals(905, bridge.callHandleOf(nobody))
+        assertEquals(0, bridge.callHandleOf(bob), "the older push took a call the library gave another")
+        assertEquals(1, log.count("conn $nobody caller sip:carol@example.invalid Carol"), log.snapshot().toString())
+        val shown = bridge.calls.value.single { it.id == nobody }
+        assertEquals("sip:carol@example.invalid", shown.caller)
+        assertEquals("Carol", shown.displayName)
+        ran++
+    }
+
+    // The INVITE for a push that named nobody arrives before the framework
+    // has created its connection: the connection is told the caller when it
+    // is.
+    Rig().run {
+        val id = bridge.pushArrived(ACCOUNT, null, callId = "a84b4c76e66710@pc33.example.invalid")
+        assertEquals(1, log.count("announce $ACCOUNT anybody a84b4c76e66710@pc33.example.invalid"), log.snapshot().toString())
+        announcedInvite(bridge, 906, "<sip:dave@example.invalid>")
+        assertEquals(0, log.count("conn $id caller"))
+        platform.create(id)
+        assertEquals(1, log.count("conn $id caller sip:dave@example.invalid -"), log.snapshot().toString())
         ran++
     }
 

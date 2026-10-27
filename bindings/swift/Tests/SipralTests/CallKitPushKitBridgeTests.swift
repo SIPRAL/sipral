@@ -10,6 +10,8 @@ final actor RecordingProvider: CallKitProviding {
     private(set) var reported: [(uuid: UUID, callerId: String, displayName: String?)] = []
     /// The names given to calls already shown.
     private(set) var named: [(uuid: UUID, displayName: String)] = []
+    /// The callers given to calls shown before anything named them.
+    private(set) var identified: [(uuid: UUID, callerId: String, displayName: String?)] = []
     private(set) var connecting: [UUID] = []
     private(set) var connected: [UUID] = []
     private(set) var ended: [(uuid: UUID, reason: CallKitBridge.EndReason)] = []
@@ -33,6 +35,10 @@ final actor RecordingProvider: CallKitProviding {
         Task { await self.recordName(uuid, displayName) }
     }
 
+    nonisolated func reportCaller(uuid: UUID, callerId: String, displayName: String?) {
+        Task { await self.recordCaller(uuid, callerId, displayName) }
+    }
+
     nonisolated func reportCallConnecting(uuid: UUID) {
         Task { await self.recordConnecting(uuid) }
     }
@@ -54,6 +60,9 @@ final actor RecordingProvider: CallKitProviding {
         reported.append((uuid, callerId, displayName))
     }
     private func recordName(_ uuid: UUID, _ displayName: String) { named.append((uuid, displayName)) }
+    private func recordCaller(_ uuid: UUID, _ callerId: String, _ displayName: String?) {
+        identified.append((uuid, callerId, displayName))
+    }
     private func recordConnecting(_ uuid: UUID) { connecting.append(uuid) }
     private func recordConnected(_ uuid: UUID) { connected.append(uuid) }
     private func recordEnded(_ uuid: UUID, _ reason: CallKitBridge.EndReason) { ended.append((uuid, reason)) }
@@ -360,7 +369,7 @@ final class PushKitBridgeTests: XCTestCase {
         XCTAssertEqual(fields.push?.displayName, "Alice Liddell")
         let sealed = VoipPushFields(clear: ["box": "q9cXg2A=", "caller": "", "name": 7])
         XCTAssertEqual(sealed, VoipPushFields())
-        XCTAssertNil(sealed.push, "no caller, nothing to announce")
+        XCTAssertNil(sealed.push, "no caller to announce it by")
     }
 
     func testAPushWithANameShowsItAndOneTheSystemNeedNotSeeIsNotShown() async throws {
@@ -398,6 +407,25 @@ final class PushKitBridgeTests: XCTestCase {
         XCTAssertTrue(ended)
         let reason = await provider.ended.first?.reason
         XCTAssertEqual(reason, .failed)
+    }
+
+    /// A push read, but naming nobody (RFC 8599 asks for no payload, and a
+    /// seal may not open): shown, and expected on the account alone.
+    func testAPushThatNamesNobodyIsShownAndExpectedOnItsAccount() async throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = RecordingProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+
+        let outcome = await pushKit.receive(VoipPushFields(callId: "a84b4c76e66710"), account: account)
+        guard case .shown(let pending) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(pending.callerId, "", "a caller nothing named was made up")
+        XCTAssertNotNil(pending.announcement, "nothing waits for the INVITE")
+        let reported = await provider.reported
+        XCTAssertEqual(reported.map(\.callerId), ["Unknown"])
+        let ended = await provider.ended
+        XCTAssertTrue(ended.isEmpty, "a call the account still expects was ended")
     }
 }
 

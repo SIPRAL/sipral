@@ -52,6 +52,17 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
         provider.reportCall(with: uuid, updated: update)
     }
 
+    /// The handle and, when there is one, the name: for a screen a push
+    /// raised without naming the caller.
+    public func reportCaller(uuid: UUID, callerId: String, displayName: String?) {
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: callerId)
+        if let displayName {
+            update.localizedCallerName = displayName
+        }
+        provider.reportCall(with: uuid, updated: update)
+    }
+
     /// An outgoing call's progress is the system's to show
     /// (`reportOutgoingCall(with:startedConnectingAt:)`); an incoming
     /// call's needs no report, since fulfilling `CXAnswerCallAction` says it.

@@ -8813,6 +8813,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_account_announce_call(ulong stack, ulong account, sbyte[] caller, nuint callerLen, sbyte[] callId, nuint callIdLen, out ulong announcement, out ulong call, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_announce_any(ulong stack, ulong account, sbyte[] callId, nuint callIdLen, out ulong announcement, out ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_refresh_binding(ulong stack, ulong account, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -9408,7 +9411,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 6;
+    public const uint AbiVersionMinor = 7;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -10409,6 +10412,36 @@ public static partial class Sipral
         var callIdSigned = new sbyte[callIdBytes.Length];
         Buffer.BlockCopy(callIdBytes, 0, callIdSigned, 0, callIdBytes.Length);
         Check(NativeMethods.sipral_account_announce_call(stack, account, callerSigned, (nuint)callerSigned.Length, callIdSigned, (nuint)callIdSigned.Length, out var announcement, out var call, nowMs));
+        return (announcement, call);
+    }
+
+    /// <summary>
+    /// A call is expected on this account from a caller the push did not
+    /// name (ABI 1.7): a push with no payload (RFC 8599 §13), or one whose
+    /// sealed payload would not open, which the platform still makes the
+    /// application show as a call.
+    ///
+    /// The INVITE with `call_id` on this account is the announced call when
+    /// one carries it; else the oldest INVITE on the account that no
+    /// announcement naming its caller takes, since one that names the caller
+    /// always goes first. Two calls ringing together on the account may be
+    /// matched the other way round: nothing in such a push tells them apart.
+    /// A `call_id_len` of zero means the push carried none, whatever the
+    /// pointer. The binding refresh and the two outputs are those of
+    /// `sipral_account_announce`.
+    ///
+    /// Safety
+    ///
+    /// `call_id` must be readable for `call_id_len` bytes or be null with a
+    /// length of zero, and each of `out_announcement` and `out_call` must
+    /// point at one `sipral_handle_t`.
+    /// </summary>
+    public static (ulong Announcement, ulong Call) AccountAnnounceAny(ulong stack, ulong account, string callId, ulong nowMs)
+    {
+        var callIdBytes = Encoding.UTF8.GetBytes(callId);
+        var callIdSigned = new sbyte[callIdBytes.Length];
+        Buffer.BlockCopy(callIdBytes, 0, callIdSigned, 0, callIdBytes.Length);
+        Check(NativeMethods.sipral_account_announce_any(stack, account, callIdSigned, (nuint)callIdSigned.Length, out var announcement, out var call, nowMs));
         return (announcement, call);
     }
 

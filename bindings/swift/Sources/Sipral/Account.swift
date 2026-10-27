@@ -389,13 +389,22 @@ public final class Account: @unchecked Sendable {
     /// before its INVITE. Returns an announcement waiting for the INVITE, or
     /// the call if it already came. With the INVITE's `callId`, when the push
     /// carries it, `sipral_account_announce_call`: that `Call-ID` is matched
-    /// first, the caller when no INVITE carries it.
-    public func announce(caller: String, callId: String? = nil) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+    /// first, the caller when no INVITE carries it. With no `caller`, for a
+    /// push that named nobody, `sipral_account_announce_any` (ABI 1.7): the
+    /// `Call-ID` first, then the oldest INVITE on this account that no push
+    /// naming its caller takes.
+    public func announce(caller: String?, callId: String? = nil) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
         let result = try retryingBusy {
-            if let callId, !callId.isEmpty {
-                try Sipral.accountAnnounceCall(stack: stack.handle, account: handle, caller: caller, callId: callId, nowMs: stack.nowMs())
+            if let caller {
+                if let callId, !callId.isEmpty {
+                    try Sipral.accountAnnounceCall(
+                        stack: stack.handle, account: handle, caller: caller, callId: callId, nowMs: stack.nowMs()
+                    )
+                } else {
+                    try Sipral.accountAnnounce(stack: stack.handle, account: handle, caller: caller, nowMs: stack.nowMs())
+                }
             } else {
-                try Sipral.accountAnnounce(stack: stack.handle, account: handle, caller: caller, nowMs: stack.nowMs())
+                try Sipral.accountAnnounceAny(stack: stack.handle, account: handle, callId: callId ?? "", nowMs: stack.nowMs())
             }
         }
         if result.call != Sipral.handleNone {

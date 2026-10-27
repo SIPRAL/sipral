@@ -326,13 +326,16 @@ class SipralAccount internal constructor(
      * With the INVITE's [callId], when the push carries it,
      * `sipral_account_announce_call` (ABI 1.3): the INVITE with that
      * `Call-ID` is the announced call, the caller when none carries it.
+     * With a null [caller], for a push that named nobody,
+     * `sipral_account_announce_any` (ABI 1.7): the `Call-ID` first, then the
+     * oldest INVITE on this account that no push naming its caller takes.
      */
-    fun announce(caller: String, callId: String? = null): SipralAnnounced {
+    fun announce(caller: String?, callId: String? = null): SipralAnnounced {
         val (announcement, call) = retryBusy {
-            if (callId.isNullOrEmpty()) {
-                Sipral.accountAnnounce(client.handle, handle, caller, client.nowMs())
-            } else {
-                Sipral.accountAnnounceCall(client.handle, handle, caller, callId, client.nowMs())
+            when {
+                caller == null -> Sipral.accountAnnounceAny(client.handle, handle, callId ?: "", client.nowMs())
+                callId.isNullOrEmpty() -> Sipral.accountAnnounce(client.handle, handle, caller, client.nowMs())
+                else -> Sipral.accountAnnounceCall(client.handle, handle, caller, callId, client.nowMs())
             }
         }
         return if (call != 0L) SipralAnnounced.Arrived(call) else SipralAnnounced.Waiting(announcement)

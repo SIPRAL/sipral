@@ -30,6 +30,16 @@
 //! first; without a `Call-ID` nothing tells them apart, and both sides keep
 //! the proxy's order.
 //!
+//! **The account alone.** A push may name nobody: §13 asks for no payload,
+//! and one sealed for the application may not open on the device. Such a
+//! push still demands a call screen, so [`UserAgent::announce_any`] expects
+//! the call on the account alone: the INVITE with the push's `Call-ID` when
+//! it carried one, else the oldest INVITE on the account that no
+//! announcement naming its caller takes. An announcement that names a
+//! caller always goes before one that does not, so the account rule only
+//! takes what the caller rule leaves. Two such calls ringing together on
+//! one account may be swapped; nothing in the push tells them apart.
+//!
 //! An announcement is used once. Two calls need two pushes.
 
 use std::time::{Duration, Instant};
@@ -58,6 +68,8 @@ pub struct Announcement {
     pub(crate) id: AnnouncementId,
     pub(crate) account: AccountId,
     pub(crate) caller: Uri,
+    /// Whether the push named `caller`, or it stands for nobody.
+    pub(crate) named: bool,
     pub(crate) call_id: Option<String>,
     pub(crate) at: Instant,
 }
@@ -75,10 +87,19 @@ impl Announcement {
         self.account
     }
 
-    /// Who the push said is calling.
+    /// Who the push said is calling. RFC 3323's
+    /// `sip:anonymous@anonymous.invalid` ([`Uri::anonymous`]) when it named
+    /// nobody ([`UserAgent::announce_any`]).
     #[must_use]
     pub const fn caller(&self) -> &Uri {
         &self.caller
+    }
+
+    /// Whether the push named the caller. `false` for an announcement on the
+    /// account alone, which any caller's INVITE can fulfil.
+    #[must_use]
+    pub const fn names_caller(&self) -> bool {
+        self.named
     }
 
     /// The `Call-ID` the push named, when it named one.
@@ -160,11 +181,45 @@ impl UserAgent {
         call_id: Option<&str>,
         now: Instant,
     ) -> Result<Announced, UaError> {
+        self.announce_by(account, Some(caller), call_id, now)
+    }
+
+    /// A call is expected on `account` from a caller the push did not name:
+    /// a push with no payload (RFC 8599 §13), or one whose sealed payload
+    /// would not open.
+    ///
+    /// The INVITE with `call_id` on `account` is this call, when one carries
+    /// it; else the oldest INVITE on `account` that no announcement naming
+    /// its caller takes (module documentation, "The account alone"). The
+    /// binding is refreshed and a late push finds the INVITE that beat it,
+    /// as for [`UserAgent::announce`]. [`Announcement::names_caller`] is
+    /// `false` on what this records.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchAccount`].
+    pub fn announce_any(
+        &mut self,
+        account: AccountId,
+        call_id: Option<&str>,
+        now: Instant,
+    ) -> Result<Announced, UaError> {
+        self.announce_by(account, None, call_id, now)
+    }
+
+    /// What every announcing entry point does; `caller` is `None` when the
+    /// push named nobody.
+    fn announce_by(
+        &mut self,
+        account: AccountId,
+        caller: Option<Uri>,
+        call_id: Option<&str>,
+        now: Instant,
+    ) -> Result<Announced, UaError> {
         if !self.accounts.contains_key(&account) {
             return Err(UaError::NoSuchAccount);
         }
         let call_id = call_id.filter(|id| !id.is_empty()).map(str::to_owned);
-        let already = self.ringing_already(account, &caller, call_id.as_deref(), now);
+        let already = self.ringing_already(account, caller.as_ref(), call_id.as_deref(), now);
         let announcement = self.mint(account, caller, call_id, now);
         let answer = if let Some(call) = already {
             if let Some(arrival) = self.arrivals.get_mut(&call) {
@@ -249,16 +304,18 @@ impl UserAgent {
     fn mint(
         &mut self,
         account: AccountId,
-        caller: Uri,
+        caller: Option<Uri>,
         call_id: Option<String>,
         at: Instant,
     ) -> Announcement {
         let id = AnnouncementId(self.next_announcement);
         self.next_announcement = self.next_announcement.wrapping_add(1);
+        let named = caller.is_some();
         Announcement {
             id,
             account,
-            caller,
+            caller: caller.unwrap_or_else(Uri::anonymous),
+            named,
             call_id,
             at,
         }
@@ -266,11 +323,11 @@ impl UserAgent {
 
     /// An unclaimed call ringing within the window: the one with this
     /// `Call-ID` when one is given and rings, otherwise the oldest from this
-    /// caller.
+    /// caller, or from anybody when `caller` is `None`.
     fn ringing_already(
         &self,
         account: AccountId,
-        caller: &Uri,
+        caller: Option<&Uri>,
         call_id: Option<&str>,
         now: Instant,
     ) -> Option<CallHandle> {
@@ -288,13 +345,16 @@ impl UserAgent {
         }
         let mut best: Option<(Instant, CallHandle)> = None;
         for (call, arrival) in &self.arrivals {
-            if arrival.matched
-                || arrival.account != Some(account)
-                || arrival.at + window < now
-                || !arrival
+            let from_caller = caller.is_none_or(|caller| {
+                arrival
                     .caller
                     .as_ref()
                     .is_some_and(|from| same_caller(caller, from))
+            });
+            if arrival.matched
+                || arrival.account != Some(account)
+                || arrival.at + window < now
+                || !from_caller
             {
                 continue;
             }
@@ -377,7 +437,8 @@ impl UserAgent {
     }
 
     /// The announcement an INVITE on `account` fulfils: the one naming its
-    /// `Call-ID`, or else the oldest naming its caller.
+    /// `Call-ID`, or else the oldest naming its caller, or else the oldest
+    /// that named nobody.
     fn claim(
         &mut self,
         account: AccountId,
@@ -386,35 +447,39 @@ impl UserAgent {
         now: Instant,
     ) -> Option<Announcement> {
         let window = self.announce_window;
+        let open = |announcement: &Announcement| {
+            announcement.account == account && announcement.at + window >= now
+        };
         if let Some(call_id) = call_id {
             let named = self.announcements.iter().position(|announcement| {
-                announcement.account == account
-                    && announcement.at + window >= now
-                    && announcement.call_id.as_deref() == Some(call_id)
+                open(announcement) && announcement.call_id.as_deref() == Some(call_id)
             });
             if let Some(at) = named {
                 return Some(self.announcements.remove(at));
             }
         }
-        let caller = caller?;
-        let mut best: Option<usize> = None;
-        for (at, announcement) in self.announcements.iter().enumerate() {
-            if announcement.account != account
-                || announcement.at + window < now
-                || !same_caller(&announcement.caller, caller)
-            {
-                continue;
-            }
-            let older = best.is_none_or(|chosen| {
-                self.announcements
-                    .get(chosen)
-                    .is_some_and(|held| announcement.at < held.at)
-            });
-            if older {
-                best = Some(at);
-            }
-        }
-        best.map(|at| self.announcements.remove(at))
+        let by_caller = caller.and_then(|caller| {
+            self.oldest_announcement(|announcement| {
+                open(announcement)
+                    && announcement.named
+                    && same_caller(&announcement.caller, caller)
+            })
+        });
+        by_caller
+            .or_else(|| {
+                self.oldest_announcement(|announcement| open(announcement) && !announcement.named)
+            })
+            .map(|at| self.announcements.remove(at))
+    }
+
+    /// Where the oldest announcement that `fits` sits; the first of equals.
+    fn oldest_announcement(&self, fits: impl Fn(&Announcement) -> bool) -> Option<usize> {
+        self.announcements
+            .iter()
+            .enumerate()
+            .filter(|(_, announcement)| fits(announcement))
+            .min_by_key(|(_, announcement)| announcement.at)
+            .map(|(at, _)| at)
     }
 
     pub(crate) fn fire_announce_timers(&mut self, now: Instant) {
@@ -1083,6 +1148,122 @@ Content-Length: 0\r\n\r\n"
             "the older one goes first"
         );
         assert!(agent.announcement(second).is_some(), "the other one stands");
+    }
+
+    #[test]
+    fn a_push_that_names_nobody_is_answered_by_the_next_call_on_its_account() {
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        // past the first REGISTER's transaction, which a refresh waits for
+        let t0 = t0 + Duration::from_secs(60);
+        agent.handle_timeout(t0);
+        transmits(&mut agent);
+        let announcement = waiting(agent.announce_any(id, None, t0).expect("an announcement"));
+        let held = agent.announcement(announcement).expect("it waits");
+        assert!(!held.names_caller());
+        assert_eq!(
+            held.caller().as_str(),
+            "sip:anonymous@anonymous.invalid",
+            "RFC 3323's nobody, not somebody's name"
+        );
+        assert!(
+            sent(&mut agent).starts_with(b"REGISTER "),
+            "§4.1.3 applies to a push that says nothing just the same"
+        );
+        events(&mut agent);
+
+        let t1 = t0 + Duration::from_secs(2);
+        deliver(&mut agent, &invite_from("sip:dave@example.com", "d1"), t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        let call = *incoming(&seen).first().expect("Dave is calling");
+        assert_eq!(announced(&seen), vec![(call, announcement.0)]);
+        assert!(agent.announcement(announcement).is_none(), "used once");
+
+        deliver(&mut agent, &invite_from("sip:dave@example.com", "d2"), t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        assert_eq!(incoming(&seen).len(), 1, "the second call still arrives");
+        assert!(announced(&seen).is_empty(), "with no push left to claim it");
+    }
+
+    #[test]
+    fn a_push_that_names_nobody_takes_only_what_a_push_naming_the_caller_leaves() {
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        // the push that names nobody is the older, and still loses Bob's call
+        let anybody = waiting(agent.announce_any(id, None, t0).expect("anybody"));
+        let bob = waiting(
+            agent
+                .announce(
+                    id,
+                    uri("sip:bob@example.com"),
+                    t0 + Duration::from_millis(300),
+                )
+                .expect("Bob is announced"),
+        );
+        transmits(&mut agent);
+        events(&mut agent);
+
+        let t1 = t0 + Duration::from_secs(1);
+        deliver(&mut agent, &invite_from("sip:bob@example.com", "b1"), t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        let first = *incoming(&seen).first().expect("Bob is calling");
+        assert_eq!(announced(&seen), vec![(first, bob.0)]);
+
+        deliver(&mut agent, &invite_from("sip:carol@example.com", "c1"), t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        let second = *incoming(&seen).first().expect("Carol is calling");
+        assert_eq!(announced(&seen), vec![(second, anybody.0)]);
+    }
+
+    #[test]
+    fn a_call_id_on_a_push_that_names_nobody_picks_its_call_out_of_two() {
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        let mut calls = Vec::new();
+        for (branch, after) in [("e1", 0), ("e2", 5)] {
+            deliver(
+                &mut agent,
+                &invite_from("sip:erin@example.com", branch),
+                t0 + Duration::from_millis(after),
+            );
+            transmits(&mut agent);
+            calls.extend(incoming(&events(&mut agent)));
+        }
+        assert_eq!(calls.len(), 2);
+        let t1 = t0 + Duration::from_millis(10);
+        assert_eq!(
+            agent
+                .announce_any(id, Some("incoming-e2"), t1)
+                .expect("an announcement"),
+            Announced::Arrived(calls[1]),
+            "the Call-ID names the second"
+        );
+        assert_eq!(
+            agent.announce_any(id, None, t1).expect("an announcement"),
+            Announced::Arrived(calls[0]),
+            "and with none, the oldest left goes"
+        );
+        assert!(
+            matches!(
+                agent.announce_any(id, None, t1).expect("an announcement"),
+                Announced::Waiting(_)
+            ),
+            "no call is claimed twice"
+        );
+    }
+
+    #[test]
+    fn a_push_that_names_nobody_on_an_unknown_account_is_refused() {
+        let t0 = Instant::now();
+        let mut agent = awake(t0);
+        assert_eq!(
+            agent.announce_any(AccountId(7), None, t0),
+            Err(UaError::NoSuchAccount)
+        );
     }
 
     #[test]

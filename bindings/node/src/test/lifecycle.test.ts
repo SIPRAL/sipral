@@ -78,6 +78,17 @@ describe('an account across the life of the process', () => {
     const { announcement } = account.announce('sip:bob@sipral.test');
     assert.ok(announcement > 0n);
     stack.forgetAnnouncement(announcement);
+    // with the held INVITE's Call-ID, and for a push that named nobody
+    const named = account.announce('sip:bob@sipral.test', 'a84b4c76e66710@sipral.test');
+    const nobody = account.announce(null);
+    assert.ok(named.announcement > 0n && nobody.announcement > 0n);
+    assert.notEqual(named.announcement, nobody.announcement);
+    stack.forgetAnnouncement(named.announcement);
+    stack.forgetAnnouncement(nobody.announcement);
+    assert.throws(
+      () => stack.forgetAnnouncement(nobody.announcement),
+      (error: { status?: number }) => error.status === SipralStatus.WrongState,
+    );
   });
 });
 

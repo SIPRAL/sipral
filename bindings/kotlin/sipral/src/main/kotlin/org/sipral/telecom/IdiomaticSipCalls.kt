@@ -50,7 +50,7 @@ class IdiomaticSipCalls(
     private fun account(handle: Long): SipralAccount =
         accounts[handle] ?: throw IllegalArgumentException("account ${handle.toString(16)} is not one this bridge was given")
 
-    override fun announce(account: Long, caller: String, callId: String?): SipralAnnounced =
+    override fun announce(account: Long, caller: String?, callId: String?): SipralAnnounced =
         account(account).announce(caller, callId)
 
     override fun forgetAnnouncement(announcement: Long) {

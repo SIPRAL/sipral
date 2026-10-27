@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 6;
+export const SIPRAL_ABI_VERSION_MINOR = 7;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9950,6 +9950,29 @@ export class Sipral {
   readonly sipral_account_announce_call: (stack: Wide, account: Wide, caller: Pointer, caller_len: number, call_id: Pointer, call_id_len: number, out_announcement: Pointer, out_call: Pointer, now_ms: Wide) => number;
 
   /**
+   * A call is expected on this account from a caller the push did not
+   * name (ABI 1.7): a push with no payload (RFC 8599 §13), or one whose
+   * sealed payload would not open, which the platform still makes the
+   * application show as a call.
+   *
+   * The INVITE with `call_id` on this account is the announced call when
+   * one carries it; else the oldest INVITE on the account that no
+   * announcement naming its caller takes, since one that names the caller
+   * always goes first. Two calls ringing together on the account may be
+   * matched the other way round: nothing in such a push tells them apart.
+   * A `call_id_len` of zero means the push carried none, whatever the
+   * pointer. The binding refresh and the two outputs are those of
+   * `sipral_account_announce`.
+   *
+   * Safety
+   *
+   * `call_id` must be readable for `call_id_len` bytes or be null with a
+   * length of zero, and each of `out_announcement` and `out_call` must
+   * point at one `sipral_handle_t`.
+   */
+  readonly sipral_account_announce_any: (stack: Wide, account: Wide, call_id: Pointer, call_id_len: number, out_announcement: Pointer, out_call: Pointer, now_ms: Wide) => number;
+
+  /**
    * Refresh the binding now, without announcing anything (C3).
    *
    * For a proxy's periodic wake-up (RFC 8599 §5.5). A push proves the path
@@ -12750,6 +12773,7 @@ export class Sipral {
     this.sipral_account_message = library.func('sipral_status_t sipral_account_message(sipral_handle_t stack, sipral_handle_t account, const char *target, size_t target_len, const char *content_type, size_t content_type_len, const uint8_t *body, size_t body_len, sipral_handle_t *out_message, uint64_t now_ms)');
     this.sipral_account_announce = library.func('sipral_status_t sipral_account_announce(sipral_handle_t stack, sipral_handle_t account, const char *caller, size_t caller_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
     this.sipral_account_announce_call = library.func('sipral_status_t sipral_account_announce_call(sipral_handle_t stack, sipral_handle_t account, const char *caller, size_t caller_len, const char *call_id, size_t call_id_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
+    this.sipral_account_announce_any = library.func('sipral_status_t sipral_account_announce_any(sipral_handle_t stack, sipral_handle_t account, const char *call_id, size_t call_id_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
     this.sipral_account_refresh_binding = library.func('sipral_status_t sipral_account_refresh_binding(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms)');
     this.sipral_announcement_forget = library.func('sipral_status_t sipral_announcement_forget(sipral_handle_t stack, sipral_handle_t announcement)');
     this.sipral_account_push_echo = library.func('sipral_status_t sipral_account_push_echo(sipral_handle_t stack, sipral_handle_t account, sipral_push_echo_t *out_echo)');

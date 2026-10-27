@@ -50,7 +50,7 @@ class SipralCallForegroundTest {
             asked += "place-request $target"
         }
 
-        override fun announce(account: Long, caller: String, callId: String?): SipralAnnounced = SipralAnnounced.Waiting(1)
+        override fun announce(account: Long, caller: String?, callId: String?): SipralAnnounced = SipralAnnounced.Waiting(1)
         override fun forgetAnnouncement(announcement: Long) {
             asked += "forget $announcement"
         }
@@ -261,7 +261,8 @@ class SipralCallForegroundTest {
         android.refuse = true
         invite(INCOMING)
         waitFor { "refused" in android.did }
-        assertTrue(reports.any { it.startsWith("call service not started") }, reports.toString())
+        // reported by the starting thread after the refusal is recorded
+        waitFor { reports.any { it.startsWith("call service not started") } }
         android.refuse = false
         bridge.reject(bridge.calls.value.single().id)
         waitFor { android.stops == 1 }

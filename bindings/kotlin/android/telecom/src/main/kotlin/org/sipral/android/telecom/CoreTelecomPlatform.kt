@@ -243,7 +243,9 @@ class SipralCoreCall internal constructor(
     internal val ringing: Boolean get() = synchronized(lock) { shown == Shown.RINGING }
 
     /** What [TelecomBridge] tells this call. Ringing and dialling are how
-     * the call was added; the far end's hold has no counterpart. */
+     * the call was added; the far end's hold has no counterpart, nor has a
+     * caller learned after the call was added: `CallControlScope` keeps the
+     * address `addCall` was given. */
     internal val port: TelecomConnection = object : TelecomConnection {
         override fun setRinging() = Unit
         override fun setDialing() = Unit

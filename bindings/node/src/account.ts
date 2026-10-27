@@ -357,16 +357,37 @@ export class Account extends EventEmitter<AccountEvents> {
    * `sipral_account_announce`: a push said a call from `caller` is on its
    * way; the stack waits for its INVITE (`CallAnnounced`, or
    * `AnnouncedCallMissing` when none comes). Returns the announcement's
-   * handle and the call handle the INVITE will carry.
+   * handle and the call handle the INVITE will carry. With the `callId` the
+   * push carried, `sipral_account_announce_call`: that INVITE first, the
+   * caller when none carries it. A `null` caller is a push that named
+   * nobody, `sipral_account_announce_any` (ABI 1.7): the `callId` first,
+   * then the oldest INVITE on this account that no push naming its caller
+   * takes.
    */
-  announce(caller: string): { announcement: bigint; call: bigint } {
+  announce(caller: string | null, callId?: string): { announcement: bigint; call: bigint } {
     this.stack.ensureOpen();
-    const [who, length] = text(caller);
     const announcement = new BigUint64Array(1);
     const call = new BigUint64Array(1);
-    checkNow(this.stack.sipral, 'sipral_account_announce', () =>
-      this.stack.sipral.sipral_account_announce(this.stack.handle, this.handle, who, length, announcement, call, this.stack.nowMs()),
-    );
+    const [id, idLength] = text(callId);
+    if (caller === null) {
+      checkNow(this.stack.sipral, 'sipral_account_announce_any', () =>
+        this.stack.sipral.sipral_account_announce_any(
+          this.stack.handle, this.handle, id, idLength, announcement, call, this.stack.nowMs(),
+        ),
+      );
+    } else if (idLength > 0) {
+      const [who, length] = text(caller);
+      checkNow(this.stack.sipral, 'sipral_account_announce_call', () =>
+        this.stack.sipral.sipral_account_announce_call(
+          this.stack.handle, this.handle, who, length, id, idLength, announcement, call, this.stack.nowMs(),
+        ),
+      );
+    } else {
+      const [who, length] = text(caller);
+      checkNow(this.stack.sipral, 'sipral_account_announce', () =>
+        this.stack.sipral.sipral_account_announce(this.stack.handle, this.handle, who, length, announcement, call, this.stack.nowMs()),
+      );
+    }
     this.stack.poll();
     return { announcement: announcement[0] ?? 0n, call: call[0] ?? 0n };
   }

@@ -86,14 +86,28 @@ event means reading two sets of logs that nobody has.
 ### The matching rule
 
 **The `Call-ID`, when the push carries one. Otherwise, and always as the
-fallback, the same account and the same user and host in the `From` URI. Time
-is only a tie-break.**
+fallback, the same account and the same user and host in the `From` URI; for
+a push that named nobody, the account alone. Time is only a tie-break.**
 
 RFC 8599 §13 says the mechanism "does not require a proxy to insert any
 payload", and §5.6.2 has the proxy hold the request rather than describe it,
 so a push need not carry any SIP identifier, and from many senders it does
-not. What a push from any sender does carry is who is calling and which
-account, so that is the rule that always applies.
+not. What a push from most senders does carry is who is calling and which
+account, so that is the rule that always applies when it is there.
+
+A push may name nobody: one that follows §13 to the letter, or one sealed for
+the application whose seal does not open on the device. iOS still makes the
+application show it as a call, so `announce_any`
+(`sipral_account_announce_any`, ABI 1.7) expects the call on the account
+alone: the INVITE with the push's `Call-ID` when it carried one, else the
+oldest INVITE on the account that no announcement naming its caller takes.
+An announcement that names the caller always goes first, so the account rule
+only takes what the caller rule leaves; two such calls ringing together on
+one account may be matched the other way round, which nothing in such a push
+can prevent. The screen raised for it shows `Unknown` until the INVITE is
+matched, and then the INVITE's `From` URI and name (Swift's
+`CallKitProviding.reportCaller`, Kotlin's `TelecomConnection.setCaller`; a
+Core-Telecom call keeps the address it was added with).
 
 A proxy that holds the INVITE while it pushes has the INVITE in hand, and
 nothing stops it putting the `Call-ID` in the push; `interop/push-gateway`
@@ -167,7 +181,9 @@ harmlessly.
 
 `sipral_account_announce` is `announce`: it fills `out_call` when the INVITE
 came first and `out_announcement` otherwise; `sipral_account_announce_call`
-is `announce_call`, the same with the push's `Call-ID`. `sipral_account_refresh_binding`
+is `announce_call`, the same with the push's `Call-ID`, and
+`sipral_account_announce_any` is `announce_any`, for a push that named
+nobody. `sipral_account_refresh_binding`
 is `refresh_binding`, and `sipral_announcement_forget` is
 `forget_announcement`. The events are `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` (31),
 then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is
@@ -185,8 +201,10 @@ the token in hex and the topic as `TEAMID.bundle.voip`, RFC 8599 §10), and
 require of a binding, and `addAccount(headers:)` adds the application's own
 fields to every REGISTER. `PushKitAdapter` reports a call to
 CallKit for every VoIP push the system says must be, which iOS requires of an application that wants
-to keep receiving them: one that names no caller, or arrives before there is
-an account, is shown and ended at once. A shown call that no INVITE fills is
+to keep receiving them: one whose payload names no caller is expected on the
+account alone ("The matching rule"), and one the decoder could not read, or
+that arrives before there is an account, is shown and ended at once. A shown
+call that no INVITE fills is
 ended too, as failed when the announcement was refused and as unanswered
 when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing. The push's
 payload carries the caller under `caller`, its name under `name` and the
@@ -503,7 +521,10 @@ What a push carries is `kind` (`call`, `message`, `dialog`, `refresh`),
 Swift push bridge announces with it whenever the push has one
 (`Account.announce(caller:callId:)`); on Android, `TelecomBridge.pushArrived`
 and `wakeForPush` take it as `callId` (`SipralAccount.announce(caller,
-callId)`).
+callId)`). A push whose payload names no caller — the decoder found none, or
+returned empty fields for a seal that would not open — is announced on the
+account alone (`caller` nil, or null on Android), not ended at once; one the
+decoder could not read at all (it threw) still is.
 
 **On APNs only an INVITE is pushed.** A VoIP push is the only kind that
 reaches a VoIP application, and since iOS 13 one that reports no call to

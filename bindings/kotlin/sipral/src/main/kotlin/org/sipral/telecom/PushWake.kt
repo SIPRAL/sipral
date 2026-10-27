@@ -24,8 +24,9 @@ data class PushWake(val id: String, val restored: Boolean)
  *    same `Call-ID` and the next sequence number, nothing sent yet;
  * 3. the call shown ringing ([TelecomBridge.pushArrived]) before anything
  *    has crossed the network, as the platform requires, which announces the
- *    caller and, on a restored account, sends the REGISTER that confirms the
- *    binding, the refresh RFC 8599 §5.5 has a woken device send;
+ *    caller (or, with a null [caller], a call on the account alone) and, on
+ *    a restored account, sends the REGISTER that confirms the binding, the
+ *    refresh RFC 8599 §5.5 has a woken device send;
  * 4. on an account with nothing to carry on, a registration from the
  *    beginning, unless the announce's own refresh already began one.
  *
@@ -40,7 +41,7 @@ fun wakeForPush(
     bridge: TelecomBridge,
     lifecycle: SipralLifecycle,
     key: String,
-    caller: String,
+    caller: String?,
     displayName: String? = null,
     callId: String? = null,
 ): PushWake {

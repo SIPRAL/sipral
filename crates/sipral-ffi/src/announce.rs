@@ -11,7 +11,9 @@
 //! §4.1.3) and matches the following INVITE to the announcement. The INVITE may
 //! win the race, so it writes back both values and exactly one names something.
 //! [`sipral_account_announce_call`] is the same with the `Call-ID` a push
-//! from the proxy holding the INVITE can carry, matched before the caller.
+//! from the proxy holding the INVITE can carry, matched before the caller;
+//! [`sipral_account_announce_any`] is for a push that names no caller, and
+//! matches on the account alone.
 //! [`sipral_account_refresh_binding`] is the refresh alone (§5.5);
 //! [`sipral_account_push_echo`] reads the registrar's `Feature-Caps` (§8.2).
 //!
@@ -98,7 +100,17 @@ entry! {
         now_ms: u64,
     ) {
         let caller = unsafe { required_text(caller, caller_len, "caller") }?;
-        unsafe { announced(stack, account, caller, None, out_announcement, out_call, now_ms) }
+        unsafe {
+            announced(
+                stack,
+                account,
+                Some(caller),
+                None,
+                out_announcement,
+                out_call,
+                now_ms,
+            )
+        }
     }
 }
 
@@ -136,7 +148,7 @@ entry! {
             announced(
                 stack,
                 account,
-                caller,
+                Some(caller),
                 call_id,
                 out_announcement,
                 out_call,
@@ -146,7 +158,52 @@ entry! {
     }
 }
 
-/// What both announcing entry points do once their text is read.
+entry! {
+    /// A call is expected on this account from a caller the push did not
+    /// name (ABI 1.7): a push with no payload (RFC 8599 §13), or one whose
+    /// sealed payload would not open, which the platform still makes the
+    /// application show as a call.
+    ///
+    /// The INVITE with `call_id` on this account is the announced call when
+    /// one carries it; else the oldest INVITE on the account that no
+    /// announcement naming its caller takes, since one that names the caller
+    /// always goes first. Two calls ringing together on the account may be
+    /// matched the other way round: nothing in such a push tells them apart.
+    /// A `call_id_len` of zero means the push carried none, whatever the
+    /// pointer. The binding refresh and the two outputs are those of
+    /// `sipral_account_announce`.
+    ///
+    /// # Safety
+    ///
+    /// `call_id` must be readable for `call_id_len` bytes or be null with a
+    /// length of zero, and each of `out_announcement` and `out_call` must
+    /// point at one `sipral_handle_t`.
+    fn sipral_account_announce_any(
+        stack: SipralHandle,
+        account: SipralHandle,
+        call_id: *const c_char,
+        call_id_len: usize,
+        out_announcement: *mut SipralHandle,
+        out_call: *mut SipralHandle,
+        now_ms: u64,
+    ) {
+        let call_id = unsafe { text(call_id, call_id_len, "call_id") }?;
+        unsafe {
+            announced(
+                stack,
+                account,
+                None,
+                call_id,
+                out_announcement,
+                out_call,
+                now_ms,
+            )
+        }
+    }
+}
+
+/// What every announcing entry point does once its text is read; `caller`
+/// is `None` when the push named nobody.
 ///
 /// # Safety
 ///
@@ -155,7 +212,7 @@ entry! {
 unsafe fn announced(
     stack: SipralHandle,
     account: SipralHandle,
-    caller: &str,
+    caller: Option<&str>,
     call_id: Option<&str>,
     out_announcement: *mut SipralHandle,
     out_call: *mut SipralHandle,
@@ -167,18 +224,23 @@ unsafe fn announced(
             "out_announcement and out_call are both written and neither may be null",
         ));
     }
-    let Ok(uri) = Uri::parse(caller.as_bytes()) else {
-        return Err(fail(
-            SipralStatus::InvalidArgument,
-            format!("caller is {caller:?}, which is not a URI"),
-        ));
-    };
+    let caller = caller
+        .map(|caller| {
+            Uri::parse(caller.as_bytes()).map_err(|_| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!("caller is {caller:?}, which is not a URI"),
+                )
+            })
+        })
+        .transpose()?;
     with_stack_at(stack, now_ms, |state, now| {
         let named = state.accounts.get(account).map_err(handle_failed)?;
-        let found = state
-            .agent
-            .announce_call(named, uri, call_id, now)
-            .map_err(|error| ua_failed(&error))?;
+        let found = match caller {
+            Some(uri) => state.agent.announce_call(named, uri, call_id, now),
+            None => state.agent.announce_any(named, call_id, now),
+        }
+        .map_err(|error| ua_failed(&error))?;
         let (announcement, call) = match found {
             Announced::Waiting(id) => {
                 let handle = state.announcements.insert(id).map_err(|status| {
@@ -291,8 +353,9 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SipralPushEcho, sipral_account_announce, sipral_account_announce_call,
-        sipral_account_push_echo, sipral_account_refresh_binding, sipral_announcement_forget,
+        SipralPushEcho, sipral_account_announce, sipral_account_announce_any,
+        sipral_account_announce_call, sipral_account_push_echo, sipral_account_refresh_binding,
+        sipral_announcement_forget,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
     use crate::call::tests::{deliver, sent};
@@ -539,6 +602,73 @@ mod tests {
             "the INVITE with the Call-ID the push named was not matched: {:?}",
             observed.kinds()
         );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_push_that_names_nobody_is_matched_on_the_account_alone() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = woken(handle, true);
+        bound(handle, account);
+
+        let mut announcement = SIPRAL_HANDLE_NONE;
+        let mut call = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe {
+                sipral_account_announce_any(
+                    handle,
+                    account,
+                    ptr::null(),
+                    0,
+                    ptr::null_mut(),
+                    &raw mut call,
+                    31_000,
+                )
+            },
+            SipralStatus::InvalidArgument,
+            "an announcement with nowhere to write it was taken"
+        );
+        assert_eq!(
+            unsafe {
+                sipral_account_announce_any(
+                    handle,
+                    account,
+                    ptr::null(),
+                    0,
+                    &raw mut announcement,
+                    &raw mut call,
+                    31_000,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_ne!(announcement, SIPRAL_HANDLE_NONE, "nothing was announced");
+        assert_eq!(call, SIPRAL_HANDLE_NONE, "a call arrived before the push");
+        assert!(
+            sent(handle)
+                .iter()
+                .any(|message| message.starts_with(b"REGISTER ")),
+            "the wake-up did not refresh the binding"
+        );
+
+        deliver(handle, &invitation("sip:carol@example.com"), 31_100);
+        poll(handle, 31_100);
+        let kinds = observed.kinds();
+        let announced = kinds
+            .iter()
+            .position(|kind| *kind == SipralEventKind::CallAnnounced)
+            .unwrap_or_else(|| panic!("the call on the account was not matched, in {kinds:?}"));
+        let incoming = kinds
+            .iter()
+            .position(|kind| *kind == SipralEventKind::IncomingCall)
+            .unwrap_or_else(|| panic!("no call came in, in {kinds:?}"));
+        assert!(announced < incoming, "{kinds:?}");
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(handle) },
             SipralStatus::Ok

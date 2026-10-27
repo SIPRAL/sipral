@@ -47,7 +47,8 @@ enum class TelecomPhase {
 }
 
 /** One call as [TelecomBridge.calls] shows it. [call] is the SIP handle,
- * zero while a push-announced call's INVITE has not arrived. */
+ * zero while a push-announced call's INVITE has not arrived; [caller] is
+ * empty while a push that named nobody waits for it. */
 data class TelecomCall(
     val id: String,
     val direction: TelecomDirection,
@@ -86,12 +87,16 @@ class TelecomBridge(
         val id: String,
         val direction: TelecomDirection,
         val account: Long,
-        val caller: String,
+        var caller: String,
         var displayName: String?,
         var phase: TelecomPhase,
     ) {
         var call: Long = 0
         var connection: TelecomConnection? = null
+
+        /** The push named nobody and the INVITE since has: the connection is
+         * told who is calling, now or once it is created. */
+        var callerLearned = false
 
         /** The framework has been told this call is over, and is told
          * nothing more about it. */
@@ -125,7 +130,10 @@ class TelecomBridge(
     private val lock = Any()
     private val entries = LinkedHashMap<String, Entry>()
     private val byCall = HashMap<Long, Entry>()
-    private val announcedCalls = HashSet<Long>()
+
+    /** Each call the library matched to an announcement, and which one,
+     * until that call's `INCOMING_CALL`. */
+    private val announcedCalls = HashMap<Long, Long>()
 
     /** Calls that ended while the framework was still creating their
      * connection, and why. The framework answers each request exactly once,
@@ -160,12 +168,19 @@ class TelecomBridge(
      * on this account (its INVITE beat the push) is not reported again; its id
      * is returned. [callId] is the held INVITE's `Call-ID` when the push
      * carries one, matched before the caller.
+     *
+     * A null [caller] is a push that named nobody (RFC 8599 asks for no
+     * payload, §13, and a sealed one may not open): the framework is shown a
+     * caller with no address, the call is expected on the account alone, and
+     * once its INVITE is matched the connection is told who is calling
+     * ([TelecomConnection.setCaller]). The oldest call already ringing on the
+     * account unannounced is taken as this one.
      */
-    fun pushArrived(account: Long, caller: String, displayName: String? = null, callId: String? = null): String = settle {
+    fun pushArrived(account: Long, caller: String?, displayName: String? = null, callId: String? = null): String = settle {
         val existing = entries.values.firstOrNull {
             it.direction == TelecomDirection.INCOMING && it.account == account && it.call != 0L &&
                 !it.announced && !it.closedForTelecom && it.phase == TelecomPhase.RINGING &&
-                sameCaller(caller, it.caller)
+                (caller == null || sameCaller(caller, it.caller))
         }
         if (existing != null) {
             existing.announced = true
@@ -175,12 +190,12 @@ class TelecomBridge(
             return@settle existing.id
         }
 
-        val entry = Entry(newId(), TelecomDirection.INCOMING, account, caller, displayName, TelecomPhase.RINGING)
+        val entry = Entry(newId(), TelecomDirection.INCOMING, account, caller ?: "", displayName, TelecomPhase.RINGING)
         entry.announced = true
         entries[entry.id] = entry
         entry.awaitingConnection = true
         try {
-            platform.reportIncomingCall(entry.id, caller, displayName)
+            platform.reportIncomingCall(entry.id, entry.caller, displayName)
         } catch (refused: RuntimeException) {
             // no screen, so nothing to announce: the push handler hears why, and an
             // INVITE that comes is an ordinary call
@@ -294,6 +309,9 @@ class TelecomBridge(
         }
         entry.awaitingConnection = false
         entry.connection = connection
+        if (entry.callerLearned) {
+            connection.setCaller(entry.caller, entry.displayName)
+        }
         if (entry.direction == TelecomDirection.OUTGOING && entry.phase == TelecomPhase.REQUESTED) {
             val handle = try {
                 sip.place(entry.account, entry.caller)
@@ -408,7 +426,7 @@ class TelecomBridge(
     fun onEvent(event: SipralEvent): Unit = settle {
         when (event.kind) {
             SipralEventKind.CALL_ANNOUNCED.value.toLong() -> {
-                announcedCalls.add(event.call)
+                announcedCalls[event.call] = event.payload.announce.announcement
             }
             SipralEventKind.INCOMING_CALL.value.toLong() -> incoming(event)
             SipralEventKind.ANNOUNCED_CALL_MISSING.value.toLong() -> missing()
@@ -426,25 +444,23 @@ class TelecomBridge(
     private fun incoming(event: SipralEvent) {
         val who = callerOf(event.message)
         val caller = who.uri ?: ""
-        val wasAnnounced = announcedCalls.remove(event.call)
+        val announcement = announcedCalls.remove(event.call)
         val known = byCall[event.call]
         if (known != null) {
             // bound already, by an announce that answered Arrived
-            if (known.displayName == null) {
-                known.displayName = who.displayName
-            }
+            learn(known, caller, who.displayName)
             return
         }
-        if (wasAnnounced) {
+        if (announcement != null) {
             val waiting = entries.values
                 .filter { it.announcement != 0L && it.account == event.account }
                 .sortedBy { it.announcedAt }
-            val entry = waiting.firstOrNull { sameCaller(it.caller, caller) } ?: waiting.firstOrNull()
+            val entry = waiting.firstOrNull { it.announcement == announcement }
+                ?: waiting.firstOrNull { it.caller.isNotEmpty() && sameCaller(it.caller, caller) }
+                ?: waiting.firstOrNull()
             if (entry != null) {
                 entry.announcement = 0L
-                if (entry.displayName == null) {
-                    entry.displayName = who.displayName
-                }
+                learn(entry, caller, who.displayName)
                 bind(entry, event.call)
                 return
             }
@@ -512,6 +528,19 @@ class TelecomBridge(
     }
 
     // The pieces
+
+    /** What the INVITE says that the push did not: the caller's name, and
+     * for a push that named nobody the caller, told to the connection. */
+    private fun learn(entry: Entry, caller: String, displayName: String?) {
+        if (entry.displayName == null) {
+            entry.displayName = displayName
+        }
+        if (entry.caller.isEmpty() && caller.isNotEmpty()) {
+            entry.caller = caller
+            entry.callerLearned = true
+            entry.connection?.setCaller(caller, entry.displayName)
+        }
+    }
 
     private fun decline(entry: Entry) {
         entry.endedLocally = true

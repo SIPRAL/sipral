@@ -6822,7 +6822,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 6;
+  static const int abiVersionMinor = 7;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7582,6 +7582,29 @@ final class Sipral {
   late final int Function(int stack, int account, ffi.Pointer<ffi.Char> caller, int callerLen, ffi.Pointer<ffi.Char> callId, int callIdLen, ffi.Pointer<SipralHandle> outAnnouncement, ffi.Pointer<SipralHandle> outCall, int nowMs) accountAnnounceCall = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Char> caller, ffi.Size callerLen, ffi.Pointer<ffi.Char> callId, ffi.Size callIdLen, ffi.Pointer<SipralHandle> outAnnouncement, ffi.Pointer<SipralHandle> outCall, ffi.Uint64 nowMs),
       int Function(int stack, int account, ffi.Pointer<ffi.Char> caller, int callerLen, ffi.Pointer<ffi.Char> callId, int callIdLen, ffi.Pointer<SipralHandle> outAnnouncement, ffi.Pointer<SipralHandle> outCall, int nowMs)>('sipral_account_announce_call');
+
+  /// A call is expected on this account from a caller the push did not
+  /// name (ABI 1.7): a push with no payload (RFC 8599 §13), or one whose
+  /// sealed payload would not open, which the platform still makes the
+  /// application show as a call.
+  ///
+  /// The INVITE with `call_id` on this account is the announced call when
+  /// one carries it; else the oldest INVITE on the account that no
+  /// announcement naming its caller takes, since one that names the caller
+  /// always goes first. Two calls ringing together on the account may be
+  /// matched the other way round: nothing in such a push tells them apart.
+  /// A `call_id_len` of zero means the push carried none, whatever the
+  /// pointer. The binding refresh and the two outputs are those of
+  /// `sipral_account_announce`.
+  ///
+  /// Safety
+  ///
+  /// `call_id` must be readable for `call_id_len` bytes or be null with a
+  /// length of zero, and each of `out_announcement` and `out_call` must
+  /// point at one `sipral_handle_t`.
+  late final int Function(int stack, int account, ffi.Pointer<ffi.Char> callId, int callIdLen, ffi.Pointer<SipralHandle> outAnnouncement, ffi.Pointer<SipralHandle> outCall, int nowMs) accountAnnounceAny = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Char> callId, ffi.Size callIdLen, ffi.Pointer<SipralHandle> outAnnouncement, ffi.Pointer<SipralHandle> outCall, ffi.Uint64 nowMs),
+      int Function(int stack, int account, ffi.Pointer<ffi.Char> callId, int callIdLen, ffi.Pointer<SipralHandle> outAnnouncement, ffi.Pointer<SipralHandle> outCall, int nowMs)>('sipral_account_announce_any');
 
   /// Refresh the binding now, without announcing anything (C3).
   ///

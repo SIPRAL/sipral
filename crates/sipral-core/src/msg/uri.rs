@@ -536,6 +536,13 @@ impl Uri {
         Ok(Self { text, parts })
     }
 
+    /// `sip:anonymous@anonymous.invalid`, the URI RFC 3323 §4.1.1.3 gives a
+    /// party that is not identified.
+    #[must_use]
+    pub fn anonymous() -> Self {
+        Self::from_rendered(String::from("sip:anonymous@anonymous.invalid"))
+    }
+
     /// Take text that was written out from an already parsed URI.
     fn from_rendered(text: String) -> Self {
         let text: Arc<str> = Arc::from(text);
@@ -1671,6 +1678,15 @@ mod tests {
         assert!(!tel.equivalent(&owned("tel:+1-201-555-0124")));
         assert!(!tel.equivalent(&owned("sip:+1-201-555-0123@example.com;user=phone")));
         assert_eq!(tel.as_request_uri().as_str(), tel.as_str());
+    }
+
+    #[test]
+    fn the_anonymous_uri_is_parsed_as_any_other_sip_uri() {
+        let anonymous = Uri::anonymous();
+        assert_eq!(anonymous.as_str(), "sip:anonymous@anonymous.invalid");
+        let sip = anonymous.sip().expect("a SIP URI");
+        assert_eq!(sip.user, Some("anonymous"));
+        assert!(anonymous.equivalent(&owned("sip:anonymous@ANONYMOUS.invalid")));
     }
 
     #[test]

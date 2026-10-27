@@ -4253,3 +4253,31 @@ calls — and answers a lookup the way `sipral_account_looked_up` does, so the
 stack cannot tell it from an application, and the callback, run inside
 `sipral_network_run` with none of the component's locks held, may call back
 into it.
+
+## What ABI 1.7 added
+
+### A push that names no caller
+
+One entry point, nothing else in the header moved, and
+`bindings/c/abi-sizes.txt` is what 1.6 left. A binding printed at 1.6 loads
+against a 1.7 library and works as it did; one printed at 1.7 is refused by a
+1.6 library, with both versions named.
+
+`sipral_account_announce_any(stack, account, call_id, call_id_len,
+out_announcement, out_call, now_ms)` announces a call on the account alone,
+for a push that named nobody: RFC 8599 asks a push for no payload (§13), and
+one sealed for the application may not open on the device, yet iOS still
+makes the application show it as a call. The INVITE with `call_id` on the
+account is the announced call when one carries it; else the oldest INVITE on
+the account that no announcement naming its caller takes, since one that
+names the caller always goes first. Two calls ringing together on one account
+may be matched the other way round, which nothing in such a push can prevent.
+A `call_id_len` of zero means none; the binding refresh, the two outputs and
+the two events are those of `sipral_account_announce`. `docs/15-mobile.md`,
+"The matching rule", has the reasoning. The facade carries it as
+`UserAgent::announce_any` and `Announcement::names_caller`, the caller of such
+an announcement reading as RFC 3323's `sip:anonymous@anonymous.invalid`
+(`Uri::anonymous`). Swift's `Account.announce(caller: nil)`, Kotlin's
+`SipralAccount.announce(null)` and Node.js's `account.announce(null)` reach
+it, and the Swift and Kotlin push bridges use it for a push whose fields name
+no caller.

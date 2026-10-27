@@ -20,6 +20,10 @@ public protocol CallKitProviding: AnyObject, Sendable {
     /// its INVITE gave (`CXProvider.reportCall(with:updated:)`). Nothing,
     /// for a provider that shows no names.
     func reportCallerName(uuid: UUID, displayName: String)
+    /// The caller itself, for a call shown before anything named it (a push
+    /// with no caller): the INVITE's `From` URI, and its name when one is
+    /// known. A provider with no use for the URI is given the name alone.
+    func reportCaller(uuid: UUID, callerId: String, displayName: String?)
     func reportCallConnecting(uuid: UUID)
     func reportCallConnected(uuid: UUID)
     func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason)
@@ -33,6 +37,12 @@ public extension CallKitProviding {
     }
 
     func reportCallerName(uuid: UUID, displayName: String) {}
+
+    func reportCaller(uuid: UUID, callerId: String, displayName: String?) {
+        if let displayName {
+            reportCallerName(uuid: uuid, displayName: displayName)
+        }
+    }
 }
 
 /// Mirrors `Call` events onto a `CallKitProviding` (the real `CXProvider` in
@@ -217,6 +227,11 @@ public final class CallKitBridge: @unchecked Sendable {
     /// Shows `displayName` for a call already on screen without one.
     func nameCaller(uuid: UUID, displayName: String) {
         provider.reportCallerName(uuid: uuid, displayName: displayName)
+    }
+
+    /// Shows who is calling on a screen raised before anything named them.
+    func identifyCaller(uuid: UUID, callerId: String, displayName: String?) {
+        provider.reportCaller(uuid: uuid, callerId: callerId, displayName: displayName)
     }
 
     private func unbind(uuid: UUID) {

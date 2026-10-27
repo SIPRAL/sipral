@@ -73,13 +73,19 @@ is not enough to keep this package building there).
 
 `PushKitAdapter` reports to CallKit every VoIP push the system says must
 be, as iOS requires: one whose payload names a caller runs the
-sequence on the account its closure returns, and any other, or one that
-meets no account, is shown and ended at once (`PushKitBridge.reportUnusable`).
+sequence on the account its closure returns, one that names nobody runs it
+on that account alone (`sipral_account_announce_any`: shown as `Unknown`,
+the call's `Call-ID` first, else the oldest INVITE on the account no push
+naming its caller takes, and the screen then given the INVITE's `From` URI
+and name through `CallKitProviding.reportCaller`), and one the decoder could
+not read, or that meets no account, is shown and ended at once
+(`PushKitBridge.reportUnusable`).
 What it reads from a payload is its `decoder`'s to say: by default the
 clear `caller`, `call-id` and `name` (`VoipPushFields(clear:)`); an
 application whose push carries only a sealed box opens the box there and
-returns the same fields, and a decoder that throws makes the push one that
-names no caller. iOS 26.4 adds a delivery with `PKVoIPPushMetadata`
+returns the same fields. A seal that does not open on a call push is
+answered with empty fields (`VoipPushFields()`), so the call is still
+expected on the account; a decoder that throws makes the push unusable. iOS 26.4 adds a delivery with `PKVoIPPushMetadata`
 (`pushRegistry(_:didReceiveIncomingVoIPPushWith:metadata:withCompletionHandler:)`),
 which the adapter implements beside the older one, under
 `@available(iOS 26.4, *)`: a push whose `mustReport` is false — the

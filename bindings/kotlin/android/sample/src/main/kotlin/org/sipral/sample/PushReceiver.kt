@@ -18,18 +18,19 @@ import android.content.Intent
  *     -n org.sipral.sample/.PushReceiver --es caller sip:170@pbx.example.com
  * ```
  *
+ * Without `--es caller`, the push names nobody and the next call on the
+ * account answers it.
+ *
  * The manifest protects it with `android.permission.DUMP`, which adb's shell
  * holds and no installed application can, so nothing on the phone can
  * raise a fake call through it.
  */
 class PushReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        // no caller is a push that named nobody: the call is expected on the
+        // account alone
         val caller = intent.getStringExtra("caller")?.trim().orEmpty()
         val phone = (context.applicationContext as SampleApplication).phone
-        if (caller.isEmpty()) {
-            phone.note("push with no caller, ignored")
-            return
-        }
         val callId = intent.getStringExtra("call-id")?.trim()?.takeIf { it.isNotEmpty() }
         val pending = goAsync()
         phone.pushArrived(caller, callId) { pending.finish() }

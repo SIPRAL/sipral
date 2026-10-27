@@ -868,11 +868,23 @@ all of it against a fake device on a plain JVM, and `docs/15-mobile.md`
 ("C4") says what the emulator showed.
 
 `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement an INVITE answered
-in `event.payload.announce.announcement`. `TelecomBridge` still matches by
-its own rule (same account, same user and host in `From`, oldest first on a
-tie), which agrees with the library's whenever the two readings of the URI
-do. An `ANNOUNCED_CALL_MISSING` is the oldest announcement still waiting,
-because every announcement waits the same window.
+in `event.payload.announce.announcement`, and `TelecomBridge` gives the
+INVITE the screen raised for that announcement; only an event that names
+none falls back to its own rule (same account, same user and host in `From`,
+oldest first on a tie). An `ANNOUNCED_CALL_MISSING` is the oldest
+announcement still waiting, because every announcement waits the same
+window.
+
+A push that named nobody is `pushArrived(account, caller = null)` (or
+`wakeForPush(..., caller = null)`): the framework is shown a call with no
+address, which the adapters show as RFC 3323's anonymous caller, the call is
+announced on the account alone (`SipralAccount.announce(null)`,
+`sipral_account_announce_any`: the push's `Call-ID` first, else the oldest
+INVITE on the account that no push naming its caller takes), and once the
+INVITE is matched the connection is told who is calling
+(`TelecomConnection.setCaller`). The `ConnectionService` adapter sets the
+connection's address and name; Core-Telecom keeps the address a call was
+added with, so there the call goes on showing the anonymous caller.
 
 A phone's lifecycle (`docs/15-mobile.md`, "Lifecycle on Android"):
 `client.suspending()`, `resumed()`, `interfaceLost()`,
