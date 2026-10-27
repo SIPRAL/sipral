@@ -265,6 +265,39 @@ export interface AccountOptions {
   headers?: Header[];
 }
 
+/**
+ * What the native half does to the SIP messages that pass it, as they pass:
+ * a message hook that needs no round trip to JavaScript, which runs too
+ * late to answer one. Every rule whose `direction` and `method` fit a
+ * message applies to it, in order.
+ */
+export interface MessageRule {
+  /** "outgoing", just before a message is sent, or "incoming", just after one arrives; left out, both. */
+  direction?: 'outgoing' | 'incoming';
+  /**
+   * Only messages of this method: a request's own, or a response's by its
+   * `CSeq` (so "REGISTER" fits a REGISTER and every answer to one). Compared
+   * as written, as RFC 3261 §7.1 has methods; left out, every message.
+   */
+  method?: string;
+  /** Each field's first instance given this value and any other taken out, or the field added when there is none. */
+  set?: Header[];
+  /** Each field added after the others, beside any already there. */
+  add?: Header[];
+  /** Field names whose every instance is taken out. */
+  remove?: string[];
+}
+
+/** One SIP message as it passed the stack, for `watchMessages`. */
+export interface MessageSeenEvent {
+  /** Whether it was on its way out. */
+  outgoing: boolean;
+  /** The whole message, start line to body, after the rules. */
+  message: string;
+  /** The far end, `host:port`. */
+  remote: string;
+}
+
 /** One header field, as it goes on the line: `name: value`. */
 export interface Header {
   /** The field name, `X-Push-Key`. */

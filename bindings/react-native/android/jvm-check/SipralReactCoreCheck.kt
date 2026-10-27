@@ -19,6 +19,7 @@ import kotlin.system.exitProcess
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import org.sipral.Sipral
@@ -615,9 +616,91 @@ private fun theAbiCheckKeepsTheOneXRule(): String {
         "another major and 0.36"
 }
 
+/** The rules as the hook applies them: a field matched in either form and
+ * any case, a folded one taken out whole, a response matched by its CSeq,
+ * the body untouched, nothing that does not fit changed. */
+private fun theMessageRulesChangeWhatFitsThemAndNothingElse(): String {
+    val rules = SipralMessageRule.parse(
+        "rule outgoing REGISTER\nset Max-Forwards:42\nset X-New:1\nremove subject\nadd X-Lab-Hook:a: b\n" +
+            "rule incoming *\nremove X-Trace",
+    )
+    val register = ("REGISTER sip:example.com SIP/2.0\r\nv: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\n" +
+        "Max-Forwards: 70\r\nmax-forwards: 69\r\ns: one,\r\n two\r\nCSeq: 1 REGISTER\r\n" +
+        "Content-Length: 4\r\n\r\nbody").toByteArray()
+    assertEquals(
+        "REGISTER sip:example.com SIP/2.0\r\nv: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\n" +
+            "Max-Forwards: 42\r\nCSeq: 1 REGISTER\r\nContent-Length: 4\r\nX-New: 1\r\nX-Lab-Hook: a: b\r\n\r\nbody",
+        String(assertNotNull(SipralMessageRule.apply(rules, true, register))),
+    )
+    assertEquals(null, SipralMessageRule.apply(rules, false, register), "an incoming REGISTER has no X-Trace")
+    val invite = "INVITE sip:bob@example.com SIP/2.0\r\nCSeq: 2 INVITE\r\n\r\n".toByteArray()
+    assertEquals(null, SipralMessageRule.apply(rules, true, invite), "a rule for REGISTER changed an INVITE")
+    val answer = "SIP/2.0 200 OK\r\nCSeq: 1 REGISTER\r\nX-Trace: 9\r\nX-Trace: 10\r\n\r\n".toByteArray()
+    assertEquals(
+        "SIP/2.0 200 OK\r\nCSeq: 1 REGISTER\r\n\r\n",
+        SipralMessageRule.apply(rules, false, answer)?.let { String(it) },
+    )
+    assertEquals(null, SipralMessageRule.apply(rules, true, "REGISTER x SIP/2.0\r\n".toByteArray()))
+    assertEquals(emptyList(), SipralMessageRule.parse(""))
+    for (bad in listOf("set X-A:1", "rule up *", "rule * *\nremove l", "rule * *\nadd X A:1", "rule * *\ndrop")) {
+        refusal("invalidArgument") { SipralMessageRule.parse(bad) }
+    }
+    return "the message rules changed what fitted them and nothing else"
+}
+
+/** Rules set from JavaScript change the REGISTER on the wire, and each
+ * message, as changed, is emitted while watched. */
+private fun theMessageRulesReachTheWireAndTheMessagesAreHandedOver(): String {
+    ServerSocket(0, 4, InetAddress.getLoopbackAddress()).use { registrar ->
+        val register = CompletableFuture.supplyAsync {
+            registrar.accept().use { connection ->
+                connection.soTimeout = 10_000
+                val held = StringBuilder()
+                val buffer = ByteArray(4096)
+                while (!held.contains("\r\n\r\n")) {
+                    val read = connection.getInputStream().read(buffer)
+                    if (read < 0) break
+                    held.append(String(buffer, 0, read, Charsets.UTF_8))
+                }
+                held.toString()
+            }
+        }
+        val events = Collections.synchronizedList(ArrayList<Map<String, Any>>())
+        val core = SipralReactCore(emit = { events += it }, audio = { SipralAudioMode.Application })
+        try {
+            refusal("closed") { core.watchMessages(true) }
+            core.open(SipralOpenOptions(bindHost = "127.0.0.1"))
+            core.setMessageRules("rule outgoing REGISTER\nset Max-Forwards:42\nadd X-Lab-Hook:1")
+            core.watchMessages(true)
+            val address = "127.0.0.1:${registrar.localPort}"
+            val line = core.addAccount(
+                SipralAccountOptions(
+                    aor = "sip:alice@sipral.invalid", registrar = "sip:sipral.invalid", registrarAddress = address,
+                    streamProtocol = "tcp",
+                ),
+            )
+            core.register(line)
+            val message = register.get(10, TimeUnit.SECONDS)
+            assertTrue("\r\nMax-Forwards: 42\r\n" in message, message)
+            assertTrue("\r\nX-Lab-Hook: 1\r\n" in message, message)
+            assertTrue(waitUntil { synchronized(events) { events.any { it["kind"] == "messageSeen" } } }, "no message was handed over")
+            val seen = synchronized(events) { events.first { it["kind"] == "messageSeen" } }
+            assertEquals(true, seen["outgoing"])
+            assertEquals(address, seen["remote"])
+            assertTrue("\r\nX-Lab-Hook: 1\r\n" in (seen["message"] as String), "$seen")
+            core.setMessageRules("")
+            core.watchMessages(false)
+        } finally {
+            core.close()
+        }
+    }
+    return "the message rules reached the wire and the messages were handed over"
+}
+
 fun main() {
     val said = try {
-        everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
+        theMessageRulesChangeWhatFitsThemAndNothingElse() + "; " + theMessageRulesReachTheWireAndTheMessagesAreHandedOver() +
+            "; " + everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
             "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
             aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule() + "; " +

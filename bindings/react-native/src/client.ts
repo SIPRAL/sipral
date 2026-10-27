@@ -23,6 +23,8 @@ import type {
   ChallengeRefusal,
   EndReason,
   LocateFailure,
+  MessageRule,
+  MessageSeenEvent,
   OpenOptions,
   AnswerOptions,
   PlaceCallOptions,
@@ -189,6 +191,8 @@ export interface ClientEvents {
   challengeDeclined: ChallengeDeclinedEvent;
   tokenRequired: TokenRequiredEvent;
   networkTest: NetworkTestEvent;
+  /** Every SIP message, while `watchMessages(true)` holds. */
+  message: MessageSeenEvent;
   /** Every event, typed or not, as the native half handed it over. */
   event: NativeEvent;
 }
@@ -834,6 +838,58 @@ export class SipralClient {
     return this.run(() => undefined, (native) => native.setDiagnosticTrace(on));
   }
 
+  /**
+   * What the native half does to each SIP message just before it is sent
+   * and just after it arrives, in place of the rules before; `[]` for none.
+   * The rules run inside the stack, on the message itself, so a REGISTER
+   * leaves with its fields already changed. `Content-Length` is the
+   * library's, and the body is never touched.
+   */
+  setMessageRules(rules: MessageRule[]): Promise<void> {
+    return this.run(
+      () => {
+        for (const rule of rules) {
+          if (rule.direction !== undefined && rule.direction !== 'outgoing' && rule.direction !== 'incoming') {
+            throw new SipralError('invalidArgument', 'a rule\'s direction is "outgoing" or "incoming"');
+          }
+          if (rule.method !== undefined && !/^[A-Za-z0-9.!%*_+`'~-]+$/.test(rule.method)) {
+            throw new SipralError('invalidArgument', `"${rule.method}" is not a method`);
+          }
+          const names = [...(rule.set ?? []), ...(rule.add ?? [])].map(({name}) => name).concat(rule.remove ?? []);
+          if (names.some((name) => !/^[A-Za-z0-9.!%*_+`'~-]+$/.test(name))) {
+            throw new SipralError('invalidArgument', 'a field name is a token, without a colon, a space or a line break');
+          }
+          if (names.some((name) => name.toLowerCase() === 'content-length' || name.toLowerCase() === 'l')) {
+            throw new SipralError('invalidArgument', 'Content-Length is the library\'s');
+          }
+          if ([...(rule.set ?? []), ...(rule.add ?? [])].some(({value}) => /[\r\n]/.test(value))) {
+            throw new SipralError('invalidArgument', 'a field\'s value is one line');
+          }
+        }
+      },
+      (native) =>
+        native.setMessageRules(
+          rules
+            .flatMap((rule) => [
+              `rule ${rule.direction ?? '*'} ${rule.method ?? '*'}`,
+              ...(rule.set ?? []).map(({name, value}) => `set ${name}:${value}`),
+              ...(rule.add ?? []).map(({name, value}) => `add ${name}:${value}`),
+              ...(rule.remove ?? []).map((name) => `remove ${name}`),
+            ])
+            .join('\n'),
+        ),
+    );
+  }
+
+  /**
+   * Have every SIP message handed over as a "message" event, after the
+   * rules, or stop. Read only and late: the message has already gone, or
+   * been taken in, by the time JavaScript sees it.
+   */
+  watchMessages(on: boolean): Promise<void> {
+    return this.run(() => undefined, (native) => native.watchMessages(on));
+  }
+
   /** The settings in effect, defaults filled in. */
   async settings(): Promise<Settings> {
     const read = await this.run(() => undefined, (native) => native.settings());
@@ -909,6 +965,14 @@ export class SipralClient {
       return;
     }
     this.emitter.emit('event', event);
+    if (event.kind === 'messageSeen') {
+      this.emitter.emit('message', {
+        outgoing: event.outgoing ?? false,
+        message: event.message ?? '',
+        remote: event.remote ?? '',
+      });
+      return;
+    }
     if (event.kind === 'registrationChanged') {
       const account = this.accounts.get(event.account);
       if (account !== undefined) {

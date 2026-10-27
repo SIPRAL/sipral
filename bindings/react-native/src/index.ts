@@ -44,6 +44,8 @@ export type {
   ChallengeRefusal,
   EndReason,
   Header,
+  MessageRule,
+  MessageSeenEvent,
   TokenError,
   NatKind,
   NetworkProbe,

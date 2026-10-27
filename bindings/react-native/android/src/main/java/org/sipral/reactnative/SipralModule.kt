@@ -130,6 +130,10 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
 
     override fun setDiagnosticTrace(on: Boolean, promise: Promise) = settle(promise) { core.setDiagnosticTrace(on) }
 
+    override fun setMessageRules(rules: String, promise: Promise) = settle(promise) { core.setMessageRules(rules) }
+
+    override fun watchMessages(on: Boolean, promise: Promise) = settle(promise) { core.watchMessages(on) }
+
     override fun networkTest(account: String, echoCall: String, echoMs: Double, timeoutMs: Double, promise: Promise) =
         settle(promise) { core.networkTest(account, echoCall, echoMs.toInt(), timeoutMs.toInt()) }
 

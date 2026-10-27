@@ -35,6 +35,7 @@ import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralHookVerdict
 import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.digitOf
 import org.sipral.idiomatic.declinedChallengeOf
@@ -136,6 +137,15 @@ class SipralReactCore(
     private val calls = SipralCallBook<SipralCall>()
     private val arrived = ConcurrentHashMap<String, SipralEvent>()
     private val transfers = ConcurrentHashMap<String, SipralEvent>()
+    /** What the message hook does: changed under this object's lock, then
+     * the hook installed again with a copy, so it reads nothing shared while
+     * the stack is locked around it. */
+    private var messageRules: List<SipralMessageRule> = emptyList()
+    private var watchingMessages = false
+    /** Where a message seen is handed to [emit], off the stack's lock. */
+    private val seen = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "sipral-react-messages").apply { isDaemon = true }
+    }
 
     /** Open the client; the address it signals from comes back. */
     @Synchronized
@@ -200,7 +210,48 @@ class SipralReactCore(
         accounts.clear()
         arrived.clear()
         transfers.clear()
+        messageRules = emptyList()
+        watchingMessages = false
         closing.close()
+    }
+
+    /** The message rules, as `setMessageRules` crosses them, in place of the
+     * ones before. */
+    fun setMessageRules(text: String) = guarded {
+        val rules = SipralMessageRule.parse(text)
+        installMessageHook { messageRules = rules }
+    }
+
+    /** Whether every message is emitted as a `messageSeen` event. */
+    fun watchMessages(on: Boolean) = guarded { installMessageHook { watchingMessages = on } }
+
+    /** Make [change], then give the client the hook the rules and the watch
+     * now call for, or none. */
+    private fun installMessageHook(change: () -> Unit) {
+        val (client, rules, watching) = synchronized(this) {
+            val client = open()
+            change()
+            Triple(client, messageRules, watchingMessages)
+        }
+        if (rules.isEmpty() && !watching) {
+            client.setMessageHook(null)
+            return
+        }
+        client.setMessageHook { outgoing, message, remote ->
+            val changed = SipralMessageRule.apply(rules, outgoing, message)
+            if (watching) {
+                val text = String(changed ?: message, Charsets.UTF_8)
+                seen.execute {
+                    emit(
+                        mapOf(
+                            "kind" to "messageSeen", "kindName" to "message seen", "account" to "", "call" to "",
+                            "outgoing" to outgoing, "message" to text, "remote" to remote,
+                        ),
+                    )
+                }
+            }
+            changed?.let { SipralHookVerdict.Replace(it) } ?: SipralHookVerdict.Keep
+        }
     }
 
     fun addAccount(options: SipralAccountOptions): String = guarded {

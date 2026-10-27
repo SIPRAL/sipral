@@ -195,6 +195,12 @@ export type NativeEvent = {
   local?: string;
   /** Where the STUN server saw it. */
   mapped?: string;
+  /** A message seen: whether it was on its way out. */
+  outgoing?: boolean;
+  /** A message seen: the whole of it. */
+  message?: string;
+  /** A message seen: the far end, host:port. */
+  remote?: string;
 };
 
 export interface Spec extends TurboModule {
@@ -229,6 +235,14 @@ export interface Spec extends TurboModule {
   /** `sipral_audio_set_system_echo_cancellation`; open devices are reopened at once. */
   setSystemEchoCancellation(on: boolean): Promise<void>;
   setDiagnosticTrace(on: boolean): Promise<void>;
+  /**
+   * The message rules, one directive a line: `rule <outgoing|incoming|*>
+   * <method|*>` opens a rule, then `set name:value`, `add name:value` and
+   * `remove name` lines; "" for none.
+   */
+  setMessageRules(rules: string): Promise<void>;
+  /** Whether every message is handed over, as a "messageSeen" event. */
+  watchMessages(on: boolean): Promise<void>;
   /** A network test before a call; "" leaves the account or the echo call out. Resolves with the test's number. */
   networkTest(
     account: string,

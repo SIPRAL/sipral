@@ -319,6 +319,40 @@ describe('accounts', () => {
     expect(native.calls).toHaveLength(before);
   });
 
+  it('crosses the message rules a directive a line, refuses one the native half could not apply before crossing, and hands each message seen over', async () => {
+    const {client, native} = await opened();
+    await client.setMessageRules([
+      {direction: 'outgoing', method: 'REGISTER', set: [{name: 'User-Agent', value: 'lab: 1'}], remove: ['X-Old']},
+      {add: [{name: 'X-Lab-Hook', value: '1'}]},
+    ]);
+    expect(native.calls[1]).toEqual({
+      method: 'setMessageRules',
+      args: ['rule outgoing REGISTER\nset User-Agent:lab: 1\nremove X-Old\nrule * *\nadd X-Lab-Hook:1'],
+    });
+    await client.setMessageRules([]);
+    expect(native.calls[2]).toEqual({method: 'setMessageRules', args: ['']});
+    const before = native.calls.length;
+    const refused = [
+      [{direction: 'sideways' as never}],
+      [{method: 'REG ISTER'}],
+      [{set: [{name: 'X: Y', value: '1'}]}],
+      [{remove: ['Content-Length']}],
+      [{add: [{name: 'l', value: '0'}]}],
+      [{add: [{name: 'X-A', value: 'a\r\nVia: b'}]}],
+    ];
+    for (const one of refused) {
+      expect((await refusal(client.setMessageRules(one))).code).toBe('invalidArgument');
+    }
+    expect(native.calls).toHaveLength(before);
+
+    await client.watchMessages(true);
+    expect(native.calls.at(-1)).toEqual({method: 'watchMessages', args: [true]});
+    const seen: unknown[] = [];
+    client.on('message', (message) => seen.push(message));
+    native.emit({kind: 'messageSeen', outgoing: true, message: 'REGISTER sip:example.com SIP/2.0\r\n\r\n', remote: '203.0.113.5:5060'});
+    expect(seen).toEqual([{outgoing: true, message: 'REGISTER sip:example.com SIP/2.0\r\n\r\n', remote: '203.0.113.5:5060'}]);
+  });
+
   it('crosses the instance and the REGISTER fields, one field per line, and refuses one that would break a line', async () => {
     const {client, native} = await opened();
     const instanceId = 'urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6';

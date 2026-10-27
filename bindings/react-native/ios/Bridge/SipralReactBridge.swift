@@ -124,6 +124,14 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.setDiagnosticTrace(on) }
     }
 
+    @objc public func setMessageRules(_ rules: String, resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.setMessageRules(rules) }
+    }
+
+    @objc public func watchMessages(_ on: Bool, resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.watchMessages(on) }
+    }
+
     @objc public func networkTest(
         _ account: String, echoCall: String, echoMs: Double, timeoutMs: Double,
         resolve: @escaping Resolve, reject: @escaping Reject

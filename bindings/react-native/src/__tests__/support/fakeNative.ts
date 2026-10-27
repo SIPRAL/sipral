@@ -132,6 +132,14 @@ export class FakeNative implements Spec {
   setSystemEchoCancellation(...args: Parameters<Spec['setSystemEchoCancellation']>) {
     return this.settle('setSystemEchoCancellation', args, undefined);
   }
+  setMessageRules(...args: Parameters<Spec['setMessageRules']>) {
+    return this.settle('setMessageRules', args, undefined);
+  }
+
+  watchMessages(...args: Parameters<Spec['watchMessages']>) {
+    return this.settle('watchMessages', args, undefined);
+  }
+
   setDiagnosticTrace(...args: Parameters<Spec['setDiagnosticTrace']>) {
     return this.settle('setDiagnosticTrace', args, undefined);
   }

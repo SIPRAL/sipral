@@ -307,6 +307,73 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(located?["account"] as? String, line)
     }
 
+    /// The rules as the hook applies them: a field matched in either form
+    /// and any case, a folded one taken out whole, a response matched by
+    /// its CSeq, the body untouched, nothing that does not fit changed.
+    func testTheMessageRulesChangeWhatFitsThemAndNothingElse() throws {
+        let rules = try SipralMessageRule.parse(
+            "rule outgoing REGISTER\nset Max-Forwards:42\nset X-New:1\nremove subject\nadd X-Lab-Hook:a: b\n"
+                + "rule incoming *\nremove X-Trace"
+        )
+        let register = Array((
+            "REGISTER sip:example.com SIP/2.0\r\nv: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\n"
+                + "Max-Forwards: 70\r\nmax-forwards: 69\r\ns: one,\r\n two\r\nCSeq: 1 REGISTER\r\n"
+                + "Content-Length: 4\r\n\r\nbody"
+        ).utf8)
+        let changed = try XCTUnwrap(SipralMessageRule.apply(rules, outgoing: true, to: register))
+        XCTAssertEqual(String(decoding: changed, as: UTF8.self),
+            "REGISTER sip:example.com SIP/2.0\r\nv: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\n"
+                + "Max-Forwards: 42\r\nCSeq: 1 REGISTER\r\nContent-Length: 4\r\nX-New: 1\r\nX-Lab-Hook: a: b\r\n\r\nbody")
+        XCTAssertNil(SipralMessageRule.apply(rules, outgoing: false, to: register), "an incoming REGISTER has no X-Trace")
+        let invite = Array("INVITE sip:bob@example.com SIP/2.0\r\nCSeq: 2 INVITE\r\n\r\n".utf8)
+        XCTAssertNil(SipralMessageRule.apply(rules, outgoing: true, to: invite), "a rule for REGISTER changed an INVITE")
+        let answer = Array("SIP/2.0 200 OK\r\nCSeq: 1 REGISTER\r\nX-Trace: 9\r\nX-Trace: 10\r\n\r\n".utf8)
+        XCTAssertEqual(SipralMessageRule.apply(rules, outgoing: false, to: answer).map { String(decoding: $0, as: UTF8.self) },
+            "SIP/2.0 200 OK\r\nCSeq: 1 REGISTER\r\n\r\n")
+        XCTAssertNil(SipralMessageRule.apply(rules, outgoing: true, to: Array("REGISTER x SIP/2.0\r\n".utf8)),
+            "a message with no end to its header was changed")
+        XCTAssertEqual(try SipralMessageRule.parse(""), [])
+        refusal("invalidArgument") { _ = try SipralMessageRule.parse("set X-A:1") }
+        refusal("invalidArgument") { _ = try SipralMessageRule.parse("rule up *") }
+        refusal("invalidArgument") { _ = try SipralMessageRule.parse("rule * *\nremove l") }
+        refusal("invalidArgument") { _ = try SipralMessageRule.parse("rule * *\nadd X A:1") }
+        refusal("invalidArgument") { _ = try SipralMessageRule.parse("rule * *\ndrop") }
+    }
+
+    /// Rules set from JavaScript change the REGISTER on the wire, and each
+    /// message, as changed, is emitted while watched.
+    func testTheMessageRulesReachTheWireAndTheMessagesAreHandedOver() async throws {
+        let registrar = try OneRegister()
+        let lock = NSLock()
+        nonisolated(unsafe) var events: [[String: Any]] = []
+        let core = SipralReactCore(emit: { event in lock.withLock { events.append(event) } }, audio: { _ in .application })
+        defer { core.close() }
+        refusal("closed") { try core.watchMessages(true) }
+        _ = try core.open(SipralOpenOptions(["bindHost": "127.0.0.1"]))
+        try core.setMessageRules("rule outgoing REGISTER\nset Max-Forwards:42\nadd X-Lab-Hook:1")
+        try core.watchMessages(true)
+        let line = try core.addAccount(SipralAccountOptions([
+            "aor": "sip:alice@sipral.invalid", "registrar": "sip:sipral.invalid",
+            "registrarAddress": registrar.address, "streamProtocol": "tcp",
+        ]))
+        try core.register(line)
+        let register = try XCTUnwrap(registrar.first(within: 10), "no REGISTER over a connection")
+        XCTAssertTrue(register.contains("\r\nMax-Forwards: 42\r\n"), register)
+        XCTAssertTrue(register.contains("\r\nX-Lab-Hook: 1\r\n"), register)
+        var handed: [String: Any]?
+        let deadline = Date().addingTimeInterval(5)
+        while handed == nil, Date() < deadline {
+            handed = lock.withLock { events.first { $0["kind"] as? String == "messageSeen" } }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let seen = try XCTUnwrap(handed, "no message was handed over")
+        XCTAssertEqual(seen["outgoing"] as? Bool, true)
+        XCTAssertEqual(seen["remote"] as? String, registrar.address)
+        XCTAssertTrue((seen["message"] as? String ?? "").contains("\r\nX-Lab-Hook: 1\r\n"), "\(seen)")
+        try core.setMessageRules("")
+        try core.watchMessages(false)
+    }
+
     /// An account on its own TCP connection registers, with its instance and
     /// its own fields on the REGISTER; an unknown protocol is refused;
     /// settings come back as NativeSettings.

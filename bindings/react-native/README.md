@@ -191,6 +191,31 @@ first, the answer to a challenge, the refresh and the de-registration. A
 field that would break a line is refused before it crosses; the library
 checks the rest as it does a call's.
 
+### A message hook
+
+The other layers hand every SIP message to a function that answers before
+the stack goes on; JavaScript runs too far from the stack for that, so here
+the application sets rules the native half applies inside the stack:
+
+```ts
+await client.setMessageRules([
+  {direction: 'outgoing', method: 'REGISTER', set: [{name: 'Max-Forwards', value: '42'}]},
+  {add: [{name: 'X-Tenant', value: 'acme'}], remove: ['User-Agent']},
+]);
+```
+
+Each rule whose `direction` ("outgoing", "incoming", or both when left out)
+and `method` (a request's, or a response's by its `CSeq`; every message when
+left out) fit a message applies to it, in order: `set` gives a field's first
+instance its value and takes out the rest, or adds it, `add` adds one beside
+any there, `remove` takes out every instance. A field is matched in any case
+and in its compact form (`v` for `Via`); `Content-Length` and the body are
+the library's. `setMessageRules([])` takes them away.
+
+`client.watchMessages(true)` hands every message over as a `message` event,
+`{outgoing, message, remote}`, after the rules: read only, and late, the
+message having gone out or been taken in by then.
+
 ### Calls
 
 `client.placeCall(account, target, options)` resolves with a `SipralCall`;

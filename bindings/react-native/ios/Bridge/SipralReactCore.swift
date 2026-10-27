@@ -166,6 +166,13 @@ public final class SipralReactCore: @unchecked Sendable {
     private var calls: [String: Call] = [:]
     private var arrived: [String: SipralEvent] = [:]
     private var transfers: [String: SipralEvent] = [:]
+    /// What the message hook does: changed under `lock`, then the hook
+    /// installed again with a copy, so it reads nothing shared while the
+    /// stack is locked around it.
+    private var messageRules: [SipralMessageRule] = []
+    private var watchingMessages = false
+    /// Where a message seen is handed to `emit`, off the stack's lock.
+    private let seen = DispatchQueue(label: "org.sipral.reactnative.messages")
 
     public init(
         emit: @escaping @Sendable ([String: Any]) -> Void,
@@ -252,9 +259,54 @@ public final class SipralReactCore: @unchecked Sendable {
             accounts.removeAll()
             arrived.removeAll()
             transfers.removeAll()
+            messageRules = []
+            watchingMessages = false
             return was
         }
         closing?.close()
+    }
+
+    /// The message rules, as `setMessageRules` crosses them, in place of the
+    /// ones before.
+    public func setMessageRules(_ text: String) throws {
+        try guarded {
+            let rules = try SipralMessageRule.parse(text)
+            try installMessageHook { messageRules = rules }
+        }
+    }
+
+    /// Whether every message is emitted as a `messageSeen` event.
+    public func watchMessages(_ on: Bool) throws {
+        try guarded { try installMessageHook { watchingMessages = on } }
+    }
+
+    /// Make `change`, then give the stack the hook the rules and the watch
+    /// now call for, or none.
+    private func installMessageHook(after change: () -> Void) throws {
+        let (stack, rules, watching) = try locked {
+            let stack = try open()
+            change()
+            return (stack, messageRules, watchingMessages)
+        }
+        if rules.isEmpty && !watching {
+            try stack.setMessageHook(nil)
+            return
+        }
+        let emit = self.emit
+        let seen = self.seen
+        try stack.setMessageHook { outgoing, message, remote in
+            let changed = SipralMessageRule.apply(rules, outgoing: outgoing, to: message)
+            if watching {
+                let text = String(decoding: changed ?? message, as: UTF8.self)
+                seen.async {
+                    emit([
+                        "kind": "messageSeen", "kindName": "message seen", "account": "", "call": "",
+                        "outgoing": outgoing, "message": text, "remote": remote,
+                    ])
+                }
+            }
+            return changed.map { .replace($0) } ?? .keep
+        }
     }
 
     public func addAccount(_ options: SipralAccountOptions) throws -> String {

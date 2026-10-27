@@ -278,7 +278,11 @@ sees every SIP message whole, as bytes, and keeps it, replaces it or drops it
 `Stack.set_message_hook`, in Swift `SipralStack.setMessageHook(_:)`, in
 Kotlin `SipralClient.setMessageHook`, in .NET `SipralStack.SetMessageHook`,
 in Dart `SipralStack.setMessageHook`, in Node.js `Stack.setMessageHook`, in
-C++ `sipral::Stack::set_message_hook`). `scripts/lab.sh`, beside Asterisk,
+C++ `sipral::Stack::set_message_hook`). React Native's JavaScript answers too
+late to decide inside the stack, so it sets rules the native half's hook
+applies there (`client.setMessageRules`: set, add or remove fields, by
+direction and method) and reads every message after the fact
+(`client.watchMessages`). `scripts/lab.sh`, beside Asterisk,
 shows it on the wire: a REGISTER Asterisk received with the header the hook
 added, the `Max-Forwards` it changed and without the `Expires` it took away.
 
