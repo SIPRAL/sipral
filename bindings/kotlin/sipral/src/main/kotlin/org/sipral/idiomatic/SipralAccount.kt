@@ -9,6 +9,7 @@ import org.sipral.SipralChallengeRefusal
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
+import org.sipral.SipralHeader
 import org.sipral.SipralNative
 import org.sipral.SipralPinnedCertificate
 import org.sipral.SipralPresence
@@ -57,10 +58,24 @@ class SipralAccount internal constructor(
     internal val derivesContact: Boolean
         get() = givenContact == null
 
-    /** The account's server was located at [target]. */
-    internal fun located(target: String) {
-        registrarAddress = target
+    /** Every address its [serverUri] was last located at, in RFC 3263's
+     * order: the stack fails over among them on its own. */
+    @Volatile
+    internal var locatedTargets: List<String> = emptyList()
+        private set
+
+    /** The account's server was located at [targets], the first of them
+     * where its requests go now. */
+    internal fun located(targets: List<String>) {
+        locatedTargets = targets
+        registrarAddress = targets.first()
     }
+
+    /** Whether requests of this account may be on a connection to
+     * [destination]: its registrar's address, or one its server was located
+     * at. */
+    internal fun reachedAt(destination: String): Boolean =
+        registrarAddress == destination || destination in locatedTargets
 
     /** `sipral_account_rebind` toward [remote], reached at [advertised]
      * (`host:port`), unless its `Contact` names that already. */
@@ -126,6 +141,8 @@ class SipralAccount internal constructor(
             privacy: Set<SipralPrivacy>,
             trustedPeers: List<String>,
             security: SipralAccountSecurity,
+            instanceId: String?,
+            headers: List<SipralHeader>,
         ): SipralAccount {
             val written = contact ?: if (location.advertised != null) {
                 client.defaultContact(aor, location.advertised, location.streamProtocol)
@@ -141,7 +158,9 @@ class SipralAccount internal constructor(
                 displayName = displayName,
                 authUser = authUser,
                 authPassword = authPassword,
+                instanceId = instanceId,
                 expiresSeconds = expiresSeconds,
+                headers = headers.ifEmpty { null },
                 pushProvider = push?.provider,
                 pushPrid = push?.prid,
                 pushParam = push?.param,

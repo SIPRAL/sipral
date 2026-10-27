@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralHeader
 import org.sipral.SipralHeldAudio
 import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralAccount
@@ -109,7 +110,9 @@ object SipralJava {
      * challenges calls under a realm REGISTER never sees; other challenges go
      * unanswered and raise `CHALLENGE_DECLINED` ([declinedChallengeOf]).
      * [webrtc] makes the account a PBX WebRTC line
-     * ([SipralAccountSecurity.webrtc]).
+     * ([SipralAccountSecurity.webrtc]). [instanceId] is the `+sip.instance`
+     * URN every REGISTER's `Contact` carries (RFC 5626 §4.1), and [headers]
+     * go on every REGISTER, as [SipralClient.addAccount] takes them.
      */
     @JvmStatic
     @JvmOverloads
@@ -126,6 +129,8 @@ object SipralJava {
         websocketHost: String? = null,
         websocketResource: String? = null,
         webrtc: Boolean = false,
+        instanceId: String? = null,
+        headers: List<SipralHeader> = emptyList(),
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
@@ -138,6 +143,8 @@ object SipralJava {
         websocketHost = websocketHost,
         websocketResource = websocketResource,
         security = SipralAccountSecurity(webrtc = webrtc),
+        instanceId = instanceId,
+        headers = headers,
     )
 
     /** The challenge a `CHALLENGE_DECLINED` [event] reports, or null for

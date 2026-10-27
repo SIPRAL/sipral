@@ -567,12 +567,15 @@ class Phone(private val app: Application) {
     }
 
     /** Show the calls the framework has; take the incoming-call
-     * notification down once nothing rings; hold the foreground service for
-     * as long as a call is connecting or connected. */
+     * notification down once nothing rings. Under the foreground service's
+     * id it stays until the service moves on to the answered call or stops:
+     * Android cancels nothing a service in the foreground shows. */
     private fun reconcile(now: List<TelecomCall>) {
         calls = now
         if (now.none { it.phase == TelecomPhase.RINGING }) {
-            app.getSystemService(NotificationManager::class.java).cancel(INCOMING_NOTIFICATION)
+            val manager = app.getSystemService(NotificationManager::class.java)
+            manager.cancel(INCOMING_NOTIFICATION)
+            manager.cancel(SipralCallForeground.NOTIFICATION_ID)
         }
         if (now.any { it.call != 0L } && watching?.isActive != true) {
             watching = scope.launch(Dispatchers.IO) { watchMedia() }
@@ -626,33 +629,48 @@ class Phone(private val app: Application) {
      * Decline. Where the user has not allowed full-screen intents (Android 14
      * and later, see [ReadinessFacts.fullScreenIntent]) the system shows the
      * same notification as a heads-up one instead.
+     *
+     * A call ringing alone is posted under the foreground service's id, so
+     * that it is one notification whether or not Android let the service
+     * start; one ringing beside a call already placed or answered, which the
+     * service shows, has its own.
      */
     private fun notifyIncoming(id: String, from: TelecomBridge) {
-        val manager = app.getSystemService(NotificationManager::class.java)
+        val now = from.calls.value
+        val caller = now.firstOrNull { it.id == id }?.let { it.displayName ?: it.caller } ?: "Incoming call"
+        val beside = now.any { it.id != id && it.phase in CONNECTED }
+        app.getSystemService(NotificationManager::class.java).notify(
+            if (beside) INCOMING_NOTIFICATION else SipralCallForeground.NOTIFICATION_ID,
+            incoming(app, id, caller),
+        )
+        note("incoming call shown: $caller")
+    }
+
+    private fun incoming(context: Context, id: String, caller: String): Notification {
+        val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH),
         )
         val open = PendingIntent.getActivity(
-            app,
+            context,
             0,
-            Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE,
         )
         val answer = PendingIntent.getActivity(
-            app,
+            context,
             1,
-            Intent(app, MainActivity::class.java).setAction(ACTION_ANSWER).putExtra(EXTRA_CALL, id)
+            Intent(context, MainActivity::class.java).setAction(ACTION_ANSWER).putExtra(EXTRA_CALL, id)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val decline = PendingIntent.getBroadcast(
-            app,
+            context,
             2,
-            Intent(app, CallActionReceiver::class.java).setAction(ACTION_DECLINE).putExtra(EXTRA_CALL, id),
+            Intent(context, CallActionReceiver::class.java).setAction(ACTION_DECLINE).putExtra(EXTRA_CALL, id),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val caller = from.calls.value.firstOrNull { it.id == id }?.let { it.displayName ?: it.caller } ?: "Incoming call"
-        val builder = Notification.Builder(app, CHANNEL)
+        val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle(caller)
             .setContentText("Sipral sample")
@@ -666,13 +684,16 @@ class Phone(private val app: Application) {
             builder.addAction(Notification.Action.Builder(null, "Decline", decline).build())
             builder.addAction(Notification.Action.Builder(null, "Answer", answer).build())
         }
-        manager.notify(INCOMING_NOTIFICATION, builder.build())
-        note("incoming call shown: $caller")
+        return builder.build()
     }
 
-    /** What the call's foreground service shows: the call style Android 12
-     * and later give a call, with its Hang up. */
+    /** What the call's foreground service shows: for a call that rings, the
+     * incoming-call notification [notifyIncoming] posts; for any other, the
+     * call style Android 12 and later give a call, with its Hang up. */
     private fun ongoing(context: Context, call: TelecomCall, hangUp: PendingIntent): Notification {
+        if (call.phase == TelecomPhase.RINGING) {
+            return incoming(context, call.id, call.displayName ?: call.caller.ifEmpty { "Incoming call" })
+        }
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(ONGOING_CHANNEL, "Ongoing calls", NotificationManager.IMPORTANCE_LOW))
         val who = call.displayName ?: call.caller
@@ -747,5 +768,8 @@ class Phone(private val app: Application) {
         const val INCOMING_NOTIFICATION = 1
         const val ONGOING_CHANNEL = "ongoing"
         const val KEEPALIVE_MS = 25_000L
+
+        /** A call placed or answered, which the foreground service shows. */
+        val CONNECTED = setOf(TelecomPhase.REQUESTED, TelecomPhase.DIALING, TelecomPhase.ACTIVE, TelecomPhase.HELD)
     }
 }

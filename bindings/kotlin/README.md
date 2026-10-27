@@ -312,6 +312,19 @@ back into the stack for something the event already said.
 and a `SipralPush` on `addAccount` are `docs/15-mobile.md`'s C2 and push
 parameters from Kotlin.
 
+`addAccount(..., instanceId = "urn:uuid:...")` gives the device's
+`+sip.instance` (RFC 5626 §4.1), a UUID the application makes once and keeps
+for the installation: every REGISTER's `Contact` carries it, which a push
+proxy (RFC 8599) may require, answering `400 Missing +sip.instance` without
+it. `headers = listOf(SipralHeader(name, value))` puts fields of the
+application's on every REGISTER of the account: the first, the one
+answering a challenge, each refresh and the de-registration. They are
+checked as a call's are (`placeCall(..., headers = ...)`): `Expires` is the
+stack's (`expiresSeconds`), a `Supported` is merged with the stack's own
+(`gruu`, sent with an instance id), and an account with no `registrar`
+refuses them with `INVALID_ARGUMENT`. `InstanceCheck.kt` shows both on all
+four REGISTERs a challenging loopback registrar sees.
+
 `SipralClient.events` and `SipralCall.events` (and `SipralCall.digits`,
 derived from it) are a `kotlinx.coroutines.flow.SharedFlow` with `replay =
 0`: a fresh subscriber never sees a value emitted before it subscribed, no
@@ -572,11 +585,14 @@ val carrier = client.addAccount(
 The stack asks for the connection with `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`,
 nothing outgrown, and the client opens it to the account's server whatever
 `streamFallback` says: a TLS one held to the account's `tlsPin` when it has
-one, to `tlsTrust` under `tlsServerName` otherwise. The account's REGISTER
-and every request of its calls go over it, its `Contact` names the
-protocol, and a connection that closes is opened again and the account
-registered again. Until it is open a call the account places throws with
-`TRANSPORT_DOWN`.
+one, to `tlsTrust` otherwise. The name checked is `tlsServerName` when
+`open` was given one; else, for an account named by `serverUri`, the URI's
+domain — the SIP domain the user configured, not the host or address its
+SRV record named (RFC 5922 §7.3); else the address connected to. The
+account's REGISTER and every request of its calls go over it, its
+`Contact` names the protocol, and a connection that closes is opened again
+and the account registered again. Until it is open a call the account
+places throws with `TRANSPORT_DOWN`.
 
 ### A client certificate
 
@@ -885,9 +901,13 @@ wakeForPush(client, account, bridge, lifecycle, key = aor, caller = callerFromTh
 Android's default network into `networkChanged` and moves every call the
 stack asks to move; `SipralCallForeground.follow(context, bridge, scope,
 ui)` holds `SipralCallService`, the call's foreground service of types
-`phoneCall` and `microphone`, from the moment a call is placed or answered
-until the last one ends, with the notification the application's
-`OngoingCallUi` builds. `IdiomaticSipCalls` with no `mediaHost` binds each
+`phoneCall` and `microphone`, from the moment a call rings (a push's
+announcement included, as `phoneCall` alone, the type Android lets a
+background process start) or is placed, until the last one ends, with the
+notification the application's `OngoingCallUi` builds: the incoming-call
+one for a call that rings. Follow the bridge before `wakeForPush`, so that
+the service starts while the push's exemption lasts (`docs/15-mobile.md`,
+"Lifecycle on Android"). `IdiomaticSipCalls` with no `mediaHost` binds each
 call's media on the network that is up when the call starts.
 
 `android/sample` is a Compose skeleton, not a product: register, call, a

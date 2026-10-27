@@ -1061,7 +1061,12 @@ its name, a flow kept open, an address a peer can reach"). Over TLS that
 connection is held to the account's `tls_pin` when it has one, by the
 library's own verdict (`sipral_account_check_certificate`), and to the
 stack's trust otherwise — the platform's authorities in the Dart layer —
-under `tls_server_name` or the server's host.
+under `tls_server_name` or the server's host. The Kotlin layer, like the
+networking component, takes the domain of the account's `serverUri` before
+the address it was located at, when the application gives no
+`tlsServerName`: the SIP domain the user configured, not the host an SRV
+record named (RFC 5922 §7.3), which is often an address the certificate
+does not carry.
 
 **When the connection fails.** The first attempt is made before the
 constructor returns and every later one on a thread of the layer's own;
