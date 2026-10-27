@@ -7,6 +7,9 @@
 //! authority beside it; that authority alone; one certificate pinned by the SHA-256 fingerprint of
 //! its DER. Nothing here turns checking off.
 
+#[cfg(any(target_os = "ios", all(test, target_vendor = "apple")))]
+mod apple;
+
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,7 +36,9 @@ use crate::failure::{Failure, TlsFailure};
 #[non_exhaustive]
 pub enum Trust {
     /// The authorities in the platform's trust store: the keychain's on macOS, the system
-    /// store on Windows, the system's CA bundle elsewhere, `SSL_CERT_FILE` when it names one.
+    /// store on Windows, the system's certificate directory on Android, whatever the Security
+    /// framework trusts on iOS, the system's CA bundle elsewhere, `SSL_CERT_FILE` when it names
+    /// one.
     #[default]
     Platform,
     /// The platform's anchors and these authorities beside them.
@@ -199,9 +204,43 @@ impl PlatformRoots {
     /// The authorities the platform's store holds. One the store cannot hand over whole is left
     /// out, as the platform's own clients leave it out.
     fn get(&self) -> &[CertificateDer<'static>] {
-        self.0
-            .get_or_init(|| rustls_native_certs::load_native_certs().certs)
+        self.0.get_or_init(platform_authorities)
     }
+}
+
+/// The keychain's roots on macOS, the system store on Windows, the CA bundle elsewhere.
+#[cfg(not(target_os = "android"))]
+fn platform_authorities() -> Vec<CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+/// Android's: one file per authority, PEM after a text dump of it, those of the updatable
+/// Conscrypt module (Android 14 and later) in place of the system image's when it has them.
+/// One the user turned off in Settings is still read: that list is the system's alone to see.
+#[cfg(target_os = "android")]
+fn platform_authorities() -> Vec<CertificateDer<'static>> {
+    let updatable = authorities_in(std::path::Path::new("/apex/com.android.conscrypt/cacerts"));
+    if updatable.is_empty() {
+        authorities_in(std::path::Path::new("/system/etc/security/cacerts"))
+    } else {
+        updatable
+    }
+}
+
+/// Every certificate the files in `directory` hold, each read as PEM after whatever text comes
+/// before it; a file that cannot be read, or holds none, adds nothing.
+#[cfg(any(target_os = "android", test))]
+fn authorities_in(directory: &std::path::Path) -> Vec<CertificateDer<'static>> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        if let Ok(text) = std::fs::read(entry.path()) {
+            out.extend(CertificateDer::pem_slice_iter(&text).filter_map(Result::ok));
+        }
+    }
+    out
 }
 
 /// The configuration for one connection: `pin` (an account's) wins over `trust`, and a chain
@@ -228,33 +267,7 @@ pub(crate) fn prepare(
             provider: Arc::clone(&provider),
         }),
         (None, Trust::Platform | Trust::PlatformAnd(_) | Trust::Only(_)) => {
-            let mut store = RootCertStore::empty();
-            if matches!(trust, Trust::Platform | Trust::PlatformAnd(_)) {
-                store.add_parsable_certificates(platform.get().iter().cloned());
-            }
-            if let Trust::PlatformAnd(roots) | Trust::Only(roots) = trust {
-                for root in roots {
-                    store
-                        .add(root.clone())
-                        .map_err(|error| refused(&format!("an authority was refused: {error}")))?;
-                }
-            }
-            if store.is_empty() {
-                return Err(Failure::new(
-                    TransportErrorKind::Other,
-                    TlsFailure::Untrusted,
-                    "TLS not tried: the platform's trust store holds no authority this library \
-                     can read; trust a private authority or pin the server's certificate",
-                ));
-            }
-            let chain =
-                WebPkiServerVerifier::builder_with_provider(Arc::new(store), Arc::clone(&provider))
-                    .build()
-                    .map_err(|error| refused(&error.to_string()))?;
-            match rules {
-                Some(rules) => Arc::new(SipDomainServer { chain, rules }),
-                None => chain,
-            }
+            chain_verifier(trust, platform, &provider, rules)?
         }
     };
     let key = match client {
@@ -276,6 +289,54 @@ pub(crate) fn prepare(
         config: Arc::new(config),
         asked,
         presented,
+    })
+}
+
+/// What checks a chain `trust` vouches for: rustls's `webpki` against its authorities, the
+/// platform's as its store hands them over; on iOS, whose store no application can read, the
+/// Security framework's own evaluation wherever the platform's authorities are trusted.
+fn chain_verifier(
+    trust: &Trust,
+    platform: &PlatformRoots,
+    provider: &Arc<CryptoProvider>,
+    rules: Option<DomainRules>,
+) -> Result<Arc<dyn ServerCertVerifier>, Failure> {
+    #[cfg(target_os = "ios")]
+    if let Some(server) = apple::PlatformServer::of(trust, rules, provider) {
+        return Ok(Arc::new(server?));
+    }
+    let refused = |why: &str| {
+        Failure::new(
+            TransportErrorKind::Other,
+            TlsFailure::HandshakeRefused,
+            &format!("TLS could not be set up: {why}"),
+        )
+    };
+    let mut store = RootCertStore::empty();
+    if matches!(trust, Trust::Platform | Trust::PlatformAnd(_)) {
+        store.add_parsable_certificates(platform.get().iter().cloned());
+    }
+    if let Trust::PlatformAnd(roots) | Trust::Only(roots) = trust {
+        for root in roots {
+            store
+                .add(root.clone())
+                .map_err(|error| refused(&format!("an authority was refused: {error}")))?;
+        }
+    }
+    if store.is_empty() {
+        return Err(Failure::new(
+            TransportErrorKind::Other,
+            TlsFailure::Untrusted,
+            "TLS not tried: the platform's trust store holds no authority this library can read; \
+             trust a private authority or pin the server's certificate",
+        ));
+    }
+    let chain = WebPkiServerVerifier::builder_with_provider(Arc::new(store), Arc::clone(provider))
+        .build()
+        .map_err(|error| refused(&error.to_string()))?;
+    Ok(match rules {
+        Some(rules) => Arc::new(SipDomainServer { chain, rules }),
+        None => chain,
     })
 }
 
@@ -458,6 +519,27 @@ mod tests {
             &PlatformRoots::default(),
             Some(DomainRules::Platform),
         )
+    }
+
+    #[test]
+    fn android_reads_one_authority_per_file_after_its_text_dump() {
+        let directory = std::env::temp_dir().join(format!("sipral-cacerts-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let authority = rcgen::generate_simple_self_signed(vec!["ca.test".to_owned()]).unwrap();
+        // as the system image lays one out: `openssl x509 -text` before the PEM
+        let dumped = format!(
+            "Certificate:\n    Data:\n        Version: 3 (0x2)\n{}",
+            authority.cert.pem()
+        );
+        std::fs::write(directory.join("1a2b3c4d.0"), dumped).unwrap();
+        std::fs::write(directory.join("5e6f7a8b.0"), "not a certificate").unwrap();
+        let read = super::authorities_in(&directory);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(read, vec![authority.cert.der().clone()]);
+        assert!(
+            super::authorities_in(&directory).is_empty(),
+            "a directory that is not there adds nothing"
+        );
     }
 
     #[test]

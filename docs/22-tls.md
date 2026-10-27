@@ -867,12 +867,20 @@ binding then evaluates the chain against those anchors only
 application's own `NWProtocolTLS.Options`.
 
 **RFC 5922 on Apple platforms** needs the `subjectAltName` entries, and the
-Security framework has no public call that returns them on iOS. An
-application that must apply §7.1 and §7.2 there parses the certificate's DER
-(`SecCertificateCopyData`) itself; one that controls its SIP servers'
-certificates gets the same protection more simply by pinning the private
-authority that issues only them, so that no wildcard certificate from a
-public authority is trusted in the first place.
+Security framework has no public call that returns them on iOS. So the Swift
+layer hands the leaf's DER (`SecCertificateCopyData`) to the core's own
+reading, `sipral_certificate_check_domain`, once the Security framework has
+evaluated the chain ("What the platform checks, and what RFC 5922 adds",
+above). An application that controls its SIP servers' certificates gets more
+still by pinning the private authority that issues only them, so that no
+certificate from a public authority is trusted in the first place.
+
+**The networking component on iOS** cannot read the system's store either,
+so it hands the server's chain to `SecTrustEvaluateWithError` under the SSL
+policy for the name, as `URLSession` does: what the device trusts, an
+installed profile's authority included, is what the component trusts, and an
+authority in `authority_pem` is an anchor beside them. The name is then read
+by the same rules.
 
 On Linux the Swift binding has no TLS to bring and refuses a TURN server
 over TLS (`TurnConnection.swift`); TCP works there.
@@ -928,7 +936,12 @@ no relay: the connection to the server closed (code 0)
 **Trust anchors by default.** `SSLSocketFactory.getDefault()` — what the
 Kotlin binding uses when `sslSocketFactory` is null — trusts the system's
 CA store. Since Android 7 (API 24), a CA the user installed is not trusted
-by an app that targets that level or later unless the app says so.
+by an app that targets that level or later unless the app says so. The
+networking component reads the same system store from its directory,
+`/system/etc/security/cacerts`, or from Android 14 the updatable Conscrypt
+module's `/apex/com.android.conscrypt/cacerts`; a user-installed CA is not in
+it, and one the user turned off in Settings still is, since that list is the
+system's alone to read. A private CA goes in `authority_pem`.
 
 **Adding a private CA:** either ship it with the app and name it in the
 network security configuration (`res/xml/network_security_config.xml`, a

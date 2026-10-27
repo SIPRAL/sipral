@@ -359,7 +359,8 @@ Every licence was read from the component's own manifest.
 | `rustls` 0.23.46 | TLS 1.2 and 1.3, `default-features = false` plus `ring`, `std`, `tls12` | Apache-2.0 OR ISC OR MIT |
 | `rustls-webpki` 0.103.16 | the certificate path and name check | ISC |
 | `rustls-pki-types` 1.15.1 | DER and PEM containers for certificates and keys | MIT OR Apache-2.0 |
-| `rustls-native-certs` 0.8.5 | reads the platform's trust store; `security-framework` on macOS, `schannel` on Windows, `openssl-probe` elsewhere | Apache-2.0 OR ISC OR MIT |
+| `rustls-native-certs` 0.8.5 | reads the platform's trust store; `security-framework` on macOS, `schannel` on Windows, `openssl-probe` elsewhere but Android, whose store is a directory read in-tree | Apache-2.0 OR ISC OR MIT |
+| `security-framework` 3.7.0 | on iOS, the Security framework's own evaluation of a server's chain, since iOS lets no application read its store; with `security-framework-sys` 2.17.0 and `core-foundation` under it | MIT OR Apache-2.0 |
 | `ring` 0.17.14 | the cryptographic provider under `rustls`, and `untrusted` 0.9.0 under it | Apache-2.0 AND ISC; ISC |
 | `hickory-resolver`, `hickory-net`, `hickory-proto` 0.26.3 | the DNS client: NAPTR, SRV, A, AAAA, the system's resolver configuration | MIT OR Apache-2.0 |
 | `tokio` 1.54.1 | the current-thread runtime the resolver runs on, and `mio`, `bytes`, `slab` under it | MIT |

@@ -1279,6 +1279,12 @@ step_other_targets() {
             -- -D warnings >/dev/null 2>&1 \
             && pass "cargo clippy -p sipral-io-coreaudio for iOS" \
             || fail "cargo clippy -p sipral-io-coreaudio --target aarch64-apple-ios --all-targets"
+        # sipral-net, which only the networking component pulls in and so no
+        # graph below compiles: its iOS half, the Security framework's own
+        # evaluation of a server's chain
+        cargo clippy -p sipral-net --target aarch64-apple-ios -- -D warnings >/dev/null 2>&1 \
+            && pass "cargo clippy -p sipral-net for iOS" \
+            || fail "cargo clippy -p sipral-net --target aarch64-apple-ios"
         # Rustdoc for every crate that builds for iOS: sipral-ffi's own graph,
         # which is what scripts/package/xcframework.sh compiles for the device,
         # read from cargo rather than listed here so a crate that joins it is
@@ -1310,6 +1316,21 @@ step_other_targets() {
             --target aarch64-linux-android >/dev/null 2>&1 \
             && pass "cargo doc -p sipral-io-aaudio -p sipral-audio for Android" \
             || fail "RUSTDOCFLAGS=-D warnings cargo doc -p sipral-io-aaudio -p sipral-audio --no-deps --target aarch64-linux-android"
+        # sipral-net's Android half, its trust store read from the system's
+        # directory. ring under rustls compiles C, so the NDK's own clang is
+        # named for this one command and ANDROID_NDK_HOME stays unset for the
+        # rest (opusic-sys reads it, and would build fuzz/ differently)
+        ndk="${ANDROID_NDK_HOME:-$(ls -d "$HOME"/Library/Android/sdk/ndk/* 2>/dev/null | tail -1)}"
+        ndk_bin="$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+        if [ -x "$ndk_bin/aarch64-linux-android24-clang" ]; then
+            CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android24-clang" \
+                AR_aarch64_linux_android="$ndk_bin/llvm-ar" \
+                cargo clippy -p sipral-net --target aarch64-linux-android -- -D warnings >/dev/null 2>&1 \
+                && pass "cargo clippy -p sipral-net for Android" \
+                || fail "cargo clippy -p sipral-net --target aarch64-linux-android"
+        else
+            fail "no Android NDK for sipral-net's C under ring: set ANDROID_NDK_HOME, or install one with the SDK manager"
+        fi
     else
         fail "aarch64-linux-android is not installed: rustup target add aarch64-linux-android"
     fi

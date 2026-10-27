@@ -66,9 +66,10 @@
 //! checks too (`docs/22-tls.md`), and a `sip:` URI in `subjectAltName` naming the domain is
 //! accepted besides, as RFC 5922 §7.1 reads one. With [`DomainRules::Rfc5922`] the name is read by
 //! RFC 5922 alone: while a `sip:` URI is there no `dNSName` counts, and no wildcard ever does. A
-//! pin replaces the chain, the name and the dates, and the handshake signature is still verified. On iOS and Android the
-//! platform's store cannot be read this way, so a connection there trusts a private authority or
-//! a pin, or the Swift and Kotlin layers' own TLS.
+//! pin replaces the chain, the name and the dates, and the handshake signature is still verified.
+//! On Android the store is read from the system's certificate directory. iOS lets no application
+//! read its store, so there the Security framework evaluates the chain itself, against its own
+//! authorities and any the application adds, as every app's TLS there is evaluated.
 
 // tests say what they mean; the no-panic discipline is for the library
 #![cfg_attr(

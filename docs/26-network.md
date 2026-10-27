@@ -33,7 +33,7 @@ It is two things:
 |---|---|---|
 | UDP, TCP | `std::net`, a thread per socket | — |
 | TLS 1.2 and 1.3 | `rustls` 0.23 with the `ring` provider | Apache-2.0 / ISC / MIT |
-| The platform's trust store | `rustls-native-certs` 0.8, checked by `rustls-webpki` | Apache-2.0 / ISC / MIT |
+| The platform's trust store | `rustls-native-certs` 0.8, checked by `rustls-webpki`; on Android the system's certificate directory, read in-tree; on iOS the Security framework's own evaluation, through `security-framework` 3.7 | Apache-2.0 / ISC / MIT |
 | NAPTR, SRV, A, AAAA | `hickory-resolver` 0.26 on a current-thread `tokio` runtime of its own | MIT / Apache-2.0 |
 | What to ask, in what order, how to rank it | the core's `Locator` (RFC 3263 §4, RFC 2782) | ours |
 
@@ -105,7 +105,7 @@ connections with the platform's APIs.
 
 | `sipral_network_config_t::trust` | Trusted |
 |---|---|
-| `SIPRAL_NETWORK_TRUST_PLATFORM` (0) | the authorities in the platform's trust store: the keychain's on macOS, the system store on Windows, the system's CA bundle elsewhere, or the file `SSL_CERT_FILE` names |
+| `SIPRAL_NETWORK_TRUST_PLATFORM` (0) | the authorities in the platform's trust store: the keychain's on macOS, the system store on Windows, on Android the system's certificate directory (the updatable Conscrypt module's from Android 14), on iOS whatever the Security framework trusts, the system's CA bundle elsewhere, or the file `SSL_CERT_FILE` names |
 | `SIPRAL_NETWORK_TRUST_PLATFORM_AND_AUTHORITY` (1) | those, and the PEM certificates in `authority_pem` |
 | `SIPRAL_NETWORK_TRUST_ONLY_AUTHORITY` (2) | the certificates in `authority_pem` alone |
 | `SIPRAL_NETWORK_TRUST_PINNED` (3) | the one certificate whose SHA-256 fingerprint is `pin_sha256`, read as `tls_pin_sha256` is (`22-tls.md`, "A PBX's own certificate, pinned") |
@@ -207,11 +207,6 @@ says.
 
 ## Not yet
 
-- **iOS and Android.** The platform's trust store cannot be read there this
-  way, so `SIPRAL_NETWORK_TRUST_PLATFORM` refuses every connection with
-  `UNTRUSTED` ("the platform's trust store holds no authority this library can
-  read"); a private authority or a pin works. The Swift and Kotlin layers'
-  own TLS is the platform's.
 - **A main transport on TCP or TLS**, as above.
 - **`ResolveNeeded`** is left to the application: a dialog keeps the flow its
   INVITE used, which is the one that survives a NAT.

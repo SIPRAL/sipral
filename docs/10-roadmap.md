@@ -131,7 +131,7 @@ November 2026, planned.
 
 December 2026, planned.
 
-- Networking ready to use from Rust and C: sockets, TLS and NAPTR/SRV lookups in one optional component, so an application without a binding no longer writes its own *(done)*
+- Networking ready to use from Rust and C: sockets, TLS, NAPTR/SRV lookups, and the STUN and TURN of every call over UDP, TCP or TLS in one optional component, so an application without a binding no longer writes its own *(done)*
 - A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller *(done)*
 - A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding *(done)*
 
@@ -782,8 +782,9 @@ C++ softphones that would move off another stack, and three pieces close it:
   SRV, holds and resumes a call at Asterisk in `scripts/lab.sh network`.
   RFC 5922's certificate rules are read there and in every binding but
   Dart's (ABI 1.8, `22-tls.md`), and it carries each media socket's STUN and
-  TURN, over UDP, TCP or TLS, with the TURN server's own trust (ABI 1.9). Not
-  yet: the platform's trust store on iOS and Android.
+  TURN, over UDP, TCP or TLS, with the TURN server's own trust (ABI 1.9). The
+  platform's trust is read on every platform: Android's certificate
+  directory, and on iOS the Security framework's own evaluation.
 - **A C++ API.** Classes over the C ABI for the stack, accounts, calls and
   events, with lifetimes tied to scope, in a header shipped beside
   `sipral.h`. *Built*: `bindings/cpp/include/sipral.hpp`, C++17, header only
