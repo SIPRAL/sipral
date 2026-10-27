@@ -52,3 +52,52 @@ lto = "thin"
 codegen-units = 1
 # unwind, not abort: sipral-ffi catches panics at the C boundary
 strip = true
+# Built for size, but for what every frame, packet or SIP message goes
+# through, which keeps full speed below: built all for size, SIP ran up to
+# 76 % slower per transaction (docs/19-numbers.md, 27 October 2026).
+opt-level = "s"
+
+[profile.release.package.sipral-core]
+opt-level = 3
+
+[profile.release.package.sipral-ua]
+opt-level = 3
+
+[profile.release.package.sipral]
+opt-level = 3
+
+[profile.release.package.sipral-media]
+opt-level = 3
+
+[profile.release.package.sipral-rtp]
+opt-level = 3
+
+[profile.release.package.sipral-audio]
+opt-level = 3
+
+[profile.release.package.sipral-io-common]
+opt-level = 3
+
+[profile.release.package.opusic-sys]
+opt-level = 3
+
+[profile.release.package.aes]
+opt-level = 3
+
+[profile.release.package.aes-gcm]
+opt-level = 3
+
+[profile.release.package.ctr]
+opt-level = 3
+
+[profile.release.package.ghash]
+opt-level = 3
+
+[profile.release.package.polyval]
+opt-level = 3
+
+[profile.release.package.cipher]
+opt-level = 3
+
+[profile.release.package.universal-hash]
+opt-level = 3

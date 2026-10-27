@@ -1433,6 +1433,30 @@ one the library holds.
 The logs stay on the lab machine, under `/opt/sipral/soak-logs/endurance-20261008`
 (`app.log`, `agent.log`, `samples.csv`).
 
+## 27 October 2026 — unreleased, for `1.3.0`: built for size where speed does not matter
+
+Apple M2, macOS 27.0.1, `rustc 1.99.1`, `./scripts/bench.sh` at C ABI 1.6, run twice
+on each profile with the load average between 15 and 27, so the times move by several per
+cent between two runs of the same build. The release profile now builds for size
+(`opt-level = "s"`) and keeps full speed (`3`) for the crates every frame, packet or SIP
+message goes through: `sipral-core`, `sipral-ua`, `sipral`, `sipral-media` with its
+codecs, `sipral-rtp`, `sipral-audio`, `sipral-io-common`, libopus, and the ciphers SRTP
+runs (`Cargo.toml`). What is left at size is the C ABI's own layer, NAT traversal, the DTLS
+handshake, STIR, the diagnostics and the platform's device code.
+
+| What | Speed everywhere | Size where it does not matter |
+|---|---|---|
+| Shared library, `libsipral_ffi.dylib` | 5 467 296 bytes | 5 254 848 bytes, 212 KB less |
+| Audio, per frame, 200 calls on 4 threads | 1.72 µs | 1.32 µs |
+| Opus, per frame | 85.0 µs | 88.0 µs |
+| G.729, per frame | 93.2 µs | 97.0 µs |
+| G.722, per frame | 17.2 µs | 17.9 µs |
+| Signalling, a thousand calls, per transaction | 40.6 µs caller, 107.8 µs callee | 43.7 µs caller, 120.2 µs callee |
+
+Everything built for size, those crates included, came to 5 026 544 bytes, but SIP went
+19 to 76 % slower per transaction and a thousand calls' messages a second fell from 86 000
+to 49 000: what a phone never notices and a server holding thousands of calls would.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty
