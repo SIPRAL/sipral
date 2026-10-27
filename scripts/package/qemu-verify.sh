@@ -72,7 +72,10 @@ if [ "$HAVE_DOCKER" -eq 0 ] && [ "$DRY_RUN" -eq 1 ]; then
         magic=$(od -An -tx1 -N4 "$NATIVE" | tr -d ' \n')
         class=$(od -An -tu1 -j4 -N1 "$NATIVE" | tr -d ' \n')
         etype=$(od -An -tu1 -j16 -N1 "$NATIVE" | tr -d ' \n')
-        machine=$(od -An -tu1 -j18 -N2 "$NATIVE" | awk '{print $1 + 256 * $2}')
+        # summed whatever lines od spreads the two bytes over: BSD od, this
+        # host's when it is a Mac, ends with an empty line
+        machine=$(od -An -tu1 -j18 -N2 "$NATIVE" \
+            | awk '{ for (i = 1; i <= NF; i++) byte[n++] = $i } END { if (n == 2) print byte[0] + 256 * byte[1] }')
         if [ "$magic" = "7f454c46" ] && [ "$class" = "2" ] && [ "$etype" = "3" ] && [ "$machine" = "183" ]; then
             pass "$(basename "$NATIVE") is a 64-bit ELF shared object for aarch64"
         else

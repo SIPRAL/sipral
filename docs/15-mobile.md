@@ -780,7 +780,7 @@ store asks of it is in the code rather than in a list:
 | | |
 |---|---|
 | Target API level | 37 (Android 17), the newest stable level in Google's SDK repository on 21 October 2026 (`platforms;android-37.2` is a minor release of it). Play has required 36 for new apps and updates since 31 August 2026 |
-| A call in the background | `SipralCallService` in the telecom helper, a foreground service of types `phoneCall` and `microphone` (`FOREGROUND_SERVICE_PHONE_CALL`, `FOREGROUND_SERVICE_MICROPHONE`), from the moment a call is placed or answered until the last one ends; "Lifecycle on Android" below says when it starts and what Android 14 refuses it. Play asks each type to be declared in the Play Console with a video of the feature (support.google.com/googleplay/android-developer/answer/13392821) |
+| A call in the background | `SipralCallService` in the telecom helper, a foreground service of types `phoneCall` and `microphone` (`FOREGROUND_SERVICE_PHONE_CALL`, `FOREGROUND_SERVICE_MICROPHONE`), from the moment a call rings (a push's announcement included, as `phoneCall` alone), is placed or answered until the last one ends; "Lifecycle on Android" below says when it starts and what Android 14 refuses it. Play asks each type to be declared in the Play Console with a video of the feature (support.google.com/googleplay/android-developer/answer/13392821) |
 | Microphone | Asked at first launch (`RECORD_AUDIO`), shown again on the Readiness screen with the reason, and the system settings offered once Android stops asking |
 | Notifications | `POST_NOTIFICATIONS` asked at first launch on Android 13 and later |
 | A call over the lock screen | `USE_FULL_SCREEN_INTENT`, checked with `NotificationManager.canUseFullScreenIntent` on Android 14 and later; refused, the Readiness screen says what changes (the call is a heads-up notification and a locked screen stays dark) and opens `ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT`. Play grants it by default only to applications whose core function is calling or alarms, declared in the Play Console (support.google.com/googleplay/android-developer/answer/13392821) |
@@ -897,36 +897,71 @@ one REGISTER on the same `Call-ID`, and ready 22 ms after its cold start;
 with no record, a new binding.
 
 **The call's foreground service and a push, in order.** `SipralCallForeground.follow`
-starts `SipralCallService` when a call is placed (the framework's
-`REQUESTED`) or answered, keeps it while the call is dialling, active or
-held, starts it again as the shown call moves on (so a microphone granted
-mid-call is added to its types), and stops it with the last call. It is
-**not** started while a call only rings:
+starts `SipralCallService` as soon as a call rings — a push's announcement
+included, before its INVITE — or is placed (the framework's `REQUESTED`),
+keeps it while a call rings, dials, is active or held, starts it again as
+the shown call moves on (so its notification and its types follow, and a
+microphone granted mid-call is added), and stops it with the last call. A
+process a push started is otherwise cached, and Android's freezer stops it
+about ten seconds after the push (`ActivityManager: freezing <pid>`): the
+announcement's twenty seconds, the caller's CANCEL and the user's decline
+would then never be acted on, and the call would ring until dismissed. The
+order:
 
-1. A push arrives (high-priority FCM); the process may be cold. The handler
-   calls `wakeForPush`: the call is reported to the framework and rings, the
-   registration is carried on. No foreground service: the incoming-call
-   notification needs none, and from the background Android 14 refuses a
-   `microphone` service outright (`SecurityException`, the "while-in-use"
-   rule, developer.android.com/develop/background-work/services/fgs/restrictions-bg-start).
-   A high-priority FCM message is an exemption from the background-start
-   rule for other types, which a `phoneCall`-only service could use; the
-   sample does not need one to ring.
-2. The user answers on the full-screen activity or the notification: the
+1. The application wires the bridge and calls `SipralCallForeground.follow`
+   before anything announces a call, in the process the push started too:
+   the service has to be started while the push's exemption lasts.
+2. A push arrives (high-priority FCM); the process may be cold. The handler
+   calls `wakeForPush`: `TelecomBridge.pushArrived` reports the call to the
+   framework, which rings it, and announces it, whose REGISTER carries the
+   registration on. The call is `RINGING`, and `SipralCallForeground` starts
+   the service at once, of type `phoneCall` alone, with the application's
+   `OngoingCallUi` notification for a ringing call (the incoming-call one).
+   `phoneCall` is the type a ringing call needs and the one Android lets a
+   background process start: a high-priority FCM message is an exemption
+   from the background-start rule, and `phoneCall` (granted with
+   `MANAGE_OWN_CALLS`) is not a while-in-use type. `microphone` is: from the
+   background Android 14 refuses such a service outright (`SecurityException`)
+   and earlier releases start it without the microphone
+   (developer.android.com/develop/background-work/services/fgs/restrictions-bg-start,
+   "Restrictions on starting foreground services that need while-in-use
+   permissions"). A message Android downgraded to normal priority is no
+   exemption: the start is refused with `ForegroundServiceStartNotAllowedException`,
+   logged, and the call rings for as long as Android lets the process run;
+   read `RemoteMessage.priority` before relying on it.
+3. While it rings, the process stays: the INVITE is matched to the
+   announced call, or the announcement's twenty seconds run out
+   (`ANNOUNCED_CALL_MISSING`), or the caller cancels, or the user declines.
+   Each of the last three ends the call, and with no other call the service
+   stops.
+4. The user answers on the full-screen activity or the notification: the
    application is visible, or the start comes from a notification the user
    touched, both exemptions for while-in-use permissions. The answer
    reaches `TelecomBridge.answer`, the call goes `ACTIVE`, and
-   `SipralCallForeground` starts the service with `phoneCall` and
-   `microphone`.
-3. Answered from a headset, a car or a watch with the phone locked, the
-   application is not visible: the service starts as `phoneCall` alone if
+   `SipralCallForeground` starts the service again, now with `phoneCall`
+   and `microphone`, and the ongoing-call notification. The service is
+   never let go between ringing and answered.
+5. Answered from a headset, a car or a watch with the phone locked, the
+   application is not visible: the service goes on as `phoneCall` alone if
    the system refuses `microphone`, and says so in the log; the far end
    then hears silence until the application is opened. That path needs a
    phone and a headset to see.
+6. The last call ends: the service stops. A call that ends while the
+   service is still being started is shown once, ended, before the service
+   leaves: Android ends a process whose service, asked for with
+   `startForegroundService`, stops before entering the foreground.
 
-A `ForegroundServiceStartNotAllowedException` (Android 12 and later) is
-logged, not thrown: the call goes on for as long as Android lets the
-process run.
+A second call that rings beside one already placed or answered leaves the
+service on that one, `microphone` kept; its incoming-call notification is
+the application's own. `SipralCallForeground.NOTIFICATION_ID` is the
+service's notification id: the sample posts a call ringing alone under it,
+so that it is one notification whether or not Android let the service
+start. `SipralCallForegroundTest` (`:telecom:testDebugUnitTest`) runs the
+order above on a JVM: a pushed call held as `phoneCall` from its
+announcement until its INVITE never comes, answered with the microphone
+added, cancelled, declined, a second call ringing beside an answered one, a
+call ended while its service starts, a start Android refuses, and a
+follower cancelled while a call rings.
 
 ### Two telecom adapters
 

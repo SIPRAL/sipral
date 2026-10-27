@@ -89,20 +89,25 @@ NDK_CLANG_TRIPLE=(arm64-v8a:aarch64-linux-android armeabi-v7a:armv7a-linux-andro
 ELF_EXPECTED=(arm64-v8a:183:64 armeabi-v7a:40:32 x86_64:62:64)
 
 # Whether $1 is an ELF shared object for the machine and word size $2:$3.
-# Read from the header's own bytes -- EI_CLASS at 4, e_type at 16, e_machine
-# at 18, both little-endian on every ABI here -- so no binutils is needed.
+# Read from the header's own bytes -- EI_CLASS at 4, EI_DATA at 5, e_type at
+# 16, e_machine at 18, little-endian on every ABI here -- so no binutils is
+# needed. e_machine's two bytes are summed whatever lines od spreads them
+# over: BSD od, macOS's, ends its output with an empty line, which a per-line
+# sum read as a second value. Fewer than two bytes is no machine at all.
 elf_matches() {
     local file="$1" machine="$2" bits="$3"
-    local magic class etype emachine
+    local magic class data etype emachine
     magic=$(od -An -tx1 -N4 "$file" 2>/dev/null | tr -d ' \n')
     [ "$magic" = "7f454c46" ] || return 1
     class=$(od -An -tu1 -j4 -N1 "$file" | tr -d ' \n')
+    data=$(od -An -tu1 -j5 -N1 "$file" | tr -d ' \n')
     etype=$(od -An -tu1 -j16 -N1 "$file" | tr -d ' \n')
-    emachine=$(od -An -tu1 -j18 -N2 "$file" | awk '{print $1 + 256 * $2}')
+    emachine=$(od -An -tu1 -j18 -N2 "$file" \
+        | awk '{ for (i = 1; i <= NF; i++) byte[n++] = $i } END { if (n == 2) print byte[0] + 256 * byte[1] }')
     local want_class=1
     [ "$bits" = "64" ] && want_class=2
-    # e_type 3 is ET_DYN, a shared object.
-    [ "$class" = "$want_class" ] && [ "$etype" = "3" ] && [ "$emachine" = "$machine" ]
+    # EI_DATA 1 is little-endian; e_type 3 is ET_DYN, a shared object.
+    [ "$class" = "$want_class" ] && [ "$data" = "1" ] && [ "$etype" = "3" ] && [ "$emachine" = "$machine" ]
 }
 
 CMD="${1:-}"

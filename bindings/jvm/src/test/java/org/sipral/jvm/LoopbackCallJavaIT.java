@@ -14,6 +14,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -32,6 +34,7 @@ import org.sipral.SipralAudioActivation;
 import org.sipral.SipralCallState;
 import org.sipral.SipralEventKind;
 import org.sipral.SipralException;
+import org.sipral.SipralHeader;
 import org.sipral.SipralStatus;
 import org.sipral.SipralTransport;
 import org.sipral.idiomatic.SipralAccount;
@@ -149,6 +152,30 @@ class LoopbackCallJavaIT {
             assertTrue(message.startsWith("REGISTER "), message);
             assertTrue(message.contains("Via: SIP/2.0/TCP "), message);
             assertTrue(message.contains(";transport=tcp"), message);
+        }
+    }
+
+    /** An account added from Java with its {@code +sip.instance} and a header
+     * field of its own: both are on the REGISTER a registrar on loopback
+     * receives. */
+    @Test
+    void anAccountsInstanceAndHeadersReachItsRegister() throws Exception {
+        try (DatagramSocket registrar = new DatagramSocket(0, InetAddress.getLoopbackAddress());
+             SipralClient client = SipralJava.open("127.0.0.1")) {
+            registrar.setSoTimeout((int) WAIT_MS);
+            String instance = "urn:uuid:0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f";
+            SipralAccount account = SipralJava.addAccount(
+                client, "sip:alice@example.invalid", "127.0.0.1:" + registrar.getLocalPort(), "sip:example.invalid",
+                null, null, null, null, List.of(), null, null, false, instance,
+                List.of(new SipralHeader("X-Device-Class", "server")));
+            account.register();
+            byte[] buffer = new byte[65536];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            registrar.receive(packet);
+            String message = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+            assertTrue(message.startsWith("REGISTER "), message);
+            assertTrue(message.contains(";+sip.instance=\"<" + instance + ">\""), message);
+            assertTrue(message.contains("\r\nX-Device-Class: server\r\n"), message);
         }
     }
 

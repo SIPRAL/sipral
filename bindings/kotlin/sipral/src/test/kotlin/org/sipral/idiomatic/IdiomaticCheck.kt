@@ -38,7 +38,7 @@ fun main() {
                 tlsSignallingChecks() + "; " + protocolsChecks() + "; " + localConferenceChecks() + "; " +
                 datagramLimitChecks() + "; " + mediaMixChecks() + "; " + transferChecks() + "; " +
                 reachabilityChecks() + "; " + challengeChecks() + "; " + appRateChecks() + "; " + freezeChecks() + "; " +
-                messageHookChecks()
+                messageHookChecks() + "; " + instanceChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()

@@ -603,7 +603,7 @@ class SipralClient private constructor(
     /** What `LOOKUP_WANTED` asked, and what `LOCATED` found, during the
      * poll that raised them, acted on right after it. */
     private val lookupsAsked = java.util.concurrent.ConcurrentLinkedQueue<Triple<Long, String, SipralDnsRecordType>>()
-    private val located = java.util.concurrent.ConcurrentLinkedQueue<Pair<Long, String>>()
+    private val located = java.util.concurrent.ConcurrentLinkedQueue<Pair<Long, List<String>>>()
 
     /** Whether an account added now, with no `Contact` of its own, is
      * reached at the route toward its server. */
@@ -677,7 +677,10 @@ class SipralClient private constructor(
             val record = SipralDnsRecordType.of(locate.record.toInt()) ?: return
             lookupsAsked.add(Triple(event.account, name, record))
         } else if (event.kind == SipralEventKind.LOCATED.value.toLong()) {
-            locate.targets?.split(',')?.firstOrNull()?.takeIf { it.isNotEmpty() }?.let { located.add(event.account to it) }
+            val targets = locate.targets?.split(',')?.filter { it.isNotEmpty() }.orEmpty()
+            if (targets.isNotEmpty()) {
+                located.add(event.account to targets)
+            }
         }
     }
 
@@ -695,9 +698,10 @@ class SipralClient private constructor(
             }
         }
         while (true) {
-            val (handle, target) = located.poll() ?: break
+            val (handle, targets) = located.poll() ?: break
             val account = accountFor(handle) ?: continue
-            account.located(target)
+            account.located(targets)
+            val target = targets.first()
             if (!picksAddress || !account.derivesContact) {
                 continue
             }
@@ -1075,6 +1079,15 @@ class SipralClient private constructor(
      * [websocketHost] as `Host` (the server's address). [clientCertificate]
      * is what a TLS or WSS connection of its own presents when the server
      * asks, in place of [open]'s.
+     *
+     * [instanceId] is the device's `+sip.instance` URN (RFC 5626 §4.1),
+     * `urn:uuid:` and a UUID the application keeps for the installation; it
+     * goes in the `Contact` of every REGISTER, which a push proxy (RFC 8599)
+     * may require. [headers] go on every REGISTER of the account, the first,
+     * the one answering a challenge, each refresh and the de-registration,
+     * checked as a call's are: `Expires` is the stack's ([expiresSeconds]),
+     * a `Supported` is merged with the stack's (`gruu` with an instance id),
+     * and an account with no [registrar] refuses them.
      */
     fun addAccount(
         aor: String,
@@ -1099,6 +1112,8 @@ class SipralClient private constructor(
         websocketHost: String? = null,
         websocketResource: String? = null,
         clientCertificate: SipralClientCertificate? = null,
+        instanceId: String? = null,
+        headers: List<SipralHeader> = emptyList(),
     ): SipralAccount {
         require((registrarAddress == null) != (serverUri == null)) {
             "an account names its server by registrarAddress or by serverUri, one of the two"
@@ -1130,6 +1145,8 @@ class SipralClient private constructor(
             privacy = privacy,
             trustedPeers = trustedPeers,
             security = security,
+            instanceId = instanceId,
+            headers = headers,
         )
         synchronized(movingLock) { accounts[account.handle] = account }
         return account
@@ -1647,29 +1664,38 @@ class SipralClient private constructor(
         }
     }
 
+    /** The accounts on a TLS or WSS connection of their own to
+     * [destination]: by its address, or one their server was located at. */
+    private fun secureAccountsAt(destination: String): List<SipralAccount> = synchronized(movingLock) {
+        accounts.values.filter {
+            (it.streamProtocol == SipralTransport.TLS || it.streamProtocol == SipralTransport.WSS) &&
+                it.reachedAt(destination)
+        }
+    }
+
     /** What a TLS connection to [destination] trusts: the pin of an account on
      * its own connection there, else the client's `tlsTrust`. */
     private fun streamTrust(destination: String): SipralTlsTrust {
-        val pinned = synchronized(movingLock) {
-            accounts.values.firstOrNull {
-                (it.streamProtocol == SipralTransport.TLS || it.streamProtocol == SipralTransport.WSS) &&
-                    it.registrarAddress == destination && it.tlsPin != null
-            }
-        }
+        val pinned = secureAccountsAt(destination).firstOrNull { it.tlsPin != null }
         return pinned?.tlsPin?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
     }
 
     /** What a TLS connection to [destination] presents: the certificate of
      * an account on its own connection there, else the client's. */
     private fun streamCertificate(destination: String): SipralClientCertificate? {
-        val named = synchronized(movingLock) {
-            accounts.values.firstOrNull {
-                (it.streamProtocol == SipralTransport.TLS || it.streamProtocol == SipralTransport.WSS) &&
-                    it.registrarAddress == destination && it.clientCertificate != null
-            }
-        }
+        val named = secureAccountsAt(destination).firstOrNull { it.clientCertificate != null }
         return named?.clientCertificate ?: streamClientCertificate
     }
+
+    /** The name a TLS connection to [destination] checks the certificate
+     * against: [open]'s `tlsServerName` when given; else the domain of the
+     * `serverUri` of an account located there, the SIP domain the user
+     * configured rather than the host its SRV record named (RFC 5922 §7.3),
+     * often an address; else the host of [destination]. */
+    private fun streamServerName(destination: String): String =
+        givenTlsServerName
+            ?: secureAccountsAt(destination).firstNotNullOfOrNull { account -> account.serverUri?.let(::sipDomainOf) }
+            ?: destination.substringBeforeLast(':')
 
     /** Connect over TCP or TLS to [destination] (or `streamServer` for TCP),
      * bind it under [id] as [bound] (WS/WSS for a WebSocket) and read it
@@ -1689,7 +1715,7 @@ class SipralClient private constructor(
             socket = if (tls) {
                 SignallingLink(
                     SipralTransport.TLS, parseHostPort(destination),
-                    givenTlsServerName ?: destination.substringBeforeLast(':'), streamTrust(destination),
+                    streamServerName(destination), streamTrust(destination),
                     streamCertificate(destination),
                 ).also { secured = it }.connect(currentHost).first
             } else {
@@ -2453,8 +2479,11 @@ class SipralClient private constructor(
             drainStun()
             drainFarewells()
             actOnTurnStreams()
-            actOnStreamsWanted()
+            // where a server was located before a connection to it is made: the
+            // connection's name, pin and certificate are those of the account
+            // located there
             actOnLookups()
+            actOnStreamsWanted()
             if (mainLetGo) {
                 mainLetGo = false
                 link?.letGo()

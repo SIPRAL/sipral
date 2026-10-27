@@ -122,7 +122,10 @@ elf_is() {
     class=$(od -An -tu1 -j4 -N1 "$file" | tr -d ' \n')
     data=$(od -An -tu1 -j5 -N1 "$file" | tr -d ' \n')
     etype=$(od -An -tu1 -j16 -N1 "$file" | tr -d ' \n')
-    emachine=$(od -An -tu1 -j18 -N2 "$file" | awk '{print $1 + 256 * $2}')
+    # summed whatever lines od spreads the two bytes over: BSD od, a Mac's,
+    # ends with an empty line
+    emachine=$(od -An -tu1 -j18 -N2 "$file" \
+        | awk '{ for (i = 1; i <= NF; i++) byte[n++] = $i } END { if (n == 2) print byte[0] + 256 * byte[1] }')
     [ "$class" = "2" ] && [ "$data" = "1" ] && [ "$etype" = "3" ] && [ "$emachine" = "$machine" ]
 }
 

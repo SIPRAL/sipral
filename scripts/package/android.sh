@@ -536,7 +536,10 @@ elf_line() {
     local file="$1"
     local class emachine
     class=$(od -An -tu1 -j4 -N1 "$file" | tr -d ' \n')
-    emachine=$(od -An -tu1 -j18 -N2 "$file" | awk '{print $1 + 256 * $2}')
+    # the two bytes summed whatever lines od spreads them over (BSD od ends
+    # with an empty line), as aar.sh reads them
+    emachine=$(od -An -tu1 -j18 -N2 "$file" \
+        | awk '{ for (i = 1; i <= NF; i++) byte[n++] = $i } END { if (n == 2) print byte[0] + 256 * byte[1] }')
     printf '%s %s' "$emachine" "$([ "$class" = 2 ] && echo 64 || echo 32)"
 }
 

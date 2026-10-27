@@ -2649,8 +2649,9 @@ needs for the three listener keepers' `deliver`, which nothing but native code
 calls, and for every `external fun`. Coroutines and `Flow` for events are
 `org.sipral.idiomatic`, and the `ConnectionService` helper is
 `org.sipral.telecom` over it with `bindings/kotlin/android` on top
-(`bindings/kotlin/README.md`). A foreground service for the call's lifetime is
-still ahead.
+(`bindings/kotlin/README.md`), whose `SipralCallService` holds a foreground
+service from a call's first ring to its end (`docs/15-mobile.md`,
+"Lifecycle on Android").
 
 `bindings/kotlin/sipral/src/test/kotlin/org/sipral/BindingCheck.kt` is what
 holds the rest to account. `scripts/check.sh` links the printed shim against

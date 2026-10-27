@@ -566,6 +566,51 @@ private suspend fun anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good: C
     return "an account over TLS and one over UDP each reached their own server"
 }
 
+/** An account on its own TLS connection, its server named by a URI and
+ * located by SRV at an address: the certificate is checked against the
+ * URI's domain, as RFC 5922 §7.3 has it, not against the address, and a
+ * `tlsServerName` the application gives still wins. */
+private suspend fun aServerLocatedBySrvIsCheckedAgainstItsSipDomain(good: Credential): String {
+    Registrar(good).use { tls ->
+        val port = tls.address.substringAfterLast(':')
+        val asked = Collections.synchronizedList(ArrayList<String>())
+        val resolver: SipralResolver = { name, record ->
+            asked += "$record $name"
+            when {
+                record == org.sipral.SipralDnsRecordType.SRV && name.endsWith(".$SERVER_NAME") ->
+                    SipralLookup(org.sipral.SipralDnsAnswer.RECORDS, listOf("300 10 60 $port host.sipral.test"))
+                record == org.sipral.SipralDnsRecordType.A && name == "host.sipral.test" ->
+                    SipralLookup(org.sipral.SipralDnsAnswer.RECORDS, listOf("300 127.0.0.1"))
+                else -> SipralLookup.NOTHING
+            }
+        }
+        fun client(name: String?) = SipralClient.open(
+            audio = SipralAudioMode.Application, bindHost = "127.0.0.1", resolver = resolver,
+            tlsTrust = SipralTlsTrust.OnlyAuthority(good.certificate), tlsServerName = name,
+        )
+        fun SipralClient.account() = addAccount(
+            aor = "sip:alice@$SERVER_NAME", registrar = "sip:$SERVER_NAME", serverUri = "sip:$SERVER_NAME",
+            streamProtocol = SipralTransport.TLS,
+        )
+        client(null).use { client ->
+            val account = client.account()
+            account.register()
+            registered(client, account)
+            assertEquals(tls.address, account.registrarAddress, "located at the SRV record's address")
+            assertTrue(asked.any { it.startsWith("SRV ") }, "$asked")
+            val (_, register) = tls.registers().first()
+            assertTrue(header("Via", register)!!.startsWith("SIP/2.0/TLS "), register)
+        }
+        client("other.sipral.test").use { client ->
+            val (_, event) = client.events.awaitNext(SipralEventKind.TRANSPORT_FAILED, timeoutMs = 10_000) {
+                client.account().register()
+            }
+            assertEquals(SipralTlsFailure.NAME_MISMATCH.value.toLong(), assertNotNull(transportFailedOf(event)).tls)
+        }
+    }
+    return "a server located by SRV is checked against its SIP domain, and a given name still wins"
+}
+
 /** An account on its own TCP connection re-registers over a new one when
  * the server drops it; anything but TCP or TLS is refused. */
 private suspend fun anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(): String {
@@ -886,6 +931,7 @@ internal suspend fun tlsSignallingChecks(): String {
             aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),
             anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good),
+            aServerLocatedBySrvIsCheckedAgainstItsSipDomain(good),
             anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(),
             anAccountOverAWebSocketAsksForItsResourceAndHost(),
             theSettingsAreReadBack(),
