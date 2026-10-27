@@ -778,6 +778,11 @@ entry! {
 /// answers a pending `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
 /// (`sipral_ua::UserAgent::stream_unavailable`), or is raised while an account waits for its
 /// own connection. Otherwise a never-bound number is refused.
+///
+/// The failure names no server, so it ends the requests waiting for a stream only when it can
+/// answer nothing else: one server asked a stream of, and no account waiting for a connection
+/// of its own. Otherwise one server's failure would end requests waiting for another's
+/// connection, and each request's own wait decides instead.
 fn lose(
     state: &mut StackState,
     transport: u32,
@@ -788,11 +793,14 @@ fn lose(
 ) -> Result<(), Fail> {
     let streaming = state.agent.wants_a_stream();
     let waiting = streaming || state.agent.wants_a_flow();
+    let answers_the_ask = streaming
+        && !state.agent.wants_a_flow()
+        && state.agent.endpoint_ref().streams_wanted() <= 1;
     let Some(id) = state.transports.resolve(transport) else {
         if !waiting {
             return named(state, transport).map(|_| ());
         }
-        if streaming {
+        if answers_the_ask {
             state.agent.stream_unavailable(now);
         }
         state.lost.push(Lost {
@@ -816,7 +824,7 @@ fn lose(
             now,
         )
         .map_err(|error| received_badly(&error))?;
-    if streaming && !was_up {
+    if answers_the_ask && !was_up {
         state.agent.stream_unavailable(now);
     }
     state.lost.push(Lost {
@@ -3471,6 +3479,70 @@ pub(crate) mod tests {
             unsafe { sipral_stack_transport_failed(handle, 2, 0, 1_070) },
             SipralStatus::InvalidArgument
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A connection that could not be opened names no server. While another account waits for
+    /// a TLS connection of its own, the failure may be that one's, so the call waiting for a
+    /// stream to its PBX is not ended by it: its own wait still decides.
+    #[test]
+    fn a_failure_that_may_be_another_accounts_connection_leaves_a_call_waiting() {
+        let mut seen = Outgrown::default();
+        let handle = challenged_past_the_line(&mut seen);
+        let bob = "sip:bob@example.com";
+        let on_tls = SipralAccountConfig {
+            aor: bob.as_ptr().cast::<c_char>(),
+            aor_len: bob.len(),
+            stream_protocol: SipralTransport::Tls as u32,
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tls), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_020) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_020);
+        assert!(
+            seen.wanted
+                .iter()
+                .any(|wanted| wanted.0 == SipralTransport::Tls as u32),
+            "the account asked for its connection: {:?}",
+            seen.wanted
+        );
+
+        assert_eq!(
+            unsafe {
+                sipral_stack_transport_failed(
+                    handle,
+                    2,
+                    SipralTransportError::ConnectionRefused as u32,
+                    1_060,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_060);
+        assert_eq!(
+            seen.lost,
+            vec![(2, SipralTransportError::ConnectionRefused as u32)]
+        );
+        assert!(seen.ended.is_empty(), "the call waits on: {:?}", seen.ended);
+
+        poll(handle, 1_010 + 10_000);
+        assert_eq!(seen.ended.len(), 1, "its own wait ran out");
+        let (reason, status, _, _) = seen.ended[0].clone();
+        assert_eq!(
+            reason,
+            crate::event::SipralCallEndReason::Unreachable as u32
+        );
+        assert_eq!(status, 513);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

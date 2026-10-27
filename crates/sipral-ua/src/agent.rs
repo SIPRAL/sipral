@@ -118,8 +118,11 @@ pub struct UserAgent {
     /// In-dialog requests too large for a datagram (RFC 3261 §18.1.1),
     /// waiting for a stream.
     pub(crate) parked: Vec<Parked>,
-    /// When the wait for a stream ends ([`crate::oversize`]).
+    /// When the first of the waits for a stream ends ([`crate::oversize`]).
     pub(crate) stream_deadline: Option<Instant>,
+    /// When each request waiting for a stream began to, by the transaction its retry answers:
+    /// each one waits its own [`crate::oversize::STREAM_WAIT`].
+    pub(crate) stream_waits: HashMap<AnyTransactionId, Instant>,
     /// Size and limit from the latest `TransportWanted`, for the 513 text.
     pub(crate) oversize: Option<(usize, u32)>,
     pub(crate) events: VecDeque<UaEvent>,
@@ -236,6 +239,7 @@ impl UserAgent {
             publications: crate::publishing::Publications::default(),
             parked: Vec::new(),
             stream_deadline: None,
+            stream_waits: HashMap::new(),
             oversize: None,
             events: VecDeque::new(),
             guard: Guard::default(),

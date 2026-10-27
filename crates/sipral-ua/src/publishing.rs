@@ -28,6 +28,7 @@ use crate::account::AccountId;
 use crate::agent::UserAgent;
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::oversize::GivingUp;
 use crate::presence::Presence;
 use crate::publish::{Publication, PublishEvent, PublishRequest};
 use crate::subscription::DEFAULT_EXPIRES;
@@ -531,7 +532,7 @@ impl UserAgent {
         }
     }
 
-    fn publications_waiting(&self) -> Vec<(PublicationHandle, AnyTransactionId)> {
+    pub(crate) fn publications_waiting(&self) -> Vec<(PublicationHandle, AnyTransactionId)> {
         self.publications
             .held
             .iter()
@@ -565,10 +566,18 @@ impl UserAgent {
         }
     }
 
-    /// No stream is coming: each held PUBLISH fails as unreachable with
-    /// `status`, not as the 401/407 it never answered.
-    pub(crate) fn give_up_publications(&mut self, status: StatusCode, now: Instant) {
+    /// No stream is coming: each held PUBLISH that `giving_up` takes fails
+    /// as unreachable with `status`, not as the 401/407 it never answered.
+    pub(crate) fn give_up_publications(
+        &mut self,
+        giving_up: GivingUp<'_>,
+        status: StatusCode,
+        now: Instant,
+    ) {
         for (publication, failed) in self.publications_waiting() {
+            if !giving_up.takes(failed) {
+                continue;
+            }
             self.endpoint.abandon_challenge(failed);
             self.publications
                 .by_transaction

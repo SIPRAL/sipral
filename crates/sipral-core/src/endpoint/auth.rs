@@ -290,6 +290,15 @@ impl Endpoint {
         self.challenges.take(failed).is_some()
     }
 
+    /// Where the retry held under `failed` goes: the address a stream is asked for while it
+    /// waits for one. `None` when no challenge is held there.
+    #[must_use]
+    pub fn challenge_destination(&self, failed: AnyTransactionId) -> Option<SocketAddr> {
+        self.challenges
+            .get(failed)
+            .map(|held| held.flow.destination)
+    }
+
     /// Who is asking, for the challenge held under `failed`
     /// ([`ChallengeOrigin`]), before anything answers it. `None` when no
     /// challenge is held there.

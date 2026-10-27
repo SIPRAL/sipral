@@ -33,6 +33,7 @@ use crate::agent::UserAgent;
 use crate::call::CallHandle;
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::oversize::GivingUp;
 
 /// RFC 3428 §8's ceiling for a MESSAGE this end cannot prove will stay off a
 /// congestion-unsafe hop. Checked against the body only; the headers add a
@@ -331,13 +332,15 @@ impl UserAgent {
         }
     }
 
-    /// No stream is coming: each MESSAGE waiting for one is reported with
-    /// `status` (513), not the 401/407 its credentials never answered.
-    pub(crate) fn give_up_messages(&mut self, status: StatusCode) {
+    /// No stream is coming: each MESSAGE waiting for one that `giving_up`
+    /// takes is reported with `status` (513), not the 401/407 its
+    /// credentials never answered.
+    pub(crate) fn give_up_messages(&mut self, giving_up: GivingUp<'_>, status: StatusCode) {
         let waiting: Vec<(MessageHandle, AnyTransactionId)> = self
             .messages
             .iter()
             .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
+            .filter(|(_, failed)| giving_up.takes(*failed))
             .collect();
         for (message, failed) in waiting {
             self.endpoint.abandon_challenge(failed);
@@ -350,6 +353,15 @@ impl UserAgent {
         self.messages
             .values()
             .any(|held| held.waiting_for_stream.is_some())
+    }
+
+    /// The challenged MESSAGEs whose answers wait for a stream.
+    pub(crate) fn messages_waiting_for_a_stream(
+        &self,
+    ) -> impl Iterator<Item = AnyTransactionId> + '_ {
+        self.messages
+            .values()
+            .filter_map(|held| held.waiting_for_stream)
     }
 
     /// A challenge with no retry is a refusal. Called at the end of every

@@ -16630,6 +16630,47 @@ fn a_challenged_invite_no_stream_carries_ends_with_the_limit_named_when_the_wait
     );
 }
 
+/// Each request waits its own [`STREAM_WAIT`]: a call challenged past the
+/// line nine seconds after another is not ended with the first one's wait,
+/// which may have been for another server's connection.
+#[test]
+fn a_request_that_starts_waiting_later_gets_its_own_stream_wait() {
+    let t0 = Instant::now();
+    let (mut agent, first, _) = challenged_past_the_line(EndpointConfig::default(), 900, t0);
+    let later = t0 + Duration::from_secs(9);
+    let id = agent.add_account(credentialled());
+    let second = agent
+        .call(id, &secure_call(), later)
+        .expect("the second INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(&mut agent, &long_challenge(&invite, 900), later);
+    let _ = only(&transmits(&mut agent), "ACK ");
+    let _ = events(&mut agent);
+
+    agent.handle_timeout(t0 + STREAM_WAIT);
+    let said = events(&mut agent);
+    let (reason, status, _) = call_end(&said).expect("the first wait ran out");
+    assert_eq!(reason, CallEndReason::Unreachable);
+    assert_eq!(status.map(StatusCode::get), Some(513));
+    assert_eq!(agent.call_state(first), None);
+    assert_eq!(agent.call_state(second), Some(CallState::Calling));
+    assert_eq!(
+        agent.poll_timeout().map(|due| due <= later + STREAM_WAIT),
+        Some(true),
+        "the second wait is still on the clock"
+    );
+
+    agent.handle_timeout(later + STREAM_WAIT.saturating_sub(Duration::from_millis(1)));
+    assert!(call_end(&events(&mut agent)).is_none(), "not yet");
+    assert_eq!(agent.call_state(second), Some(CallState::Calling));
+
+    agent.handle_timeout(later + STREAM_WAIT);
+    let (reason, status, _) = call_end(&events(&mut agent)).expect("its own wait ran out");
+    assert_eq!(reason, CallEndReason::Unreachable);
+    assert_eq!(status.map(StatusCode::get), Some(513));
+    assert_eq!(agent.call_state(second), None);
+}
+
 #[test]
 fn the_application_saying_no_stream_ends_the_call_at_once() {
     let t0 = Instant::now();

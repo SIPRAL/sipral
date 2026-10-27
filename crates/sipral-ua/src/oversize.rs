@@ -8,7 +8,9 @@
 //! The endpoint holds it and raises `TransportWanted`; [`crate::parked`]
 //! does the same for what this layer sends by itself.
 //!
-//! The wait is bounded by [`STREAM_WAIT`], or ends at once on
+//! Each request waits [`STREAM_WAIT`] from when it began to, so one that
+//! began later is not cut short by an earlier one's wait, which may be for
+//! another server. Every wait ends at once on
 //! [`UserAgent::stream_unavailable`]. Then:
 //!
 //! - an initial INVITE is retried once over the datagram with one `a=crypto`
@@ -32,6 +34,8 @@
 //!
 //! 513 is §21.5.6's Message Too Large, a local verdict like §8.1.3.1's 408.
 
+use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sipral_core::msg::StatusCode;
@@ -51,6 +55,26 @@ pub const STREAM_WAIT: Duration = Duration::from_secs(10);
 /// RFC 3261 §21.5.6's Message Too Large.
 const TOO_LARGE: u16 = 513;
 
+/// Which of the requests waiting for a stream give up.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GivingUp<'a> {
+    /// Every one: no stream is coming.
+    All,
+    /// Those whose own wait ran out, named by the transaction each one's
+    /// retry answers.
+    These(&'a [AnyTransactionId]),
+}
+
+impl GivingUp<'_> {
+    /// Whether the request whose retry answers `failed` gives up.
+    pub(crate) fn takes(self, failed: AnyTransactionId) -> bool {
+        match self {
+            Self::All => true,
+            Self::These(due) => due.contains(&failed),
+        }
+    }
+}
+
 impl UserAgent {
     /// The stream a `TransportWanted` asked for cannot be had.
     ///
@@ -58,7 +82,7 @@ impl UserAgent {
     /// Everything waiting gives up now instead of after [`STREAM_WAIT`], as
     /// the module docs describe. A no-op when nothing is waiting.
     pub fn stream_unavailable(&mut self, now: Instant) {
-        self.give_up_on_a_stream(now);
+        self.give_up_on_a_stream(GivingUp::All, now);
         self.give_up_parked(now);
         self.drain(now);
     }
@@ -96,21 +120,81 @@ impl UserAgent {
             || self.publications_wait_for_a_stream()
     }
 
-    /// Arms the deadline with the first waiting request and clears it with
-    /// the last. Run after every drain. One deadline for all: later
-    /// requests wait for the same connection.
-    pub(crate) fn watch_the_stream_wait(&mut self, now: Instant) {
-        if !self.waiting_for_a_stream() {
-            self.stream_deadline = None;
-        } else if self.stream_deadline.is_none() {
-            self.stream_deadline = Some(now + STREAM_WAIT);
-        }
+    /// Every request waiting for a stream, by the transaction its retry
+    /// answers.
+    fn stream_waiters(&self) -> HashSet<AnyTransactionId> {
+        let registrations = self
+            .registrations
+            .values()
+            .filter_map(|reg| reg.waiting_for_stream);
+        let calls = self
+            .challenged
+            .iter()
+            .filter(|(_, refusal)| refusal.waiting_for_stream)
+            .map(|(invite, _)| AnyTransactionId::InviteClient(*invite));
+        let requests = self
+            .challenged_requests
+            .iter()
+            .filter(|(_, refusal)| refusal.waiting_for_stream)
+            .map(|(id, _)| *id);
+        let offers = self
+            .challenged_offers
+            .iter()
+            .filter(|(_, offer)| offer.waiting_for_stream)
+            .map(|(id, _)| *id);
+        let subscriptions = self
+            .subscriptions
+            .values()
+            .filter_map(|held| held.waiting_for_stream);
+        let publications = self
+            .publications_waiting()
+            .into_iter()
+            .map(|(_, failed)| failed);
+        registrations
+            .chain(calls)
+            .chain(requests)
+            .chain(offers)
+            .chain(subscriptions)
+            .chain(self.messages_waiting_for_a_stream())
+            .chain(publications)
+            .collect()
     }
 
-    pub(crate) fn fire_stream_wait(&mut self, now: Instant) {
-        if self.stream_deadline.is_some_and(|due| due <= now) {
-            self.give_up_on_a_stream(now);
+    /// Notes when each waiting request began to, forgets those that stopped,
+    /// and arms the deadline with the first wait to run out. Run after every
+    /// drain, so a request is seen waiting in the round that parked it.
+    pub(crate) fn watch_the_stream_wait(&mut self, now: Instant) {
+        // the usual round: nothing waits, and nothing is built to say so
+        if !self.waiting_for_a_stream() {
+            self.stream_waits.clear();
+            self.stream_deadline = None;
+            return;
         }
+        let waiting = self.stream_waiters();
+        self.stream_waits
+            .retain(|failed, _| waiting.contains(failed));
+        for failed in waiting {
+            self.stream_waits.entry(failed).or_insert(now);
+        }
+        self.stream_deadline = self
+            .stream_waits
+            .values()
+            .min()
+            .map(|since| *since + STREAM_WAIT);
+    }
+
+    /// Gives up the requests whose own wait ran out.
+    pub(crate) fn fire_stream_wait(&mut self, now: Instant) {
+        if self.stream_deadline.is_none_or(|due| due > now) {
+            return;
+        }
+        let due: Vec<AnyTransactionId> = self
+            .stream_waits
+            .iter()
+            .filter(|(_, since)| **since + STREAM_WAIT <= now)
+            .map(|(failed, _)| *failed)
+            .collect();
+        self.give_up_on_a_stream(GivingUp::These(&due), now);
     }
 
     fn too_large_text(&self) -> String {
@@ -126,32 +210,50 @@ impl UserAgent {
         }
     }
 
-    /// With `DatagramLimit::without_stream_bytes` set, everything held is
-    /// first resent under that limit; only what still does not fit fails.
-    fn give_up_on_a_stream(&mut self, now: Instant) {
+    /// With `DatagramLimit::without_stream_bytes` set, what `giving_up` takes
+    /// is first resent under that limit, to the servers it waited for; only
+    /// what still does not fit fails.
+    fn give_up_on_a_stream(&mut self, giving_up: GivingUp<'_>, now: Instant) {
         self.stream_deadline = None;
-        if self.endpoint.no_stream_coming() {
+        let datagram_after_all = match giving_up {
+            GivingUp::All => self.endpoint.no_stream_coming(),
+            GivingUp::These(due) => {
+                let destinations: Vec<SocketAddr> = due
+                    .iter()
+                    .filter_map(|failed| self.endpoint.challenge_destination(*failed))
+                    .collect();
+                self.endpoint.no_stream_coming_to(&destinations)
+            }
+        };
+        if datagram_after_all {
             self.resume_what_waited_for_a_stream(now);
         }
         let text = self.too_large_text();
         let status = StatusCode::new(TOO_LARGE).ok();
-        self.give_up_calls(&text, status, now);
-        self.give_up_registrations(status);
-        self.give_up_requests(status);
-        self.give_up_offers(status);
-        self.give_up_subscriptions(status, now);
+        self.give_up_calls(giving_up, &text, status, now);
+        self.give_up_registrations(giving_up, status);
+        self.give_up_requests(giving_up, status);
+        self.give_up_offers(giving_up, status);
+        self.give_up_subscriptions(giving_up, status, now);
         if let Some(status) = status {
-            self.give_up_messages(status);
-            self.give_up_publications(status, now);
+            self.give_up_messages(giving_up, status);
+            self.give_up_publications(giving_up, status, now);
         }
     }
 
-    fn give_up_calls(&mut self, text: &str, status: Option<StatusCode>, now: Instant) {
+    fn give_up_calls(
+        &mut self,
+        giving_up: GivingUp<'_>,
+        text: &str,
+        status: Option<StatusCode>,
+        now: Instant,
+    ) {
         let waiting: Vec<TransactionId<InviteClient>> = self
             .challenged
             .iter()
             .filter(|(_, refusal)| refusal.waiting_for_stream)
             .map(|(invite, _)| *invite)
+            .filter(|invite| giving_up.takes(AnyTransactionId::InviteClient(*invite)))
             .collect();
         for invite in waiting {
             let old = AnyTransactionId::InviteClient(invite);
@@ -198,11 +300,12 @@ impl UserAgent {
         }
     }
 
-    fn give_up_registrations(&mut self, status: Option<StatusCode>) {
+    fn give_up_registrations(&mut self, giving_up: GivingUp<'_>, status: Option<StatusCode>) {
         let waiting: Vec<(crate::AccountId, AnyTransactionId)> = self
             .registrations
             .iter()
             .filter_map(|(account, reg)| reg.waiting_for_stream.map(|failed| (*account, failed)))
+            .filter(|(_, failed)| giving_up.takes(*failed))
             .collect();
         for (account, failed) in waiting {
             self.endpoint.abandon_challenge(failed);
@@ -215,12 +318,13 @@ impl UserAgent {
         }
     }
 
-    fn give_up_requests(&mut self, status: Option<StatusCode>) {
+    fn give_up_requests(&mut self, giving_up: GivingUp<'_>, status: Option<StatusCode>) {
         let waiting: Vec<AnyTransactionId> = self
             .challenged_requests
             .iter()
             .filter(|(_, refusal)| refusal.waiting_for_stream)
             .map(|(id, _)| *id)
+            .filter(|id| giving_up.takes(*id))
             .collect();
         for id in waiting {
             self.endpoint.abandon_challenge(id);
@@ -231,12 +335,13 @@ impl UserAgent {
         }
     }
 
-    fn give_up_offers(&mut self, status: Option<StatusCode>) {
+    fn give_up_offers(&mut self, giving_up: GivingUp<'_>, status: Option<StatusCode>) {
         let waiting: Vec<AnyTransactionId> = self
             .challenged_offers
             .iter()
             .filter(|(_, offer)| offer.waiting_for_stream)
             .map(|(id, _)| *id)
+            .filter(|id| giving_up.takes(*id))
             .collect();
         for id in waiting {
             self.endpoint.abandon_challenge(id);
@@ -248,11 +353,17 @@ impl UserAgent {
         }
     }
 
-    fn give_up_subscriptions(&mut self, status: Option<StatusCode>, now: Instant) {
+    fn give_up_subscriptions(
+        &mut self,
+        giving_up: GivingUp<'_>,
+        status: Option<StatusCode>,
+        now: Instant,
+    ) {
         let waiting: Vec<(SubscriptionHandle, AnyTransactionId)> = self
             .subscriptions
             .iter()
             .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
+            .filter(|(_, failed)| giving_up.takes(*failed))
             .collect();
         for (subscription, failed) in waiting {
             self.endpoint.abandon_challenge(failed);

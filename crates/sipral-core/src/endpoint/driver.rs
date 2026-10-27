@@ -281,6 +281,27 @@ impl Endpoint {
         true
     }
 
+    /// [`Self::no_stream_coming`] for `destinations` alone: a stream to any other address is still
+    /// asked for.
+    pub fn no_stream_coming_to(&mut self, destinations: &[SocketAddr]) -> bool {
+        let datagram_after_all = self.config.datagram_limit.without_stream_bytes.is_some();
+        let mut moved = false;
+        for destination in destinations {
+            if self.streams_wanted.remove(destination) && datagram_after_all {
+                self.streamless.insert(*destination);
+                moved = true;
+            }
+        }
+        moved
+    }
+
+    /// How many addresses a stream is asked for and not bound yet (§18.1.1), each with a
+    /// `TransportWanted`.
+    #[must_use]
+    pub fn streams_wanted(&self) -> usize {
+        self.streams_wanted.len()
+    }
+
     /// Bytes, or news about a transport.
     ///
     /// # Errors
