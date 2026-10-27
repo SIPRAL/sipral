@@ -221,6 +221,13 @@ pub(crate) fn run_folded(constant: [u8; 32]) -> [u8; 32] {
 /// is what is waited for; this is only the cap, so that a server which sends
 /// no audio still gets the REFER and the flow reports the transfer's own
 /// outcome rather than a timeout.
+///
+/// The test digit waits the same way. A phone may drop all media until the
+/// ACK reaches it, and through a proxy that Record-Routes, the ACK takes the
+/// long way while the digit goes straight there: baresip enables its RTP
+/// receiver only on the ACK, and a digit that arrives before it is never
+/// heard. Its first audio comes from the same step that enables its
+/// receiver, so that audio proves the digit will be heard.
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Audible frames `Flow::G729` has to hear back from the echo: half a second
@@ -1716,6 +1723,9 @@ enum Step {
     Talking,
     /// Up, and waiting for the far end to be worth handing over.
     Settling,
+    /// `Flow::Dtmf4733` and `Flow::Renumbered`: up, and waiting for the far
+    /// end's first audio before the digit goes (`SETTLE`).
+    AwaitingAudio,
     Holding,
     Resuming,
     /// `Flow::HoldCodecChange`, while the call is held: a re-offer naming a
@@ -2183,19 +2193,12 @@ impl Script {
             {
                 self.listen_until = Some(now + dwell());
             }
+            // not straight into the digit: see SETTLE
             Step::Talking if self.flow == Flow::Dtmf4733 || self.flow == Flow::Renumbered => {
-                self.step = Step::Dialling;
-                let dialled = self
-                    .call
-                    .and_then(|call| endpoint.engine.session(call))
-                    .map(|mut session| session.dial(&TEST_DIGIT.to_string(), DEFAULT_DIGIT));
-                if let Some(Err(error)) = dialled {
-                    self.seen.refused = Some(format!("dial: {error}"));
-                    self.step = Step::Ending;
-                }
-                // whichever answers first: the digit named back, or the timer
-                self.listen_until = Some(now + dwell() + Duration::from_secs(2));
+                self.step = Step::AwaitingAudio;
+                self.settled_by = Some(now + SETTLE);
             }
+            Step::AwaitingAudio => self.dial_test_digit(endpoint, now),
             Step::Talking if self.flow == Flow::DtmfInfo => self.send_dtmf_by_info(endpoint, now),
             // no `listen_until`, unlike every flow in the arm above: this
             // one's own claim is that it never asks for the call to end
@@ -2284,6 +2287,24 @@ impl Script {
                 .change_codecs(&mut endpoint.agent, call, &["PCMA"], now);
             self.tried("codec change", asked);
         }
+    }
+
+    /// `Flow::Dtmf4733`'s and `Flow::Renumbered`'s digit, once the far end's
+    /// audio says it is listening: dialled on the media, then waited for
+    /// until it is named back or the timer runs out. Factored out of
+    /// `advance` for the reason `send_dtmf_by_info` gives.
+    fn dial_test_digit(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        self.step = Step::Dialling;
+        let dialled = self
+            .call
+            .and_then(|call| endpoint.engine.session(call))
+            .map(|mut session| session.dial(&TEST_DIGIT.to_string(), DEFAULT_DIGIT));
+        if let Some(Err(error)) = dialled {
+            self.seen.refused = Some(format!("dial: {error}"));
+            self.step = Step::Ending;
+        }
+        // whichever answers first: the digit named back, or the timer
+        self.listen_until = Some(now + dwell() + Duration::from_secs(2));
     }
 
     /// `Flow::DtmfInfo`'s own `Step::Talking`: send the test digit by INFO

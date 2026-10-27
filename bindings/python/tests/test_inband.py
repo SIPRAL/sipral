@@ -16,6 +16,7 @@ import unittest
 
 from sipral import Stack, features
 from sipral.enums import (
+    AmdReason,
     AmdVerdict,
     AudioMode,
     DigitSource,
@@ -147,9 +148,17 @@ class InBandAndRecording(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"OpusTags", data)
 
     async def test_a_greeting_that_runs_on_is_reported_as_a_machine(self) -> None:
-        # A short greeting limit for a quick decision.
+        # A short greeting limit for a quick decision. The rules that read a pause are out of
+        # reach: the greeting's 200 ms pauses are heard on the wall clock, and a stall of a
+        # loaded machine lengthens them into a person's hello.
         alice_call, bob_call = await self._place_and_answer(
-            before_answer=lambda call: call.detect_progress(max_greeting_ms=600, beep=False)
+            before_answer=lambda call: call.detect_progress(
+                max_greeting_ms=600,
+                beep=False,
+                silence_after_greeting_ms=10_000,
+                max_initial_silence_ms=10_000,
+                max_decision_ms=12_000,
+            )
         )
         rate = bob_call.media.sample_rate
         greeting = bytearray()
@@ -157,9 +166,10 @@ class InBandAndRecording(unittest.IsolatedAsyncioTestCase):
             voiced = (n // (rate // 5)) % 2 == 0
             greeting += struct.pack("<h", _voiced(n, rate) if voiced else 0)
         bob_call.media.send_audio(bytes(greeting))
-        heard = await self._event_of(alice_call, EventKind.PROGRESS_DETECTED)
+        heard = await self._event_of(alice_call, EventKind.PROGRESS_DETECTED, timeout=15)
         self.assertEqual(heard.fields["what"], ProgressKind.ANSWERED_BY)
         self.assertEqual(heard.fields["verdict"], AmdVerdict.MACHINE)
+        self.assertIn(heard.fields["reason"], (AmdReason.LONG_GREETING, AmdReason.TOO_MANY_WORDS))
         self.assertGreater(heard.fields["at_ms"], 0)
 
     async def test_the_consent_tone_reaches_the_far_end_while_recording(self) -> None:

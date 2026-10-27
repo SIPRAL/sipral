@@ -161,9 +161,18 @@ public sealed class InBandTests : IDisposable
     [Fact]
     public async Task AGreetingThatRunsOnIsReportedAsAMachine()
     {
-        // a short greeting limit, so the decision comes in a second
+        // a short greeting limit, so the decision comes in a second; the rules that read a pause
+        // are out of reach, because the greeting's 200 ms pauses are heard on the wall clock and a
+        // stall of a loaded machine lengthens them into a person's hello
         var (aliceCall, bobCall) = await PlaceAndAnswerAsync(
-            call => call.DetectProgress(new SipralProgressOptions { MaxGreetingMs = 600, Beep = false }));
+            call => call.DetectProgress(new SipralProgressOptions
+            {
+                MaxGreetingMs = 600,
+                Beep = false,
+                SilenceAfterGreetingMs = 10_000,
+                MaxInitialSilenceMs = 10_000,
+                MaxDecisionMs = 12_000,
+            }));
         try
         {
             var rate = bobCall.Media!.Info().SampleRate;
@@ -180,6 +189,7 @@ public sealed class InBandTests : IDisposable
             var heard = await FirstMatchingAsync(aliceCall.Events, e => e.Kind == SipralEventKind.ProgressDetected, Timeout);
             Assert.Equal(SipralProgressKind.AnsweredBy, heard.Progress!.What);
             Assert.Equal(SipralAmdVerdict.Machine, heard.Progress.Verdict);
+            Assert.Contains(heard.Progress.Reason, new[] { SipralAmdReason.LongGreeting, SipralAmdReason.TooManyWords });
             Assert.True(heard.Progress.AtMs > 0);
         }
         finally

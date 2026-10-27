@@ -123,12 +123,17 @@ final class InBandTests: XCTestCase {
         let (alice, bob) = try stacks()
         defer { alice.close(); bob.close() }
         var aliceEvents: Recorder<SipralEvent>?
-        // a short greeting limit, so the decision comes in a second
+        // a short greeting limit, so the decision comes in a second; the rules that read a pause
+        // are out of reach, because the greeting's 200 ms pauses are heard on the wall clock and a
+        // stall of a loaded machine lengthens them into a person's hello
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob) { call in
             aliceEvents = Recorder(call.events())
             var options = ProgressOptions()
             options.maxGreetingMs = 600
             options.beep = false
+            options.silenceAfterGreetingMs = 10_000
+            options.maxInitialSilenceMs = 10_000
+            options.maxDecisionMs = 12_000
             try call.detectProgress(options)
         }
         defer { aliceCall.close(); bobCall.close() }
@@ -146,6 +151,7 @@ final class InBandTests: XCTestCase {
         let progress = try XCTUnwrap(try XCTUnwrap(found, "no progress event").progressData)
         XCTAssertEqual(progress.what, .answeredBy)
         XCTAssertEqual(progress.verdict, .machine)
+        XCTAssertTrue([.longGreeting, .tooManyWords].contains(progress.reason), "decided by \(String(describing: progress.reason))")
         XCTAssertGreaterThan(progress.atMs, 0)
     }
 

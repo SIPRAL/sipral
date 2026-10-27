@@ -24,6 +24,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
+import org.sipral.SipralAmdReason
 import org.sipral.SipralAmdVerdict
 import org.sipral.SipralDigitSource
 import org.sipral.SipralDtmf
@@ -107,8 +108,20 @@ private suspend fun aStereoRecordingKeepsThisEndOnTheLeft(): String = overACall 
 }
 
 private suspend fun aGreetingThatRunsOnIsAMachine(): String = overACall(
-    // a short greeting limit, so the decision comes in a second
-    beforeAnswer = { it.detectProgress(SipralProgressOptions(maxGreetingMs = 600, beep = false)) },
+    // a short greeting limit, so the decision comes in a second; the rules that read a pause are
+    // out of reach, because the greeting's 200 ms pauses are heard on the wall clock and a stall
+    // of a loaded machine lengthens them into a person's hello
+    beforeAnswer = {
+        it.detectProgress(
+            SipralProgressOptions(
+                maxGreetingMs = 600,
+                beep = false,
+                silenceAfterGreetingMs = 10_000,
+                maxInitialSilenceMs = 10_000,
+                maxDecisionMs = 12_000,
+            ),
+        )
+    },
 ) { callA, callB ->
     val mediaB = assertNotNull(callB.media)
     val rate = mediaB.info().sampleRate.toInt()
@@ -127,6 +140,10 @@ private suspend fun aGreetingThatRunsOnIsAMachine(): String = overACall(
     val progress = assertNotNull(progressOf(heard))
     assertEquals(SipralProgressKind.ANSWERED_BY.value.toLong(), progress.what)
     assertEquals(SipralAmdVerdict.MACHINE.value.toLong(), progress.verdict)
+    assertTrue(
+        progress.reason in listOf(SipralAmdReason.LONG_GREETING, SipralAmdReason.TOO_MANY_WORDS).map { it.value.toLong() },
+        "decided by rule ${progress.reason}",
+    )
     assertTrue(progress.atMs > 0)
     "a greeting that ran on reported as a machine after ${progress.atMs} ms"
 }

@@ -751,6 +751,15 @@ for is shared the same way sending's bounds are — `sipral_ua::dtmf`'s own
 `DEFAULT_DTMF_MS`, which `sipral::DEFAULT_DIGIT` reads rather than keeping a
 copy of the same number.
 
+**A digit dialled the instant the call is answered can be lost at the far
+end.** Media may flow as soon as the 2xx arrives (RFC 3264), and Sipral
+sends it then, but some phones drop everything until the ACK reaches them:
+baresip enables its RTP receiver only on the ACK. Through a proxy that
+Record-Routes, the ACK takes the long way while the digit goes straight
+there. An application that dials on answer, an IVR's first key for one,
+waits for the far end's first audio, which such a phone sends from the
+same step that enables its receiver. The lab's harness does the same.
+
 **The other way a digit crosses, and where the two meet.** `sipral-ua` has
 its own INFO-based DTMF (`docs/04-ua.md`), sent and received
 without ever touching the media path this crate owns. What `sipral-ua`
