@@ -706,6 +706,25 @@ fn the_talkers_are_reported_as_they_change() {
     assert!(quartet.changes().contains(&ConferenceChange::Talkers));
 }
 
+/// Following the talkers runs on every tick, the audio's own thread: with
+/// the same members talking it allocates nothing and reports no change.
+#[test]
+fn following_the_talkers_allocates_nothing() {
+    let mut quartet = three_calls_and_this_end();
+    quartet.ends[2].sending = false;
+    quartet.run(20, false);
+    let talking = quartet.conference.talkers().len();
+    assert!(talking >= 1, "nobody is talking");
+    quartet.changes();
+
+    let before = crate::realtime_tests::allocations();
+    for _ in 0..100 {
+        quartet.conference.follow_talkers();
+    }
+    assert_eq!(crate::realtime_tests::allocations() - before, 0);
+    assert!(quartet.changes().is_empty(), "a change with nobody moving");
+}
+
 /// The refusals: a conference that is full, a call added twice, a member
 /// that is not there, and a rate the conference cannot mix.
 #[test]

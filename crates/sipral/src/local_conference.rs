@@ -262,7 +262,8 @@ impl LocalConference {
             places: config.max_members,
             seats: Vec::new(),
             local,
-            talkers: Vec::new(),
+            // every member can talk at once: room for all of them, so a change allocates nothing
+            talkers: Vec::with_capacity(config.max_members),
             changes: VecDeque::new(),
             changes_dropped: 0,
             packets: VecDeque::new(),
@@ -805,27 +806,25 @@ impl LocalConference {
         }
     }
 
-    /// The talkers as the mixer ranked them, and a change when they moved.
-    fn follow_talkers(&mut self) {
+    /// The talkers as the mixer ranked them, and a change when they moved. Runs on every tick, so
+    /// the list is compared where it stands and rewritten in place only when it moved: no
+    /// allocation once it has grown to the conference.
+    pub(crate) fn follow_talkers(&mut self) {
         let local = self.local.map(|(id, _)| id);
-        let now: Vec<Member> = self
-            .mixer
-            .talkers()
+        let ranked = self.mixer.talkers();
+        let now = ranked
             .iter()
-            .filter_map(|id| {
-                if Some(*id) == local {
-                    return Some(Member::Local);
-                }
-                self.seats
-                    .iter()
-                    .find(|seat| seat.id == *id)
-                    .map(|seat| Member::Call(seat.call))
-            })
-            .collect();
-        if now != self.talkers {
-            self.talkers = now;
-            self.note(ConferenceChange::Talkers);
+            .filter_map(|id| member_of(*id, local, &self.seats));
+        if now.eq(self.talkers.iter().copied()) {
+            return;
         }
+        self.talkers.clear();
+        self.talkers.extend(
+            ranked
+                .iter()
+                .filter_map(|id| member_of(*id, local, &self.seats)),
+        );
+        self.note(ConferenceChange::Talkers);
     }
 
     fn note(&mut self, change: ConferenceChange) {
@@ -835,6 +834,18 @@ impl LocalConference {
         }
         self.changes.push_back(change);
     }
+}
+
+/// The member the mixer's participant `id` is: this end when it is `local`, else the call seated
+/// under it.
+fn member_of(id: ParticipantId, local: Option<ParticipantId>, seats: &[Seat]) -> Option<Member> {
+    if Some(id) == local {
+        return Some(Member::Local);
+    }
+    seats
+        .iter()
+        .find(|seat| seat.id == id)
+        .map(|seat| Member::Call(seat.call))
 }
 
 /// Why the mixer would not seat somebody, in the facade's terms.
