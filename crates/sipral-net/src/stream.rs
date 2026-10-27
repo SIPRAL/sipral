@@ -46,8 +46,8 @@ pub(crate) struct TlsDial<'a> {
     pub(crate) pin: Option<&'a sipral_core::pin::CertificatePin>,
     pub(crate) client: Option<&'a ClientCertificate>,
     pub(crate) platform: &'a PlatformRoots,
-    /// How the server's name is read.
-    pub(crate) rules: sipral_core::domain_certificate::DomainRules,
+    /// How the server's name is read: as a SIP domain's, or as HTTPS reads a host's (`None`).
+    pub(crate) rules: Option<sipral_core::domain_certificate::DomainRules>,
 }
 
 /// What the TLS handshake learnt that the first reads still need.

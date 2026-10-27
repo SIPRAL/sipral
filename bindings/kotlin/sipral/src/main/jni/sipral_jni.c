@@ -5893,7 +5893,7 @@ Java_org_sipral_SipralNative_sipral_1isup_1number(JNIEnv *env, jobject self, jby
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, jlong stack, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong configDomainRules, jlong configReservedRules, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, jlong stack, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong configDomainRules, jlong configReservedRules, jlong configTurnTrust, jlong configReservedTurn, jbyteArray configTurnAuthorityPem, jbyteArray configTurnPinSha256, jbyteArray configTurnServerName, jbyteArray configTurnClientCertificatePem, jbyteArray configTurnClientKeyPem, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -5930,6 +5930,28 @@ Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, j
     config_value.reserved_end = (uint32_t)configReservedEnd;
     config_value.domain_rules = (sipral_domain_rules_t)configDomainRules;
     config_value.reserved_rules = (uint32_t)configReservedRules;
+    config_value.turn_trust = (sipral_network_trust_t)configTurnTrust;
+    config_value.reserved_turn = (uint32_t)configReservedTurn;
+    jbyte *configTurnAuthorityPem_data = configTurnAuthorityPem ? (*env)->GetByteArrayElements(env, configTurnAuthorityPem, NULL) : NULL;
+    jsize configTurnAuthorityPem_size = configTurnAuthorityPem ? (*env)->GetArrayLength(env, configTurnAuthorityPem) : 0;
+    config_value.turn_authority_pem = (const char *)configTurnAuthorityPem_data;
+    config_value.turn_authority_pem_len = (size_t)configTurnAuthorityPem_size;
+    jbyte *configTurnPinSha256_data = configTurnPinSha256 ? (*env)->GetByteArrayElements(env, configTurnPinSha256, NULL) : NULL;
+    jsize configTurnPinSha256_size = configTurnPinSha256 ? (*env)->GetArrayLength(env, configTurnPinSha256) : 0;
+    config_value.turn_pin_sha256 = (const char *)configTurnPinSha256_data;
+    config_value.turn_pin_sha256_len = (size_t)configTurnPinSha256_size;
+    jbyte *configTurnServerName_data = configTurnServerName ? (*env)->GetByteArrayElements(env, configTurnServerName, NULL) : NULL;
+    jsize configTurnServerName_size = configTurnServerName ? (*env)->GetArrayLength(env, configTurnServerName) : 0;
+    config_value.turn_server_name = (const char *)configTurnServerName_data;
+    config_value.turn_server_name_len = (size_t)configTurnServerName_size;
+    jbyte *configTurnClientCertificatePem_data = configTurnClientCertificatePem ? (*env)->GetByteArrayElements(env, configTurnClientCertificatePem, NULL) : NULL;
+    jsize configTurnClientCertificatePem_size = configTurnClientCertificatePem ? (*env)->GetArrayLength(env, configTurnClientCertificatePem) : 0;
+    config_value.turn_client_certificate_pem = (const char *)configTurnClientCertificatePem_data;
+    config_value.turn_client_certificate_pem_len = (size_t)configTurnClientCertificatePem_size;
+    jbyte *configTurnClientKeyPem_data = configTurnClientKeyPem ? (*env)->GetByteArrayElements(env, configTurnClientKeyPem, NULL) : NULL;
+    jsize configTurnClientKeyPem_size = configTurnClientKeyPem ? (*env)->GetArrayLength(env, configTurnClientKeyPem) : 0;
+    config_value.turn_client_key_pem = (const char *)configTurnClientKeyPem_data;
+    config_value.turn_client_key_pem_len = (size_t)configTurnClientKeyPem_size;
     sipral_status_t status = sipral_network_start((sipral_handle_t)stack, &config_value, (uint64_t)nowMs);
     if (configAuthorityPem) {
         (*env)->ReleaseByteArrayElements(env, configAuthorityPem, configAuthorityPem_data, JNI_ABORT);
@@ -5948,6 +5970,21 @@ Java_org_sipral_SipralNative_sipral_1network_1start(JNIEnv *env, jobject self, j
     }
     if (configTlsServerName) {
         (*env)->ReleaseByteArrayElements(env, configTlsServerName, configTlsServerName_data, JNI_ABORT);
+    }
+    if (configTurnAuthorityPem) {
+        (*env)->ReleaseByteArrayElements(env, configTurnAuthorityPem, configTurnAuthorityPem_data, JNI_ABORT);
+    }
+    if (configTurnPinSha256) {
+        (*env)->ReleaseByteArrayElements(env, configTurnPinSha256, configTurnPinSha256_data, JNI_ABORT);
+    }
+    if (configTurnServerName) {
+        (*env)->ReleaseByteArrayElements(env, configTurnServerName, configTurnServerName_data, JNI_ABORT);
+    }
+    if (configTurnClientCertificatePem) {
+        (*env)->ReleaseByteArrayElements(env, configTurnClientCertificatePem, configTurnClientCertificatePem_data, JNI_ABORT);
+    }
+    if (configTurnClientKeyPem) {
+        (*env)->ReleaseByteArrayElements(env, configTurnClientKeyPem, configTurnClientKeyPem_data, JNI_ABORT);
     }
     return (jint)status;
 }
@@ -5971,7 +6008,7 @@ Java_org_sipral_SipralNative_sipral_1network_1stop(JNIEnv *env, jobject self, jl
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong configDomainRules, jlong configReservedRules, jbyteArray serverUri, jlong protocol, jbyteArray buffer, jlongArray needed)
+Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, jlong configTrust, jlong configReserved, jbyteArray configAuthorityPem, jbyteArray configPinSha256, jbyteArray configClientCertificatePem, jbyteArray configClientKeyPem, jbyteArray configNameServers, jbyteArray configTlsServerName, jlong configConnectTimeoutMs, jlong configReservedEnd, jlong configDomainRules, jlong configReservedRules, jlong configTurnTrust, jlong configReservedTurn, jbyteArray configTurnAuthorityPem, jbyteArray configTurnPinSha256, jbyteArray configTurnServerName, jbyteArray configTurnClientCertificatePem, jbyteArray configTurnClientKeyPem, jbyteArray serverUri, jlong protocol, jbyteArray buffer, jlongArray needed)
 {
     (void)env;
     (void)self;
@@ -6008,6 +6045,28 @@ Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, 
     config_value.reserved_end = (uint32_t)configReservedEnd;
     config_value.domain_rules = (sipral_domain_rules_t)configDomainRules;
     config_value.reserved_rules = (uint32_t)configReservedRules;
+    config_value.turn_trust = (sipral_network_trust_t)configTurnTrust;
+    config_value.reserved_turn = (uint32_t)configReservedTurn;
+    jbyte *configTurnAuthorityPem_data = configTurnAuthorityPem ? (*env)->GetByteArrayElements(env, configTurnAuthorityPem, NULL) : NULL;
+    jsize configTurnAuthorityPem_size = configTurnAuthorityPem ? (*env)->GetArrayLength(env, configTurnAuthorityPem) : 0;
+    config_value.turn_authority_pem = (const char *)configTurnAuthorityPem_data;
+    config_value.turn_authority_pem_len = (size_t)configTurnAuthorityPem_size;
+    jbyte *configTurnPinSha256_data = configTurnPinSha256 ? (*env)->GetByteArrayElements(env, configTurnPinSha256, NULL) : NULL;
+    jsize configTurnPinSha256_size = configTurnPinSha256 ? (*env)->GetArrayLength(env, configTurnPinSha256) : 0;
+    config_value.turn_pin_sha256 = (const char *)configTurnPinSha256_data;
+    config_value.turn_pin_sha256_len = (size_t)configTurnPinSha256_size;
+    jbyte *configTurnServerName_data = configTurnServerName ? (*env)->GetByteArrayElements(env, configTurnServerName, NULL) : NULL;
+    jsize configTurnServerName_size = configTurnServerName ? (*env)->GetArrayLength(env, configTurnServerName) : 0;
+    config_value.turn_server_name = (const char *)configTurnServerName_data;
+    config_value.turn_server_name_len = (size_t)configTurnServerName_size;
+    jbyte *configTurnClientCertificatePem_data = configTurnClientCertificatePem ? (*env)->GetByteArrayElements(env, configTurnClientCertificatePem, NULL) : NULL;
+    jsize configTurnClientCertificatePem_size = configTurnClientCertificatePem ? (*env)->GetArrayLength(env, configTurnClientCertificatePem) : 0;
+    config_value.turn_client_certificate_pem = (const char *)configTurnClientCertificatePem_data;
+    config_value.turn_client_certificate_pem_len = (size_t)configTurnClientCertificatePem_size;
+    jbyte *configTurnClientKeyPem_data = configTurnClientKeyPem ? (*env)->GetByteArrayElements(env, configTurnClientKeyPem, NULL) : NULL;
+    jsize configTurnClientKeyPem_size = configTurnClientKeyPem ? (*env)->GetArrayLength(env, configTurnClientKeyPem) : 0;
+    config_value.turn_client_key_pem = (const char *)configTurnClientKeyPem_data;
+    config_value.turn_client_key_pem_len = (size_t)configTurnClientKeyPem_size;
     jbyte *serverUri_data = serverUri ? (*env)->GetByteArrayElements(env, serverUri, NULL) : NULL;
     jsize serverUri_size = serverUri ? (*env)->GetArrayLength(env, serverUri) : 0;
     jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
@@ -6031,6 +6090,21 @@ Java_org_sipral_SipralNative_sipral_1network_1locate(JNIEnv *env, jobject self, 
     }
     if (configTlsServerName) {
         (*env)->ReleaseByteArrayElements(env, configTlsServerName, configTlsServerName_data, JNI_ABORT);
+    }
+    if (configTurnAuthorityPem) {
+        (*env)->ReleaseByteArrayElements(env, configTurnAuthorityPem, configTurnAuthorityPem_data, JNI_ABORT);
+    }
+    if (configTurnPinSha256) {
+        (*env)->ReleaseByteArrayElements(env, configTurnPinSha256, configTurnPinSha256_data, JNI_ABORT);
+    }
+    if (configTurnServerName) {
+        (*env)->ReleaseByteArrayElements(env, configTurnServerName, configTurnServerName_data, JNI_ABORT);
+    }
+    if (configTurnClientCertificatePem) {
+        (*env)->ReleaseByteArrayElements(env, configTurnClientCertificatePem, configTurnClientCertificatePem_data, JNI_ABORT);
+    }
+    if (configTurnClientKeyPem) {
+        (*env)->ReleaseByteArrayElements(env, configTurnClientKeyPem, configTurnClientKeyPem_data, JNI_ABORT);
     }
     if (serverUri) {
         (*env)->ReleaseByteArrayElements(env, serverUri, serverUri_data, JNI_ABORT);

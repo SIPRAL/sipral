@@ -205,13 +205,14 @@ impl PlatformRoots {
 }
 
 /// The configuration for one connection: `pin` (an account's) wins over `trust`, and a chain
-/// that `trust` vouches for has its name read by `rules`.
+/// that `trust` vouches for has its name read by `rules`, or as HTTPS reads a host's for a
+/// server that is not a SIP server (`None`).
 pub(crate) fn prepare(
     trust: &Trust,
     pin: Option<&CertificatePin>,
     client: Option<&ClientCertificate>,
     platform: &PlatformRoots,
-    rules: DomainRules,
+    rules: Option<DomainRules>,
 ) -> Result<Prepared, Failure> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let refused = |why: &str| {
@@ -250,7 +251,10 @@ pub(crate) fn prepare(
                 WebPkiServerVerifier::builder_with_provider(Arc::new(store), Arc::clone(&provider))
                     .build()
                     .map_err(|error| refused(&error.to_string()))?;
-            Arc::new(SipDomainServer { chain, rules })
+            match rules {
+                Some(rules) => Arc::new(SipDomainServer { chain, rules }),
+                None => chain,
+            }
         }
     };
     let key = match client {
@@ -452,7 +456,7 @@ mod tests {
             None,
             Some(client),
             &PlatformRoots::default(),
-            DomainRules::Platform,
+            Some(DomainRules::Platform),
         )
     }
 

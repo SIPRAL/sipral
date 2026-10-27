@@ -159,12 +159,51 @@ from a binding.
 A call's socket is the component's when the application asks for one
 (`sipral_network_media_open`) and attaches the call's media handle to it once
 `SIPRAL_EVENT_KIND_MEDIA_STARTED` has come and `sipral_call_media` has minted
-it. Packets that arrive before that are dropped: nothing can read them yet.
-Capture and playback stay the application's — PCM in with
-`sipral_network_media_capture`, out with `sipral_media_playback` — or the
-built-in audio engine's in device mode, whose transmit callback the application
-still writes. A packet the stack routes through a TURN server over TCP or TLS
-is not carried yet; relayed media over UDP is.
+it. What arrives before that goes to `sipral_stack_receive_stun`, which keeps
+what the call will need — the STUN and TURN servers' answers, the far end's
+early checks — and refuses the rest, which is dropped. Capture and playback
+stay the application's — PCM in with `sipral_network_media_capture`, out with
+`sipral_media_playback` — or the built-in audio engine's in device mode, whose
+transmit callback the application still writes.
+
+### STUN and TURN
+
+On a stack created with `SIPRAL_NAT_STUN` (ABI 1.9) the component carries what
+`06-nat.md` has an application carry for each media socket. The turn after
+`sipral_network_media_open` names the socket with `sipral_stack_nat_map`;
+every turn sends what `sipral_stack_poll_stun` queued, from the socket it
+names, and hands what the socket hears to `sipral_stack_receive_stun` until
+the call's handle is attached. The application places or answers the call on
+the socket once `SIPRAL_EVENT_KIND_NAT_MAPPING` about it has come, and, with a
+`turn_server`, `SIPRAL_EVENT_KIND_NAT_RELAY` too: the stack refuses a call
+described on a socket still being asked about. `sipral_network_media_close`
+on a socket with no call releases it at the next turn with
+`sipral_stack_nat_unmap`, so that its relay is given back with a Refresh of
+lifetime zero (RFC 8656 §8) from the socket before it closes.
+
+With `turn_transport` TCP or TLS the relay is reached over a connection of the
+socket's own (RFC 8656 §3.1). The component opens it when
+`SIPRAL_EVENT_KIND_TURN_STREAM` asks, says so with
+`sipral_stack_turn_connected`, hands everything it carries to
+`sipral_stack_turn_receive`, writes on it every packet the stack marks for it
+— the Allocate and its refreshes, the permissions, the call's checks and audio,
+RTCP and the goodbye, a frame `sipral_network_media_capture` encodes included
+— and closes it when the stack says `SIPRAL_TURN_STREAM_CLOSE`, after what was
+queued for it. A connection that cannot be made, or breaks, is
+`sipral_stack_turn_closed`, which costs the socket its relay. Over TLS the
+TURN server is not a SIP server and its certificate names a host, so it is
+checked as HTTPS checks one, by trust members of its own:
+
+| Member | For the TURN server |
+|---|---|
+| `turn_trust` | a `sipral_network_trust_t`, as `trust` is for the SIP servers; zero is the platform's |
+| `turn_authority_pem`, `turn_pin_sha256` | as `authority_pem` and `pin_sha256` |
+| `turn_server_name` | the name its certificate must carry; null for the address `turn_server` names |
+| `turn_client_certificate_pem`, `turn_client_key_pem` | the client certificate presented when it asks for one |
+
+The signalling socket needs nothing of the component: its requests and their
+answers go through the stack's own queue and receive call, as `06-nat.md`
+says.
 
 ## Not yet
 
@@ -173,7 +212,7 @@ is not carried yet; relayed media over UDP is.
   `UNTRUSTED` ("the platform's trust store holds no authority this library can
   read"); a private authority or a pin works. The Swift and Kotlin layers'
   own TLS is the platform's.
-- **TURN over TCP or TLS, and a main transport on TCP or TLS**, as above.
+- **A main transport on TCP or TLS**, as above.
 - **`ResolveNeeded`** is left to the application: a dialog keeps the flow its
   INVITE used, which is the one that survives a NAT.
 
@@ -187,7 +226,14 @@ located by SRV and reached over TLS checked against the domain.
 `crates/sipral-ffi/src/network/tests.rs` does the same through the C ABI:
 a stack registers over TLS at a domain only an SRV record names, places a call,
 carries its audio both ways, holds it, resumes it and hangs up, everything over
-the one connection the component opened, with no socket of the test's own.
+the one connection the component opened, with no socket of the test's own. Its
+`relayed` tests run a STUN server and a TURN server of their own: a media
+socket is mapped, its relay allocated on the TCP connection the component
+opened, and given back on it with a Refresh of lifetime zero before the
+connection closes; over TLS the same, the TURN server trusted by its own
+authority and checked against its own name while the SIP servers' trust is
+the platform's, and the same server held to a name its certificate does not
+carry gives no relay and is asked nothing.
 
 `scripts/lab.sh network` runs `interop/network/register-and-hold.c` — a C
 program with no socket, TLS or resolver of its own — against Asterisk: the
@@ -195,3 +241,12 @@ domain published by a name server beside it as a NAPTR record, an SRV record
 and the SRV target's address only, the program registers over TLS 1.2 checked
 against the lab authority and the domain, calls the tone, hears it, holds,
 resumes, hears it again, hangs up and unregisters.
+
+`scripts/lab.sh turn` runs `interop/network/relayed-call.c`, a C program with
+no networking code either, as one more caller across the NAT pair whose block
+leaves no path but a relay (`06-nat.md`, "Proven in the lab"): without TURN
+its call finds no path; with a relay at both ends over UDP the tone crosses
+coturn; and from behind a NAT that drops every datagram to coturn, its relay
+reached over TCP and then over TLS — coturn's certificate trusted from the
+run's own authority and checked against its name — carries the call, and
+coturn's log counts the relay given back.

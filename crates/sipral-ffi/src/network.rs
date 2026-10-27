@@ -34,6 +34,14 @@
 //! [`sipral_network_media_attach`] has the component read and write it, and
 //! [`sipral_network_media_capture`] sends a frame of the microphone.
 //!
+//! On a stack with `SIPRAL_NAT_STUN` the component carries each media socket's STUN and TURN
+//! too (ABI 1.9): it names the socket with `sipral_stack_nat_map`, sends what
+//! `sipral_stack_poll_stun` queues and hands back what arrives, and opens the connection to the
+//! TURN server that `SIPRAL_EVENT_KIND_TURN_STREAM` asks for over TCP or TLS, checked by the
+//! `turn_*` members of `sipral_network_config_t`. The application waits for the socket's
+//! `SIPRAL_EVENT_KIND_NAT_MAPPING`, and with a `turn_server` its `SIPRAL_EVENT_KIND_NAT_RELAY`,
+//! before it places or answers a call on it.
+//!
 //! A build without the `network` feature has every entry point here and answers
 //! `SIPRAL_STATUS_NOT_SUPPORTED`; `SIPRAL_FEATURE_NETWORK` says which build this is.
 
@@ -125,6 +133,35 @@ record! {
         pub domain_rules: Number<SipralDomainRules>,
         /// Zero.
         pub reserved_rules: u32,
+        /// A [`SipralNetworkTrust`] for the TURN server a media socket reaches over TLS
+        /// (`sipral_stack_config_t::turn_transport`, ABI 1.9); zero for the platform's. Its
+        /// certificate is checked against `turn_server_name` as HTTPS checks a host's, not as
+        /// a SIP domain's.
+        pub turn_trust: Number<SipralNetworkTrust>,
+        /// Zero.
+        pub reserved_turn: u32,
+        /// `authority_pem` for the TURN server.
+        pub turn_authority_pem: *const c_char,
+        /// How many bytes of it.
+        pub turn_authority_pem_len: usize,
+        /// `pin_sha256` for the TURN server.
+        pub turn_pin_sha256: *const c_char,
+        /// How many bytes of it.
+        pub turn_pin_sha256_len: usize,
+        /// The name the TURN server's certificate is checked against; null for the address
+        /// `turn_server` names.
+        pub turn_server_name: *const c_char,
+        /// How many bytes of it.
+        pub turn_server_name_len: usize,
+        /// The client certificate presented when the TURN server asks for one, as
+        /// `client_certificate_pem` is written; null for none.
+        pub turn_client_certificate_pem: *const c_char,
+        /// How many bytes of it.
+        pub turn_client_certificate_pem_len: usize,
+        /// Its private key, as `client_key_pem` is written; required with the certificate.
+        pub turn_client_key_pem: *const c_char,
+        /// How many bytes of it.
+        pub turn_client_key_pem_len: usize,
     }
 }
 
@@ -312,6 +349,12 @@ entry! {
     /// stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
     /// no free pair.
     ///
+    /// On a stack with `SIPRAL_NAT_STUN` the next [`sipral_network_run`] names the socket with
+    /// `sipral_stack_nat_map` (ABI 1.9) and carries its STUN and TURN from then on, over UDP or
+    /// on the TURN connection the component opens: place or answer the call on it once
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` about it has come, and with a `turn_server` its
+    /// `SIPRAL_EVENT_KIND_NAT_RELAY` too, as the stack requires.
+    ///
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
@@ -339,7 +382,10 @@ entry! {
     /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
     /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
     /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
-    /// [`sipral_network_run`]. The socket closes, and its port goes back, when the call ends.
+    /// [`sipral_network_run`], or on its TURN connection when the stack marks it so. Before,
+    /// what arrives goes to `sipral_stack_receive_stun`, which keeps the STUN and TURN servers'
+    /// answers and the far end's early checks for the call (ABI 1.9). The socket closes, and
+    /// its port goes back, when the call ends.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
     ///
@@ -399,7 +445,10 @@ entry! {
 entry! {
     /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
     /// range. For a socket whose call never came to media; one whose call ended has closed
-    /// already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+    /// already. A socket the stack's STUN client was told of is released at the next
+    /// [`sipral_network_run`] with `sipral_stack_nat_unmap`, its relay given back from it with
+    /// a Refresh of lifetime zero (RFC 8656 §8), and closed then (ABI 1.9).
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
     ///
     /// # Safety
     ///

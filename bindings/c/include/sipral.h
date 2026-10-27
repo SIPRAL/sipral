@@ -136,7 +136,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)8)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)9)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -8645,6 +8645,59 @@ struct sipral_network_config {
      * Zero.
      */
     uint32_t reserved_rules;
+    /**
+     * A sipral_network_trust_t for the TURN server a media socket reaches over TLS
+     * (`sipral_stack_config_t::turn_transport`, ABI 1.9); zero for the platform's. Its
+     * certificate is checked against `turn_server_name` as HTTPS checks a host's, not as
+     * a SIP domain's.
+     */
+    sipral_network_trust_t turn_trust;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_turn;
+    /**
+     * `authority_pem` for the TURN server.
+     */
+    const char *turn_authority_pem;
+    /**
+     * How many bytes of it.
+     */
+    size_t turn_authority_pem_len;
+    /**
+     * `pin_sha256` for the TURN server.
+     */
+    const char *turn_pin_sha256;
+    /**
+     * How many bytes of it.
+     */
+    size_t turn_pin_sha256_len;
+    /**
+     * The name the TURN server's certificate is checked against; null for the address
+     * `turn_server` names.
+     */
+    const char *turn_server_name;
+    /**
+     * How many bytes of it.
+     */
+    size_t turn_server_name_len;
+    /**
+     * The client certificate presented when the TURN server asks for one, as
+     * `client_certificate_pem` is written; null for none.
+     */
+    const char *turn_client_certificate_pem;
+    /**
+     * How many bytes of it.
+     */
+    size_t turn_client_certificate_pem_len;
+    /**
+     * Its private key, as `client_key_pem` is written; required with the certificate.
+     */
+    const char *turn_client_key_pem;
+    /**
+     * How many bytes of it.
+     */
+    size_t turn_client_key_pem_len;
 };
 
 /**
@@ -11826,6 +11879,12 @@ sipral_status_t sipral_network_locate(const sipral_network_config_t *config, con
  * stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
  * no free pair.
  *
+ * On a stack with `SIPRAL_NAT_STUN` the next sipral_network_run names the socket with
+ * `sipral_stack_nat_map` (ABI 1.9) and carries its STUN and TURN from then on, over UDP or
+ * on the TURN connection the component opens: place or answer the call on it once
+ * `SIPRAL_EVENT_KIND_NAT_MAPPING` about it has come, and with a `turn_server` its
+ * `SIPRAL_EVENT_KIND_NAT_RELAY` too, as the stack requires.
+ *
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
@@ -11838,7 +11897,10 @@ sipral_status_t sipral_network_media_open(sipral_handle_t stack, char *buffer, s
  * (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
  * arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
  * `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
- * sipral_network_run. The socket closes, and its port goes back, when the call ends.
+ * sipral_network_run, or on its TURN connection when the stack marks it so. Before,
+ * what arrives goes to `sipral_stack_receive_stun`, which keeps the STUN and TURN servers'
+ * answers and the far end's early checks for the call (ABI 1.9). The socket closes, and
+ * its port goes back, when the call ends.
  *
  * `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
  *
@@ -11865,7 +11927,10 @@ sipral_status_t sipral_network_media_capture(sipral_handle_t stack, sipral_handl
 /**
  * Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
  * range. For a socket whose call never came to media; one whose call ended has closed
- * already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+ * already. A socket the stack's STUN client was told of is released at the next
+ * sipral_network_run with `sipral_stack_nat_unmap`, its relay given back from it with
+ * a Refresh of lifetime zero (RFC 8656 §8), and closed then (ABI 1.9).
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
  *
  * Safety
  *

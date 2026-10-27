@@ -713,14 +713,15 @@ the C ABI says `SIPRAL_TURN_STREAM_CLOSE` once no call is described on the
 socket any more, a fork's other branches included, and the application
 closes the connection after writing what is still queued for it.
 
-The four bindings open the connection themselves: Swift with
+The bindings open the connection themselves: Swift with
 Network.framework's `NWConnection`, Kotlin with a `Socket` and an
 `SSLSocket` over it, Python with `socket` and `ssl`, .NET with a `TcpClient`
-and an `SslStream`. Each checks the server's certificate against the
-configured name with the platform's trust by default, or with roots the
-application hands it for a private CA or a self-signed server, and none can be
-told to stop checking. `docs/20-security-model.md` has what the TLS is and is
-not trusted for.
+and an `SslStream`, Node.js with `net` and `tls`; for a C or C++ program the
+networking component opens it with rustls (`26-network.md`, "STUN and TURN").
+Each checks the server's certificate against the configured name with the
+platform's trust by default, or with roots the application hands it for a
+private CA or a self-signed server, and none can be told to stop checking.
+`docs/20-security-model.md` has what the TLS is and is not trusted for.
 
 ### Proven in the lab
 
@@ -757,8 +758,10 @@ idiomatic layer's `Client`/`SipralStack` constructor and `placeCall`, and
 `=swift`.
 
 The same pair proves the relay over a connection. `interop/turn`'s coturn
-listens on TCP beside UDP on 3478 and on TLS on 5349, with a certificate
-`scripts/lab.sh` makes for the run (`turn_certificate`) for a name, and the
+listens on TCP beside UDP on 3478 and on TLS on 5349, with a certificate for
+a name signed by an authority `scripts/lab.sh` makes for the run
+(`turn_certificate`) — not one self-signed certificate, which rustls's
+`webpki` refuses as a server's for being an authority too — and the
 caller's NAT is told to drop every datagram to or from coturn as well. The
 C harness then places the call with a relay over TCP (`SIPRAL_TURN_TRANSPORT
 =tcp`): it requires the media socket's STUN mapping to go unanswered — the
@@ -766,16 +769,19 @@ proof the block holds — the relay allocated over the connection, the tone
 heard back through it, its own audio marked for the connection, and the
 Refresh that gives the relay back written on it. The Python agent places the
 same call over TLS (`SIPRAL_TURN_TRANSPORT=tls`), told to trust the run's
-certificate and to check it against its name (`SIPRAL_TURN_CA`,
+authority and to check coturn's certificate against its name (`SIPRAL_TURN_CA`,
 `SIPRAL_TURN_NAME`), with the platform's own `ssl`. coturn's log has to count
 both allocations given back, beside the UDP ones. The C harness carries no
 TLS of its own; TLS is the Python agent's to prove, the platform's stack
 being exactly what an application brings. Kotlin and .NET place it over TCP
 and then over TLS with the same three variables, through an `SSLSocket` and
-an `SslStream` trusting only the run's certificate; Swift places it over TCP
+an `SslStream` trusting only the run's authority; Swift places it over TCP
 alone, since its TLS is Network.framework's, which only Apple's platforms
 have and the lab's Linux containers do not, and its TLS is proved by
-`TurnStreamTests.swift` on macOS instead.
+`TurnStreamTests.swift` on macOS instead. The networking component places it
+over TCP and over TLS too, from `interop/network/relayed-call.c`, a C program
+whose sockets, TURN connection and TLS are all the component's
+(`26-network.md`, "STUN and TURN").
 
 The same pair carries a forked call (`interop/harness/src/fork_ice.rs`):
 two phones behind the second NAT, registered at Kamailio as the one user it

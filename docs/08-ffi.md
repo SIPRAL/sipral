@@ -4308,3 +4308,37 @@ value for the networking component, followed by `reserved_rules`, zero; a
 caller compiled against 1.7 sends neither, and reads as the default.
 `22-tls.md`, "What the platform checks, and what RFC 5922 adds", has the
 reasoning and every layer's setting.
+
+## What ABI 1.9 added
+
+### A media socket's STUN and TURN, carried by the networking component
+
+Twelve members appended to `sipral_network_config_t`, nothing else in the
+header moved, and its pinned length stays where 1.6 ended it. A binding
+printed at 1.8 loads against a 1.9 library and works as it did; one printed at
+1.9 is refused by a 1.8 library, with both versions named.
+
+On a stack with `SIPRAL_NAT_STUN`, the component now does for each media
+socket what this document has an application do: it names the socket with
+`sipral_stack_nat_map` at the turn after `sipral_network_media_open`, sends
+what `sipral_stack_poll_stun` queues from the socket it names, hands what the
+socket hears to `sipral_stack_receive_stun` until the call's handle is
+attached, and releases a socket closed with no call on it with
+`sipral_stack_nat_unmap` before it closes it. With `turn_transport` TCP or TLS
+it opens the connection `SIPRAL_EVENT_KIND_TURN_STREAM` asks for, reports it
+with `sipral_stack_turn_connected`, `sipral_stack_turn_receive` and
+`sipral_stack_turn_closed`, and writes on it every packet the stack marks for
+it, a frame `sipral_network_media_capture` encodes included. The new members
+say how the TURN server is checked over TLS, as a host and not as a SIP
+domain: `turn_trust` (a `sipral_network_trust_t`, zero for the platform's)
+with `reserved_turn`, zero, then `turn_authority_pem`, `turn_pin_sha256`,
+`turn_server_name` (null for the address `turn_server` names), and
+`turn_client_certificate_pem` with `turn_client_key_pem`, each with its
+length. A caller compiled against 1.8 sends none of them, and its TURN server
+is checked against the platform's trust store. `26-network.md`, "STUN and
+TURN", has the rest.
+
+Bytes off a connection, the SIP servers' as well as the TURN server's, are
+now handed in again for up to half a second while another thread is inside
+the stack (`SIPRAL_STATUS_BUSY`) rather than dropped, which had left a hole
+in the stream.

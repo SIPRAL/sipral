@@ -6601,6 +6601,39 @@ class SipralNetworkConfig(
      * Zero.
      */
     val reservedRules: Long = 0,
+    /**
+     * A SipralNetworkTrust for the TURN server a media socket reaches over TLS
+     * (`sipral_stack_config_t::turn_transport`, ABI 1.9); zero for the platform's. Its
+     * certificate is checked against `turn_server_name` as HTTPS checks a host's, not as
+     * a SIP domain's.
+     */
+    val turnTrust: Long = 0,
+    /**
+     * Zero.
+     */
+    val reservedTurn: Long = 0,
+    /**
+     * `authority_pem` for the TURN server.
+     */
+    val turnAuthorityPem: String? = null,
+    /**
+     * `pin_sha256` for the TURN server.
+     */
+    val turnPinSha256: String? = null,
+    /**
+     * The name the TURN server's certificate is checked against; null for the address
+     * `turn_server` names.
+     */
+    val turnServerName: String? = null,
+    /**
+     * The client certificate presented when the TURN server asks for one, as
+     * `client_certificate_pem` is written; null for none.
+     */
+    val turnClientCertificatePem: String? = null,
+    /**
+     * Its private key, as `client_key_pem` is written; required with the certificate.
+     */
+    val turnClientKeyPem: String? = null,
 )
 
 /**
@@ -8965,7 +8998,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 8)
+        agree(1, 9)
     }
 
     /**
@@ -9183,10 +9216,10 @@ internal object SipralNative {
     external fun sipral_message_isup(message: ByteArray, offset: LongArray, len: LongArray): Int
     external fun sipral_isup_read(body: ByteArray, isup: LongArray): Int
     external fun sipral_isup_number(body: ByteArray, which: Long, buffer: ByteArray, needed: LongArray): Int
-    external fun sipral_network_start(stack: Long, configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, configDomainRules: Long, configReservedRules: Long, nowMs: Long): Int
+    external fun sipral_network_start(stack: Long, configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, configDomainRules: Long, configReservedRules: Long, configTurnTrust: Long, configReservedTurn: Long, configTurnAuthorityPem: ByteArray?, configTurnPinSha256: ByteArray?, configTurnServerName: ByteArray?, configTurnClientCertificatePem: ByteArray?, configTurnClientKeyPem: ByteArray?, nowMs: Long): Int
     external fun sipral_network_run(stack: Long, nowMs: Long, waitMs: Long): Int
     external fun sipral_network_stop(stack: Long): Int
-    external fun sipral_network_locate(configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, configDomainRules: Long, configReservedRules: Long, serverUri: ByteArray, protocol: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_network_locate(configTrust: Long, configReserved: Long, configAuthorityPem: ByteArray?, configPinSha256: ByteArray?, configClientCertificatePem: ByteArray?, configClientKeyPem: ByteArray?, configNameServers: ByteArray?, configTlsServerName: ByteArray?, configConnectTimeoutMs: Long, configReservedEnd: Long, configDomainRules: Long, configReservedRules: Long, configTurnTrust: Long, configReservedTurn: Long, configTurnAuthorityPem: ByteArray?, configTurnPinSha256: ByteArray?, configTurnServerName: ByteArray?, configTurnClientCertificatePem: ByteArray?, configTurnClientKeyPem: ByteArray?, serverUri: ByteArray, protocol: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_network_media_open(stack: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_network_media_attach(stack: Long, address: ByteArray, call: Long, media: Long): Int
     external fun sipral_network_media_capture(stack: Long, media: Long, nowMs: Long, samples: ShortArray): Int
@@ -9211,7 +9244,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 8
+    const val ABI_VERSION_MINOR: Long = 9
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9674,7 +9707,7 @@ object Sipral {
         "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
         "sipral_network_test_config_t" to intArrayOf(48, 36, 40),
         "sipral_isup_t" to intArrayOf(72, 68, 68),
-        "sipral_network_config_t" to intArrayOf(128, 76, 76),
+        "sipral_network_config_t" to intArrayOf(216, 124, 124),
     )
 
     /**
@@ -13593,7 +13626,12 @@ object Sipral {
         val configClientKeyPem = config.clientKeyPem?.toByteArray(Charsets.UTF_8)
         val configNameServers = config.nameServers?.toByteArray(Charsets.UTF_8)
         val configTlsServerName = config.tlsServerName?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_network_start(stack, config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, config.domainRules, config.reservedRules, nowMs))
+        val configTurnAuthorityPem = config.turnAuthorityPem?.toByteArray(Charsets.UTF_8)
+        val configTurnPinSha256 = config.turnPinSha256?.toByteArray(Charsets.UTF_8)
+        val configTurnServerName = config.turnServerName?.toByteArray(Charsets.UTF_8)
+        val configTurnClientCertificatePem = config.turnClientCertificatePem?.toByteArray(Charsets.UTF_8)
+        val configTurnClientKeyPem = config.turnClientKeyPem?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_network_start(stack, config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, config.domainRules, config.reservedRules, config.turnTrust, config.reservedTurn, configTurnAuthorityPem, configTurnPinSha256, configTurnServerName, configTurnClientCertificatePem, configTurnClientKeyPem, nowMs))
     }
 
     /**
@@ -13654,9 +13692,14 @@ object Sipral {
         val configClientKeyPem = config.clientKeyPem?.toByteArray(Charsets.UTF_8)
         val configNameServers = config.nameServers?.toByteArray(Charsets.UTF_8)
         val configTlsServerName = config.tlsServerName?.toByteArray(Charsets.UTF_8)
+        val configTurnAuthorityPem = config.turnAuthorityPem?.toByteArray(Charsets.UTF_8)
+        val configTurnPinSha256 = config.turnPinSha256?.toByteArray(Charsets.UTF_8)
+        val configTurnServerName = config.turnServerName?.toByteArray(Charsets.UTF_8)
+        val configTurnClientCertificatePem = config.turnClientCertificatePem?.toByteArray(Charsets.UTF_8)
+        val configTurnClientKeyPem = config.turnClientKeyPem?.toByteArray(Charsets.UTF_8)
         val serverUriBytes = serverUri.toByteArray(Charsets.UTF_8)
         val neededSlot = LongArray(1)
-        check(SipralNative.sipral_network_locate(config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, config.domainRules, config.reservedRules, serverUriBytes, protocol, buffer, neededSlot))
+        check(SipralNative.sipral_network_locate(config.trust, config.reserved, configAuthorityPem, configPinSha256, configClientCertificatePem, configClientKeyPem, configNameServers, configTlsServerName, config.connectTimeoutMs, config.reservedEnd, config.domainRules, config.reservedRules, config.turnTrust, config.reservedTurn, configTurnAuthorityPem, configTurnPinSha256, configTurnServerName, configTurnClientCertificatePem, configTurnClientKeyPem, serverUriBytes, protocol, buffer, neededSlot))
         return neededSlot[0]
     }
 
@@ -13671,6 +13714,12 @@ object Sipral {
      * and nothing opened. `SIPRAL_STATUS_WRONG_STATE` before sipral_network_start or on a
      * stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
      * no free pair.
+     *
+     * On a stack with `SIPRAL_NAT_STUN` the next sipral_network_run names the socket with
+     * `sipral_stack_nat_map` (ABI 1.9) and carries its STUN and TURN from then on, over UDP or
+     * on the TURN connection the component opens: place or answer the call on it once
+     * `SIPRAL_EVENT_KIND_NAT_MAPPING` about it has come, and with a `turn_server` its
+     * `SIPRAL_EVENT_KIND_NAT_RELAY` too, as the stack requires.
      *
      * Safety
      *
@@ -13688,7 +13737,10 @@ object Sipral {
      * (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
      * arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
      * `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
-     * sipral_network_run. The socket closes, and its port goes back, when the call ends.
+     * sipral_network_run, or on its TURN connection when the stack marks it so. Before,
+     * what arrives goes to `sipral_stack_receive_stun`, which keeps the STUN and TURN servers'
+     * answers and the far end's early checks for the call (ABI 1.9). The socket closes, and
+     * its port goes back, when the call ends.
      *
      * `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
      *
@@ -13720,7 +13772,10 @@ object Sipral {
     /**
      * Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
      * range. For a socket whose call never came to media; one whose call ended has closed
-     * already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+     * already. A socket the stack's STUN client was told of is released at the next
+     * sipral_network_run with `sipral_stack_nat_unmap`, its relay given back from it with
+     * a Refresh of lifetime zero (RFC 8656 §8), and closed then (ABI 1.9).
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
      *
      * Safety
      *

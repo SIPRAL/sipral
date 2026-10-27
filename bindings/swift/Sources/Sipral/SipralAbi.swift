@@ -2551,7 +2551,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 8
+    public static let abiVersionMinor: UInt32 = 9
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2955,7 +2955,7 @@ public enum Sipral {
         ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
         ("sipral_network_test_config_t", MemoryLayout<sipral_network_test_config_t>.size, 48, 36, 40),
         ("sipral_isup_t", MemoryLayout<sipral_isup_t>.size, 72, 68, 68),
-        ("sipral_network_config_t", MemoryLayout<sipral_network_config_t>.size, 128, 76, 76),
+        ("sipral_network_config_t", MemoryLayout<sipral_network_config_t>.size, 216, 124, 124),
     ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
@@ -7153,6 +7153,12 @@ public enum Sipral {
     /// stack that advertises a wildcard address, `SIPRAL_STATUS_EXHAUSTED` when the range has
     /// no free pair.
     ///
+    /// On a stack with `SIPRAL_NAT_STUN` the next sipral_network_run names the socket with
+    /// `sipral_stack_nat_map` (ABI 1.9) and carries its STUN and TURN from then on, over UDP or
+    /// on the TURN connection the component opens: place or answer the call on it once
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` about it has come, and with a `turn_server` its
+    /// `SIPRAL_EVENT_KIND_NAT_RELAY` too, as the stack requires.
+    ///
     /// Safety
     ///
     /// `buffer` must be writable for `capacity` bytes and `out_needed` null or pointing at one
@@ -7172,7 +7178,10 @@ public enum Sipral {
     /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
     /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
     /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
-    /// sipral_network_run. The socket closes, and its port goes back, when the call ends.
+    /// sipral_network_run, or on its TURN connection when the stack marks it so. Before,
+    /// what arrives goes to `sipral_stack_receive_stun`, which keeps the STUN and TURN servers'
+    /// answers and the far end's early checks for the call (ABI 1.9). The socket closes, and
+    /// its port goes back, when the call ends.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
     ///
@@ -7211,7 +7220,10 @@ public enum Sipral {
 
     /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
     /// range. For a socket whose call never came to media; one whose call ended has closed
-    /// already. `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
+    /// already. A socket the stack's STUN client was told of is released at the next
+    /// sipral_network_run with `sipral_stack_nat_unmap`, its relay given back from it with
+    /// a Refresh of lifetime zero (RFC 8656 §8), and closed then (ABI 1.9).
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an address the component has no socket at.
     ///
     /// Safety
     ///

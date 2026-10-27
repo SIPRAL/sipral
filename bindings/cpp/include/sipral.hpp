@@ -162,6 +162,19 @@ struct NetworkOptions {
     std::string client_key_pem;
     /** Name servers to ask instead of the system's, comma-separated `host:port`. */
     std::string name_servers;
+    /** The name every SIP server's certificate is checked against; empty for the domain of the account's server_uri. */
+    std::string tls_server_name;
+    /** How a SIP server's certificate is read for its name (22-tls.md). */
+    sipral_domain_rules_t domain_rules = SIPRAL_DOMAIN_RULES_PLATFORM;
+    /** What a TURN server reached over TLS is trusted by, as `trust` is for the SIP servers. */
+    sipral_network_trust_t turn_trust = SIPRAL_NETWORK_TRUST_PLATFORM;
+    std::string turn_authority_pem;
+    std::string turn_pin_sha256;
+    /** The name its certificate is checked against; empty for the address in StackOptions::turn_server. */
+    std::string turn_server_name;
+    /** A client certificate and its key, both PEM, for a TURN server that asks for one. */
+    std::string turn_client_certificate_pem;
+    std::string turn_client_key_pem;
 };
 
 namespace detail {
@@ -183,6 +196,20 @@ inline sipral_network_config_t network_config(const NetworkOptions &options)
     config.client_key_pem_len = options.client_key_pem.size();
     config.name_servers = text(options.name_servers);
     config.name_servers_len = options.name_servers.size();
+    config.tls_server_name = text(options.tls_server_name);
+    config.tls_server_name_len = options.tls_server_name.size();
+    config.domain_rules = options.domain_rules;
+    config.turn_trust = options.turn_trust;
+    config.turn_authority_pem = text(options.turn_authority_pem);
+    config.turn_authority_pem_len = options.turn_authority_pem.size();
+    config.turn_pin_sha256 = text(options.turn_pin_sha256);
+    config.turn_pin_sha256_len = options.turn_pin_sha256.size();
+    config.turn_server_name = text(options.turn_server_name);
+    config.turn_server_name_len = options.turn_server_name.size();
+    config.turn_client_certificate_pem = text(options.turn_client_certificate_pem);
+    config.turn_client_certificate_pem_len = options.turn_client_certificate_pem.size();
+    config.turn_client_key_pem = text(options.turn_client_key_pem);
+    config.turn_client_key_pem_len = options.turn_client_key_pem.size();
     return config;
 }
 
@@ -260,6 +287,16 @@ struct StackOptions {
     sipral_transport_t transport = SIPRAL_TRANSPORT_UDP;
     /** Called for every event, on the thread inside poll() or run(). */
     std::function<void(const Event &)> on_event;
+    /** ICE for every call (SIPRAL_ICE_OFFERED or _REQUIRED); zero for none. */
+    sipral_ice_t ice = static_cast<sipral_ice_t>(0);
+    /** SIPRAL_NAT_STUN asks stun_server, `host:port`, where each socket appears from (06-nat.md). */
+    sipral_nat_t nat = static_cast<sipral_nat_t>(0);
+    std::string stun_server;
+    /** A TURN server, `host:port`, relaying every media socket, its credential, and how it is reached. */
+    std::string turn_server;
+    std::string turn_username;
+    std::string turn_password;
+    sipral_transport_t turn_transport = static_cast<sipral_transport_t>(0);
 };
 
 /** What an account is made with (sipral_account_config_t, the members most programs set). */
@@ -396,6 +433,18 @@ public:
         config.entropy_len = seed.size();
         config.media_seed = media_seed.data();
         config.media_seed_len = media_seed.size();
+        auto text = [](const std::string &value) { return value.empty() ? nullptr : value.data(); };
+        config.ice = options.ice;
+        config.nat = options.nat;
+        config.stun_server = text(options.stun_server);
+        config.stun_server_len = options.stun_server.size();
+        config.turn_server = text(options.turn_server);
+        config.turn_server_len = options.turn_server.size();
+        config.turn_username = text(options.turn_username);
+        config.turn_username_len = options.turn_username.size();
+        config.turn_password = text(options.turn_password);
+        config.turn_password_len = options.turn_password.size();
+        config.turn_transport = options.turn_transport;
         detail::check(sipral_stack_create(&config, &state_->stack), "sipral_stack_create");
     }
     Stack(const Stack &) = delete;

@@ -1129,6 +1129,15 @@ step_linked_from_c() {
             fail "interop/harness-c/main.c does not compile:"
             sed 's/^/        /' "$work/cc-harness"
         fi
+        if cc -std=c11 -Wall -Wextra -Werror -o "$work/relayed-call" \
+            interop/network/relayed-call.c -I bindings/c/include \
+            -L"$ROOT/target/release" -lsipral_ffi -lm -Wl,-rpath,"$ROOT/target/release" \
+            >"$work/cc-relayed" 2>&1; then
+            pass "interop/network/relayed-call.c"
+        else
+            fail "interop/network/relayed-call.c does not compile:"
+            sed 's/^/        /' "$work/cc-relayed"
+        fi
         # the C++ layer the same way: its smoke test compiled as an integrator
         # would, warnings fatal, and run; the lab's C++ program compiled and not
         # run, for the reason the C driver is not
@@ -1184,7 +1193,8 @@ step_c_against_glibc() {
         jdk="${JAVA_HOME:-$(/usr/libexec/java_home 2>/dev/null || true)}"
         for arch in x86_64 aarch64; do
             compiled=1
-            for pair in "c99:interop/harness-c/main.c" "c11:bindings/c/smoke.c" "c99:bindings/c/sipral.c"; do
+            for pair in "c99:interop/harness-c/main.c" "c11:bindings/c/smoke.c" "c99:bindings/c/sipral.c" \
+                "c11:interop/network/register-and-hold.c" "c11:interop/network/relayed-call.c"; do
                 if ! zig cc -target "$arch-linux-gnu" -std="${pair%%:*}" -Wall -Wextra -Werror -pedantic \
                     -I bindings/c/include -c -o "$work/out.o" "${pair#*:}" >"$work/cc" 2>&1; then
                     fail "${pair#*:} does not compile against glibc for $arch:"

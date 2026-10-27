@@ -6,9 +6,11 @@
 //! It is the loop `crate::transport` and every binding write, written once: it calls the same
 //! entry points an application would — `sipral_stack_poll`, `sipral_stack_poll_transmit`,
 //! `sipral_stack_receive_*`, `sipral_stack_transport_bind`,
-//! `sipral_stack_transport_failed_with`, the media calls — so the stack cannot tell it from
-//! one, and reads the events it needs through the stack's observer before the callback does.
-//! Sockets, connections and lookups are `sipral-net`'s.
+//! `sipral_stack_transport_failed_with`, the media calls, and for a media socket's STUN and
+//! TURN `sipral_stack_nat_map`, `sipral_stack_poll_stun`, `sipral_stack_receive_stun` and
+//! `sipral_stack_turn_*` — so the stack cannot tell it from one, and reads the events it needs
+//! through the stack's observer before the callback does. Sockets, connections and lookups are
+//! `sipral-net`'s.
 
 use std::collections::HashMap;
 use std::ffi::c_char;
@@ -24,8 +26,8 @@ use sipral_core::endpoint::{
 use sipral_core::msg::{HostRef, Uri};
 use sipral_core::pin::CertificatePin;
 use sipral_net::{
-    ClientCertificate, Failure, Happening, MediaSender, Network, NetworkConfig, Resolver,
-    StreamTarget, TlsFailure, Trust,
+    ClientCertificate, Failure, Happening, HostTrust, MediaSender, Network, NetworkConfig,
+    Resolver, StreamSender, StreamTarget, TlsFailure, Trust,
 };
 
 use super::SipralNetworkConfig;
@@ -37,6 +39,11 @@ use crate::media::{
     SIPRAL_ADDRESS_BYTES, SIPRAL_MEDIA_PACKET_BYTES, SipralMediaPacket, sipral_media_capture,
     sipral_media_poll_rtcp, sipral_media_poll_transmit, sipral_media_receive,
     sipral_stack_poll_farewell,
+};
+use crate::nat::{
+    SipralTurnStream, sipral_stack_nat_map, sipral_stack_nat_unmap, sipral_stack_poll_stun,
+    sipral_stack_receive_stun, sipral_stack_turn_closed, sipral_stack_turn_connected,
+    sipral_stack_turn_receive,
 };
 use crate::ports::{sipral_stack_rtp_port_release, sipral_stack_rtp_port_reserve};
 use crate::stack::{
@@ -58,6 +65,9 @@ const FIRST_STREAM: u32 = 1 << 31;
 /// The longest one turn waits when the stack has no timer due.
 const IDLE: Duration = Duration::from_secs(1);
 
+/// How long what must reach the stack waits for it while another thread is inside it.
+const PATIENCE: Duration = Duration::from_millis(500);
+
 /// What the observer noted for the component, during a poll.
 enum Seen {
     Wanted {
@@ -74,6 +84,13 @@ enum Seen {
     Ended {
         call: SipralHandle,
     },
+    /// A media socket's connection to the TURN server, to open or to close.
+    Turn {
+        open: bool,
+        protocol: TransportProtocol,
+        local: SocketAddr,
+        server: SocketAddr,
+    },
 }
 
 /// One connection the component opened, or is opening.
@@ -84,6 +101,20 @@ struct Stream {
     bound: bool,
 }
 
+/// Where a media socket stands with the stack's STUN client.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Naming {
+    /// To be named with `sipral_stack_nat_map` at the next turn.
+    Asking,
+    /// Named.
+    Named,
+    /// Closed by the application while named: released with `sipral_stack_nat_unmap` at the
+    /// next turn, then closed.
+    Releasing,
+    /// Not named: the stack asks no STUN server.
+    Never,
+}
+
 /// One media socket the component opened.
 #[derive(Clone, Copy)]
 struct Media {
@@ -91,16 +122,31 @@ struct Media {
     attached: Option<(SipralHandle, SipralHandle)>,
     /// The port reserved from the stack's range, to give back if no call took it.
     reserved: Option<u32>,
+    named: Naming,
+}
+
+/// One media socket's connection to the TURN server (RFC 8656 §3.1), under the transport number
+/// it was opened as.
+#[derive(Clone, Copy)]
+struct Relay {
+    /// The media socket: the connection's name in the calls that take one.
+    local: SocketAddr,
+    /// Whether it is open, and the stack told.
+    open: bool,
 }
 
 /// What the loop keeps between turns, under one lock that a poll never holds.
 struct Driver {
     network: Network,
     server_name: Option<String>,
+    /// What the TURN server's certificate is checked against, and by.
+    turn_name: Option<String>,
+    turn_trust: HostTrust,
     /// The address the stack's socket is bound at.
     local: SocketAddr,
     next: u32,
     streams: HashMap<u32, Stream>,
+    relays: HashMap<u32, Relay>,
     media: HashMap<SocketAddr, Media>,
     /// One message or packet at a time, written by the stack.
     out: Vec<u8>,
@@ -115,6 +161,8 @@ struct Shared {
     /// Each attached media handle's socket, under a lock of its own so that capturing a frame
     /// never waits for a turn of the loop.
     senders: Mutex<HashMap<SipralHandle, (SocketAddr, MediaSender)>>,
+    /// Each open TURN connection, by its media socket, for the frames marked for it.
+    relay_senders: Mutex<HashMap<SocketAddr, StreamSender>>,
 }
 
 /// Every stack the component runs.
@@ -163,6 +211,19 @@ impl Clock {
 struct Settings {
     network: NetworkConfig,
     server_name: Option<String>,
+    turn_name: Option<String>,
+    turn_trust: HostTrust,
+}
+
+/// The members that say which servers are trusted and what is presented to them: the SIP
+/// servers' (`prefix` empty) or the TURN server's (`turn_`), read.
+struct Trusting<'a> {
+    prefix: &'static str,
+    trust: u32,
+    authority: Option<&'a [u8]>,
+    pin: Option<&'a str>,
+    certificate: Option<&'a [u8]>,
+    key: Option<&'a [u8]>,
 }
 
 /// The configuration, read; zero everywhere, or none, is the defaults.
@@ -172,104 +233,172 @@ unsafe fn settings_of(config: Option<&SipralNetworkConfig>) -> Result<Settings, 
         return Ok(Settings {
             network,
             server_name: None,
+            turn_name: None,
+            turn_trust: HostTrust::default(),
         });
     };
     let invalid = |message: String| fail(SipralStatus::InvalidArgument, message);
-    network.trust = unsafe { trust_of(config) }?;
-    let certificate = unsafe {
-        bytes(
-            config.client_certificate_pem.cast(),
-            config.client_certificate_pem_len,
-            "client_certificate_pem",
+    // PEM is lines, so read as bytes rather than as a header's text
+    let sip = Trusting {
+        prefix: "",
+        trust: config.trust,
+        authority: unsafe {
+            bytes(
+                config.authority_pem.cast(),
+                config.authority_pem_len,
+                "authority_pem",
+            )
+        }?,
+        pin: unsafe { text(config.pin_sha256, config.pin_sha256_len, "pin_sha256") }?,
+        certificate: unsafe {
+            bytes(
+                config.client_certificate_pem.cast(),
+                config.client_certificate_pem_len,
+                "client_certificate_pem",
+            )
+        }?,
+        key: unsafe {
+            bytes(
+                config.client_key_pem.cast(),
+                config.client_key_pem_len,
+                "client_key_pem",
+            )
+        }?,
+    };
+    network.trust = trust_of(&sip)?;
+    network.client_certificate = presented(&sip)?;
+    let turn = Trusting {
+        prefix: "turn_",
+        trust: config.turn_trust,
+        authority: unsafe {
+            bytes(
+                config.turn_authority_pem.cast(),
+                config.turn_authority_pem_len,
+                "turn_authority_pem",
+            )
+        }?,
+        pin: unsafe {
+            text(
+                config.turn_pin_sha256,
+                config.turn_pin_sha256_len,
+                "turn_pin_sha256",
+            )
+        }?,
+        certificate: unsafe {
+            bytes(
+                config.turn_client_certificate_pem.cast(),
+                config.turn_client_certificate_pem_len,
+                "turn_client_certificate_pem",
+            )
+        }?,
+        key: unsafe {
+            bytes(
+                config.turn_client_key_pem.cast(),
+                config.turn_client_key_pem_len,
+                "turn_client_key_pem",
+            )
+        }?,
+    };
+    let turn_trust = HostTrust::new(trust_of(&turn)?, presented(&turn)?);
+    let turn_name = unsafe {
+        text(
+            config.turn_server_name,
+            config.turn_server_name_len,
+            "turn_server_name",
         )
-    }?;
-    let key = unsafe {
-        bytes(
-            config.client_key_pem.cast(),
-            config.client_key_pem_len,
-            "client_key_pem",
-        )
-    }?;
-    settings_rest(config, network, certificate, key, invalid)
+    }?
+    .map(str::to_owned);
+    let mut settings = settings_rest(config, network, invalid)?;
+    settings.turn_name = turn_name;
+    settings.turn_trust = turn_trust;
+    Ok(settings)
 }
 
-/// The members of the configuration that say which servers are trusted.
-unsafe fn trust_of(config: &SipralNetworkConfig) -> Result<Trust, Fail> {
+/// Which servers the members trust.
+fn trust_of(members: &Trusting<'_>) -> Result<Trust, Fail> {
     let invalid = |message: String| fail(SipralStatus::InvalidArgument, message);
-    // PEM is lines, so read as bytes rather than as a header's text
-    let authority = unsafe {
-        bytes(
-            config.authority_pem.cast(),
-            config.authority_pem_len,
-            "authority_pem",
-        )
-    }?;
-    let pin = unsafe { text(config.pin_sha256, config.pin_sha256_len, "pin_sha256") }?;
+    let Trusting {
+        prefix,
+        authority,
+        pin,
+        ..
+    } = *members;
     let roots = || match authority {
-        None => Err(invalid(
-            "authority_pem is required when trust names an authority".to_owned(),
-        )),
+        None => Err(invalid(format!(
+            "{prefix}authority_pem is required when {prefix}trust names an authority"
+        ))),
         Some(pem) => Trust::authorities_from_pem(pem)
-            .map_err(|error| invalid(format!("authority_pem: {error}"))),
+            .map_err(|error| invalid(format!("{prefix}authority_pem: {error}"))),
     };
-    let trust = match config.trust {
+    let trust = match members.trust {
         0 => Trust::Platform,
         1 => Trust::PlatformAnd(roots()?),
         2 => Trust::Only(roots()?),
         3 => {
             let Some(pin) = pin else {
-                return Err(invalid(
-                    "pin_sha256 is required with SIPRAL_NETWORK_TRUST_PINNED".to_owned(),
-                ));
+                return Err(invalid(format!(
+                    "{prefix}pin_sha256 is required with SIPRAL_NETWORK_TRUST_PINNED"
+                )));
             };
             Trust::Pinned(
                 CertificatePin::parse(pin)
-                    .map_err(|error| invalid(format!("pin_sha256 is {pin:?}: {error}")))?,
+                    .map_err(|error| invalid(format!("{prefix}pin_sha256 is {pin:?}: {error}")))?,
             )
         }
         other => {
             return Err(invalid(format!(
-                "trust is {other}, and a trust is 0 for the platform's, 1 for an authority beside \
-                 it, 2 for that authority alone or 3 for a pinned certificate"
+                "{prefix}trust is {other}, and a trust is 0 for the platform's, 1 for an \
+                 authority beside it, 2 for that authority alone or 3 for a pinned certificate"
             )));
         }
     };
-    if config.trust != 3 && pin.is_some() {
-        return Err(invalid(
-            "pin_sha256 is given and trust is not SIPRAL_NETWORK_TRUST_PINNED: an account's own \
-             pin is tls_pin_sha256"
-                .to_owned(),
-        ));
+    if members.trust != 3 && pin.is_some() {
+        let own = if prefix.is_empty() {
+            ": an account's own pin is tls_pin_sha256"
+        } else {
+            ""
+        };
+        return Err(invalid(format!(
+            "{prefix}pin_sha256 is given and {prefix}trust is not SIPRAL_NETWORK_TRUST_PINNED{own}"
+        )));
     }
-    if matches!(config.trust, 0 | 3) && authority.is_some() {
-        return Err(invalid(
-            "authority_pem is given and trust names no authority".to_owned(),
-        ));
+    if matches!(members.trust, 0 | 3) && authority.is_some() {
+        return Err(invalid(format!(
+            "{prefix}authority_pem is given and {prefix}trust names no authority"
+        )));
     }
     Ok(trust)
 }
 
-/// The client certificate, the resolver and the patience, after the trust.
+/// The client certificate the members present, if any.
+fn presented(members: &Trusting<'_>) -> Result<Option<ClientCertificate>, Fail> {
+    let prefix = members.prefix;
+    match (members.certificate, members.key) {
+        (None, None) => Ok(None),
+        (Some(certificate), Some(key)) => ClientCertificate::from_pem(certificate, key)
+            .map(Some)
+            .map_err(|error| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!("{prefix}client_certificate_pem: {error}"),
+                )
+            }),
+        _ => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "a client certificate needs {prefix}client_certificate_pem and \
+                 {prefix}client_key_pem both"
+            ),
+        )),
+    }
+}
+
+/// The resolver, the patience and the rules, after the trust.
 fn settings_rest(
     config: &SipralNetworkConfig,
     mut network: NetworkConfig,
-    certificate: Option<&[u8]>,
-    key: Option<&[u8]>,
     invalid: impl Fn(String) -> Fail,
 ) -> Result<Settings, Fail> {
-    network.client_certificate = match (certificate, key) {
-        (None, None) => None,
-        (Some(certificate), Some(key)) => Some(
-            ClientCertificate::from_pem(certificate, key)
-                .map_err(|error| invalid(format!("client_certificate_pem: {error}")))?,
-        ),
-        _ => {
-            return Err(invalid(
-                "a client certificate needs client_certificate_pem and client_key_pem both"
-                    .to_owned(),
-            ));
-        }
-    };
     let servers = unsafe { text(config.name_servers, config.name_servers_len, "name_servers") }?;
     if let Some(servers) = servers {
         for (index, written) in servers.split(',').map(str::trim).enumerate() {
@@ -302,6 +431,8 @@ fn settings_rest(
     Ok(Settings {
         network,
         server_name,
+        turn_name: None,
+        turn_trust: HostTrust::default(),
     })
 }
 
@@ -343,8 +474,64 @@ fn seen(event: &SipralEvent) -> Option<Seen> {
             transport: unsafe { event.payload.transport_failed }.transport,
         }),
         SipralEventKind::CallEnded => Some(Seen::Ended { call: event.call }),
+        SipralEventKind::TurnStream => {
+            // Safety: the arm the kind names
+            let asked = unsafe { event.payload.turn_stream };
+            let local = unsafe { text(asked.local, asked.local_len, "local") }
+                .ok()??
+                .parse()
+                .ok()?;
+            let server = unsafe { text(asked.server, asked.server_len, "server") }
+                .ok()??
+                .parse()
+                .ok()?;
+            let protocol = if asked.protocol == SipralTransport::Tls as u32 {
+                TransportProtocol::Tls
+            } else {
+                TransportProtocol::Tcp
+            };
+            Some(Seen::Turn {
+                open: asked.state == SipralTurnStream::Open as u32,
+                protocol,
+                local,
+                server,
+            })
+        }
         _ => None,
     }
+}
+
+/// `call` until the stack takes it: another thread inside the stack answers
+/// `SIPRAL_STATUS_BUSY`, and one whose clock ran ahead `SIPRAL_STATUS_CLOCK_BEHIND`, for half a
+/// second at most. What a connection carried is handed in so, never dropped, since a stream
+/// with a hole in it cannot be read again.
+fn patiently(mut call: impl FnMut() -> SipralStatus) -> SipralStatus {
+    let since = Instant::now();
+    loop {
+        let status = call();
+        if !matches!(status, SipralStatus::Busy | SipralStatus::ClockBehind)
+            || since.elapsed() >= PATIENCE
+        {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// One of the calls that take a media socket's name and the time.
+type Said = unsafe extern "C" fn(SipralHandle, *const c_char, usize, u64) -> SipralStatus;
+
+/// Tell the stack something about the media socket at `local`.
+fn tell(stack: SipralHandle, said: Said, local: SocketAddr, clock: &Clock) -> SipralStatus {
+    let named = local.to_string();
+    patiently(|| unsafe { said(stack, named.as_ptr().cast(), named.len(), clock.now()) })
+}
+
+/// The next number a connection of the component's is opened under.
+fn next_transport(driver: &mut Driver) -> u32 {
+    let id = driver.next;
+    driver.next = driver.next.checked_add(1).unwrap_or(FIRST_STREAM);
+    id
 }
 
 /// `sipral_transport_t`'s number for a protocol.
@@ -533,14 +720,18 @@ pub(super) unsafe fn start(
             driver: Mutex::new(Driver {
                 network,
                 server_name: settings.server_name,
+                turn_name: settings.turn_name,
+                turn_trust: settings.turn_trust,
                 local: bound,
                 next: FIRST_STREAM,
                 streams: HashMap::new(),
+                relays: HashMap::new(),
                 media: HashMap::new(),
                 out: vec![0; SIPRAL_MESSAGE_BYTES],
             }),
             running: AtomicBool::new(false),
             senders: Mutex::new(HashMap::new()),
+            relay_senders: Mutex::new(HashMap::new()),
         }),
     ));
     Ok(())
@@ -622,8 +813,11 @@ fn turn(shared: &Shared, clock: &Clock) -> Result<Duration, Fail> {
         "sipral_stack_poll",
     )?;
     let mut driver = locked(&shared.driver);
-    farewells(stack, &mut driver);
-    media(&mut driver, clock);
+    farewells(shared, &mut driver, clock);
+    let released = name(shared, &mut driver, clock);
+    stun(shared, &mut driver, clock);
+    close_released(shared, &mut driver, &released);
+    media(shared, &mut driver, clock);
     act(shared, &mut driver);
     flush(stack, &mut driver, clock);
     Ok(if polled.has_deadline == 0 {
@@ -633,7 +827,105 @@ fn turn(shared: &Shared, clock: &Clock) -> Result<Duration, Fail> {
     })
 }
 
-/// What the observer noted: connections to open or let go, lookups to make, media to close.
+/// Name the media sockets opened since the last turn to the stack's STUN client, and release
+/// those the application closed while named; returns the released ones, to close once what
+/// their release queued has been sent.
+fn name(shared: &Shared, driver: &mut Driver, clock: &Clock) -> Vec<SocketAddr> {
+    let mut released = Vec::new();
+    let waiting: Vec<(SocketAddr, Naming)> = driver
+        .media
+        .iter()
+        .filter(|(_, media)| matches!(media.named, Naming::Asking | Naming::Releasing))
+        .map(|(local, media)| (*local, media.named))
+        .collect();
+    for (local, named) in waiting {
+        if named == Naming::Releasing {
+            // the relay's Refresh of lifetime zero waits in the STUN queue (RFC 8656 §8)
+            let _ = tell(shared.stack, sipral_stack_nat_unmap, local, clock);
+            released.push(local);
+            continue;
+        }
+        let status = tell(shared.stack, sipral_stack_nat_map, local, clock);
+        if let Some(media) = driver.media.get_mut(&local) {
+            // without SIPRAL_NAT_STUN the stack asks nothing about any socket
+            media.named = if status == SipralStatus::Ok {
+                Naming::Named
+            } else {
+                Naming::Never
+            };
+        }
+    }
+    released
+}
+
+/// Close the media sockets released this turn, now that their release has been sent.
+fn close_released(shared: &Shared, driver: &mut Driver, released: &[SocketAddr]) {
+    for local in released {
+        let Some(media) = driver.media.remove(local) else {
+            continue;
+        };
+        driver.network.close_media(*local);
+        if let Some(port) = media.reserved {
+            let _ = unsafe { sipral_stack_rtp_port_release(shared.stack, port) };
+        }
+    }
+}
+
+/// Send what the stack's STUN and TURN clients queued for the media sockets: their mappings,
+/// their relays' Allocates, permissions and refreshes, and a call's traffic before it has a
+/// media handle.
+fn stun(shared: &Shared, driver: &mut Driver, clock: &Clock) {
+    let mut destination = [0 as c_char; SIPRAL_ADDRESS_BYTES];
+    let mut source = [0 as c_char; SIPRAL_ADDRESS_BYTES];
+    loop {
+        let mut transmit = transmit_into(&mut driver.out, &mut destination, &mut source);
+        let status = unsafe { sipral_stack_poll_stun(shared.stack, &raw mut transmit) };
+        if status != SipralStatus::Ok || transmit.len == 0 {
+            return;
+        }
+        let (Some(to), Some(from)) = (
+            written_address(&destination, transmit.destination_len),
+            written_address(&source, transmit.source_len),
+        ) else {
+            continue;
+        };
+        send_from(
+            shared,
+            driver,
+            Leaving {
+                local: from,
+                to,
+                protocol: transmit.protocol,
+                len: transmit.len,
+            },
+            clock,
+        );
+    }
+}
+
+/// The transmit record over the driver's buffers.
+fn transmit_into(
+    out: &mut [u8],
+    destination: &mut [c_char],
+    source: &mut [c_char],
+) -> SipralTransmit {
+    SipralTransmit {
+        size: size_of::<SipralTransmit>(),
+        transport: 0,
+        protocol: 0,
+        data: out.as_mut_ptr(),
+        capacity: out.len(),
+        len: 0,
+        destination: destination.as_mut_ptr(),
+        destination_capacity: destination.len(),
+        destination_len: 0,
+        source: source.as_mut_ptr(),
+        source_capacity: source.len(),
+        source_len: 0,
+    }
+}
+
+/// What the connections asked for meanwhile, opened, or closed after what was queued for them.
 fn act(shared: &Shared, driver: &mut Driver) {
     let noted = std::mem::take(&mut *locked(&shared.notes));
     for note in noted {
@@ -662,8 +954,7 @@ fn act(shared: &Shared, driver: &mut Driver) {
                     }
                     None => {}
                 }
-                let id = driver.next;
-                driver.next = driver.next.checked_add(1).unwrap_or(FIRST_STREAM);
+                let id = next_transport(driver);
                 let target = target_for(shared.stack, destination, driver.server_name.as_ref());
                 driver
                     .network
@@ -697,7 +988,62 @@ fn act(shared: &Shared, driver: &mut Driver) {
                     locked(&shared.senders).retain(|_, (at, _)| *at != local);
                 }
             }
+            Seen::Turn {
+                open: true,
+                protocol,
+                local,
+                server,
+            } => {
+                // asked for again: the old one's allocation went with it (RFC 8656 §3.2)
+                let old: Vec<u32> = relays_of(driver, local);
+                for id in old {
+                    forget_relay(shared, driver, id);
+                }
+                let id = next_transport(driver);
+                driver.network.connect_host(
+                    TransportId(id),
+                    protocol,
+                    server,
+                    driver.turn_name.clone(),
+                    &driver.turn_trust,
+                );
+                driver.relays.insert(id, Relay { local, open: false });
+            }
+            Seen::Turn {
+                open: false, local, ..
+            } => {
+                // what was queued for it has been written: stun and farewells ran first
+                for id in relays_of(driver, local) {
+                    forget_relay(shared, driver, id);
+                }
+            }
         }
+    }
+}
+
+/// The TURN connections of the media socket at `local`.
+fn relays_of(driver: &Driver, local: SocketAddr) -> Vec<u32> {
+    driver
+        .relays
+        .iter()
+        .filter(|(_, relay)| relay.local == local)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Close a TURN connection without a word to the stack, which asked for it closed or already
+/// knows it broke.
+fn forget_relay(shared: &Shared, driver: &mut Driver, id: u32) -> Option<Relay> {
+    let relay = driver.relays.remove(&id)?;
+    driver.network.close(TransportId(id));
+    locked(&shared.relay_senders).remove(&relay.local);
+    Some(relay)
+}
+
+/// A TURN connection lost: closed, and the stack told, which loses the socket's relay.
+fn lose_relay(shared: &Shared, driver: &mut Driver, id: u32, clock: &Clock) {
+    if let Some(relay) = forget_relay(shared, driver, id) {
+        let _ = tell(shared.stack, sipral_stack_turn_closed, relay.local, clock);
     }
 }
 
@@ -706,20 +1052,7 @@ fn flush(stack: SipralHandle, driver: &mut Driver, clock: &Clock) {
     let mut destination = [0 as c_char; SIPRAL_ADDRESS_BYTES];
     let mut source = [0 as c_char; SIPRAL_ADDRESS_BYTES];
     loop {
-        let mut transmit = SipralTransmit {
-            size: size_of::<SipralTransmit>(),
-            transport: 0,
-            protocol: 0,
-            data: driver.out.as_mut_ptr(),
-            capacity: driver.out.len(),
-            len: 0,
-            destination: destination.as_mut_ptr(),
-            destination_capacity: destination.len(),
-            destination_len: 0,
-            source: source.as_mut_ptr(),
-            source_capacity: source.len(),
-            source_len: 0,
-        };
+        let mut transmit = transmit_into(&mut driver.out, &mut destination, &mut source);
         let status = unsafe { sipral_stack_poll_transmit(stack, &raw mut transmit) };
         if status != SipralStatus::Ok || transmit.len == 0 {
             return;
@@ -763,34 +1096,78 @@ fn packet(out: &mut [u8], destination: &mut [c_char]) -> SipralMediaPacket {
     }
 }
 
-/// Whether a packet leaves as a datagram from the call's socket, rather than on a TURN
-/// connection over TCP or TLS, which the component does not carry yet.
-const fn relayed_by_udp(packet: &SipralMediaPacket) -> bool {
-    packet.protocol == SipralTransport::Udp as u32 || packet.protocol == 0
+/// Whether bytes the stack marked with `protocol` leave as a datagram from the media socket,
+/// rather than on its TURN connection over TCP or TLS.
+const fn as_datagram(protocol: u32) -> bool {
+    protocol == SipralTransport::Udp as u32 || protocol == 0
 }
 
-/// Send what `packet` holds from the media socket at `local`; a relayed packet for a TURN
-/// connection is not the component's to carry.
+/// Bytes in the driver's buffer, and where they go.
+#[derive(Clone, Copy)]
+struct Leaving {
+    /// The media socket they leave from, or whose TURN connection carries them.
+    local: SocketAddr,
+    to: SocketAddr,
+    protocol: u32,
+    len: usize,
+}
+
+/// Send the first `leaving.len` bytes of the driver's buffer: from the media socket as a
+/// datagram, or whole on its TURN connection when the stack marked them for it, already framed
+/// (RFC 8656 §12.5). A connection that will not take them is lost, and the stack told.
+fn send_from(shared: &Shared, driver: &mut Driver, leaving: Leaving, clock: &Clock) {
+    let Some(payload) = driver.out.get(..leaving.len) else {
+        return;
+    };
+    if as_datagram(leaving.protocol) {
+        // a refused datagram is one destination's; the media watchdog notices silence
+        let _ = driver
+            .network
+            .send_media(leaving.local, leaving.to, payload);
+        return;
+    }
+    let open = driver
+        .relays
+        .iter()
+        .find(|(_, relay)| relay.local == leaving.local && relay.open)
+        .map(|(id, _)| *id);
+    // bytes for a connection that is not open have nothing to go on; the stack's own timers
+    // notice what they were for
+    let Some(id) = open else {
+        return;
+    };
+    if driver
+        .network
+        .send(TransportId(id), leaving.to, payload)
+        .is_err()
+    {
+        lose_relay(shared, driver, id, clock);
+    }
+}
+
+/// Send what `packet` holds for the media socket at `local`.
 fn send_packet(
-    driver: &Driver,
+    shared: &Shared,
+    driver: &mut Driver,
     local: SocketAddr,
     packet: &SipralMediaPacket,
     destination: &[c_char],
+    clock: &Clock,
 ) {
-    if !relayed_by_udp(packet) {
-        return;
-    }
     let Some(to) = written_address(destination, packet.destination_len) else {
         return;
     };
-    if let Some(payload) = driver.out.get(..packet.len) {
-        // a refused datagram is one destination's; the media watchdog notices silence
-        let _ = driver.network.send_media(local, to, payload);
-    }
+    let leaving = Leaving {
+        local,
+        to,
+        protocol: packet.protocol,
+        len: packet.len,
+    };
+    send_from(shared, driver, leaving, clock);
 }
 
 /// Every attached call's handshake, connectivity checks and RTCP.
-fn media(driver: &mut Driver, clock: &Clock) {
+fn media(shared: &Shared, driver: &mut Driver, clock: &Clock) {
     let attached: Vec<(SocketAddr, SipralHandle)> = driver
         .media
         .iter()
@@ -807,20 +1184,21 @@ fn media(driver: &mut Driver, clock: &Clock) {
                 if status != SipralStatus::Ok || polled.len == 0 {
                     break;
                 }
-                send_packet(driver, local, &polled, &destination);
+                send_packet(shared, driver, local, &polled, &destination, clock);
             }
         }
     }
 }
 
-/// The RTCP goodbyes of calls that ended, from their own sockets.
-fn farewells(stack: SipralHandle, driver: &mut Driver) {
+/// The RTCP goodbyes of calls that ended, and their relays given back, from their own sockets.
+fn farewells(shared: &Shared, driver: &mut Driver, clock: &Clock) {
     let mut destination = [0 as c_char; SIPRAL_ADDRESS_BYTES];
     loop {
         let mut call = SIPRAL_HANDLE_NONE;
         let mut out = std::mem::take(&mut driver.out);
         let mut polled = packet(&mut out, &mut destination);
-        let status = unsafe { sipral_stack_poll_farewell(stack, &raw mut call, &raw mut polled) };
+        let status =
+            unsafe { sipral_stack_poll_farewell(shared.stack, &raw mut call, &raw mut polled) };
         driver.out = out;
         if status != SipralStatus::Ok || polled.len == 0 {
             return;
@@ -831,7 +1209,7 @@ fn farewells(stack: SipralHandle, driver: &mut Driver) {
             .find(|(_, media)| media.attached.is_some_and(|(of, _)| of == call))
             .map(|(local, _)| *local);
         if let Some(local) = from {
-            send_packet(driver, local, &polled, &destination);
+            send_packet(shared, driver, local, &polled, &destination, clock);
         }
     }
 }
@@ -840,6 +1218,9 @@ fn farewells(stack: SipralHandle, driver: &mut Driver) {
 fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
     let stack = shared.stack;
     for happening in arrived {
+        let Some(happening) = relayed(shared, happening, clock) else {
+            continue;
+        };
         match happening {
             Happening::Datagram {
                 transport,
@@ -864,7 +1245,8 @@ fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
                 };
             }
             Happening::StreamData { transport, data } => {
-                let _ = unsafe {
+                // a stream the stack could not read any more it has let go of itself
+                let _ = patiently(|| unsafe {
                     sipral_stack_receive_stream(
                         stack,
                         transport.0,
@@ -872,7 +1254,7 @@ fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
                         data.len(),
                         clock.now(),
                     )
-                };
+                });
             }
             Happening::Connected {
                 transport,
@@ -906,31 +1288,125 @@ fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
                 local,
                 remote,
                 mut data,
-            } => {
-                let attached = locked(&shared.driver)
-                    .media
-                    .get(&local)
-                    .and_then(|media| media.attached);
-                // before its handle exists, a call's socket hears nothing worth keeping
-                if let Some((_, handle)) = attached {
-                    let from = remote.to_string();
-                    let mut arrival: u32 = 0;
-                    // what was dropped, and why, the stack counts itself
-                    let _ = unsafe {
-                        sipral_media_receive(
-                            handle,
-                            data.as_mut_ptr(),
-                            data.len(),
-                            from.as_ptr().cast(),
-                            from.len(),
-                            clock.now(),
-                            &raw mut arrival,
-                        )
-                    };
-                }
-            }
+            } => media_arrived(shared, local, remote, &mut data, clock),
             _ => {}
         }
+    }
+}
+
+/// A packet on a media socket: the call's once its handle is attached; before, the STUN
+/// server's and the TURN server's answers and the far end's early checks, which the stack keeps
+/// for the call. What the stack refuses is dropped, and counted there.
+fn media_arrived(
+    shared: &Shared,
+    local: SocketAddr,
+    remote: SocketAddr,
+    data: &mut [u8],
+    clock: &Clock,
+) {
+    let known = locked(&shared.driver)
+        .media
+        .get(&local)
+        .map(|media| media.attached);
+    let from = remote.to_string();
+    match known {
+        Some(Some((_, handle))) => {
+            let mut arrival: u32 = 0;
+            let _ = unsafe {
+                sipral_media_receive(
+                    handle,
+                    data.as_mut_ptr(),
+                    data.len(),
+                    from.as_ptr().cast(),
+                    from.len(),
+                    clock.now(),
+                    &raw mut arrival,
+                )
+            };
+        }
+        Some(None) => {
+            let to = local.to_string();
+            let _ = unsafe {
+                sipral_stack_receive_stun(
+                    shared.stack,
+                    data.as_ptr(),
+                    data.len(),
+                    from.as_ptr().cast(),
+                    from.len(),
+                    to.as_ptr().cast(),
+                    to.len(),
+                    clock.now(),
+                )
+            };
+        }
+        None => {}
+    }
+}
+
+/// A happening on a media socket's TURN connection, handed to the stack as an application
+/// would hand it; any other is given back.
+fn relayed(shared: &Shared, happening: Happening, clock: &Clock) -> Option<Happening> {
+    let transport = match happening {
+        Happening::Connected { transport, .. }
+        | Happening::ConnectFailed { transport, .. }
+        | Happening::StreamData { transport, .. }
+        | Happening::StreamClosed { transport }
+        | Happening::StreamFailed { transport, .. } => transport.0,
+        _ => return Some(happening),
+    };
+    let mut driver = locked(&shared.driver);
+    let Some(relay) = driver.relays.get(&transport).copied() else {
+        return Some(happening);
+    };
+    match happening {
+        Happening::Connected { early, .. } => {
+            if let Some(sender) = driver.network.stream_sender(TransportId(transport)) {
+                locked(&shared.relay_senders).insert(relay.local, sender);
+            }
+            if let Some(open) = driver.relays.get_mut(&transport) {
+                open.open = true;
+            }
+            drop(driver);
+            let told = tell(
+                shared.stack,
+                sipral_stack_turn_connected,
+                relay.local,
+                clock,
+            );
+            if told != SipralStatus::Ok {
+                // the stack no longer wants it: the socket was released meanwhile
+                forget_relay(shared, &mut locked(&shared.driver), transport);
+            } else if !early.is_empty() {
+                turn_bytes(shared, transport, relay.local, &early, clock);
+            }
+        }
+        Happening::StreamData { data, .. } => {
+            drop(driver);
+            turn_bytes(shared, transport, relay.local, &data, clock);
+        }
+        // refused, closed or broken: the relay goes with it (RFC 8656 §3.2)
+        _ => lose_relay(shared, &mut driver, transport, clock),
+    }
+    None
+}
+
+/// Bytes off a TURN connection, for the stack to put back together.
+fn turn_bytes(shared: &Shared, transport: u32, local: SocketAddr, data: &[u8], clock: &Clock) {
+    let named = local.to_string();
+    let status = patiently(|| unsafe {
+        sipral_stack_turn_receive(
+            shared.stack,
+            named.as_ptr().cast(),
+            named.len(),
+            data.as_ptr(),
+            data.len(),
+            clock.now(),
+        )
+    });
+    if status == SipralStatus::StreamBroken {
+        // nothing in the stream says where the next message starts: the stack has let the relay
+        // go, and the connection follows
+        forget_relay(shared, &mut locked(&shared.driver), transport);
     }
 }
 
@@ -951,7 +1427,7 @@ fn connected(
                 stream.bound = true;
             }
             if !early.is_empty() {
-                let _ = unsafe {
+                let _ = patiently(|| unsafe {
                     sipral_stack_receive_stream(
                         stack,
                         transport,
@@ -959,7 +1435,7 @@ fn connected(
                         early.len(),
                         clock.now(),
                     )
-                };
+                });
             }
         }
         Err(refused) => {
@@ -1083,6 +1559,8 @@ pub(super) unsafe fn media_open(
         Media {
             attached: None,
             reserved,
+            // named at the next turn, with that turn's clock
+            named: Naming::Asking,
         },
     );
     drop(driver);
@@ -1103,6 +1581,10 @@ pub(super) fn media_attach(
     socket.attached = Some((call, media));
     // a port a call took comes back with it
     socket.reserved = None;
+    // a call described before its socket was named has no mapping to wait for
+    if socket.named == Naming::Asking {
+        socket.named = Naming::Never;
+    }
     let sender = driver
         .network
         .media_sender(local)
@@ -1127,11 +1609,8 @@ pub(super) unsafe fn media_capture(
     sample_count: usize,
 ) -> Result<(), Fail> {
     let shared = find(stack)?;
-    // the senders' lock alone, never the loop's: an audio thread must not wait out a turn
-    let Some(sender) = locked(&shared.senders)
-        .get(&media)
-        .map(|(_, sender)| sender.clone())
-    else {
+    // the senders' locks alone, never the loop's: an audio thread must not wait out a turn
+    let Some((local, sender)) = locked(&shared.senders).get(&media).cloned() else {
         return Err(fail(
             SipralStatus::InvalidArgument,
             "no media socket of the networking component is attached to this media handle",
@@ -1143,13 +1622,22 @@ pub(super) unsafe fn media_capture(
     let status =
         unsafe { sipral_media_capture(media, now_ms, samples, sample_count, &raw mut captured) };
     answered(status, "sipral_media_capture")?;
-    if captured.len > 0
-        && relayed_by_udp(&captured)
-        && let Some(to) = written_address(&destination, captured.destination_len)
-        && let Some(payload) = out.get(..captured.len)
-    {
+    let (Some(to), Some(payload)) = (
+        written_address(&destination, captured.destination_len),
+        out.get(..captured.len),
+    ) else {
+        return Ok(());
+    };
+    if payload.is_empty() {
+        return Ok(());
+    }
+    if as_datagram(captured.protocol) {
         // a refused datagram is one destination's; the media watchdog notices silence
         let _ = sender.send(to, payload);
+    } else if let Some(relay) = locked(&shared.relay_senders).get(&local).cloned() {
+        // a connection that will not take it is heard ending by its reader, which tells the
+        // stack
+        let _ = relay.send(payload);
     }
     Ok(())
 }
@@ -1157,6 +1645,14 @@ pub(super) unsafe fn media_capture(
 pub(super) fn media_close(stack: SipralHandle, local: SocketAddr) -> Result<(), Fail> {
     let shared = find(stack)?;
     let mut driver = locked(&shared.driver);
+    let Some(socket) = driver.media.get_mut(&local) else {
+        return Err(no_socket(local));
+    };
+    if socket.attached.is_none() && matches!(socket.named, Naming::Named | Naming::Releasing) {
+        // released at the next turn, its relay given back from it, and closed then
+        socket.named = Naming::Releasing;
+        return Ok(());
+    }
     let Some(socket) = driver.media.remove(&local) else {
         return Err(no_socket(local));
     };

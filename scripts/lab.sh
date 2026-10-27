@@ -120,12 +120,14 @@
 #                               Kamailio to two phones behind the second NAT,
 #                               every end relayed, both branches carrying
 #                               media until one answers; then through the C
-#                               ABI and through each idiomatic binding --
-#                               Python, Kotlin, .NET, Swift -- and again from
+#                               ABI, through each idiomatic binding --
+#                               Python, Kotlin, .NET, Swift -- and through
+#                               the networking component, and again from
 #                               behind a NAT that drops every datagram to
 #                               coturn, the relay reached over TCP from the
 #                               C ABI, over TLS from Python, over TCP and TLS
-#                               from Kotlin and .NET, and over TCP from Swift
+#                               from Kotlin, .NET and the networking
+#                               component, and over TCP from Swift
 #   scripts/lab.sh tls          only SIP over a connection through the four
 #                               idiomatic layers: the Python, Kotlin and
 #                               .NET agents over TLS to Asterisk, each first
@@ -2780,7 +2782,26 @@ nat_pair_down() {
 # registrar, the same shape `docs/08-ffi.md`'s "An account with no
 # registrar never registers" gives a trunk -- proving each idiomatic layer
 # takes TURN and ICE the way an application actually would, not only the
-# harnesses written for this lab.
+# harnesses written for this lab. NAT_PAIR_CALLER=network places it from
+# interop/network/relayed-call.c, a C program with no networking code, through
+# the networking component.
+#
+# That program, built once per run by network_caller against a libsipral built
+# with sipral-ffi's `network` feature into target/network, so that the library
+# every other step links is left as it was; its -rpath is /lib-sipral, where
+# nat_pair_call mounts that library. NETWORK_CALLER names it once built.
+NETWORK_CALLER=""
+network_caller() {
+    [ -z "$NETWORK_CALLER" ] || return 0
+    CARGO_TARGET_DIR="$ROOT/target/network" \
+        cargo build --release -p sipral-ffi --features network >/dev/null 2>&1 || return 1
+    cc -std=c11 -Wall -Wextra -Werror -I "$ROOT/bindings/c/include" \
+        -o "$ROOT/target/network/relayed-call" "$ROOT/interop/network/relayed-call.c" \
+        -L "$ROOT/target/network/release" -lsipral_ffi -lm -Wl,-rpath,/lib-sipral >/dev/null 2>&1 \
+        || return 1
+    NETWORK_CALLER="$ROOT/target/network/relayed-call"
+}
+
 nat_pair_call() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
     local callee callee_status status=0 tries=0 beside
@@ -2795,7 +2816,7 @@ nat_pair_call() {
             -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD"
             -e "SIPRAL_TURN_TRANSPORT=${NAT_PAIR_TURN_TRANSPORT:-udp}"
             -e "SIPRAL_TURN_NAME=$TURN_TLS_NAME"
-            -e SIPRAL_TURN_CA=/turn-certs/turn.pem
+            -e SIPRAL_TURN_CA=/turn-certs/ca.pem
             -v "$SIPRAL_TURN_CERTS:/turn-certs:ro")
     fi
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
@@ -3017,6 +3038,31 @@ nat_pair_call() {
                 sipral-lab-nat-swift sh -c "
                     ip route replace default via $NAT_PAIR_GATEWAY || exit 1
                     exec /work/bindings/.build/release/SipralLabAgent"
+            status=$?
+        fi
+    elif [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = network ]; then
+        # interop/network/relayed-call.c, which has no networking code: the
+        # networking component maps its media socket, carries its STUN and
+        # TURN and opens its TURN connection. NETWORK_CALLER is built with the
+        # library beside it (network_caller), the same `inside` image as the
+        # C harness's, the library mounted where its -rpath points
+        if ! network_caller; then
+            printf '  could not build the program on the networking component\n'
+            status=1
+        else
+            lab_run "the networking component's call across the NAT pair" $((LAB_START_S + LAB_CALL_S)) \
+                --network "${project}_inside" \
+                --cap-add NET_ADMIN \
+                -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_PEER_HOST=$NAT_PAIR_OUTSIDE2" -e SIPRAL_PEER_PORT=5060 \
+                -e "SIPRAL_PATIENCE_MS=$LAB_PATIENCE_MS" -e "SIPRAL_DWELL_MS=$LAB_DWELL_MS" \
+                ${1+"$@"} \
+                ${caller_only[@]+"${caller_only[@]}"} \
+                -v "$NETWORK_CALLER:/relayed-call:ro" \
+                -v "$ROOT/target/network/release:/lib-sipral:ro" \
+                sipral-lab-nat sh -c "
+                    ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                    exec /relayed-call"
             status=$?
         fi
     elif [ "$status" -eq 0 ]; then
@@ -3291,7 +3337,7 @@ ice_turn_flow() {
         # channel, the tone both ways and the Refresh that gives it back
         [ "$status" -ne 0 ] || turn_over_stream c tcp C || status=1
     fi
-    for caller in python kotlin dotnet swift; do
+    for caller in python kotlin dotnet swift network; do
         [ "$status" -eq 0 ] || break
         turn_binding "$caller" || status=1
     done
@@ -3490,6 +3536,11 @@ turn_binding() {
         streams=(tcp)
         [ -n "$SWIFT_AGENT" ] || missing="no Swift lab agent built, so there is no relayed call through the Swift bindings"
         ;;
+    network)
+        said="networking component"
+        streams=(tcp tls)
+        network_caller || missing="the program on the networking component could not be built, so there is no relayed call through it"
+        ;;
     esac
     if [ -n "$missing" ]; then
         if [ "$WANT" = turn ]; then
@@ -3517,24 +3568,36 @@ turn_binding() {
 # have checked beforehand.
 TURN_TLS_NAME=turn.lab.sipral.test
 
-# A key and a self-signed certificate for coturn's TLS listener, made for
-# this run alone and thrown away after it, in the directory SIPRAL_TURN_CERTS
-# names (interop/turn/compose.override.yaml mounts it). serverAuth is in it
-# because Apple's TLS refuses a server certificate without it. Readable by
-# coturn's own unprivileged user: the key protects a lab that lasts minutes.
+# An authority made for this run alone and thrown away after it, and the
+# certificate for coturn's TLS listener it signs, in the directory
+# SIPRAL_TURN_CERTS names (interop/turn/compose.override.yaml mounts it):
+# ca.pem is what the clients trust, turn.pem and turn.key what coturn
+# presents. An authority and a leaf rather than one self-signed certificate,
+# because a server certificate that is an authority as well is refused by the
+# networking component's webpki, as RFC 5280 has a path read, where the
+# platforms' own TLS lets a self-signed anchor through. serverAuth is in the
+# leaf because Apple's TLS refuses a server certificate without it. Readable
+# by coturn's own unprivileged user: the key protects a lab that lasts minutes.
 turn_certificate() {
     SIPRAL_TURN_CERTS=$(mktemp -d)
     export SIPRAL_TURN_CERTS
+    local dir="$SIPRAL_TURN_CERTS"
     if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
-        -subj "/CN=$TURN_TLS_NAME" -addext "subjectAltName=DNS:$TURN_TLS_NAME" \
-        -addext extendedKeyUsage=serverAuth \
-        -keyout "$SIPRAL_TURN_CERTS/turn.key" -out "$SIPRAL_TURN_CERTS/turn.pem" >/dev/null 2>&1; then
-        printf '  could not make the certificate for coturn'"'"'s TLS listener (openssl)\n'
-        rm -rf "$SIPRAL_TURN_CERTS"
+            -subj "/CN=Sipral lab TURN authority" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -keyout "$dir/ca.key" -out "$dir/ca.pem" >/dev/null 2>&1 \
+        || ! openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -subj "/CN=$TURN_TLS_NAME" -keyout "$dir/turn.key" -out "$dir/turn.csr" >/dev/null 2>&1 \
+        || ! printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s\n' \
+            "$TURN_TLS_NAME" >"$dir/turn.ext" \
+        || ! openssl x509 -req -in "$dir/turn.csr" -CA "$dir/ca.pem" -CAkey "$dir/ca.key" \
+            -CAcreateserial -days 1 -extfile "$dir/turn.ext" -out "$dir/turn.pem" >/dev/null 2>&1; then
+        printf '  could not make the certificates for coturn'"'"'s TLS listener (openssl)\n'
+        rm -rf "$dir"
         return 1
     fi
-    chmod 755 "$SIPRAL_TURN_CERTS"
-    chmod 644 "$SIPRAL_TURN_CERTS/turn.key" "$SIPRAL_TURN_CERTS/turn.pem"
+    rm -f "$dir/ca.key" "$dir/ca.srl" "$dir/turn.csr" "$dir/turn.ext"
+    chmod 755 "$dir"
+    chmod 644 "$dir/turn.key" "$dir/turn.pem" "$dir/ca.pem"
 }
 
 # At the caller's NAT, every datagram to or from coturn dropped (-I) or let

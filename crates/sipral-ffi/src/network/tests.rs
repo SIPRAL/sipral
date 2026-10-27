@@ -58,6 +58,11 @@ struct Pki {
 }
 
 fn pki() -> Pki {
+    pki_for(DOMAIN)
+}
+
+/// The same for a server named `name`.
+fn pki_for(name: &str) -> Pki {
     let authority_key = KeyPair::generate().unwrap();
     let mut authority = CertificateParams::new(Vec::<String>::new()).unwrap();
     authority.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -67,7 +72,7 @@ fn pki() -> Pki {
     authority.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let pem = authority.self_signed(&authority_key).unwrap().pem();
     let key = KeyPair::generate().unwrap();
-    let leaf = CertificateParams::new(vec![DOMAIN.to_owned()])
+    let leaf = CertificateParams::new(vec![name.to_owned()])
         .unwrap()
         .signed_by(&key, &Issuer::from_params(&authority, &authority_key))
         .unwrap();
@@ -340,6 +345,15 @@ fn text(value: &str) -> (*const c_char, usize) {
     (value.as_ptr().cast(), value.len())
 }
 
+/// Zero everywhere: the platform's trust store and resolver, and no client certificate.
+fn network_config() -> SipralNetworkConfig {
+    SipralNetworkConfig {
+        size: size_of::<SipralNetworkConfig>(),
+        // Safety: integers and null pointers, as the header says to start from
+        ..unsafe { std::mem::zeroed() }
+    }
+}
+
 /// Milliseconds since `origin`, the test's monotonic clock.
 fn now(origin: Instant) -> u64 {
     u64::try_from(origin.elapsed().as_millis()).unwrap()
@@ -377,25 +391,12 @@ fn a_stack_registers_over_tls_at_a_domain_found_by_srv_and_holds_a_call_with_no_
     let (authority_pem, authority_pem_len) = text(&authority);
     let (name_servers, name_servers_len) = text(&servers);
     let network = SipralNetworkConfig {
-        size: size_of::<SipralNetworkConfig>(),
         trust: super::SipralNetworkTrust::OnlyAuthority as u32,
-        reserved: 0,
         authority_pem,
         authority_pem_len,
-        pin_sha256: ptr::null(),
-        pin_sha256_len: 0,
-        client_certificate_pem: ptr::null(),
-        client_certificate_pem_len: 0,
-        client_key_pem: ptr::null(),
-        client_key_pem_len: 0,
         name_servers,
         name_servers_len,
-        tls_server_name: ptr::null(),
-        tls_server_name_len: 0,
-        connect_timeout_ms: 0,
-        reserved_end: 0,
-        domain_rules: 0,
-        reserved_rules: 0,
+        ..network_config()
     };
 
     // RFC 3263 before any stack: the domain is found by SRV alone
@@ -616,25 +617,10 @@ fn a_server_whose_certificate_is_not_trusted_is_reported_with_the_reason() {
     // the platform's store has never heard of the test authority
     let (name_servers, name_servers_len) = text(&servers);
     let network = SipralNetworkConfig {
-        size: size_of::<SipralNetworkConfig>(),
         trust: super::SipralNetworkTrust::Platform as u32,
-        reserved: 0,
-        authority_pem: ptr::null(),
-        authority_pem_len: 0,
-        pin_sha256: ptr::null(),
-        pin_sha256_len: 0,
-        client_certificate_pem: ptr::null(),
-        client_certificate_pem_len: 0,
-        client_key_pem: ptr::null(),
-        client_key_pem_len: 0,
         name_servers,
         name_servers_len,
-        tls_server_name: ptr::null(),
-        tls_server_name_len: 0,
-        connect_timeout_ms: 0,
-        reserved_end: 0,
-        domain_rules: 0,
-        reserved_rules: 0,
+        ..network_config()
     };
     let mut observed = Observed::default();
     let mut stack_config = config(record, &mut observed);
@@ -688,25 +674,8 @@ fn a_configuration_that_cannot_be_read_says_which_member() {
     (stack_config.bind_address, stack_config.bind_address_len) = text("127.0.0.1:0");
     let (_, stack) = create(&stack_config);
     let broken = SipralNetworkConfig {
-        size: size_of::<SipralNetworkConfig>(),
         trust: super::SipralNetworkTrust::OnlyAuthority as u32,
-        reserved: 0,
-        authority_pem: ptr::null(),
-        authority_pem_len: 0,
-        pin_sha256: ptr::null(),
-        pin_sha256_len: 0,
-        client_certificate_pem: ptr::null(),
-        client_certificate_pem_len: 0,
-        client_key_pem: ptr::null(),
-        client_key_pem_len: 0,
-        name_servers: ptr::null(),
-        name_servers_len: 0,
-        tls_server_name: ptr::null(),
-        tls_server_name_len: 0,
-        connect_timeout_ms: 0,
-        reserved_end: 0,
-        domain_rules: 0,
-        reserved_rules: 0,
+        ..network_config()
     };
     assert_eq!(
         unsafe { sipral_network_start(stack, &raw const broken, 0) },
@@ -728,6 +697,37 @@ fn a_configuration_that_cannot_be_read_says_which_member() {
     );
     assert!(
         last_error_text().contains("domain_rules is 2"),
+        "{}",
+        last_error_text()
+    );
+    // the TURN server's trust is read as the SIP servers' is, member by member
+    let turn_without_authority = SipralNetworkConfig {
+        trust: super::SipralNetworkTrust::Platform as u32,
+        turn_trust: super::SipralNetworkTrust::PlatformAndAuthority as u32,
+        ..broken
+    };
+    assert_eq!(
+        unsafe { sipral_network_start(stack, &raw const turn_without_authority, 0) },
+        SipralStatus::InvalidArgument
+    );
+    assert!(
+        last_error_text().contains("turn_authority_pem is required"),
+        "{}",
+        last_error_text()
+    );
+    let (key, key_len) = text("-----BEGIN PRIVATE KEY-----");
+    let turn_key_alone = SipralNetworkConfig {
+        trust: super::SipralNetworkTrust::Platform as u32,
+        turn_client_key_pem: key,
+        turn_client_key_pem_len: key_len,
+        ..broken
+    };
+    assert_eq!(
+        unsafe { sipral_network_start(stack, &raw const turn_key_alone, 0) },
+        SipralStatus::InvalidArgument
+    );
+    assert!(
+        last_error_text().contains("turn_client_certificate_pem and turn_client_key_pem"),
         "{}",
         last_error_text()
     );
@@ -753,4 +753,434 @@ fn a_configuration_that_cannot_be_read_says_which_member() {
         last_error_text()
     );
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// A media socket's STUN and TURN, carried by the component: a STUN server and a TURN server on
+/// loopback, the socket named to the stack, its relay allocated on the TCP or TLS connection the
+/// component opened, and given back on it.
+#[cfg(all(feature = "stun", feature = "ice"))]
+mod relayed {
+    use std::cell::RefCell;
+    use std::ffi::{c_char, c_void};
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Instant;
+
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+    use super::super::{
+        SipralNetworkConfig, SipralNetworkTrust, sipral_network_media_close,
+        sipral_network_media_open, sipral_network_start,
+    };
+    use super::{Pki, network_config, now, pki_for, run_until, text, written};
+    use crate::error::last_error_text;
+    use crate::event::{SipralEvent, SipralEventKind};
+    use crate::handle::SipralHandle;
+    use crate::media::SIPRAL_ADDRESS_BYTES;
+    use crate::nat::{SipralNat, SipralNatRelay};
+    use crate::stack::tests::{Observed, config, create, record};
+    use crate::stack::{SipralStackConfig, SipralTransport, sipral_stack_destroy};
+    use crate::status::SipralStatus;
+
+    /// What the STUN server shows as every socket's public address.
+    const PUBLIC: &str = "203.0.113.7:41002";
+    /// Where the TURN server says every relay is.
+    const RELAYED: &str = "198.51.100.9:50000";
+    /// The name in the TURN server's certificate.
+    const TURN_NAME: &str = "turn.example.test";
+    const COOKIE: u32 = 0x2112_a442;
+    const ALLOCATE: u16 = 0x0003;
+    const REFRESH: u16 = 0x0004;
+
+    /// The media sockets the stack said were mapped, and every relay it reported: outcome,
+    /// socket, relayed address.
+    #[derive(Default)]
+    struct Said {
+        mapped: Vec<String>,
+        relays: Vec<(u32, String, String)>,
+    }
+
+    thread_local! {
+        static SAID: RefCell<Said> = RefCell::new(Said::default());
+    }
+
+    fn piece(pointer: *const c_char, len: usize) -> String {
+        if pointer.is_null() {
+            return String::new();
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    unsafe extern "C" fn listen(event: *const SipralEvent, user_data: *mut c_void) {
+        let seen = unsafe { &*event };
+        if seen.kind == SipralEventKind::NatMapping {
+            let payload = unsafe { seen.payload.nat };
+            let local = piece(payload.local, payload.local_len);
+            SAID.with(|said| said.borrow_mut().mapped.push(local));
+        }
+        if seen.kind == SipralEventKind::NatRelay {
+            let payload = unsafe { seen.payload.relay };
+            let relay = (
+                payload.outcome,
+                piece(payload.local, payload.local_len),
+                piece(payload.relayed, payload.relayed_len),
+            );
+            SAID.with(|said| said.borrow_mut().relays.push(relay));
+        }
+        unsafe { record(event, user_data) };
+    }
+
+    /// `address` as an XOR'd address attribute of type `kind` (RFC 8489 §14.2).
+    fn xored(kind: u16, address: SocketAddr) -> Vec<u8> {
+        let IpAddr::V4(ip) = address.ip() else {
+            panic!("these tests are IPv4");
+        };
+        let mut out = kind.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0x00, 0x08, 0x00, 0x01]);
+        let port = address.port() ^ u16::try_from(COOKIE >> 16).unwrap();
+        out.extend_from_slice(&port.to_be_bytes());
+        out.extend_from_slice(&(u32::from(ip) ^ COOKIE).to_be_bytes());
+        out
+    }
+
+    /// The method of a STUN request, or `None` for an indication, a response or ChannelData.
+    fn requested(message: &[u8]) -> Option<u16> {
+        let kind = u16::from_be_bytes([*message.first()?, *message.get(1)?]);
+        (message.len() >= 20 && kind & 0xc000 == 0 && kind & 0x0110 == 0).then_some(kind & 0x3eef)
+    }
+
+    /// A success response to `request` carrying `body` (RFC 8489 §5).
+    fn success(request: &[u8], method: u16, body: &[u8]) -> Vec<u8> {
+        let mut out = (method | 0x0100).to_be_bytes().to_vec();
+        out.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
+        out.extend_from_slice(&request[4..20]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A STUN server on loopback answering every Binding request with [`PUBLIC`].
+    fn stun_server() -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 2048];
+            while let Ok((read, from)) = socket.recv_from(&mut buffer) {
+                let request = &buffer[..read];
+                if requested(request) == Some(0x0001) {
+                    let mapped = xored(0x0020, PUBLIC.parse().unwrap());
+                    let _ = socket.send_to(&success(request, 0x0001, &mapped), from);
+                }
+            }
+        });
+        address
+    }
+
+    /// What the TURN server heard: every request's method and LIFETIME, and how many of its
+    /// connections the client closed.
+    #[derive(Default)]
+    struct Heard {
+        requests: Vec<(u16, Option<u32>)>,
+        closed: usize,
+    }
+
+    /// The LIFETIME a STUN message carries (RFC 8656 §18.2).
+    fn lifetime(message: &[u8]) -> Option<u32> {
+        let mut at = 20;
+        while at + 4 <= message.len() {
+            let kind = u16::from_be_bytes([message[at], message[at + 1]]);
+            let len = usize::from(u16::from_be_bytes([message[at + 2], message[at + 3]]));
+            if kind == 0x000d && len == 4 {
+                return Some(u32::from_be_bytes(
+                    message.get(at + 4..at + 8)?.try_into().ok()?,
+                ));
+            }
+            at += 4 + len.div_ceil(4) * 4;
+        }
+        None
+    }
+
+    /// How long the first whole message in `buffer` is: STUN, or ChannelData padded to four
+    /// octets as a stream carries it (RFC 8656 §12.5).
+    fn whole(buffer: &[u8]) -> Option<usize> {
+        let len = usize::from(u16::from_be_bytes([*buffer.get(2)?, *buffer.get(3)?]));
+        let total = if buffer[0] & 0xc0 == 0x40 {
+            4 + len.div_ceil(4) * 4
+        } else {
+            20 + len
+        };
+        (buffer.len() >= total).then_some(total)
+    }
+
+    trait Stream: Read + Write + Send {}
+    impl<T: Read + Write + Send> Stream for T {}
+
+    /// Answer every request on one connection with success: the relay at [`RELAYED`] and ten
+    /// minutes for an Allocate, the lifetime asked for a Refresh.
+    fn serve(stream: &mut dyn Stream, client: SocketAddr, heard: &Mutex<Heard>) {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => {
+                    heard.lock().unwrap().closed += 1;
+                    return;
+                }
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            }
+            while let Some(total) = whole(&buffer) {
+                let message: Vec<u8> = buffer.drain(..total).collect();
+                let Some(method) = requested(&message) else {
+                    continue;
+                };
+                let asked = lifetime(&message);
+                heard.lock().unwrap().requests.push((method, asked));
+                let mut body = Vec::new();
+                if method == ALLOCATE {
+                    body.extend(xored(0x0016, RELAYED.parse().unwrap()));
+                    body.extend(xored(0x0020, client));
+                }
+                if method == ALLOCATE || method == REFRESH {
+                    body.extend_from_slice(&[0x00, 0x0d, 0x00, 0x04]);
+                    body.extend_from_slice(&asked.unwrap_or(600).to_be_bytes());
+                }
+                let answer = success(&message, method, &body);
+                if stream
+                    .write_all(&answer)
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    heard.lock().unwrap().closed += 1;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// A TURN server on loopback over TCP, or over TLS with `tls`'s certificate.
+    fn turn_server(tls: Option<Pki>) -> (SocketAddr, Arc<Mutex<Heard>>) {
+        let config = tls.map(|pki| {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            Arc::new(
+                ServerConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        pki.chain,
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pki.key.serialize_der())),
+                    )
+                    .unwrap(),
+            )
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let noted = Arc::clone(&heard);
+        thread::spawn(move || {
+            for tcp in listener.incoming() {
+                let Ok(tcp) = tcp else { continue };
+                let client = tcp.peer_addr().unwrap();
+                let noted = Arc::clone(&noted);
+                let config = config.clone();
+                thread::spawn(move || {
+                    let mut stream: Box<dyn Stream> = match config {
+                        Some(config) => Box::new(StreamOwned::new(
+                            ServerConnection::new(config).unwrap(),
+                            tcp,
+                        )),
+                        None => Box::new(tcp),
+                    };
+                    serve(&mut *stream, client, &noted);
+                });
+            }
+        });
+        (address, heard)
+    }
+
+    /// A stack whose media sockets are mapped by `stun` and relayed by `turn` over `protocol`.
+    fn relaying(
+        observed: &mut Observed,
+        stun: &str,
+        turn: &str,
+        protocol: SipralTransport,
+    ) -> SipralStackConfig {
+        let mut settings = config(listen, observed);
+        (settings.bind_address, settings.bind_address_len) = text("127.0.0.1:0");
+        settings.nat = SipralNat::Stun as u32;
+        (settings.stun_server, settings.stun_server_len) = text(stun);
+        (settings.turn_server, settings.turn_server_len) = text(turn);
+        (settings.turn_username, settings.turn_username_len) = text("alice");
+        (settings.turn_password, settings.turn_password_len) = text("correct horse");
+        settings.turn_transport = protocol as u32;
+        settings
+    }
+
+    /// One stack and its one media socket, run until the stack said what the socket's mapping
+    /// and its relay came to.
+    struct Relaying {
+        stack: SipralHandle,
+        origin: Instant,
+        local: String,
+        // the callback's, for as long as the stack lives
+        _observed: Box<Observed>,
+    }
+
+    impl Relaying {
+        fn opened(
+            network: &SipralNetworkConfig,
+            turn: SocketAddr,
+            protocol: SipralTransport,
+        ) -> Self {
+            SAID.with(|said| *said.borrow_mut() = Said::default());
+            let stun = stun_server().to_string();
+            let turn = turn.to_string();
+            let origin = Instant::now();
+            let mut observed = Box::new(Observed::default());
+            let (status, stack) = create(&relaying(&mut observed, &stun, &turn, protocol));
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            assert_eq!(
+                unsafe { sipral_network_start(stack, network, now(origin)) },
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+            let mut media_address = [0 as c_char; SIPRAL_ADDRESS_BYTES];
+            let mut needed = 0_usize;
+            let status = unsafe {
+                sipral_network_media_open(
+                    stack,
+                    media_address.as_mut_ptr(),
+                    media_address.len(),
+                    &raw mut needed,
+                )
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            let local = written(&media_address, needed);
+            run_until(
+                stack,
+                origin,
+                "the socket mapped and its relay answered",
+                || {
+                    SAID.with(|said| {
+                        let said = said.borrow();
+                        said.mapped.contains(&local)
+                            && said.relays.iter().any(|(_, socket, _)| *socket == local)
+                    })
+                },
+            );
+            Self {
+                stack,
+                origin,
+                local,
+                _observed: observed,
+            }
+        }
+
+        /// What the stack said of the socket's relay: its outcome and where it is.
+        fn relay(&self) -> (u32, String) {
+            SAID.with(|said| {
+                said.borrow()
+                    .relays
+                    .iter()
+                    .find(|(_, socket, _)| *socket == self.local)
+                    .map(|(outcome, _, relayed)| (*outcome, relayed.clone()))
+                    .unwrap()
+            })
+        }
+
+        /// Close the socket with no call on it, and run until its relay was given back with a
+        /// Refresh of lifetime zero (RFC 8656 §8) on its connection, and that connection closed.
+        fn given_back(self, heard: &Mutex<Heard>) {
+            let status = unsafe {
+                sipral_network_media_close(self.stack, self.local.as_ptr().cast(), self.local.len())
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            run_until(
+                self.stack,
+                self.origin,
+                "the relay given back on its connection",
+                || {
+                    let heard = heard.lock().unwrap();
+                    heard.requests.contains(&(REFRESH, Some(0))) && heard.closed >= 1
+                },
+            );
+            assert_eq!(
+                unsafe { sipral_stack_destroy(self.stack) },
+                SipralStatus::Ok
+            );
+        }
+    }
+
+    #[test]
+    fn a_media_socket_is_mapped_relayed_over_tcp_and_its_relay_given_back_on_the_connection() {
+        let (turn, heard) = turn_server(None);
+        let relaying = Relaying::opened(&network_config(), turn, SipralTransport::Tcp);
+        assert_eq!(
+            relaying.relay(),
+            (SipralNatRelay::Allocated as u32, RELAYED.to_owned())
+        );
+        assert_eq!(
+            heard
+                .lock()
+                .unwrap()
+                .requests
+                .first()
+                .map(|(method, _)| *method),
+            Some(ALLOCATE),
+            "the Allocate went on the connection the component opened"
+        );
+        relaying.given_back(&heard);
+    }
+
+    #[test]
+    fn over_tls_the_turn_server_is_held_to_its_own_authority_and_name() {
+        let pki = pki_for(TURN_NAME);
+        let authority = pki.pem.clone();
+        let (turn, heard) = turn_server(Some(pki));
+        let (turn_authority_pem, turn_authority_pem_len) = text(&authority);
+        let (turn_server_name, turn_server_name_len) = text(TURN_NAME);
+        // the SIP servers' trust is the platform's, which has never heard of this authority
+        let network = SipralNetworkConfig {
+            turn_trust: SipralNetworkTrust::OnlyAuthority as u32,
+            turn_authority_pem,
+            turn_authority_pem_len,
+            turn_server_name,
+            turn_server_name_len,
+            ..network_config()
+        };
+        let relaying = Relaying::opened(&network, turn, SipralTransport::Tls);
+        assert_eq!(
+            relaying.relay(),
+            (SipralNatRelay::Allocated as u32, RELAYED.to_owned())
+        );
+        relaying.given_back(&heard);
+
+        // the same server, held to a name its certificate does not carry
+        let (elsewhere, elsewhere_len) = text("elsewhere.example.test");
+        let misnamed = SipralNetworkConfig {
+            turn_server_name: elsewhere,
+            turn_server_name_len: elsewhere_len,
+            ..network
+        };
+        let asked = heard.lock().unwrap().requests.len();
+        let refused = Relaying::opened(&misnamed, turn, SipralTransport::Tls);
+        assert_eq!(
+            refused.relay().0,
+            SipralNatRelay::Failed as u32,
+            "a TURN server that names another host gives no relay"
+        );
+        assert_eq!(
+            heard.lock().unwrap().requests.len(),
+            asked,
+            "nothing was asked of a server that did not prove its name"
+        );
+        assert_eq!(
+            unsafe { sipral_stack_destroy(refused.stack) },
+            SipralStatus::Ok
+        );
+    }
 }

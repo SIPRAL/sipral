@@ -44,8 +44,8 @@ any `sipral_*` function can be called next to them.
 
 | | |
 |---|---|
-| `Stack(StackOptions)` | `sipral_stack_create`: bind address, transport, the event handler. `poll()`, `set_message_hook()`, `add_account()`, `call(handle)` for a call an event names |
-| `Stack::start_network(NetworkOptions)`, `run(wait_ms)` | the networking component (`26-network.md`): trust, a client certificate, name servers; `run` is one turn of its loop. `open_media()`, `attach_media()`, `capture()` and `close_media()` carry a call's audio through it |
+| `Stack(StackOptions)` | `sipral_stack_create`: bind address, transport, the event handler, ICE, and a STUN and a TURN server with how the TURN server is reached. `poll()`, `set_message_hook()`, `add_account()`, `call(handle)` for a call an event names |
+| `Stack::start_network(NetworkOptions)`, `run(wait_ms)` | the networking component (`26-network.md`): trust, a client certificate, name servers, the name a SIP server is held to and how it is read, and the TURN server's own trust, name and client certificate; `run` is one turn of its loop. `open_media()`, `attach_media()`, `capture()` and `close_media()` carry a call's audio through it, with its STUN and TURN |
 | `Account` | `start_registration()`, `stop_registration()`, `place_call(target, media_address)` |
 | `Call` | `answer()`, `reject(code)`, `hangup()`, `hold()`, `resume()`, `send_dtmf()`, `media()` |
 | `locate()`, `advertised_address()`, `has_network()` | where RFC 3263 finds a server, the local address toward it, and whether this library carries the networking component |

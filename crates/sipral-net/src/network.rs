@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -82,6 +82,37 @@ impl StreamTarget {
     }
 }
 
+/// What a connection to a server that is not a SIP server trusts, in place of the network's: a
+/// TURN server's (RFC 8656 §3.1), whose certificate names its host as HTTPS names one, not a SIP
+/// domain, so RFC 5922's rules are not read for it.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct HostTrust {
+    /// Which servers are trusted.
+    pub trust: Trust,
+    /// Presented when the server asks for a client certificate.
+    pub client_certificate: Option<ClientCertificate>,
+}
+
+impl HostTrust {
+    /// `trust`, presenting `client_certificate` when the server asks for one.
+    #[must_use]
+    pub const fn new(trust: Trust, client_certificate: Option<ClientCertificate>) -> Self {
+        Self {
+            trust,
+            client_certificate,
+        }
+    }
+}
+
+/// How one connection is checked: the trust, the certificate presented, and how the server's
+/// name is read (`None`: as HTTPS reads a host's).
+struct Checked {
+    trust: Trust,
+    client: Option<ClientCertificate>,
+    rules: Option<DomainRules>,
+}
+
 /// Something that arrived, for the loop to hand to the user agent.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -105,7 +136,8 @@ pub enum Happening {
         data: Vec<u8>,
     },
     /// A connection asked for with [`Network::connect`] is up: `Input::TransportBound`, then
-    /// `early` as `Input::StreamData` when it is not empty.
+    /// `early` as `Input::StreamData` when it is not empty. One asked for with
+    /// [`Network::connect_host`] is the caller's own, and the user agent never hears of it.
     Connected {
         /// The number it was asked for under.
         transport: TransportId,
@@ -192,6 +224,33 @@ impl MediaSender {
     }
 }
 
+/// Writes on one connection, from any thread ([`Network::stream_sender`]).
+#[derive(Clone)]
+pub struct StreamSender(Arc<Mutex<Writer>>);
+
+impl fmt::Debug for StreamSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamSender").finish_non_exhaustive()
+    }
+}
+
+impl StreamSender {
+    /// Write one message whole, after anything another thread is writing.
+    ///
+    /// # Errors
+    /// The write's own error. The connection's reader then hears it end, and
+    /// [`Happening::StreamFailed`] or [`Happening::StreamClosed`] says so.
+    pub fn send(&self, payload: &[u8]) -> io::Result<()> {
+        locked(&self.0).send(payload)
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // a writer is whole between writes: one that panicked mid-write left a broken connection,
+    // which its next write reports
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// One socket the network reads, and how to stop its reader.
 struct Datagram {
     socket: Arc<UdpSocket>,
@@ -211,7 +270,7 @@ pub struct Network {
     inbox: Receiver<Arrival>,
     postbox: Sender<Arrival>,
     datagrams: HashMap<TransportId, Datagram>,
-    streams: HashMap<TransportId, (u64, Writer)>,
+    streams: HashMap<TransportId, (u64, Arc<Mutex<Writer>>)>,
     /// Connections being made, by serial.
     connecting: HashMap<TransportId, u64>,
     /// Serials closed while their connection was being made.
@@ -234,8 +293,8 @@ impl fmt::Debug for Network {
 
 impl Drop for Network {
     fn drop(&mut self) {
-        for (_, (_, mut writer)) in self.streams.drain() {
-            writer.close();
+        for (_, (_, writer)) in self.streams.drain() {
+            locked(&writer).close();
         }
     }
 }
@@ -400,14 +459,61 @@ impl Network {
         remote: SocketAddr,
         target: StreamTarget,
     ) {
+        let checked = Checked {
+            trust: self.config.trust.clone(),
+            client: self.config.client_certificate.clone(),
+            rules: Some(self.config.domain_rules),
+        };
+        self.dial(transport, protocol, remote, target, checked);
+    }
+
+    /// Start a connection to `remote`, a server that is not a SIP server, as `transport`: TCP for
+    /// [`TransportProtocol::Tcp`], TLS for [`TransportProtocol::Tls`], checked against
+    /// `server_name` (`None`: the address) by `trust` alone, as HTTPS checks a host. A TURN
+    /// server's connection (RFC 8656 §3.1) is one.
+    ///
+    /// What follows is what follows [`Network::connect`].
+    pub fn connect_host(
+        &mut self,
+        transport: TransportId,
+        protocol: TransportProtocol,
+        remote: SocketAddr,
+        server_name: Option<String>,
+        trust: &HostTrust,
+    ) {
+        let checked = Checked {
+            trust: trust.trust.clone(),
+            client: trust.client_certificate.clone(),
+            rules: None,
+        };
+        self.dial(
+            transport,
+            protocol,
+            remote,
+            StreamTarget::new(server_name, None),
+            checked,
+        );
+    }
+
+    /// Connect on a thread of its own, checked as `checked` says.
+    fn dial(
+        &mut self,
+        transport: TransportId,
+        protocol: TransportProtocol,
+        remote: SocketAddr,
+        target: StreamTarget,
+        checked: Checked,
+    ) {
         self.close(transport);
         self.serial = self.serial.wrapping_add(1);
         let serial = self.serial;
         self.connecting.insert(transport, serial);
         let tls = matches!(protocol, TransportProtocol::Tls | TransportProtocol::Wss);
-        let trust = self.config.trust.clone();
-        let client = self.config.client_certificate.clone();
-        let rules = self.config.domain_rules;
+        let Checked {
+            trust,
+            client,
+            rules,
+        } = checked;
         let patience = self.config.connect_timeout;
         let platform = Arc::clone(&self.platform);
         let postbox = self.postbox.clone();
@@ -490,11 +596,21 @@ impl Network {
             self.abandoned.insert(serial);
             return true;
         }
-        if let Some((_, mut writer)) = self.streams.remove(&transport) {
-            writer.close();
+        if let Some((_, writer)) = self.streams.remove(&transport) {
+            locked(&writer).close();
             return true;
         }
         self.datagrams.remove(&transport).is_some()
+    }
+
+    /// What writes on the connection open as `transport` without the network: for an audio
+    /// thread, which must not wait while the loop's thread sits in [`Network::wait`]. `None` when
+    /// no connection is open under that number. Its writes fail once [`Network::close`] has run.
+    #[must_use]
+    pub fn stream_sender(&self, transport: TransportId) -> Option<StreamSender> {
+        self.streams
+            .get(&transport)
+            .map(|(_, writer)| StreamSender(Arc::clone(writer)))
     }
 
     /// Write one message on `transport`: to `destination` on a datagram socket, on the connection
@@ -515,18 +631,19 @@ impl Network {
             let _ = datagram.socket.send_to(payload, destination);
             return Ok(());
         }
-        let Some(&mut (_, ref mut writer)) = self.streams.get_mut(&transport) else {
+        let Some((_, writer)) = self.streams.get(&transport) else {
             return Err(Failure::new(
                 TransportErrorKind::Closed,
                 TlsFailure::None,
                 &format!("nothing is open as transport {}", transport.0),
             ));
         };
-        match writer.send(payload) {
+        let sent = locked(writer).send(payload);
+        match sent {
             Ok(()) => Ok(()),
             Err(error) => {
-                if let Some((_, mut writer)) = self.streams.remove(&transport) {
-                    writer.close();
+                if let Some((_, writer)) = self.streams.remove(&transport) {
+                    locked(&writer).close();
                 }
                 Err(Failure::of_io(
                     &format!("the connection to {destination}"),
@@ -587,7 +704,8 @@ impl Network {
                     return None;
                 }
                 self.connecting.remove(&transport);
-                self.streams.insert(transport, (serial, writer));
+                self.streams
+                    .insert(transport, (serial, Arc::new(Mutex::new(writer))));
                 Some(happening)
             }
             Arrival::Stream { serial, happening } => {

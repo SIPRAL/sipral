@@ -16,7 +16,10 @@
 //!   answers the core's lookups, writes what the core wants written and hands back, through
 //!   [`Network::wait`], everything that arrived as a [`Happening`]: a datagram, stream bytes, a
 //!   connection made or refused with the reason, a lookup answered. The caller feeds those to the
-//!   user agent as `Input`s and answers, exactly as it would with sockets of its own.
+//!   user agent as `Input`s and answers, exactly as it would with sockets of its own. A
+//!   connection to a server that is not a SIP server — a TURN server's over TCP or TLS (RFC 8656
+//!   §3.1) — is [`Network::connect_host`], with a [`HostTrust`] of its own, and a
+//!   [`StreamSender`] or a [`MediaSender`] writes from an audio thread.
 //! - [`Resolver`]: RFC 3263's NAPTR, SRV, A and AAAA lookups (`docs/04-ua.md`), against the
 //!   system's resolver configuration or the name servers the application names, with
 //!   [`Resolver::locate`] running the core's own `Locator` to the end for a caller that wants an
@@ -85,7 +88,9 @@ mod stream;
 mod trust;
 
 pub use failure::{Failure, TlsFailure};
-pub use network::{Happening, MediaSender, Network, NetworkConfig, StreamTarget};
+pub use network::{
+    Happening, HostTrust, MediaSender, Network, NetworkConfig, StreamSender, StreamTarget,
+};
 pub use resolver::Resolver;
 pub use sipral_core::domain_certificate::DomainRules;
 pub use trust::{ClientCertificate, ClientCertificateError, Trust, TrustError};
