@@ -105,6 +105,10 @@ public struct SipralAccountOptions {
     public var websocketHost: String?
     /// The resource a WebSocket account's handshake asks for.
     public var websocketResource: String?
+    /// The `+sip.instance` URN on the `Contact` of every REGISTER.
+    public var instanceId: String?
+    /// Header fields for every REGISTER, one `name:value` per line.
+    public var headers: String?
 
     public init(aor: String, registrarAddress: String? = nil, serverUri: String? = nil) {
         self.aor = aor
@@ -129,6 +133,18 @@ public struct SipralAccountOptions {
         realms = options["realms"] as? String
         websocketHost = options["websocketHost"] as? String
         websocketResource = options["websocketResource"] as? String
+        instanceId = options["instanceId"] as? String
+        headers = options["headers"] as? String
+    }
+
+    /// The header fields, split at each line and at the first colon of each.
+    var headerFields: [SipralHeader] {
+        (headers ?? "").split(separator: "\n").map { (line: Substring) -> SipralHeader in
+            guard let colon = line.firstIndex(of: ":") else {
+                return SipralHeader(name: String(line), value: "")
+            }
+            return SipralHeader(name: String(line[..<colon]), value: String(line[line.index(after: colon)...]))
+        }
     }
 }
 
@@ -267,7 +283,9 @@ public final class SipralReactCore: @unchecked Sendable {
                 displayName: options.displayName,
                 authUser: options.authUser,
                 authPassword: options.authPassword,
+                instanceId: options.instanceId,
                 expiresSeconds: options.expiresSeconds,
+                headers: options.headerFields,
                 realms: options.realms.map { $0.split(separator: "\n").map(String.init) } ?? []
             )
             let id = String(account.handle)

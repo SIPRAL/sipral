@@ -69,6 +69,10 @@ export type NativeAccountOptions = {
   websocketHost?: string;
   /** The resource a WebSocket account's handshake asks for. */
   websocketResource?: string;
+  /** The `+sip.instance` URN on the `Contact` of every REGISTER. */
+  instanceId?: string;
+  /** Header fields for every REGISTER, one `name:value` per line. */
+  headers?: string;
 };
 
 /** One call's own controls in one direction, read back. */

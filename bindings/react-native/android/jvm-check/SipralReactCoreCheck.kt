@@ -253,8 +253,9 @@ private fun aCallThatEndedBeforeItWasKeptIsClosed(): String {
 }
 
 /** An account on its own TCP connection beside the UDP socket registers
- * over a connection the core opened; another protocol is refused; settings
- * come back as NativeSettings, echo switch included. */
+ * over a connection the core opened, with its instance and its own fields
+ * on the REGISTER; another protocol is refused; settings come back as
+ * NativeSettings, echo switch included. */
 private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
     ServerSocket(0, 4, InetAddress.getLoopbackAddress()).use { registrar ->
         val register = CompletableFuture.supplyAsync {
@@ -285,7 +286,8 @@ private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
             val line = core.addAccount(
                 SipralAccountOptions(
                     aor = "sip:alice@sipral.invalid", registrar = "sip:sipral.invalid", registrarAddress = address,
-                    streamProtocol = "tcp",
+                    streamProtocol = "tcp", instanceId = "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+                    headers = "X-Push-Key:k-17\nX-Note:a: b",
                 ),
             )
             core.register(line)
@@ -293,6 +295,9 @@ private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
             assertTrue(message.startsWith("REGISTER "), message)
             assertTrue("Via: SIP/2.0/TCP " in message, message)
             assertTrue(";transport=tcp" in message, message)
+            assertTrue("+sip.instance=\"<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>\"" in message, message)
+            assertTrue("\r\nX-Push-Key: k-17\r\n" in message, message)
+            assertTrue("\r\nX-Note: a: b\r\n" in message, message)
             val settings = core.settings()
             assertEquals("udp", settings["transport"])
             assertEquals("2,1", settings["srtpSuites"])
@@ -303,7 +308,7 @@ private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
             core.close()
         }
     }
-    return "an account on a TCP connection of its own registered over it, and the settings read back"
+    return "an account on a TCP connection of its own registered over it with its instance and fields, and the settings read back"
 }
 
 /** A call's own gain and mute through the core, in device mode with the

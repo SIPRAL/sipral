@@ -184,6 +184,13 @@ certificate with that fingerprint, read in TypeScript as `pinDigest` reads
 it; without one, the platform's authorities. Only on a client signalling
 over `"udp"`.
 
+`instanceId` puts RFC 5626's `+sip.instance` on the `Contact` of every
+REGISTER, which a push proxy (RFC 8599) refuses to do without, and
+`headers` (`{name, value}` pairs) go on every REGISTER of the account: the
+first, the answer to a challenge, the refresh and the de-registration. A
+field that would break a line is refused before it crosses; the library
+checks the rest as it does a call's.
+
 ### Calls
 
 `client.placeCall(account, target, options)` resolves with a `SipralCall`;

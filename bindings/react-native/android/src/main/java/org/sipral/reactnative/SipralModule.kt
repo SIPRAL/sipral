@@ -73,6 +73,8 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 realms = options.text("realms"),
                 websocketHost = options.text("websocketHost"),
                 websocketResource = options.text("websocketResource"),
+                instanceId = options.text("instanceId"),
+                headers = options.text("headers"),
             ),
         )
     }

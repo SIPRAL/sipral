@@ -23,6 +23,7 @@ import org.sipral.SipralCallEndReason
 import org.sipral.SipralCallState
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralHeader
 import org.sipral.SipralHeldAudio
 import org.sipral.SipralException
 import org.sipral.SipralLocateFailure
@@ -103,7 +104,17 @@ data class SipralAccountOptions(
     val websocketHost: String? = null,
     /** The resource a WebSocket account's handshake asks for. */
     val websocketResource: String? = null,
-)
+    /** The `+sip.instance` URN on the `Contact` of every REGISTER. */
+    val instanceId: String? = null,
+    /** Header fields for every REGISTER, one `name:value` per line. */
+    val headers: String? = null,
+) {
+    /** The header fields, split at each line and at the first colon of each. */
+    internal val headerFields: List<SipralHeader>
+        get() = headers.orEmpty().split('\n').filter { it.isNotEmpty() }.map { line ->
+            SipralHeader(line.substringBefore(':'), line.substringAfter(':', ""))
+        }
+}
 
 /**
  * One client and what hangs off it. [emit] is called with each event,
@@ -221,6 +232,8 @@ class SipralReactCore(
             realms = options.realms?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
             websocketHost = options.websocketHost,
             websocketResource = options.websocketResource,
+            instanceId = options.instanceId,
+            headers = options.headerFields,
         )
         val id = account.handle.toString()
         accounts[id] = account

@@ -319,6 +319,30 @@ describe('accounts', () => {
     expect(native.calls).toHaveLength(before);
   });
 
+  it('crosses the instance and the REGISTER fields, one field per line, and refuses one that would break a line', async () => {
+    const {client, native} = await opened();
+    const instanceId = 'urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6';
+    await client.addAccount({
+      aor: 'sip:alice@example.com',
+      registrarAddress: '203.0.113.5:5060',
+      registrar: 'sip:example.com',
+      instanceId,
+      headers: [
+        {name: 'X-Push-Key', value: 'k-17'},
+        {name: 'X-Note', value: 'a: b'},
+      ],
+    });
+    expect(native.calls[1].args[0]).toMatchObject({instanceId, headers: 'X-Push-Key:k-17\nX-Note:a: b'});
+    await client.addAccount({aor: 'sip:bob@example.com', registrarAddress: '203.0.113.5:5060', headers: []});
+    expect((native.calls[2].args[0] as {headers?: string}).headers).toBeUndefined();
+    const before = native.calls.length;
+    const base = {aor: 'sip:carol@example.com', registrarAddress: '203.0.113.5:5060'};
+    for (const headers of [[{name: '', value: 'x'}], [{name: 'X:Y', value: 'x'}], [{name: 'X-A', value: 'x\r\nVia: y'}]]) {
+      expect((await refusal(client.addAccount({...base, headers}))).code).toBe('invalidArgument');
+    }
+    expect(native.calls).toHaveLength(before);
+  });
+
   it('reports a declined challenge on the account and on the client, its realms as a list', async () => {
     const {client, native} = await opened();
     const account = await client.addAccount({aor: 'sip:alice@example.com', registrarAddress: '203.0.113.5:5060'});

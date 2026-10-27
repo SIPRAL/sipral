@@ -307,8 +307,9 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(located?["account"] as? String, line)
     }
 
-    /// An account on its own TCP connection registers; an unknown protocol
-    /// is refused; settings come back as NativeSettings.
+    /// An account on its own TCP connection registers, with its instance and
+    /// its own fields on the REGISTER; an unknown protocol is refused;
+    /// settings come back as NativeSettings.
     func testAnAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() async throws {
         let registrar = try OneRegister()
         let core = SipralReactCore(emit: { _ in }, audio: { _ in .application })
@@ -325,12 +326,17 @@ final class SipralReactCoreTests: XCTestCase {
         let line = try core.addAccount(SipralAccountOptions([
             "aor": "sip:alice@sipral.invalid", "registrar": "sip:sipral.invalid",
             "registrarAddress": registrar.address, "streamProtocol": "tcp",
+            "instanceId": "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "headers": "X-Push-Key:k-17\nX-Note:a: b",
         ]))
         try core.register(line)
         let register = try XCTUnwrap(registrar.first(within: 10), "no REGISTER over a connection")
         XCTAssertTrue(register.hasPrefix("REGISTER "), register)
         XCTAssertTrue(register.contains("Via: SIP/2.0/TCP "), register)
         XCTAssertTrue(register.contains(";transport=tcp"), register)
+        XCTAssertTrue(register.contains("+sip.instance=\"<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>\""), register)
+        XCTAssertTrue(register.contains("\r\nX-Push-Key: k-17\r\n"), register)
+        XCTAssertTrue(register.contains("\r\nX-Note: a: b\r\n"), register)
 
         let settings = try core.settings()
         XCTAssertEqual(settings["transport"] as? String, "udp")

@@ -758,12 +758,23 @@ export class SipralClient {
         if (options.realms !== undefined && options.realms.some((realm) => realm === '' || realm.includes('\n'))) {
           throw new SipralError('invalidArgument', 'a realm is a line of text, not empty');
         }
+        // the lines carry them across; the library checks the rest
+        if (
+          options.headers !== undefined &&
+          options.headers.some(({name, value}) => name === '' || /[:\r\n]/.test(name) || /[\r\n]/.test(value))
+        ) {
+          throw new SipralError('invalidArgument', 'a header field is a name without a colon and a value on one line');
+        }
       },
       (native) =>
         native.addAccount({
           ...options,
           tlsPin,
           realms: options.realms === undefined || options.realms.length === 0 ? undefined : options.realms.join('\n'),
+          headers:
+            options.headers === undefined || options.headers.length === 0
+              ? undefined
+              : options.headers.map(({name, value}) => `${name}:${value}`).join('\n'),
         }),
     );
     const account = new SipralAccount(this, id, options.aor);

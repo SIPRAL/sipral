@@ -43,6 +43,7 @@ export type {
   CallState,
   ChallengeRefusal,
   EndReason,
+  Header,
   TokenError,
   NatKind,
   NetworkProbe,

@@ -132,6 +132,8 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   put(given, @"realms", options.realms());
   put(given, @"websocketHost", options.websocketHost());
   put(given, @"websocketResource", options.websocketResource());
+  put(given, @"instanceId", options.instanceId());
+  put(given, @"headers", options.headers());
   [_bridge addAccount:given resolve:resolve reject:reject];
 }
 

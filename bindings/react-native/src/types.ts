@@ -250,6 +250,27 @@ export interface AccountOptions {
    * left out, "/ws".
    */
   websocketResource?: string;
+  /**
+   * The device's `+sip.instance` (RFC 5626 §4.1): `urn:uuid:` and a UUID
+   * the application keeps for the installation. It goes on the `Contact` of
+   * every REGISTER, which a push proxy (RFC 8599) may require.
+   */
+  instanceId?: string;
+  /**
+   * Header fields for every REGISTER of the account: the first, the one
+   * answering a challenge, each refresh and the de-registration. The
+   * library checks them as a call's: `Expires` is its own
+   * (`expiresSeconds`), and an account with no `registrar` refuses them.
+   */
+  headers?: Header[];
+}
+
+/** One header field, as it goes on the line: `name: value`. */
+export interface Header {
+  /** The field name, `X-Push-Key`. */
+  name: string;
+  /** The value after the colon; empty for a field with none. */
+  value: string;
 }
 
 export interface PlaceCallOptions {
