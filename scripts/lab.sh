@@ -1598,8 +1598,11 @@ kotlin_agent() {
                 /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c /sipral-jni/audio_routes.c \
                 -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral
             address=$(getent hosts asterisk | cut -d" " -f1)
+            # without --enable-native-access, JDK 24 and later warn as the
+            # JNI library loads, and the warning ends with an empty line
+            # scripts/interop-matrix.py reads as the start of a section
             SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
-                exec java -Djava.library.path=/tmp \
+                exec java --enable-native-access=ALL-UNNAMED -Djava.library.path=/tmp \
                 -cp "/kotlin/sipral-kotlin.jar:/kotlin/kotlin-stdlib.jar:/kotlin/kotlinx-coroutines.jar" \
                 org.sipral.examples.AgentKt' >/dev/null \
         || { printf '  could not start the Kotlin agent container\n'; return 1; }
@@ -2962,7 +2965,7 @@ nat_pair_call() {
                         -o /tmp/libsipral_jni.so \
                         /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c \
                         -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral
-                    exec java -Djava.library.path=/tmp \
+                    exec java --enable-native-access=ALL-UNNAMED -Djava.library.path=/tmp \
                         -cp /kotlin/sipral-kotlin.jar:/kotlin/kotlin-stdlib.jar:/kotlin/kotlinx-coroutines.jar \
                         org.sipral.examples.AgentKt"
             status=$?
@@ -4339,8 +4342,10 @@ fi
 
 if [ "$WANT" = all ] || [ "$WANT" = push ]; then
     if [ -n "$HARNESS_C" ] && [ -n "$PUSH_GATEWAY" ]; then
+        # the step first: a gateway that does not start fails it, rather
+        # than the step printed before it
+        step "woken by a push through the RFC 8599 gateway, matched by the INVITE's Call-ID, in C"
         if push_gateway_up; then
-            step "woken by a push through the RFC 8599 gateway, matched by the INVITE's Call-ID, in C"
             push_case call "the held INVITE goes to" \
                 && pass "asleep, pushed, refreshed, and the held INVITE was the call announced by its Call-ID alone, answered and heard" \
                 || fail "woken by a push, matched by Call-ID"
@@ -5497,9 +5502,19 @@ identity_flow() {
         && said '^confirmed 9040$' \
         && said '^media 9040 sent [0-9]+ received [1-9]' \
         && said '^media 9040 callee sent [0-9]+ received [1-9]'; then
-        pass "P-Asserted-Identity: written by the caller, taken by Asterisk as who is calling, asserted again to the callee and read there from a trusted peer; audio both ways once Asterisk handed the media to the two ends"
+        pass "P-Asserted-Identity: written by the caller, taken by Asterisk as who is calling, asserted again to the callee and read there from a trusted peer; audio both ways"
     else
         fail "P-Asserted-Identity sent and received"
+        ok=1
+    fi
+    # direct_media on both endpoints: Asterisk re-INVITEs each end of 9040
+    # with the other's own socket, and the audio then has to come from there
+    if said '^moved 9040 caller direct$' && said '^moved 9040 callee direct$' \
+        && said '^media 9040 from-other [1-9][0-9]+$' \
+        && said '^media 9040 callee from-other [1-9][0-9]+$'; then
+        pass "the media moved straight between the two stacks by the PBX's re-INVITE: Asterisk re-INVITEd each end onto the other's own socket, and the audio then came from it, not through Asterisk"
+    else
+        fail "the media moved straight between the two stacks by the PBX's re-INVITE"
         ok=1
     fi
     if said '^incoming 9041 diverted=sip:9041@[^ ]+ reason=no-answer count=1$' \

@@ -32,15 +32,21 @@ Lines, one each, flushed as they happen, for the step to read:
     incoming <number> trusted=<0|1> asserted=<uri> display=<name>
     incoming <number> diverted=<uri> reason=<reason> count=<n>
     confirmed <number>
+    moved <number> caller|callee direct
+    moved <number> caller|callee to <address:port>
     media <number> sent <packets> received <packets>
     media <number> callee sent <packets> received <packets>
+    media <number> from-other <datagrams>
+    media <number> callee from-other <datagrams>
     ended <number> <end reason> <status>
     timed out
 
 The two ends of 9040 and 9041 are both this stack's, and Asterisk hands
-their media to each other once the call is answered (``direct_media``, on
-by default): audio counted at both ends is the stack following a re-INVITE
-that moved its far end to another sender.
+their media to each other once the call is answered (``direct_media``):
+it re-INVITEs each end with the other's own socket as its far end. A
+``moved ... direct`` line is a session change naming the other end's
+socket, and ``from-other`` counts the datagrams that then reached each
+end's socket straight from the other's, not through Asterisk.
 """
 
 from __future__ import annotations
@@ -55,6 +61,73 @@ from sipral.enums import AudioMode, CallEndReason, EventKind, RegistrationState
 from sipral.errors import SipralError
 
 ASSERTED = '"Lab Asserted" <sip:5550100@asterisk>'
+
+# How long a call that rang the callee waits for Asterisk to hand the media
+# to its two ends before it dwells.
+MOVE_WAIT_S = 5.0
+
+
+class Arrivals:
+    """Every datagram each call's media socket handed the stack, by where
+    it came from.
+
+    ``sipral.media`` hands each one to ``sipral_media_receive``; this
+    stands in for the library object that module calls through, passes
+    every call on unchanged, and counts per media handle and source.
+    """
+
+    def __init__(self) -> None:
+        self._real = None
+        self._seen: dict[tuple[int, str], int] = {}
+
+    def install(self) -> None:
+        import sipral.media
+
+        self._real = sipral.media.lib
+        sipral.media.lib = self
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+    def sipral_media_receive(self, media, data, length, source, source_len, now, out):
+        key = (int(media), bytes(source[:source_len]).decode("utf-8", "replace"))
+        self._seen[key] = self._seen.get(key, 0) + 1
+        return self._real.sipral_media_receive(media, data, length, source, source_len, now, out)
+
+    def from_source(self, media: int, source: str) -> int:
+        return self._seen.get((int(media), source), 0)
+
+
+ARRIVALS = Arrivals()
+
+
+def media_endpoint(sdp: bytes | None) -> str | None:
+    """``address:port`` of the first audio stream a description names."""
+    if not sdp:
+        return None
+    session_address = None
+    media_address = None
+    port = None
+    in_audio = False
+    for raw in sdp.decode("utf-8", "replace").splitlines():
+        line = raw.strip()
+        if line.startswith("m="):
+            if port is not None:
+                break
+            fields = line[2:].split()
+            in_audio = bool(fields) and fields[0] == "audio"
+            if in_audio and len(fields) > 1:
+                port = fields[1]
+        elif line.startswith("c="):
+            address = line.split()[-1]
+            if in_audio:
+                media_address = address
+            elif port is None:
+                session_address = address
+    address = media_address or session_address
+    if address is None or port is None:
+        return None
+    return f"{address}:{port}"
 
 
 def route_to(address: str) -> str:
@@ -95,6 +168,7 @@ async def main() -> None:
     password = os.environ.get("SIPRAL_PASSWORD", "labpass")
     dwell = int(os.environ.get("SIPRAL_DWELL_MS", "2000")) / 1000
     patience = int(os.environ.get("SIPRAL_PATIENCE_MS", "20000")) / 1000
+    ARRIVALS.install()
     stack = Stack(
         loop=asyncio.get_running_loop(),
         bind_host=route_to(server),
@@ -159,22 +233,60 @@ def say_media(label: str, call: Call) -> None:
     )
 
 
+def say_from_other(label: str, call: Call, other: Call) -> None:
+    """How many datagrams reached ``call``'s socket straight from
+    ``other``'s."""
+    arrived = 0 if call.media is None else ARRIVALS.from_source(call.media.handle, other.media_address)
+    print(f"media {label} from-other {arrived}", flush=True)
+
+
 async def one_call(
     stack: Stack, caller, number: str, headers, dwell: float, patience: float, tasks
 ) -> None:
     """Place one call to ``number``, answer whatever reaches the callee,
     and hang up from the calling end once the call has been up for
-    ``dwell``."""
+    ``dwell``, and once Asterisk has handed the media to both ends when
+    the call rang the callee, or ``MOVE_WAIT_S`` has passed."""
     call = stack.place_call(
         caller, f"sip:{number}@asterisk", headers=headers, follow_redirects=True
     )
     tasks.append(asyncio.create_task(talk(call)))
     answered: list[Call] = []
-    async with asyncio.timeout(patience + dwell):
+    moved: set[int] = set()
+
+    def other_of(handle: int) -> Call | None:
+        if handle == call.handle:
+            return answered[0] if answered else None
+        return call if any(taken.handle == handle for taken in answered) else None
+
+    async def finish() -> None:
+        loop = asyncio.get_running_loop()
+        until = loop.time() + MOVE_WAIT_S
+        while answered and len(moved) < 2 and loop.time() < until:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(dwell)
+        say_media(f"{number}", call)
+        for taken in answered:
+            say_media(f"{number} callee", taken)
+            say_from_other(f"{number}", call, taken)
+            say_from_other(f"{number} callee", taken, call)
+        call.hangup()
+
+    async with asyncio.timeout(patience + MOVE_WAIT_S + dwell):
         while True:
             event = await stack.events.get()
             fields = event.fields
-            if event.kind == EventKind.INCOMING_CALL:
+            if event.kind == EventKind.SESSION_CHANGED:
+                other = other_of(event.call)
+                far = media_endpoint(fields.get("remote_sdp"))
+                if other is not None and far is not None:
+                    side = "caller" if event.call == call.handle else "callee"
+                    if far == other.media_address:
+                        moved.add(event.call)
+                        print(f"moved {number} {side} direct", flush=True)
+                    else:
+                        print(f"moved {number} {side} to {far}", flush=True)
+            elif event.kind == EventKind.INCOMING_CALL:
                 identity = event.identity
                 print(
                     f"incoming {number} trusted={int(identity.trusted)} "
@@ -193,11 +305,7 @@ async def one_call(
                 tasks.append(asyncio.create_task(talk(taken)))
             elif event.kind == EventKind.CALL_CONFIRMED and event.call == call.handle:
                 print(f"confirmed {number}", flush=True)
-                await asyncio.sleep(dwell)
-                say_media(f"{number}", call)
-                for taken in answered:
-                    say_media(f"{number} callee", taken)
-                call.hangup()
+                tasks.append(asyncio.create_task(finish()))
             elif event.kind == EventKind.CALL_ENDED and event.call == call.handle:
                 print(
                     f"ended {number} {CallEndReason(fields['end_reason']).name} "

@@ -74,6 +74,7 @@ FLOW_SECTIONS = {
     "the same, through the C ABI -- baresip through the proxy": ("baresip", "c"),
     "behind a NAT -- STUN against coturn, then register and call Asterisk, in C": ("nat_stun", "c"),
     "called behind a NAT -- STUN against coturn, then Asterisk calls in, in C": ("nat_stun", "c"),
+    "moved behind a NAT, at a registrar that rewrites the Contact, in C": ("nat_stun", "c"),
     "ICE-lite -- a call that requires ICE, placed at the headless agent answering as lite": (
         "ice_lite",
         "rust",
@@ -205,6 +206,7 @@ LAYER_SECTIONS = {
         "asterisk",
         (
             "P-Asserted-Identity",
+            "the media moved straight between the two stacks by the PBX's re-INVITE",
             "Diversion",
             "a 302 followed by the stack",
         ),
@@ -292,6 +294,48 @@ VERDICT_SECTIONS = {
         "asterisk",
         "SIP over a secure WebSocket",
     ),
+    "the message hook on the wire, through the Python layer": (
+        "asterisk",
+        "a REGISTER rewritten by the message hook, read on the wire",
+    ),
+    # three calls, regular, half and full trickle, each read by lab.sh's
+    # closing line, which also holds full trickle to having started before
+    # gathering was over
+    "trickle ICE -- two stacks behind two NATs through the proxy, a STUN server that never answers": (
+        "trickle_pair",
+        "regular, half and full trickle ICE through the proxy and two NATs",
+    ),
+    "half trickle -- an offer that says trickle, to Asterisk's ICE, which does not": (
+        "asterisk",
+        "half trickle to an ICE agent that does not trickle",
+    ),
+    # the push steps, against the lab's own RFC 8599 gateway in front of
+    # Asterisk and its stand-in notification service: no phone and no APNs
+    # or FCM
+    "woken by a push through the RFC 8599 gateway, matched by the INVITE's Call-ID, in C": (
+        "push_gateway",
+        "woken by a push, the call matched by its Call-ID (C ABI)",
+    ),
+    "the same, announced by the caller alone": (
+        "push_gateway",
+        "woken by a push, the call matched by its caller (C ABI)",
+    ),
+    "a MESSAGE held for a phone that sleeps, on FCM's terms": (
+        "push_gateway",
+        "a MESSAGE held for a sleeping phone until it refreshed (C ABI)",
+    ),
+    "a push that never arrives": (
+        "push_gateway",
+        "a push that never arrives, the INVITE answered 480 (C ABI)",
+    ),
+    "a phone that answers its push late": (
+        "push_gateway",
+        "a push answered late, the announced call reported missing (C ABI)",
+    ),
+    "a carrier gateway's calls, the ISUP beside the SDP -- SIP-I both ways, in C": (
+        "isup_gateway",
+        "a carrier gateway's calls, the ISUP beside the SDP both ways (C ABI)",
+    ),
 }
 # The steps lab.sh prints before any flow runs: builds and container
 # readiness. Their `ok` lines are notes, not results, and are the only ones
@@ -305,6 +349,7 @@ SETUP_SECTIONS = {
     "the lab",
     "waiting for the servers to listen",
     "a browser's calls -- its image",
+    "the push gateway",
 }
 NETEM_SECTION = "the same call, over a bad network"
 TURN_RELAY_SECTION = "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
@@ -332,6 +377,9 @@ PEER_LABELS = {
     "vicibox_live": "ViciBox (VICIdial), on the LAN",
     "browser_asterisk": "Chromium with JsSIP, through Asterisk (secure WebSocket)",
     "browser_kamailio": "Chromium with JsSIP, through Kamailio (WebSocket, media end to end)",
+    "trickle_pair": "sipral, self-to-self through Kamailio (each behind its own NAT)",
+    "push_gateway": "Asterisk, behind the lab's RFC 8599 push gateway",
+    "isup_gateway": "a SIP-I carrier gateway scripted from ITU-T Q.763, not a carrier's trunk",
 }
 
 # Every peer worth an eventual row that this lab cannot reach yet, because
@@ -408,10 +456,16 @@ def split_flow_line(text: str) -> tuple[str, str | None]:
     nothing here needs, since a passing flow's stats are never rendered
     (render_result() reads `detail` only for a fail, and split_flow_line is
     never called for one -- FLOW_FAIL_RE's own em-dash line carries the
-    reason directly).
+    reason directly). A passing flow may say what it saw after an em dash
+    instead, as the out-of-dialog REFER's two do ("..., referral — 202, then
+    3 NOTIFYs from 100 to 200 in 50 ms"): that is its detail, not its name,
+    which would otherwise carry a timing and match no feature's flow.
     """
+    dash = text.find(" — ")
     marker = "   ("
     idx = text.find(marker)
+    if dash != -1 and (idx == -1 or dash < idx):
+        return text[:dash], text[dash + 3 :]
     if idx == -1:
         return text, None
     name = text[:idx]
@@ -896,6 +950,17 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         # interop/robust/listener.py, a few lines of Python in the lab: no
         # release of anybody's to pin.
         return "n/a"
+    if peer_key == "trickle_pair":
+        # the proxy routes, and both ends are this stack's own
+        return f"{v('kamailio')} (proxy)"
+    if peer_key == "push_gateway":
+        # the gateway is this repository's (interop/push-gateway); the PBX
+        # behind it is the lab's Asterisk
+        return f"{v('asterisk')} (Asterisk)"
+    if peer_key == "isup_gateway":
+        # interop/isup/gateway.py, written here from the Recommendation: no
+        # release of anybody's to pin
+        return "n/a"
     raise ValueError(peer_key)
 
 
@@ -1318,6 +1383,16 @@ def self_test() -> int:
             flows = {r.flow for r in rows}
             for _, label in VERDICT_SECTIONS.values():
                 self.assertIn(label, flows)
+
+        def test_what_a_passing_flow_saw_after_an_em_dash_is_not_its_name(self) -> None:
+            self.assertEqual(
+                split_flow_line("a REFER from outside any call, referral — 202, then 3 NOTIFYs in 50 ms"),
+                ("a REFER from outside any call, referral", "202, then 3 NOTIFYs in 50 ms"),
+            )
+            self.assertEqual(
+                split_flow_line("call   (100 sent, 99 back)"),
+                ("call", "100 sent, 99 back"),
+            )
 
         def test_the_stir_flows_start_after_the_seed(self) -> None:
             header = next(iter(SEED_STARTED_SECTIONS))

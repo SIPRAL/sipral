@@ -413,3 +413,42 @@ name = "The far end's media moved by the PBX's re-INVITE (direct media)"
 implemented = true
 unit_tested = true
 flows = ["the media moved straight between the two stacks by the PBX's re-INVITE"]
+
+[[feature]]
+name = "Trickle ICE (RFC 8838, RFC 8840): regular, half and full, and half trickle to an agent that does not"
+implemented = true
+unit_tested = true
+flows = [
+  "regular, half and full trickle ICE through the proxy and two NATs",
+  "half trickle to an ICE agent that does not trickle",
+]
+
+[[feature]]
+name = "A phone that moves behind a NAT, registered and called again at its new binding"
+implemented = true
+unit_tested = true
+flows = ["moved behind a NAT, at a registrar that rewrites Contacts"]
+
+[[feature]]
+name = "Push notifications (RFC 8599): a sleeping phone woken and its call matched, a MESSAGE held, a lost and a late push"
+implemented = true
+unit_tested = true
+flows = [
+  "woken by a push, the call matched by its Call-ID",
+  "woken by a push, the call matched by its caller",
+  "a MESSAGE held for a sleeping phone until it refreshed",
+  "a push that never arrives, the INVITE answered 480",
+  "a push answered late, the announced call reported missing",
+]
+
+[[feature]]
+name = "SIP-I: the ISUP beside the SDP (ITU-T Q.763, RFC 3204), both ways"
+implemented = true
+unit_tested = true
+flows = ["a carrier gateway's calls, the ISUP beside the SDP both ways"]
+
+[[feature]]
+name = "A hook that reads and rewrites any SIP message on its way in or out"
+implemented = true
+unit_tested = true
+flows = ["a REGISTER rewritten by the message hook, read on the wire"]
