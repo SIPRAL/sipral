@@ -10,6 +10,12 @@
 //! here is public knowledge: it proves the plumbing and nothing about who
 //! signed.
 
+use p256::ecdsa::signature::Signer as _;
+use p256::ecdsa::{Signature, SigningKey};
+
+use crate::base64;
+use crate::identity::{Identity, Token};
+use crate::passport::{ALG, PPT_SHAKEN, header_value};
 use crate::testpki::{self, NOT_AFTER, NOT_BEFORE, Pki};
 use crate::tnauthlist::{TnAuthList, TnEntry};
 
@@ -55,6 +61,43 @@ pub fn credentials(numbers: &[&str]) -> Credentials {
             .map(|number| TnEntry::One((*number).to_owned()))
             .collect(),
     )
+}
+
+/// The Identity header field value of a full PASSporT whose claims are
+/// `claims_json` byte for byte, signed with `credentials`' key for the
+/// certificate at `x5u`, a SHAKEN one when `shaken`: claims as another
+/// authentication service writes them, which [`Signer`](crate::Signer)
+/// never would.
+///
+/// # Panics
+///
+/// For a key that does not sign: a test's own mistake.
+#[must_use]
+// a test's own mistake stops the test where it was made
+#[allow(clippy::expect_used)]
+pub fn identity_for_claims(
+    credentials: &Credentials,
+    x5u: &str,
+    claims_json: &str,
+    shaken: bool,
+) -> String {
+    let header = base64::encode_url(header_value(x5u, shaken).canonical().as_bytes());
+    let claims = base64::encode_url(claims_json.as_bytes());
+    let key = SigningKey::from_slice(&credentials.key).expect("the credentials' own key");
+    let signature: Signature = key
+        .try_sign(format!("{header}.{claims}").as_bytes())
+        .expect("a signature");
+    Identity {
+        token: Token::Full {
+            header,
+            claims,
+            signature: base64::encode_url(&signature.to_bytes()),
+        },
+        info: x5u.to_owned(),
+        alg: Some(ALG.to_owned()),
+        ppt: shaken.then(|| PPT_SHAKEN.to_owned()),
+    }
+    .to_string()
 }
 
 /// Credentials whose signing certificate's TNAuthList names the service

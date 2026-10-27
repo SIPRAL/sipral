@@ -521,6 +521,73 @@ fn a_passport_for_a_sip_uri_holds_only_for_a_request_to_that_uri() {
     );
 }
 
+/// `invite` with its Identity header field's value replaced by `identity`.
+fn with_identity(invite: &[u8], identity: &str) -> Vec<u8> {
+    let text = String::from_utf8(invite.to_vec()).expect("text");
+    let mut replaced = 0;
+    let lines: Vec<String> = text
+        .split("\r\n")
+        .map(|line| {
+            if line.to_ascii_lowercase().starts_with("identity:") {
+                replaced += 1;
+                format!("Identity: {identity}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    assert_eq!(replaced, 1, "one Identity header field");
+    lines.join("\r\n").into_bytes()
+}
+
+/// RFC 8224 §8.5 from the verifying side: another authentication service
+/// may sign the called URI as the request wrote it, with its case, port,
+/// password and parameters. Such a PASSporT holds for a request to the same
+/// address and for no other. Our own signer always writes the canonical
+/// form, so only claims signed by hand reach the verifier's own reading.
+#[test]
+fn a_passport_another_signer_wrote_with_an_uncanonical_dest_uri_holds_for_that_address() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite_to(&credentials, "sip:alice@biloxi.example.com", t0);
+    let claims = signed_claims(&invite);
+    let canonical = r#""uri":["sip:alice@biloxi.example.com"]"#;
+    assert!(claims.contains(canonical), "{claims}");
+    let signed_for = |dest: &str| {
+        let written = claims.replace(canonical, &format!(r#""uri":["{dest}"]"#));
+        let identity = sipral_stir::testing::identity_for_claims(&credentials, X5U, &written, true);
+        with_identity(&invite, &identity)
+    };
+
+    let foreign = signed_for("SIP:Alice:secret@Biloxi.example.com:5070;transport=tcp");
+    let held = verdict_on(&credentials, &foreign, |config| config, t0);
+    assert_eq!(held.outcome, VerificationOutcome::Valid, "{held:?}");
+
+    let other = signed_for("sip:Mallory@Biloxi.example.com:5060");
+    let refused = verdict_on(&credentials, &other, |config| config, t0);
+    assert_eq!(refused.outcome, VerificationOutcome::Invalid);
+    assert_eq!(refused.failure, Some(VerificationFailure::DestMismatch));
+    assert_eq!(refused.response.as_ref().map(|(code, _)| *code), Some(438));
+}
+
+/// And from the request's side: a canonical PASSporT holds for a request
+/// whose `To` and Request-URI write the same address with a port,
+/// parameters and another case.
+#[test]
+fn a_canonical_passport_holds_for_a_request_that_writes_its_address_another_way() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite_to(&credentials, "sip:alice@biloxi.example.com", t0);
+    let text = String::from_utf8(invite).expect("text");
+    let rewritten = text.replace(
+        "sip:alice@biloxi.example.com",
+        "sip:Alice@Biloxi.example.com:5060;transport=udp",
+    );
+    assert_ne!(rewritten, text, "the To and the Request-URI were rewritten");
+    let held = verdict_on(&credentials, rewritten.as_bytes(), |config| config, t0);
+    assert_eq!(held.outcome, VerificationOutcome::Valid, "{held:?}");
+}
+
 /// A number in a SIP URI with `user=phone` (RFC 8224 §8.1) is signed as a
 /// number and compared as one: the same number written another way holds,
 /// another number does not.
