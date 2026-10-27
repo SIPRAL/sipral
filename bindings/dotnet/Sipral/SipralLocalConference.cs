@@ -238,7 +238,10 @@ public sealed class SipralLocalConference : IDisposable
     private void Run()
     {
         var speaker = new short[FrameSamples];
-        var next = DateTime.UtcNow;
+        // the frames are paced on a monotonic clock: the wall clock steps when the system's time
+        // is set, and a step would stall the mix or send a burst of frames
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var schedule = new FrameSchedule(0.020, () => clock.Elapsed.TotalSeconds);
         while (!_closed.IsSet)
         {
             var mic = NextChunk();
@@ -253,15 +256,10 @@ public sealed class SipralLocalConference : IDisposable
                 _frames.Writer.TryWrite(speaker.AsSpan(0, (int)written).ToArray());
             }
             SendWaiting();
-            next += TimeSpan.FromMilliseconds(20);
-            var remaining = next - DateTime.UtcNow;
-            if (remaining > TimeSpan.Zero)
+            var wait = schedule.Next();
+            if (wait > TimeSpan.Zero)
             {
-                _closed.Wait(remaining);
-            }
-            else
-            {
-                next = DateTime.UtcNow;
+                _closed.Wait(wait);
             }
         }
     }

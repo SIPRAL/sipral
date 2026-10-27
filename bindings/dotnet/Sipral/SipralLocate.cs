@@ -183,10 +183,11 @@ public static class SipralDns
     {
         using var socket = new UdpClient(server.AddressFamily);
         socket.Send(question, question.Length, server);
-        var deadline = DateTime.UtcNow + Patience;
+        // a monotonic clock: a wall clock set back mid-wait would stretch it by as much
+        var waited = System.Diagnostics.Stopwatch.StartNew();
         while (true)
         {
-            var left = deadline - DateTime.UtcNow;
+            var left = Patience - waited.Elapsed;
             if (left <= TimeSpan.Zero)
             {
                 return null;
