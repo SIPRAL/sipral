@@ -37,6 +37,7 @@ import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralHookVerdict
+import org.sipral.idiomatic.SipralSubscription
 import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.digitOf
 import org.sipral.idiomatic.declinedChallengeOf
@@ -112,6 +113,9 @@ data class SipralAccountOptions(
     val instanceId: String? = null,
     /** Header fields for every REGISTER, one `name:value` per line. */
     val headers: String? = null,
+    /** Take a `message-summary` NOTIFY no subscription asked for, from the
+     * account's server. */
+    val unsolicitedMwi: Boolean = false,
 ) {
     /** The header fields, split at each line and at the first colon of each. */
     internal val headerFields: List<SipralHeader>
@@ -140,6 +144,9 @@ class SipralReactCore(
     private val calls = SipralCallBook<SipralCall>()
     private val arrived = ConcurrentHashMap<String, SipralEvent>()
     private val transfers = ConcurrentHashMap<String, SipralEvent>()
+    /** Each mailbox subscription, and the account it is of: the library
+     * names only the subscription on what one brings. */
+    private val mailboxes = HashMap<String, Pair<SipralSubscription, String>>()
     /** What the message hook does: changed under this object's lock, then
      * the hook installed again with a copy, so it reads nothing shared while
      * the stack is locked around it. */
@@ -213,6 +220,7 @@ class SipralReactCore(
         accounts.clear()
         arrived.clear()
         transfers.clear()
+        synchronized(mailboxes) { mailboxes.clear() }
         messageRules = emptyList()
         watchingMessages = false
         closing.close()
@@ -289,6 +297,7 @@ class SipralReactCore(
             instanceId = options.instanceId,
             headers = options.headerFields,
             security = SipralAccountSecurity(webrtc = options.webrtc),
+            unsolicitedMwi = options.unsolicitedMwi,
         )
         val id = account.handle.toString()
         accounts[id] = account
@@ -307,7 +316,30 @@ class SipralReactCore(
     fun removeAccount(account: String) = guarded {
         accountOf(account).remove()
         accounts.remove(account)
+        synchronized(mailboxes) { mailboxes.values.removeAll { it.second == account } }
         Unit
+    }
+
+    /** [account]'s `message-summary` subscription (RFC 3842) to [target];
+     * its handle comes back. It is kept before the client's events are read
+     * on, so the first NOTIFY finds the account it is of. */
+    fun subscribeMailbox(account: String, target: String, expiresSeconds: Long = 0, destination: String? = null): String =
+        guarded {
+            val line = accountOf(account)
+            synchronized(mailboxes) {
+                val made = line.subscribe(target, "message-summary", expiresSeconds = expiresSeconds, destination = destination)
+                val id = made.handle.toString()
+                mailboxes[id] = made to account
+                id
+            }
+        }
+
+    /** Unsubscribe (`Expires: 0`); the handle goes after the notifier's last
+     * NOTIFY, which may still report the mailbox. */
+    fun endSubscription(subscription: String) = guarded {
+        val kept = synchronized(mailboxes) { mailboxes[subscription] }
+            ?: throw SipralRefusal("invalidHandle", "no subscription $subscription")
+        kept.first.end()
     }
 
     fun placeCall(
@@ -469,7 +501,14 @@ class SipralReactCore(
             SipralEventKind.TRANSFER_REQUESTED.value.toLong() -> transfers[id] = event
             else -> {}
         }
-        emit(flatten(event))
+        val flat = flatten(event).toMutableMap()
+        if (event.kind == SipralEventKind.MESSAGES_WAITING.value.toLong() && flat["account"] == "") {
+            // a subscription's NOTIFY names no account; the one it is of
+            (flat["subscription"] as? String)
+                ?.let { subscription -> synchronized(mailboxes) { mailboxes[subscription] } }
+                ?.let { flat["account"] = it.second }
+        }
+        emit(flat)
         if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
             arrived.remove(id)
             transfers.remove(id)
@@ -592,6 +631,16 @@ class SipralReactCore(
                     text(call.toUri)?.let { flat["toUri"] = it }
                 }
                 event.kind in digitKinds -> digitOf(event)?.let { flat["digit"] = it.toString() }
+                event.kind == SipralEventKind.MESSAGES_WAITING.value.toLong() -> {
+                    val mailbox = event.payload.message
+                    flat["subscription"] = if (mailbox.subscription == 0L) "" else mailbox.subscription.toString()
+                    flat["waiting"] = mailbox.waiting != 0L
+                    flat["newMessages"] = mailbox.newMessages.toDouble()
+                    flat["oldMessages"] = mailbox.oldMessages.toDouble()
+                    flat["urgentNewMessages"] = mailbox.urgentNewMessages.toDouble()
+                    flat["urgentOldMessages"] = mailbox.urgentOldMessages.toDouble()
+                    mailbox.messageAccount?.let { flat["messageAccount"] = it }
+                }
                 declinedChallengeOf(event) != null -> {
                     val challenge = declinedChallengeOf(event)!!
                     challenge.refusal?.let { flat["challengeRefusal"] = camel(it.name) }

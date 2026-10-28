@@ -111,6 +111,9 @@ public struct SipralAccountOptions {
     public var instanceId: String?
     /// Header fields for every REGISTER, one `name:value` per line.
     public var headers: String?
+    /// Take a `message-summary` NOTIFY no subscription asked for, from the
+    /// account's server.
+    public var unsolicitedMwi = false
 
     public init(aor: String, registrarAddress: String? = nil, serverUri: String? = nil) {
         self.aor = aor
@@ -138,6 +141,7 @@ public struct SipralAccountOptions {
         webrtc = (options["webrtc"] as? NSNumber)?.boolValue ?? false
         instanceId = options["instanceId"] as? String
         headers = options["headers"] as? String
+        unsolicitedMwi = (options["unsolicitedMwi"] as? NSNumber)?.boolValue ?? false
     }
 
     /// The header fields, split at each line and at the first colon of each.
@@ -169,6 +173,9 @@ public final class SipralReactCore: @unchecked Sendable {
     private var calls: [String: Call] = [:]
     private var arrived: [String: SipralEvent] = [:]
     private var transfers: [String: SipralEvent] = [:]
+    /// Each mailbox subscription, and the account it is of: the library
+    /// names only the subscription on what one brings.
+    private var mailboxes: [String: (subscription: SipralSubscription, account: String)] = [:]
     /// What the message hook does: changed under `lock`, then the hook
     /// installed again with a copy, so it reads nothing shared while the
     /// stack is locked around it.
@@ -262,6 +269,7 @@ public final class SipralReactCore: @unchecked Sendable {
             accounts.removeAll()
             arrived.removeAll()
             transfers.removeAll()
+            mailboxes.removeAll()
             messageRules = []
             watchingMessages = false
             return was
@@ -342,7 +350,8 @@ public final class SipralReactCore: @unchecked Sendable {
                 expiresSeconds: options.expiresSeconds,
                 headers: options.headerFields,
                 realms: options.realms.map { $0.split(separator: "\n").map(String.init) } ?? [],
-                security: AccountSecurity(webrtc: options.webrtc)
+                security: AccountSecurity(webrtc: options.webrtc),
+                unsolicitedMwi: options.unsolicitedMwi
             )
             let id = String(account.handle)
             locked { accounts[id] = account }
@@ -367,7 +376,40 @@ public final class SipralReactCore: @unchecked Sendable {
     public func removeAccount(_ account: String) throws {
         try guarded {
             try accountOf(account).remove()
-            _ = locked { accounts.removeValue(forKey: account) }
+            locked {
+                accounts.removeValue(forKey: account)
+                mailboxes = mailboxes.filter { $0.value.account != account }
+            }
+        }
+    }
+
+    /// `account`'s `message-summary` subscription (RFC 3842) to `target`;
+    /// its handle comes back. It is kept before the stack's events are read
+    /// again, so the first NOTIFY finds the account it is of.
+    public func subscribeMailbox(
+        _ account: String, target: String, expiresSeconds: UInt32 = 0, destination: String? = nil
+    ) throws -> String {
+        try guarded {
+            let line = try accountOf(account)
+            return try locked {
+                let made = try line.subscribe(
+                    to: target, package: "message-summary", expiresSeconds: expiresSeconds, destination: destination
+                )
+                let id = String(made.handle)
+                mailboxes[id] = (made, account)
+                return id
+            }
+        }
+    }
+
+    /// Unsubscribe (`Expires: 0`); the handle goes after the notifier's last
+    /// NOTIFY, which may still report the mailbox.
+    public func endSubscription(_ subscription: String) throws {
+        try guarded {
+            guard let kept = locked({ mailboxes[subscription] }) else {
+                throw SipralRefusal("invalidHandle", "no subscription \(subscription)")
+            }
+            try kept.subscription.end()
         }
     }
 
@@ -583,14 +625,19 @@ public final class SipralReactCore: @unchecked Sendable {
 
     private func deliver(_ event: SipralEvent) {
         let id = String(event.call)
+        var flat = Self.flatten(event)
         locked {
             if event.kind == .incomingCall {
                 arrived[id] = event
             } else if event.kind == .transferRequested {
                 transfers[id] = event
+            } else if event.kind == .messagesWaiting, flat["account"] as? String == "",
+                      let subscription = flat["subscription"] as? String, let kept = mailboxes[subscription] {
+                // a subscription's NOTIFY names no account; the one it is of
+                flat["account"] = kept.account
             }
         }
-        emit(Self.flatten(event))
+        emit(flat)
         if event.kind == .callEnded {
             let ended: Call? = locked {
                 arrived.removeValue(forKey: id)
@@ -744,6 +791,14 @@ public final class SipralReactCore: @unchecked Sendable {
             challenge.refusal.map { flat["challengeRefusal"] = String(describing: $0) }
             challenge.server.map { flat["challengeServer"] = $0 }
             flat["challengeRealms"] = challenge.realms.joined(separator: "\n")
+        } else if event.kind == .messagesWaiting, let mailbox = event.messageData {
+            flat["subscription"] = mailbox.subscription == Sipral.handleNone ? "" : String(mailbox.subscription)
+            flat["waiting"] = mailbox.waiting
+            flat["newMessages"] = Double(mailbox.newMessages)
+            flat["oldMessages"] = Double(mailbox.oldMessages)
+            flat["urgentNewMessages"] = Double(mailbox.urgentNewMessages)
+            flat["urgentOldMessages"] = Double(mailbox.urgentOldMessages)
+            mailbox.messageAccount.map { flat["messageAccount"] = $0 }
         } else if let locate = event.locateData {
             locate.targets.map { flat["targets"] = $0 }
             if event.kind == .locateFailed, let failure = SipralLocateFailure(rawValue: locate.failureRaw) {

@@ -269,6 +269,24 @@ export interface AccountOptions {
    * (`expiresSeconds`), and an account with no `registrar` refuses them.
    */
   headers?: Header[];
+  /**
+   * Take a `message-summary` NOTIFY no subscription asked for, sent to the
+   * account from its `registrarAddress`, for a PBX that ties the mailbox to
+   * the extension, refuses a subscription to it and notifies unasked
+   * (VitalPBX): it is answered 200 and raised as "messagesWaiting" with no
+   * subscription. This departs from RFC 6665 §4.1.3 on purpose, so it is off
+   * by default, when such a NOTIFY is answered 481 and raises nothing.
+   */
+  unsolicitedMwi?: boolean;
+}
+
+export interface SubscribeMailboxOptions {
+  /** The mailbox's URI; left out, the account's own `aor` (RFC 3842 §4). */
+  target?: string;
+  /** The duration asked for, in seconds; left out or zero, an hour. */
+  expiresSeconds?: number;
+  /** host:port the SUBSCRIBE goes to, when it is not the account's server. */
+  destination?: string;
 }
 
 /**

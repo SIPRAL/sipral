@@ -156,6 +156,89 @@ private final class OneRegister: @unchecked Sendable {
     }
 }
 
+/// A mailbox's server on a UDP socket on loopback: what reaches it, and the
+/// answers and NOTIFYs it sends back.
+private final class Mailbox: @unchecked Sendable {
+    /// Two new messages, one of them urgent, and five old, for `account`.
+    static func waiting(for account: String) -> String {
+        "Messages-Waiting: yes\r\nMessage-Account: \(account)\r\nVoice-Message: 2/5 (1/0)\r\n"
+    }
+
+    private let socket: UDPSocket
+    var address: String { socket.localAddress }
+
+    init() throws {
+        socket = try UDPSocket(host: "127.0.0.1", port: 0)
+    }
+
+    func close() {
+        socket.close()
+    }
+
+    /// The next message that starts with `start` within `seconds`, and where
+    /// it came from; anything else is let go.
+    func next(_ start: String, within seconds: Double = 10) async -> (message: String, from: String)? {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            while let (data, from) = socket.receive() {
+                let text = String(decoding: data, as: UTF8.self)
+                if text.hasPrefix(start) { return (text, from) }
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return nil
+    }
+
+    static func header(_ name: String, in message: String) -> String? {
+        let head = message.components(separatedBy: "\r\n\r\n").first ?? message
+        return head.components(separatedBy: "\r\n")
+            .first { $0.lowercased().hasPrefix(name.lowercased() + ":") }
+            .map { String($0.drop(while: { $0 != ":" }).dropFirst()).trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A response to `request`, its dialog's fields copied and `To` tagged.
+    func answer(_ request: (message: String, from: String), _ status: String, more: String = "") {
+        var lines = ["SIP/2.0 \(status)"]
+        for name in ["Via", "From", "To", "Call-ID", "CSeq"] {
+            guard var value = Self.header(name, in: request.message) else { continue }
+            if name == "To" && !value.contains(";tag=") {
+                value += ";tag=mailbox"
+            }
+            lines.append("\(name): \(value)")
+        }
+        let text = lines.joined(separator: "\r\n") + "\r\n" + more + "Content-Length: 0\r\n\r\n"
+        _ = socket.send(Array(text.utf8), to: request.from)
+    }
+
+    /// A `message-summary` NOTIFY to `aor` at `phone`: in the dialog
+    /// `subscribe` opened, or outside any, the way a PBX that notifies
+    /// unasked sends it.
+    func notify(_ aor: String, at phone: String, in subscribe: String?) {
+        let body = Self.waiting(for: aor)
+        let dialog: String
+        if let subscribe {
+            dialog = "From: \(Self.header("To", in: subscribe) ?? "");tag=mailbox\r\n"
+                + "To: \(Self.header("From", in: subscribe) ?? "")\r\n"
+                + "Call-ID: \(Self.header("Call-ID", in: subscribe) ?? "")\r\n"
+        } else {
+            dialog = "From: <\(aor)>;tag=mailbox\r\nTo: <\(aor)>\r\nCall-ID: unasked-\(UUID().uuidString)\r\n"
+        }
+        let user = aor.dropFirst("sip:".count).prefix { $0 != "@" }
+        let text = "NOTIFY sip:\(user)@\(phone) SIP/2.0\r\n"
+            + "Via: SIP/2.0/UDP \(address);branch=z9hG4bK-\(UUID().uuidString.prefix(8))\r\n"
+            + "Max-Forwards: 70\r\n"
+            + dialog
+            + "CSeq: 1 NOTIFY\r\n"
+            + "Contact: <sip:mailbox@\(address)>\r\n"
+            + "Event: message-summary\r\n"
+            + "Subscription-State: active;expires=600\r\n"
+            + "Content-Type: application/simple-message-summary\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n\r\n"
+            + body
+        _ = socket.send(Array(text.utf8), to: phone)
+    }
+}
+
 private func refusal(_ code: String, file: StaticString = #filePath, line: UInt = #line, _ body: () throws -> Void) {
     XCTAssertThrowsError(try body(), file: file, line: line) { error in
         XCTAssertEqual((error as? SipralRefusal)?.code, code, "\(error)", file: file, line: line)
@@ -668,6 +751,77 @@ final class SipralReactCoreTests: XCTestCase {
         let report = try XCTUnwrap(answered.media).encryption()
         XCTAssertEqual(report.first?.keyExchange, .dtls)
         XCTAssertEqual(report.first?.authenticated, true, "the certificate did not match the fingerprint")
+    }
+
+    /// A mailbox subscribed to through the bridge: the SUBSCRIBE asks for
+    /// `message-summary`, the NOTIFY reaches JavaScript as `messagesWaiting`
+    /// naming the account and the subscription with every count, and ending
+    /// it unsubscribes.
+    func testASubscribedMailboxReachesJavaScript() async throws {
+        let server = try Mailbox()
+        defer { server.close() }
+        let alice = try Phone("alice")
+        defer { alice.core.close() }
+        let line = try alice.core.addAccount(SipralAccountOptions(["aor": alice.aor, "registrarAddress": server.address]))
+        refusal("invalidHandle") { _ = try alice.core.subscribeMailbox("424242", target: alice.aor) }
+        let mailbox = try alice.core.subscribeMailbox(line, target: alice.aor, expiresSeconds: 600)
+        let subscribed = await server.next("SUBSCRIBE ")
+        let subscribe = try XCTUnwrap(subscribed, "no SUBSCRIBE")
+        XCTAssertTrue(subscribe.message.hasPrefix("SUBSCRIBE \(alice.aor) "), subscribe.message)
+        XCTAssertEqual(Mailbox.header("Event", in: subscribe.message), "message-summary")
+        XCTAssertEqual(Mailbox.header("Expires", in: subscribe.message), "600")
+        server.answer(subscribe, "200 OK", more: "Expires: 600\r\n")
+        server.notify(alice.aor, at: alice.address, in: subscribe.message)
+        let told = try await alice.await("the mailbox's state") { $0["kind"] as? String == "messagesWaiting" }
+        XCTAssertEqual(told["account"] as? String, line)
+        XCTAssertEqual(told["subscription"] as? String, mailbox)
+        XCTAssertEqual(told["waiting"] as? Bool, true)
+        XCTAssertEqual(told["newMessages"] as? Double, 2)
+        XCTAssertEqual(told["oldMessages"] as? Double, 5)
+        XCTAssertEqual(told["urgentNewMessages"] as? Double, 1)
+        XCTAssertEqual(told["urgentOldMessages"] as? Double, 0)
+        XCTAssertEqual(told["messageAccount"] as? String, alice.aor)
+
+        try alice.core.endSubscription(mailbox)
+        let unsubscribing = await server.next("SUBSCRIBE ")
+        let unsubscribe = try XCTUnwrap(unsubscribing, "no unsubscribe")
+        XCTAssertEqual(Mailbox.header("Expires", in: unsubscribe.message), "0")
+        refusal("invalidHandle") { try alice.core.endSubscription("424242") }
+    }
+
+    /// A PBX that notifies unasked (VitalPBX): an account JavaScript added
+    /// with `unsolicitedMwi` answers 200 and reports the mailbox with no
+    /// subscription; one added without answers 481 and reports nothing.
+    func testAnUnaskedMailboxReachesOnlyAnAccountThatAllowsIt() async throws {
+        for allowed in [true, false] {
+            let server = try Mailbox()
+            defer { server.close() }
+            let alice = try Phone("alice")
+            defer { alice.core.close() }
+            var options: [String: Any] = ["aor": alice.aor, "registrarAddress": server.address]
+            if allowed {
+                options["unsolicitedMwi"] = NSNumber(value: true)
+            }
+            let line = try alice.core.addAccount(SipralAccountOptions(options))
+            server.notify(alice.aor, at: alice.address, in: nil)
+            let answered = await server.next("SIP/2.0 ")
+            let answer = try XCTUnwrap(answered, "the NOTIFY was not answered")
+            if allowed {
+                XCTAssertTrue(answer.message.hasPrefix("SIP/2.0 200"), answer.message)
+                let told = try await alice.await("the unasked mailbox") { $0["kind"] as? String == "messagesWaiting" }
+                XCTAssertEqual(told["account"] as? String, line)
+                XCTAssertEqual(told["subscription"] as? String, "")
+                XCTAssertEqual(told["waiting"] as? Bool, true)
+                XCTAssertEqual(told["newMessages"] as? Double, 2)
+                XCTAssertEqual(told["oldMessages"] as? Double, 5)
+                XCTAssertEqual(told["messageAccount"] as? String, alice.aor)
+            } else {
+                XCTAssertTrue(answer.message.hasPrefix("SIP/2.0 481"), answer.message)
+                // refused, a second is long enough for an event that should not come
+                let raised = await waitFor(1) { alice.events.contains { $0["kind"] as? String == "messagesWaiting" } }
+                XCTAssertFalse(raised, "an account that did not allow it reported an unasked mailbox")
+            }
+        }
     }
 
     /// A status reaches JavaScript by its name, and one this build has no

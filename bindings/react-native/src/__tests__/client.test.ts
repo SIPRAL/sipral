@@ -6,6 +6,7 @@ import type {
   CallEndedEvent,
   ChallengeDeclinedEvent,
   IncomingCallEvent,
+  MessagesWaitingEvent,
   NetworkTestEvent,
   RegistrationChangedEvent,
   TokenRequiredEvent,
@@ -498,6 +499,122 @@ describe('accounts', () => {
       'invalidArgument',
     );
     expect(native.methods()).toEqual(['open']);
+  });
+});
+
+describe('a mailbox', () => {
+  const line = {aor: 'sip:alice@pbx.example', registrarAddress: '203.0.113.5:5060'};
+
+  it('crosses unsolicitedMwi, and leaves it out of an account that does not ask for it', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({...line, unsolicitedMwi: true});
+    expect(native.calls[1].args[0]).toMatchObject({unsolicitedMwi: true});
+    await client.addAccount(line);
+    expect((native.calls[2].args[0] as {unsolicitedMwi?: boolean}).unsolicitedMwi).toBeUndefined();
+  });
+
+  it('is subscribed to as the account\'s own unless another is named, and refused before crossing when it cannot be', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount(line);
+    const own = await account.subscribeMailbox();
+    expect(native.calls[2]).toEqual({
+      method: 'subscribeMailbox',
+      args: [account.id, 'sip:alice@pbx.example', {expiresSeconds: undefined, destination: undefined}],
+    });
+    expect([own.id, own.account, own.target, own.ended]).toEqual(['2', account, 'sip:alice@pbx.example', false]);
+    const other = await account.subscribeMailbox({
+      target: 'sip:*97@pbx.example',
+      expiresSeconds: 600,
+      destination: '203.0.113.6:5060',
+    });
+    expect(native.calls[3].args).toEqual([account.id, 'sip:*97@pbx.example', {expiresSeconds: 600, destination: '203.0.113.6:5060'}]);
+    expect(other.target).toBe('sip:*97@pbx.example');
+
+    const before = native.calls.length;
+    expect((await refusal(account.subscribeMailbox({target: ' '}))).code).toBe('invalidArgument');
+    expect((await refusal(account.subscribeMailbox({expiresSeconds: -1}))).code).toBe('invalidArgument');
+    expect((await refusal(account.subscribeMailbox({expiresSeconds: 1.5}))).code).toBe('invalidArgument');
+    expect(native.calls).toHaveLength(before);
+    native.failNext('subscribeMailbox', 'wrongState', 'the stack is shutting down');
+    expect((await refusal(account.subscribeMailbox())).code).toBe('wrongState');
+  });
+
+  it('reports what a subscription brings on the account and on the client, naming the subscription', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount(line);
+    const mailbox = await account.subscribeMailbox();
+    const onAccount: MessagesWaitingEvent[] = [];
+    const onClient: MessagesWaitingEvent[] = [];
+    account.on('messagesWaiting', (event) => onAccount.push(event));
+    client.on('messagesWaiting', (event) => onClient.push(event));
+    native.emit({
+      kind: 'messagesWaiting',
+      account: account.id,
+      subscription: mailbox.id,
+      waiting: true,
+      newMessages: 2,
+      oldMessages: 5,
+      urgentNewMessages: 1,
+      urgentOldMessages: 0,
+      messageAccount: 'sip:*97@pbx.example',
+    });
+    expect(onAccount).toEqual([
+      {
+        account,
+        subscription: mailbox,
+        waiting: true,
+        newMessages: 2,
+        oldMessages: 5,
+        urgentNewMessages: 1,
+        urgentOldMessages: 0,
+        messageAccount: 'sip:*97@pbx.example',
+      },
+    ]);
+    expect(onClient).toEqual(onAccount);
+  });
+
+  it('reports a mailbox told unasked with no subscription, with what the event left out as none', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount({...line, unsolicitedMwi: true});
+    const told: MessagesWaitingEvent[] = [];
+    client.on('messagesWaiting', (event) => told.push(event));
+    native.emit({kind: 'messagesWaiting', account: account.id, subscription: '', waiting: false});
+    native.emit({kind: 'messagesWaiting', account: '99', subscription: '', waiting: true});
+    expect(told).toEqual([
+      {
+        account,
+        subscription: null,
+        waiting: false,
+        newMessages: 0,
+        oldMessages: 0,
+        urgentNewMessages: 0,
+        urgentOldMessages: 0,
+        messageAccount: '',
+      },
+    ]);
+  });
+
+  it('is ended once, and refuses an end once its account is removed', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount(line);
+    const mailbox = await account.subscribeMailbox();
+    await mailbox.end();
+    expect(native.calls[3]).toEqual({method: 'endSubscription', args: [mailbox.id]});
+    expect(mailbox.ended).toBe(true);
+    expect((await refusal(mailbox.end())).code).toBe('wrongState');
+
+    const second = await account.subscribeMailbox();
+    native.failNext('endSubscription', 'invalidHandle', 'no subscription');
+    expect((await refusal(second.end())).code).toBe('invalidHandle');
+    expect(second.ended).toBe(false);
+    await account.remove();
+    const before = native.calls.length;
+    expect((await refusal(second.end())).code).toBe('wrongState');
+    expect(native.calls).toHaveLength(before);
+    const told: MessagesWaitingEvent[] = [];
+    client.on('messagesWaiting', (event) => told.push(event));
+    native.emit({kind: 'messagesWaiting', account: account.id, subscription: second.id, waiting: true});
+    expect(told).toEqual([]);
   });
 });
 

@@ -5,15 +5,21 @@
 // SipralReactCores on loopback, driven with the handles and options
 // JavaScript would pass, every event read back as the bridge's map. A call
 // placed, answered, held, resumed, sent digits, transferred to a third
-// phone, a second call refused, and a client closed. Built with
+// phone, a second call refused, a mailbox subscribed to and one told
+// unasked, and a client closed. Built with
 // bindings/kotlin by scripts/check.sh and run under -Xcheck:jni.
 
 package org.sipral.reactnative.core
 
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
+import java.net.SocketAddress
+import java.net.SocketTimeoutException
 import java.util.Collections
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
@@ -497,6 +503,158 @@ private fun aWebRtcLineReachesTheLibrary(): String {
     return "a WebRTC line offered and keyed by a handshake"
 }
 
+/** A mailbox's server on a UDP socket on loopback: what reaches it, and the
+ * answers and NOTIFYs it sends back. */
+private class Mailbox : AutoCloseable {
+    private val socket = DatagramSocket(0, InetAddress.getLoopbackAddress()).apply { soTimeout = 50 }
+    val address = "127.0.0.1:${socket.localPort}"
+
+    /** The next message that starts with [start] within [withinMs], and
+     * where it came from; anything else is let go. */
+    fun next(start: String, withinMs: Long = 10_000): Pair<String, SocketAddress>? {
+        val deadline = System.currentTimeMillis() + withinMs
+        val buffer = ByteArray(65536)
+        while (System.currentTimeMillis() < deadline) {
+            val packet = DatagramPacket(buffer, buffer.size)
+            try {
+                socket.receive(packet)
+            } catch (_: SocketTimeoutException) {
+                continue
+            }
+            val text = String(packet.data, 0, packet.length, Charsets.UTF_8)
+            if (text.startsWith(start)) {
+                return text to packet.socketAddress
+            }
+        }
+        return null
+    }
+
+    /** A response to [request], its dialog's fields copied and `To` tagged. */
+    fun answer(request: Pair<String, SocketAddress>, status: String, more: String = "") {
+        val lines = mutableListOf("SIP/2.0 $status")
+        for (name in listOf("Via", "From", "To", "Call-ID", "CSeq")) {
+            val value = header(name, request.first) ?: continue
+            lines += "$name: " + if (name == "To" && ";tag=" !in value) "$value;tag=mailbox" else value
+        }
+        send(lines.joinToString("\r\n") + "\r\n" + more + "Content-Length: 0\r\n\r\n", request.second)
+    }
+
+    /** A `message-summary` NOTIFY to [aor] at [phone]: in the dialog
+     * [subscribe] opened, or outside any, the way a PBX that notifies unasked
+     * sends it. */
+    fun notify(aor: String, phone: String, subscribe: String?) {
+        val body = waiting(aor)
+        val dialog = if (subscribe != null) {
+            "From: ${header("To", subscribe)};tag=mailbox\r\nTo: ${header("From", subscribe)}\r\n" +
+                "Call-ID: ${header("Call-ID", subscribe)}\r\n"
+        } else {
+            "From: <$aor>;tag=mailbox\r\nTo: <$aor>\r\nCall-ID: unasked-${System.nanoTime()}\r\n"
+        }
+        val user = aor.removePrefix("sip:").substringBefore('@')
+        val text = "NOTIFY sip:$user@$phone SIP/2.0\r\n" +
+            "Via: SIP/2.0/UDP $address;branch=z9hG4bK-${System.nanoTime()}\r\n" +
+            "Max-Forwards: 70\r\n" + dialog +
+            "CSeq: 1 NOTIFY\r\n" +
+            "Contact: <sip:mailbox@$address>\r\n" +
+            "Event: message-summary\r\n" +
+            "Subscription-State: active;expires=600\r\n" +
+            "Content-Type: application/simple-message-summary\r\n" +
+            "Content-Length: ${body.toByteArray().size}\r\n\r\n" + body
+        val (host, port) = phone.substringBeforeLast(':') to phone.substringAfterLast(':').toInt()
+        send(text, InetSocketAddress(host, port))
+    }
+
+    private fun send(text: String, to: SocketAddress) {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        socket.send(DatagramPacket(bytes, bytes.size, to))
+    }
+
+    override fun close() = socket.close()
+
+    companion object {
+        /** Two new messages, one of them urgent, and five old, for [account]. */
+        fun waiting(account: String) =
+            "Messages-Waiting: yes\r\nMessage-Account: $account\r\nVoice-Message: 2/5 (1/0)\r\n"
+
+        fun header(name: String, message: String): String? = message.substringBefore("\r\n\r\n").split("\r\n")
+            .firstOrNull { it.lowercase().startsWith(name.lowercase() + ":") }
+            ?.substringAfter(':')?.trim()
+    }
+}
+
+/** A mailbox subscribed to through the core: the SUBSCRIBE asks for
+ * `message-summary`, the NOTIFY is emitted as `messagesWaiting` naming the
+ * account and the subscription with every count, and ending it unsubscribes. */
+private fun aSubscribedMailboxReachesJavaScript(): String {
+    Mailbox().use { server ->
+        val alice = Phone("alice")
+        try {
+            val line = alice.core.addAccount(SipralAccountOptions(aor = alice.aor, registrarAddress = server.address))
+            refusal("invalidHandle") { alice.core.subscribeMailbox("424242", alice.aor) }
+            val mailbox = alice.core.subscribeMailbox(line, alice.aor, expiresSeconds = 600)
+            val subscribe = assertNotNull(server.next("SUBSCRIBE "), "no SUBSCRIBE")
+            assertTrue(subscribe.first.startsWith("SUBSCRIBE ${alice.aor} "), subscribe.first)
+            assertEquals("message-summary", Mailbox.header("Event", subscribe.first))
+            assertEquals("600", Mailbox.header("Expires", subscribe.first))
+            server.answer(subscribe, "200 OK", "Expires: 600\r\n")
+            server.notify(alice.aor, alice.address, subscribe.first)
+            val told = alice.await("the mailbox's state") { it["kind"] == "messagesWaiting" }
+            assertEquals(line, told["account"])
+            assertEquals(mailbox, told["subscription"])
+            assertEquals(true, told["waiting"])
+            assertEquals(2.0, told["newMessages"])
+            assertEquals(5.0, told["oldMessages"])
+            assertEquals(1.0, told["urgentNewMessages"])
+            assertEquals(0.0, told["urgentOldMessages"])
+            assertEquals(alice.aor, told["messageAccount"])
+
+            alice.core.endSubscription(mailbox)
+            val unsubscribe = assertNotNull(server.next("SUBSCRIBE "), "no unsubscribe")
+            assertEquals("0", Mailbox.header("Expires", unsubscribe.first))
+            refusal("invalidHandle") { alice.core.endSubscription("424242") }
+        } finally {
+            alice.core.close()
+        }
+    }
+    return "a mailbox subscribed to reported 2 new and 5 old with its account and subscription, and was ended"
+}
+
+/** A PBX that notifies unasked (VitalPBX): an account added with
+ * `unsolicitedMwi` answers 200 and reports the mailbox with no
+ * subscription; one added without answers 481 and reports nothing. */
+private fun anUnaskedMailboxReachesOnlyAnAccountThatAllowsIt(): String {
+    for (allowed in listOf(true, false)) {
+        Mailbox().use { server ->
+            val alice = Phone("alice")
+            try {
+                val line = alice.core.addAccount(
+                    SipralAccountOptions(aor = alice.aor, registrarAddress = server.address, unsolicitedMwi = allowed),
+                )
+                server.notify(alice.aor, alice.address, null)
+                val answer = assertNotNull(server.next("SIP/2.0 "), "the NOTIFY was not answered").first
+                if (allowed) {
+                    assertTrue(answer.startsWith("SIP/2.0 200"), answer)
+                    val told = alice.await("the unasked mailbox") { it["kind"] == "messagesWaiting" }
+                    assertEquals(line, told["account"])
+                    assertEquals("", told["subscription"])
+                    assertEquals(true, told["waiting"])
+                    assertEquals(2.0, told["newMessages"])
+                    assertEquals(5.0, told["oldMessages"])
+                    assertEquals(alice.aor, told["messageAccount"])
+                } else {
+                    assertTrue(answer.startsWith("SIP/2.0 481"), answer)
+                    // refused, a second is long enough for an event that should not come
+                    val raised = waitUntil(1_000) { synchronized(alice.events) { alice.events.any { it["kind"] == "messagesWaiting" } } }
+                    assertFalse(raised, "an account that did not allow it reported an unasked mailbox")
+                }
+            } finally {
+                alice.core.close()
+            }
+        }
+    }
+    return "an unasked mailbox reached only an account that allows it, refused 481 otherwise"
+}
+
 /** Account realms and held audio reach the library through the core,
  * unknown values are refused first, and a declined challenge is flattened
  * with refusal, server and realms. */
@@ -757,7 +915,8 @@ fun main() {
             "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
             aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule() + "; " +
             theRateOfACallsFramesIsChosen() + "; " + theEchoCancellationIsSwitchedAndReadBack() + "; " +
-            aCallsOwnCodecsReachTheLibrary() + "; " + aWebRtcLineReachesTheLibrary()
+            aCallsOwnCodecsReachTheLibrary() + "; " + aWebRtcLineReachesTheLibrary() + "; " +
+            aSubscribedMailboxReachesJavaScript() + "; " + anUnaskedMailboxReachesOnlyAnAccountThatAllowsIt()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

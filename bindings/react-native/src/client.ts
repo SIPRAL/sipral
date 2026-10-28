@@ -32,6 +32,7 @@ import type {
   RegistrationState,
   Settings,
   Signalling,
+  SubscribeMailboxOptions,
   TokenError,
   NatKind,
   NetworkProbe,
@@ -94,6 +95,23 @@ export interface TokenRequiredEvent {
   scope: string;
   /** The authorization server, an https URI, '' for none named. */
   authzServer: string;
+}
+
+/** A mailbox's state, from a `message-summary` NOTIFY (RFC 3842). */
+export interface MessagesWaitingEvent {
+  account: SipralAccount;
+  /** The subscription that reported it, or null for a server that reported it unasked (`unsolicitedMwi`). */
+  subscription: SipralSubscription | null;
+  /** Whether messages wait: the body's `Messages-Waiting: yes`. */
+  waiting: boolean;
+  /** New voice messages (RFC 3458 §6.2), zero when the body had no such line. */
+  newMessages: number;
+  oldMessages: number;
+  /** Of those, the ones flagged urgent. */
+  urgentNewMessages: number;
+  urgentOldMessages: number;
+  /** The `Message-Account` the server named, '' for none. */
+  messageAccount: string;
 }
 
 /** A network test's result; `verdict` is the worst of the parts tested. */
@@ -190,6 +208,7 @@ export interface ClientEvents {
   locateFailed: LocateFailedEvent;
   challengeDeclined: ChallengeDeclinedEvent;
   tokenRequired: TokenRequiredEvent;
+  messagesWaiting: MessagesWaitingEvent;
   networkTest: NetworkTestEvent;
   /** Every SIP message, while `watchMessages(true)` holds. */
   message: MessageSeenEvent;
@@ -216,6 +235,7 @@ export interface AccountEvents {
   locateFailed: LocateFailedEvent;
   challengeDeclined: ChallengeDeclinedEvent;
   tokenRequired: TokenRequiredEvent;
+  messagesWaiting: MessagesWaitingEvent;
 }
 
 const DTMF = /^[0-9A-Da-d*#]+$/;
@@ -300,6 +320,34 @@ export class SipralAccount {
     );
   }
 
+  /**
+   * Subscribe to a mailbox's `message-summary` (RFC 3842), the account's own
+   * unless `target` names another; the stack refreshes the subscription
+   * until `end()`. What the server notifies arrives as 'messagesWaiting',
+   * naming the subscription this resolves with.
+   */
+  async subscribeMailbox(options: SubscribeMailboxOptions = {}): Promise<SipralSubscription> {
+    const target = options.target ?? this.aor;
+    const id = await this.client.run(
+      () => {
+        this.usable();
+        if (target.trim() === '') {
+          throw new SipralError('invalidArgument', 'a mailbox is named by a URI, or left out for the account\'s own');
+        }
+        const expires = options.expiresSeconds;
+        if (expires !== undefined && !(Number.isInteger(expires) && expires >= 0 && expires <= 0xffffffff)) {
+          throw new SipralError('invalidArgument', 'expiresSeconds is a whole number from 0 to 4294967295');
+        }
+      },
+      (native) =>
+        native.subscribeMailbox(this.id, target, {
+          expiresSeconds: options.expiresSeconds,
+          destination: options.destination,
+        }),
+    );
+    return this.client.subscriptionFor(id, this, target);
+  }
+
   /** Registers, resolving once registered or rejecting with the failing event. */
   registerAndWait(timeoutMs = 30_000): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -359,10 +407,56 @@ export class SipralAccount {
     this.emitter.emit('tokenRequired', event);
   }
 
-  private usable(): void {
+  /** @internal */
+  messagesWaiting(event: MessagesWaitingEvent): void {
+    this.emitter.emit('messagesWaiting', event);
+  }
+
+  /** @internal */
+  usable(): void {
     if (this.removed) {
       throw new SipralError('wrongState', `${this.aor} was removed`);
     }
+  }
+}
+
+/**
+ * One `message-summary` subscription of an account (RFC 6665), made by
+ * `account.subscribeMailbox`.
+ */
+export class SipralSubscription {
+  private finished = false;
+
+  /** @internal Made by `SipralAccount.subscribeMailbox`. */
+  constructor(
+    private readonly client: SipralClient,
+    /** The library's handle, as the native half named it. */
+    readonly id: string,
+    readonly account: SipralAccount,
+    /** The mailbox subscribed to. */
+    readonly target: string,
+  ) {}
+
+  /** Whether `end()` has been asked for. */
+  get ended(): boolean {
+    return this.finished;
+  }
+
+  /**
+   * Unsubscribe (`Expires: 0`). The server's last NOTIFY may still report
+   * the mailbox; nothing more can be done with the subscription.
+   */
+  async end(): Promise<void> {
+    await this.client.run(
+      () => {
+        this.account.usable();
+        if (this.finished) {
+          throw new SipralError('wrongState', `subscription ${this.id} has ended`);
+        }
+      },
+      (native) => native.endSubscription(this.id),
+    );
+    this.finished = true;
   }
 }
 
@@ -647,6 +741,7 @@ export class SipralClient {
   private readonly emitter = new TypedEmitter<ClientEvents>();
   private readonly accounts = new Map<string, SipralAccount>();
   private readonly calls = new Map<string, SipralCall>();
+  private readonly mailboxes = new Map<string, SipralSubscription>();
   private subscription: EventSubscription | undefined;
   private closed = false;
   private address = '';
@@ -943,6 +1038,18 @@ export class SipralClient {
   /** @internal */
   forgetAccount(id: string): void {
     this.accounts.delete(id);
+    for (const [handle, mailbox] of this.mailboxes) {
+      if (mailbox.account.id === id) {
+        this.mailboxes.delete(handle);
+      }
+    }
+  }
+
+  /** @internal */
+  subscriptionFor(id: string, account: SipralAccount, target: string): SipralSubscription {
+    const mailbox = new SipralSubscription(this, id, account, target);
+    this.mailboxes.set(id, mailbox);
+    return mailbox;
   }
 
   /**
@@ -1064,6 +1171,25 @@ export class SipralClient {
       this.emitter.emit('tokenRequired', payload);
       return;
     }
+    if (event.kind === 'messagesWaiting') {
+      const account = this.accounts.get(event.account);
+      if (account === undefined) {
+        return;
+      }
+      const payload: MessagesWaitingEvent = {
+        account,
+        subscription: this.mailboxes.get(event.subscription ?? '') ?? null,
+        waiting: event.waiting ?? false,
+        newMessages: event.newMessages ?? 0,
+        oldMessages: event.oldMessages ?? 0,
+        urgentNewMessages: event.urgentNewMessages ?? 0,
+        urgentOldMessages: event.urgentOldMessages ?? 0,
+        messageAccount: event.messageAccount ?? '',
+      };
+      account.messagesWaiting(payload);
+      this.emitter.emit('messagesWaiting', payload);
+      return;
+    }
     if (event.call === '') {
       return;
     }
@@ -1093,6 +1219,7 @@ export class SipralClient {
     this.subscription = undefined;
     this.accounts.clear();
     this.calls.clear();
+    this.mailboxes.clear();
     this.emitter.removeAllListeners();
     if (SipralClient.opened === this) {
       SipralClient.opened = undefined;

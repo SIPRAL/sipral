@@ -75,6 +75,15 @@ export type NativeAccountOptions = {
   instanceId?: string;
   /** Header fields for every REGISTER, one `name:value` per line. */
   headers?: string;
+  /** Take a `message-summary` NOTIFY no subscription asked for, from the account's server. */
+  unsolicitedMwi?: boolean;
+};
+
+export type NativeSubscribeOptions = {
+  /** The duration asked for, 0 to 4 294 967 295 seconds; left out or 0, an hour. */
+  expiresSeconds?: CodegenTypes.Double;
+  /** host:port the SUBSCRIBE goes to, in place of the account's server. */
+  destination?: string;
 };
 
 /** One call's own controls in one direction, read back. */
@@ -203,6 +212,20 @@ export type NativeEvent = {
   message?: string;
   /** A message seen: the far end, host:port. */
   remote?: string;
+  /** A mailbox's state: the subscription that reported it, "" for a server that reported it unasked. */
+  subscription?: string;
+  /** Whether messages wait: RFC 3842's `Messages-Waiting: yes`. */
+  waiting?: boolean;
+  /** New voice messages. */
+  newMessages?: CodegenTypes.Double;
+  /** Old voice messages. */
+  oldMessages?: CodegenTypes.Double;
+  /** New voice messages flagged urgent. */
+  urgentNewMessages?: CodegenTypes.Double;
+  /** Old voice messages flagged urgent. */
+  urgentOldMessages?: CodegenTypes.Double;
+  /** The `Message-Account` the server named, when it named one. */
+  messageAccount?: string;
 };
 
 export interface Spec extends TurboModule {
@@ -217,6 +240,14 @@ export interface Spec extends TurboModule {
   /** The OAuth 2.0 access token the account's server asked for; "" takes it away. */
   setAccessToken(account: string, token: string): Promise<void>;
   removeAccount(account: string): Promise<void>;
+  /**
+   * The account's `message-summary` subscription (RFC 3842) to `target`;
+   * resolves with the subscription's handle, which each "messagesWaiting" it
+   * brings names, with the account.
+   */
+  subscribeMailbox(account: string, target: string, options: NativeSubscribeOptions): Promise<string>;
+  /** Unsubscribe (`Expires: 0`); the handle goes after the notifier's last NOTIFY. */
+  endSubscription(subscription: string): Promise<void>;
 
   /** Resolves with the call's handle. */
   placeCall(account: string, target: string, options: NativeCallOptions): Promise<string>;

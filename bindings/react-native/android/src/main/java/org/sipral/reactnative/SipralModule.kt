@@ -76,6 +76,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 webrtc = options.flag("webrtc") ?: false,
                 instanceId = options.text("instanceId"),
                 headers = options.text("headers"),
+                unsolicitedMwi = options.flag("unsolicitedMwi") ?: false,
             ),
         )
     }
@@ -88,6 +89,19 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
         settle(promise) { core.setAccessToken(account, token) }
 
     override fun removeAccount(account: String, promise: Promise) = settle(promise) { core.removeAccount(account) }
+
+    override fun subscribeMailbox(account: String, target: String, options: ReadableMap, promise: Promise) =
+        settle(promise) {
+            core.subscribeMailbox(
+                account,
+                target,
+                options.number("expiresSeconds")?.toLong() ?: 0,
+                options.text("destination"),
+            )
+        }
+
+    override fun endSubscription(subscription: String, promise: Promise) =
+        settle(promise) { core.endSubscription(subscription) }
 
     override fun placeCall(account: String, target: String, options: ReadableMap, promise: Promise) = settle(promise) {
         core.placeCall(

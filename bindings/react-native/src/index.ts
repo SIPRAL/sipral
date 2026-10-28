@@ -9,7 +9,7 @@ import type {Spec} from './NativeSipral';
 import {SipralClient} from './client';
 import type {OpenOptions} from './types';
 
-export {SipralAccount, SipralCall, SipralClient} from './client';
+export {SipralAccount, SipralCall, SipralClient, SipralSubscription} from './client';
 export type {
   AccountEvents,
   CallEndedEvent,
@@ -22,6 +22,7 @@ export type {
   IncomingCallEvent,
   LocatedEvent,
   LocateFailedEvent,
+  MessagesWaitingEvent,
   NetworkTestEvent,
   RegistrationChangedEvent,
   TokenRequiredEvent,
@@ -60,6 +61,7 @@ export type {
   Settings,
   Signalling,
   Srtp,
+  SubscribeMailboxOptions,
 } from './types';
 
 export const Sipral = {

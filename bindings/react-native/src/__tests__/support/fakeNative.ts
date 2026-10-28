@@ -90,6 +90,12 @@ export class FakeNative implements Spec {
   removeAccount(...args: Parameters<Spec['removeAccount']>) {
     return this.settle('removeAccount', args, undefined);
   }
+  subscribeMailbox(...args: Parameters<Spec['subscribeMailbox']>) {
+    return this.settle('subscribeMailbox', args, this.handle());
+  }
+  endSubscription(...args: Parameters<Spec['endSubscription']>) {
+    return this.settle('endSubscription', args, undefined);
+  }
   placeCall(...args: Parameters<Spec['placeCall']>) {
     return this.settle('placeCall', args, this.handle());
   }

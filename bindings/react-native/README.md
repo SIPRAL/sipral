@@ -196,6 +196,18 @@ checks the rest as it does a call's.
 with ICE, rtcp-mux and BUNDLE, whatever the client's `srtp` says; the native
 halves pass it to the Swift and Kotlin layers' account security.
 
+`account.subscribeMailbox({target, expiresSeconds, destination})` subscribes
+to a mailbox's `message-summary` (RFC 3842), the account's own `aor` unless
+`target` names another, and resolves with a `SipralSubscription` the stack
+refreshes until its `end()`. Each NOTIFY arrives as `messagesWaiting` on the
+account and on the client: `waiting`, `newMessages`, `oldMessages`,
+`urgentNewMessages`, `urgentOldMessages`, `messageAccount` ('' when the
+server sent none) and the `subscription`. `unsolicitedMwi: true` takes the
+mailbox state a PBX that ties it to the extension sends unasked (VitalPBX),
+from the account's `registrarAddress`: answered 200 and raised as
+`messagesWaiting` with `subscription` null. It departs from RFC 6665 §4.1.3
+on purpose and is off by default, when such a NOTIFY is answered 481.
+
 ### A message hook
 
 The other layers hand every SIP message to a function that answers before
@@ -274,6 +286,7 @@ listener that throws does not stop the others.
 | `transferRequested` | `call`, `target`, `attended` |
 | `transferProgress`, `transferDone` | `call`, `statusCode` |
 | `digitReceived` | `call`, `digit` |
+| `messagesWaiting` | `account`, `subscription`, `waiting`, the four counts, `messageAccount` |
 | `event` | every event, as the native half handed it over |
 
 State and reason names are the library's own enumerations in lower camel

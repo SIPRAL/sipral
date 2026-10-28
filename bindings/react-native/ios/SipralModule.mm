@@ -132,8 +132,14 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   put(given, @"realms", options.realms());
   put(given, @"websocketHost", options.websocketHost());
   put(given, @"websocketResource", options.websocketResource());
+  if (options.webrtc().has_value()) {
+    put(given, @"webrtc", @(options.webrtc().value()));
+  }
   put(given, @"instanceId", options.instanceId());
   put(given, @"headers", options.headers());
+  if (options.unsolicitedMwi().has_value()) {
+    put(given, @"unsolicitedMwi", @(options.unsolicitedMwi().value()));
+  }
   [_bridge addAccount:given resolve:resolve reject:reject];
 }
 
@@ -160,6 +166,27 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
                reject:(RCTPromiseRejectBlock)reject
 {
   [_bridge removeAccount:account resolve:resolve reject:reject];
+}
+
+- (void)subscribeMailbox:(NSString *)account
+                  target:(NSString *)target
+                 options:(JS::NativeSipral::NativeSubscribeOptions &)options
+                 resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject
+{
+  NSMutableDictionary *given = [NSMutableDictionary dictionary];
+  if (options.expiresSeconds().has_value()) {
+    put(given, @"expiresSeconds", @(options.expiresSeconds().value()));
+  }
+  put(given, @"destination", options.destination());
+  [_bridge subscribeMailbox:account target:target options:given resolve:resolve reject:reject];
+}
+
+- (void)endSubscription:(NSString *)subscription
+                resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge endSubscription:subscription resolve:resolve reject:reject];
 }
 
 - (void)placeCall:(NSString *)account

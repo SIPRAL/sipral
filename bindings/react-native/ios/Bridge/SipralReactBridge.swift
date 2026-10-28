@@ -53,6 +53,23 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.removeAccount(account) }
     }
 
+    @objc public func subscribeMailbox(
+        _ account: String, target: String, options: [String: Any],
+        resolve: @escaping Resolve, reject: @escaping Reject
+    ) {
+        settle(resolve, reject) {
+            try self.core.subscribeMailbox(
+                account, target: target,
+                expiresSeconds: UInt32(clamping: (options["expiresSeconds"] as? NSNumber)?.int64Value ?? 0),
+                destination: options["destination"] as? String
+            )
+        }
+    }
+
+    @objc public func endSubscription(_ subscription: String, resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.endSubscription(subscription) }
+    }
+
     @objc public func placeCall(
         _ account: String, target: String, options: [String: Any],
         resolve: @escaping Resolve, reject: @escaping Reject
