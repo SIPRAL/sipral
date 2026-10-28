@@ -15,10 +15,12 @@ private final class Phone: @unchecked Sendable {
     let aor: String
     var address = ""
 
-    init(_ name: String, audio: AudioMode = .application) throws {
+    init(_ name: String, audio: AudioMode = .application, host: String = "127.0.0.1", codecs: String? = nil) throws {
         aor = "sip:\(name)@sipral.invalid"
         core = SipralReactCore(emit: { [weak self] event in self?.record(event) }, audio: { _ in audio })
-        address = try core.open(SipralOpenOptions(bindHost: "127.0.0.1"))
+        var options = SipralOpenOptions(bindHost: host)
+        options.codecs = codecs
+        address = try core.open(options)
     }
 
     private func record(_ event: [String: Any]) {
@@ -58,6 +60,26 @@ private func waitFor(_ seconds: Double, _ condition: () -> Bool) async -> Bool {
         try? await Task.sleep(nanoseconds: 10_000_000)
     }
     return condition()
+}
+
+/// A non-loopback IPv4 address of this machine, since RFC 8445 §5.1.1.1
+/// keeps loopback out of ICE's candidates. Nothing leaves the machine.
+private func hostAddress() throws -> String {
+    var list: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&list) == 0, let start = list else { throw XCTSkip("no interfaces") }
+    defer { freeifaddrs(list) }
+    for entry in sequence(first: start, next: { $0.pointee.ifa_next }) {
+        let flags = Int32(entry.pointee.ifa_flags)
+        guard let address = entry.pointee.ifa_addr, address.pointee.sa_family == sa_family_t(AF_INET),
+              flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0, flags & IFF_POINTOPOINT == 0 else { continue }
+        var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { inet in
+            var sin = inet.pointee.sin_addr
+            _ = inet_ntop(AF_INET, &sin, &text, socklen_t(INET_ADDRSTRLEN))
+        }
+        return String(cString: text)
+    }
+    throw XCTSkip("no interface but loopback: ICE has no host candidate to test with")
 }
 
 /// The first of `events` that `matches`, or a refusal once `seconds` pass.
@@ -612,6 +634,40 @@ final class SipralReactCoreTests: XCTestCase {
             XCTAssertTrue(up, "the call's media never came up")
             XCTAssertEqual(try XCTUnwrap(placed.media).info().codec, pcma)
         }
+    }
+
+    /// An account the bridge was told is a PBX WebRTC line offers what one
+    /// does, and its call is keyed by a handshake on the pair ICE chose.
+    func testAWebRtcLineReachesTheLibrary() async throws {
+        let host = try hostAddress()
+        // one codec, as the Swift layer's own test of the line: the offer
+        // with every codec of the default list does not fit a datagram
+        let alice = try Phone("alice", host: host, codecs: "PCMU")
+        let bob = try SipralStack(audio: .application, bindHost: host, codecs: "PCMU")
+        defer { alice.core.close(); bob.close() }
+        let line = try alice.core.addAccount(SipralAccountOptions([
+            "aor": alice.aor, "registrarAddress": bob.bindAddress, "webrtc": NSNumber(value: true),
+        ]))
+        _ = try bob.addAccount(
+            aor: "sip:bob@sipral.invalid", registrarAddress: alice.address, security: AccountSecurity(webrtc: true)
+        )
+        let arrivals = bob.events()
+        _ = try alice.core.placeCall(line, "sip:bob@\(bob.bindAddress)", destination: nil, codecs: nil)
+        let incoming = try await first(arrivals) { $0.kind == .incomingCall }
+        let offer = String(
+            decoding: try XCTUnwrap(incoming.callData?.remoteSdp ?? incoming.message, "the call carried no offer"),
+            as: UTF8.self
+        )
+        for wanted in ["UDP/TLS/RTP/SAVPF", "a=fingerprint:", "a=group:BUNDLE 0", "a=rtcp-mux-only", "a=ice-ufrag:"] {
+            XCTAssertTrue(offer.contains(wanted), "\(wanted) is not in the offer:\n\(offer)")
+        }
+        let answered = try bob.answerCall(incoming)
+        defer { answered.close() }
+        let keyed = await waitFor(15) { (try? answered.media?.encryption().first?.encrypted) == true }
+        XCTAssertTrue(keyed, "the handshake never keyed the call")
+        let report = try XCTUnwrap(answered.media).encryption()
+        XCTAssertEqual(report.first?.keyExchange, .dtls)
+        XCTAssertEqual(report.first?.authenticated, true, "the certificate did not match the fingerprint")
     }
 
     /// A status reaches JavaScript by its name, and one this build has no

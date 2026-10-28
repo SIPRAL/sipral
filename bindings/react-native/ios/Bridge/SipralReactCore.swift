@@ -105,6 +105,8 @@ public struct SipralAccountOptions {
     public var websocketHost: String?
     /// The resource a WebSocket account's handshake asks for.
     public var websocketResource: String?
+    /// A PBX WebRTC line: DTLS-SRTP on UDP/TLS/RTP/SAVPF, ICE and BUNDLE.
+    public var webrtc = false
     /// The `+sip.instance` URN on the `Contact` of every REGISTER.
     public var instanceId: String?
     /// Header fields for every REGISTER, one `name:value` per line.
@@ -133,6 +135,7 @@ public struct SipralAccountOptions {
         realms = options["realms"] as? String
         websocketHost = options["websocketHost"] as? String
         websocketResource = options["websocketResource"] as? String
+        webrtc = (options["webrtc"] as? NSNumber)?.boolValue ?? false
         instanceId = options["instanceId"] as? String
         headers = options["headers"] as? String
     }
@@ -338,7 +341,8 @@ public final class SipralReactCore: @unchecked Sendable {
                 instanceId: options.instanceId,
                 expiresSeconds: options.expiresSeconds,
                 headers: options.headerFields,
-                realms: options.realms.map { $0.split(separator: "\n").map(String.init) } ?? []
+                realms: options.realms.map { $0.split(separator: "\n").map(String.init) } ?? [],
+                security: AccountSecurity(webrtc: options.webrtc)
             )
             let id = String(account.handle)
             locked { accounts[id] = account }

@@ -69,6 +69,8 @@ export type NativeAccountOptions = {
   websocketHost?: string;
   /** The resource a WebSocket account's handshake asks for. */
   websocketResource?: string;
+  /** A PBX WebRTC line: DTLS-SRTP on UDP/TLS/RTP/SAVPF, ICE and BUNDLE. */
+  webrtc?: boolean;
   /** The `+sip.instance` URN on the `Contact` of every REGISTER. */
   instanceId?: string;
   /** Header fields for every REGISTER, one `name:value` per line. */

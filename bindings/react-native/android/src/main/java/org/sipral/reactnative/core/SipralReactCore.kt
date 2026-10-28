@@ -32,6 +32,7 @@ import org.sipral.SipralRegistrationState
 import org.sipral.SipralSrtp
 import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralAccount
+import org.sipral.idiomatic.SipralAccountSecurity
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
@@ -105,6 +106,8 @@ data class SipralAccountOptions(
     val websocketHost: String? = null,
     /** The resource a WebSocket account's handshake asks for. */
     val websocketResource: String? = null,
+    /** A PBX WebRTC line: DTLS-SRTP on UDP/TLS/RTP/SAVPF, ICE and BUNDLE. */
+    val webrtc: Boolean = false,
     /** The `+sip.instance` URN on the `Contact` of every REGISTER. */
     val instanceId: String? = null,
     /** Header fields for every REGISTER, one `name:value` per line. */
@@ -285,6 +288,7 @@ class SipralReactCore(
             websocketResource = options.websocketResource,
             instanceId = options.instanceId,
             headers = options.headerFields,
+            security = SipralAccountSecurity(webrtc = options.webrtc),
         )
         val id = account.handle.toString()
         accounts[id] = account

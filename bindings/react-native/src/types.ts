@@ -251,6 +251,12 @@ export interface AccountOptions {
    */
   websocketResource?: string;
   /**
+   * A PBX WebRTC line (Asterisk's `webrtc=yes`): the account's calls offer
+   * and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF`, with ICE, rtcp-mux and
+   * BUNDLE, whatever the client's `srtp` says.
+   */
+  webrtc?: boolean;
+  /**
    * The device's `+sip.instance` (RFC 5626 §4.1): `urn:uuid:` and a UUID
    * the application keeps for the installation. It goes on the `Contact` of
    * every REGISTER, which a push proxy (RFC 8599) may require.

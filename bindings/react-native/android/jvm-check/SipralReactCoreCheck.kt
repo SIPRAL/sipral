@@ -10,7 +10,9 @@
 
 package org.sipral.reactnative.core
 
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.util.Collections
 import java.util.concurrent.CompletableFuture
@@ -28,20 +30,22 @@ import org.sipral.SipralChallengeRefusal
 import org.sipral.SipralCodec
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralKeyExchange
 import org.sipral.SipralNatKind
 import org.sipral.SipralNetworkProbe
 import org.sipral.SipralNetworkVerdict
 import org.sipral.SipralServerReach
 import org.sipral.SipralToggle
 import org.sipral.SipralTokenError
+import org.sipral.idiomatic.SipralAccountSecurity
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.awaitNext
 
-private class Phone(name: String, mode: SipralAudioMode = SipralAudioMode.Application) {
+private class Phone(name: String, mode: SipralAudioMode = SipralAudioMode.Application, host: String = "127.0.0.1") {
     val events: MutableList<Map<String, Any>> = Collections.synchronizedList(ArrayList())
     val core = SipralReactCore(emit = { events += it }, audio = { mode })
-    val address = core.open(SipralOpenOptions(bindHost = "127.0.0.1"))
+    val address = core.open(SipralOpenOptions(bindHost = host))
     val aor = "sip:$name@sipral.invalid"
 
     /** The first event, from the [after]th on, that [matches] -- or a failure naming what was seen. */
@@ -445,6 +449,54 @@ private fun aCallsOwnCodecsReachTheLibrary(): String {
     return "a call's own codecs settled on PCMA, placed and answered"
 }
 
+/** A non-loopback IPv4 address of this machine, since RFC 8445 §5.1.1.1
+ * keeps loopback out of ICE's candidates. Nothing leaves the machine. */
+private fun hostAddress(): String? = NetworkInterface.getNetworkInterfaces().asSequence()
+    .filter { it.isUp && !it.isLoopback && !it.isPointToPoint && !it.isVirtual }
+    .flatMap { it.inetAddresses.asSequence() }
+    .firstOrNull { it is Inet4Address }
+    ?.hostAddress
+
+/** An account the core was told is a PBX WebRTC line offers what one does,
+ * and its call is keyed by a handshake on the pair ICE chose. */
+private fun aWebRtcLineReachesTheLibrary(): String {
+    val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
+    val alice = Phone("alice", host = host)
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, codecs = "PCMU").use { bob ->
+        try {
+            val line = alice.core.addAccount(
+                SipralAccountOptions(aor = alice.aor, registrarAddress = bob.bindAddress, webrtc = true),
+            )
+            bob.addAccount(
+                aor = "sip:bob@sipral.invalid",
+                registrarAddress = alice.address,
+                security = SipralAccountSecurity(webrtc = true),
+            )
+            val (_, incoming) = runBlocking {
+                bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                    alice.core.placeCall(line, "sip:bob@${bob.bindAddress}", destination = null, codecs = null)
+                }
+            }
+            val offer = String(assertNotNull(incoming.message, "the INVITE rode along"), Charsets.UTF_8)
+            for (wanted in listOf("UDP/TLS/RTP/SAVPF", "a=fingerprint:", "a=group:BUNDLE 0", "a=rtcp-mux-only", "a=ice-ufrag:")) {
+                assertTrue(offer.contains(wanted), "$wanted is not in the offer:\n$offer")
+            }
+            bob.answerCall(incoming).use { answered ->
+                assertTrue(
+                    waitUntil(15_000) { answered.media?.encryption()?.firstOrNull()?.encrypted == true },
+                    "the handshake never keyed the call",
+                )
+                val stream = answered.media!!.encryption().first()
+                assertEquals(SipralKeyExchange.DTLS, stream.keyExchange)
+                assertTrue(stream.authenticated, "the certificate did not match the fingerprint")
+            }
+        } finally {
+            alice.core.close()
+        }
+    }
+    return "a WebRTC line offered and keyed by a handshake"
+}
+
 /** Account realms and held audio reach the library through the core,
  * unknown values are refused first, and a declined challenge is flattened
  * with refusal, server and realms. */
@@ -705,7 +757,7 @@ fun main() {
             "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
             aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule() + "; " +
             theRateOfACallsFramesIsChosen() + "; " + theEchoCancellationIsSwitchedAndReadBack() + "; " +
-            aCallsOwnCodecsReachTheLibrary()
+            aCallsOwnCodecsReachTheLibrary() + "; " + aWebRtcLineReachesTheLibrary()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

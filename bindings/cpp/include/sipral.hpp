@@ -312,6 +312,8 @@ struct AccountOptions {
     /** The transport to open toward the server; zero leaves the stack's own. */
     sipral_transport_t stream_protocol = static_cast<sipral_transport_t>(0);
     sipral_srtp_t srtp = static_cast<sipral_srtp_t>(0);
+    /** A PBX WebRTC line: DTLS-SRTP on UDP/TLS/RTP/SAVPF, ICE and BUNDLE, whatever srtp says. */
+    bool webrtc = false;
     std::string auth_user;
     std::string auth_password;
 };
@@ -546,6 +548,7 @@ public:
         config.server_naptr = options.server_naptr ? SIPRAL_TOGGLE_ON : SIPRAL_TOGGLE_DEFAULT;
         config.stream_protocol = options.stream_protocol;
         config.srtp = options.srtp;
+        config.webrtc = options.webrtc ? SIPRAL_TOGGLE_ON : SIPRAL_TOGGLE_DEFAULT;
         config.auth_user = text(options.auth_user);
         config.auth_user_len = options.auth_user.size();
         config.auth_password = text(options.auth_password);

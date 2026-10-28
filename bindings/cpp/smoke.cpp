@@ -4,8 +4,9 @@
  * The C++ layer, compiled the way an integrator compiles it (C++17, warnings
  * fatal) and run against the shared library: a refused stack is an Error
  * with its status, an account goes with its object, a call's INVITE passes a
- * message hook that adds a header, and a hook that throws keeps the message
- * and has its exception come out of the next poll().
+ * message hook that adds a header, a hook that throws keeps the message
+ * and has its exception come out of the next poll(), and an account that is a
+ * WebRTC line offers DTLS-SRTP on UDP/TLS/RTP/SAVPF.
  *
  * Exits 0 when every check holds; prints each one that did not.
  */
@@ -139,6 +140,23 @@ int main()
     }
     stack.set_message_hook({});
     stack.poll();
+
+    sipral::AccountOptions line = alice();
+    line.aor = "sip:dave@127.0.0.1";
+    line.webrtc = true;
+    sipral::Account webrtc = stack.add_account(line);
+    // the line offers ICE, which keeps loopback out of its candidates (RFC 8445
+    // §5.1.1.1): the media address is a documentation one (RFC 5737), and
+    // nothing here is sent anywhere
+    webrtc.place_call("sip:erin@127.0.0.1:5999", "192.0.2.10:40004");
+    bool offered = false;
+    for (const auto &message : sent(stack.handle())) {
+        offered = offered || (message.rfind("INVITE sip:erin@", 0) == 0 &&
+                              message.find("UDP/TLS/RTP/SAVPF") != std::string::npos &&
+                              message.find("a=fingerprint:") != std::string::npos);
+    }
+    expect(offered, "a WebRTC line's INVITE did not offer DTLS-SRTP on UDP/TLS/RTP/SAVPF");
+
 
     expect(sipral::advertised_address("0.0.0.0:0", "127.0.0.1:5999").rfind("127.0.0.1:", 0) == 0,
            "the way toward loopback is not loopback");

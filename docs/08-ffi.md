@@ -3976,14 +3976,18 @@ per call, `CodecCatalog::with_webrtc`.
 account's SRTP policy: Swift `AccountSecurity(webrtc: true)`, .NET
 `new AccountSecurity(Webrtc: true)`, Kotlin `SipralAccountSecurity(webrtc =
 true)` and the JVM jar's `SipralJava.addAccount(..., webrtc)`, Python
-`add_account(..., webrtc=True)`, Dart `addAccount(..., webrtc: true)` and
-Node `stack.addAccount(aor, {webrtc: true})`. Each layer's tests call between
+`add_account(..., webrtc=True)`, Dart `addAccount(..., webrtc: true)`,
+Node `stack.addAccount(aor, {webrtc: true})`, React Native
+`client.addAccount({webrtc: true})`, which its Swift and Kotlin halves hand
+on as the account's security, and C++ `AccountOptions::webrtc`, whose smoke
+test reads the offer off the INVITE. Each other layer's tests call between
 two such accounts on this machine's own routable address — the line offers
 ICE, and ICE keeps loopback out of its candidates (RFC 8445 §5.1.1.1), so a
 WebRTC line between two stacks on `127.0.0.1` is refused before the INVITE
 with `SIPRAL_STATUS_NOT_SENT` — and read the call back as keyed by a
 DTLS-SRTP handshake (Dart, whose layer has no encryption report, by the
-handshake's `SIPRAL_EVENT_KIND_MEDIA_SECURED`). React Native's account options do not carry it yet.
+handshake's `SIPRAL_EVENT_KIND_MEDIA_SECURED`); React Native's two halves
+do the same through the bridge.
 
 ### Trickle ICE
 

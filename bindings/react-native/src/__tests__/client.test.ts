@@ -302,6 +302,14 @@ describe('accounts', () => {
     expect(native.calls).toHaveLength(before);
   });
 
+  it('crosses a PBX WebRTC line, and leaves it out of an account that does not ask for one', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({aor: 'sip:alice@pbx.example', registrarAddress: '203.0.113.5:5060', webrtc: true});
+    expect(native.calls[1].args[0]).toMatchObject({webrtc: true});
+    await client.addAccount({aor: 'sip:bob@pbx.example', registrarAddress: '203.0.113.5:5060'});
+    expect((native.calls[2].args[0] as {webrtc?: boolean}).webrtc).toBeUndefined();
+  });
+
   it('crosses the realms a password answers one per line, and refuses an empty one before crossing', async () => {
     const {client, native} = await opened();
     await client.addAccount({
