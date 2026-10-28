@@ -21,7 +21,11 @@
 //! registers, once when it is added. The REGISTER waits, as one waits for a
 //! lookup; [`crate::oversize::STREAM_WAIT`] after the question it is given up
 //! as unreachable and retried after the back-off any registration that found
-//! nobody gets (RFC 5626 §4.5), and the retry asks again. A connection that
+//! nobody gets (RFC 5626 §4.5), and the retry asks again. A server located
+//! by RFC 3263 with more than one address is not given up on: the REGISTER
+//! goes at once to the next address (§4.3), and asks for a connection there,
+//! when the wait runs out or the application says the connection could not
+//! be opened ([`UserAgent::flow_unavailable`]). A connection that
 //! closes or fails is asked for again at once: by a REGISTER for an account
 //! that was registered over it, which nothing can reach until it registers
 //! again (RFC 5626 §4.4.1), and directly for one that never registers.
@@ -109,6 +113,48 @@ impl UserAgent {
     #[must_use]
     pub fn wants_a_flow(&self) -> bool {
         !self.flows_wanted.is_empty()
+    }
+
+    /// The connection a [`UaEvent::TransportWanted`] asked for could not be
+    /// opened: the application tried and failed, which names no server.
+    ///
+    /// When every account waiting for a connection waits for the same
+    /// server, it is that server's: each one's held REGISTER goes on at once,
+    /// to the next address the server's lookup gave (RFC 3263 §4.3), or
+    /// fails as unreachable and backs off when there is none, rather than
+    /// waiting out [`STREAM_WAIT`] first. Accounts waiting for different
+    /// servers each wait on, since the failure cannot say whose it was; so
+    /// does an account that never registers, which asks again when its wait
+    /// runs out.
+    pub fn flow_unavailable(&mut self, now: Instant) {
+        let waiting: Vec<(AccountId, std::net::SocketAddr)> = self
+            .flows_wanted
+            .keys()
+            .filter_map(|id| self.accounts.get(id).map(|config| (*id, config.remote)))
+            .collect();
+        let Some(&(_, server)) = waiting.first() else {
+            return;
+        };
+        if waiting.iter().any(|(_, remote)| *remote != server) {
+            return;
+        }
+        let error = crate::UaError::Send(sipral_core::endpoint::SendError::NeedsStreamTransport);
+        for (account, _) in waiting {
+            let held = self.registrations.get(&account).is_some_and(|reg| {
+                reg.transaction.is_none()
+                    && (reg.unregistering
+                        || matches!(
+                            reg.state,
+                            RegistrationState::Registering | RegistrationState::Retrying
+                        ))
+            });
+            if !held {
+                continue;
+            }
+            self.flows_wanted.remove(&account);
+            self.register_unsent(account, &error, now);
+        }
+        self.drain(now);
     }
 
     /// A REGISTER for `account` that has to wait for its connection: held

@@ -671,7 +671,9 @@ entry! {
     ///
     /// Also answers a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the application could not honour:
     /// on the number it would have bound, waiting requests stop waiting (RFC 3261 §18.1.1:
-    /// trimmed into a datagram if it fits, else ended with 513). A never-bound number is
+    /// trimmed into a datagram if it fits, else ended with 513), and an account waiting for a
+    /// connection of its own to a server found by RFC 3263 sends its REGISTER to the next
+    /// address at once (§4.3), asking for a connection there. A never-bound number is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` when nothing waits.
     ///
     /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before the effects.
@@ -777,7 +779,9 @@ entry! {
 /// A failure on a transport that is not up is a connection that could not be opened. It
 /// answers a pending `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
 /// (`sipral_ua::UserAgent::stream_unavailable`), or is raised while an account waits for its
-/// own connection. Otherwise a never-bound number is refused.
+/// own connection, whose REGISTER then goes on at once to the next address its server's lookup
+/// gave (`sipral_ua::UserAgent::flow_unavailable`, RFC 3263 §4.3) when every account waiting
+/// waits for the same server. Otherwise a never-bound number is refused.
 ///
 /// The failure names no server, so it ends the requests waiting for a stream only when it can
 /// answer nothing else: one server asked a stream of, and no account waiting for a connection
@@ -792,16 +796,20 @@ fn lose(
     now: std::time::Instant,
 ) -> Result<(), Fail> {
     let streaming = state.agent.wants_a_stream();
-    let waiting = streaming || state.agent.wants_a_flow();
-    let answers_the_ask = streaming
-        && !state.agent.wants_a_flow()
-        && state.agent.endpoint_ref().streams_wanted() <= 1;
+    let flowing = state.agent.wants_a_flow();
+    let waiting = streaming || flowing;
+    let answers_the_ask = streaming && !flowing && state.agent.endpoint_ref().streams_wanted() <= 1;
     let Some(id) = state.transports.resolve(transport) else {
         if !waiting {
             return named(state, transport).map(|_| ());
         }
         if answers_the_ask {
             state.agent.stream_unavailable(now);
+        }
+        // an account's own connection that could not be opened: on to the
+        // next address its server's lookup gave, when it is clear whose
+        if flowing {
+            state.agent.flow_unavailable(now);
         }
         state.lost.push(Lost {
             transport,
@@ -826,6 +834,9 @@ fn lose(
         .map_err(|error| received_badly(&error))?;
     if answers_the_ask && !was_up {
         state.agent.stream_unavailable(now);
+    }
+    if flowing && !was_up {
+        state.agent.flow_unavailable(now);
     }
     state.lost.push(Lost {
         transport,
@@ -1240,6 +1251,8 @@ pub(crate) mod tests {
             websocket_resource_len: 0,
             webrtc: 0,
             reserved_1_4: 0,
+            unsolicited_mwi: 0,
+            reserved_1_10: 0,
         }
     }
 
@@ -1251,8 +1264,6 @@ pub(crate) mod tests {
         account
     }
 
-            unsolicited_mwi: 0,
-            reserved_1_10: 0,
     /// An account with its own `aor`, on `transport`, registering at `registrar`.
     fn line_on(
         stack: SipralHandle,
@@ -1286,17 +1297,6 @@ pub(crate) mod tests {
         handle
     }
 
-    /// A whole registration driven through the C ABI alone.
-    #[test]
-    fn a_registration_goes_out_and_comes_back_through_the_abi_alone() {
-        let mut observed = Observed::default();
-        let handle = stack(&mut observed);
-        let account = line(handle);
-
-        assert_eq!(
-            unsafe { sipral_account_register(handle, account, 1_000) },
-            SipralStatus::Ok,
-            "{}",
     /// The mailbox state a PBX sends with no subscription, out of any dialog.
     fn unasked_summary(call_id: &str) -> Vec<u8> {
         let body = "Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n";
@@ -1381,6 +1381,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// A whole registration driven through the C ABI alone.
+    #[test]
+    fn a_registration_goes_out_and_comes_back_through_the_abi_alone() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = line(handle);
+
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok,
+            "{}",
             last_error_text()
         );
         poll(handle, 1_000);

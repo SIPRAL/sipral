@@ -12045,7 +12045,9 @@ public static partial class Sipral
     ///
     /// Also answers a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the application could not honour:
     /// on the number it would have bound, waiting requests stop waiting (RFC 3261 §18.1.1:
-    /// trimmed into a datagram if it fits, else ended with 513). A never-bound number is
+    /// trimmed into a datagram if it fits, else ended with 513), and an account waiting for a
+    /// connection of its own to a server found by RFC 3263 sends its REGISTER to the next
+    /// address at once (§4.3), asking for a connection there. A never-bound number is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` when nothing waits.
     ///
     /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before the effects.

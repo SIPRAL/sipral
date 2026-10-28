@@ -1403,4 +1403,156 @@ mod tests {
                     && *to == addr("198.51.100.20:5060"))
         );
     }
+
+    const TLS: TransportId = TransportId(7);
+
+    /// A push proxy over TLS, found by SRV at two hosts.
+    fn proxy() -> Dns {
+        Dns::default()
+            .srv(
+                "_sips._tcp.pbx.example.com",
+                &[(5061, "nova.example.com"), (5061, "orion.example.com")],
+                3_600,
+            )
+            .a("nova.example.com", "192.0.2.54", 3_600)
+            .a("orion.example.com", "198.51.100.55", 3_600)
+    }
+
+    fn nova() -> SocketAddr {
+        addr("192.0.2.54:5061")
+    }
+
+    fn orion() -> SocketAddr {
+        addr("198.51.100.55:5061")
+    }
+
+    /// An account on a TLS connection of its own to a server found by SRV,
+    /// asked to register: what it asked for.
+    fn on_tls(now: Instant) -> (UserAgent, AccountId, Seen) {
+        let mut agent = agent(now);
+        let id = agent.add_account(
+            Account::located(
+                uri("sips:alice@pbx.example.com"),
+                uri("sips:pbx.example.com"),
+                uri("sips:alice@192.0.2.1;transport=tls"),
+                UDP,
+            )
+            .on_stream(TransportProtocol::Tls),
+        );
+        agent.register(id, now).unwrap();
+        let seen = settle(&mut agent, id, &proxy(), now);
+        (agent, id, seen)
+    }
+
+    fn wanted(seen: &Seen) -> Vec<SocketAddr> {
+        seen.events
+            .iter()
+            .filter_map(|event| match event {
+                UaEvent::TransportWanted {
+                    protocol: TransportProtocol::Tls,
+                    destination,
+                    ..
+                } => Some(*destination),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn failed(seen: &Seen) -> bool {
+        seen.events
+            .iter()
+            .any(|event| matches!(event, UaEvent::RegistrationFailed { .. }))
+    }
+
+    #[test]
+    fn a_connection_that_could_not_be_opened_sends_the_register_to_the_next_address_at_once() {
+        // RFC 3263 §4.3: the first host refused the connection, so the next
+        // one the same answer named is tried now, not after the back-off
+        let t0 = Instant::now();
+        let (mut agent, id, seen) = on_tls(t0);
+        assert_eq!(wanted(&seen), [nova()]);
+        assert!(seen.registers().is_empty(), "the REGISTER waits for it");
+
+        agent.flow_unavailable(t0);
+        let seen = settle(&mut agent, id, &proxy(), t0);
+        assert_eq!(wanted(&seen), [orion()], "{:?}", seen.events);
+        assert!(!failed(&seen), "a failover is not a failure");
+        assert!(seen.asked.is_empty(), "nothing looked up again");
+
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TLS,
+                    protocol: TransportProtocol::Tls,
+                    local: addr("192.0.2.1:50123"),
+                    remote: Some(orion()),
+                },
+                t0,
+            )
+            .unwrap();
+        let seen = settle(&mut agent, id, &proxy(), t0);
+        assert_eq!(seen.registers(), [orion()]);
+    }
+
+    #[test]
+    fn a_connection_that_never_came_sends_the_register_to_the_next_address() {
+        let t0 = Instant::now();
+        let (mut agent, id, _) = on_tls(t0);
+        // nothing said about it: the wait runs out instead
+        let seen = run(
+            &mut agent,
+            id,
+            &proxy(),
+            t0,
+            t0 + crate::oversize::STREAM_WAIT + Duration::from_secs(1),
+        );
+        assert_eq!(wanted(&seen), [orion()], "{:?}", seen.events);
+        assert!(!failed(&seen), "a failover is not a failure");
+    }
+
+    #[test]
+    fn a_connection_refused_at_the_last_address_fails_at_once_and_backs_off() {
+        let t0 = Instant::now();
+        let (mut agent, id, _) = on_tls(t0);
+        agent.flow_unavailable(t0);
+        let _ = settle(&mut agent, id, &proxy(), t0);
+        agent.flow_unavailable(t0);
+        let seen = settle(&mut agent, id, &proxy(), t0);
+        assert!(
+            seen.events.iter().any(|event| matches!(
+                event,
+                UaEvent::RegistrationFailed {
+                    reason: RegistrationFailure::Unreachable,
+                    retry_in: Some(_),
+                    ..
+                }
+            )),
+            "{:?}",
+            seen.events
+        );
+        assert!(wanted(&seen).is_empty(), "nothing asked until the retry");
+    }
+
+    #[test]
+    fn a_failure_with_two_servers_waited_for_names_neither() {
+        // the failure names no server: with two in question, each waits on
+        let t0 = Instant::now();
+        let (mut agent, id, _) = on_tls(t0);
+        let other = agent.add_account(
+            Account::new(
+                uri("sips:bob@other.example.com"),
+                uri("sips:other.example.com"),
+                uri("sips:bob@192.0.2.1;transport=tls"),
+                UDP,
+                addr("203.0.113.20:5061"),
+            )
+            .on_stream(TransportProtocol::Tls),
+        );
+        agent.register(other, t0).unwrap();
+        let _ = settle(&mut agent, id, &proxy(), t0);
+        agent.flow_unavailable(t0);
+        let seen = settle(&mut agent, id, &proxy(), t0);
+        assert!(wanted(&seen).is_empty(), "{:?}", seen.events);
+        assert!(!failed(&seen));
+    }
 }

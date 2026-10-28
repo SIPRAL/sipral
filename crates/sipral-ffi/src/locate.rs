@@ -487,6 +487,75 @@ pub(crate) mod tests {
         );
     }
 
+    /// RFC 3263 §4.3 through the C ABI: an account on a TLS connection of its
+    /// own, whose first SRV host refused the connection the application
+    /// tried, asks at once for one to the second.
+    #[test]
+    fn a_connection_refused_at_the_first_srv_host_asks_for_one_to_the_second() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let server = "sips:pbx.example.com";
+        let mut config = account_config();
+        config.registrar_address = ptr::null();
+        config.registrar_address_len = 0;
+        config.server_uri = server.as_ptr().cast();
+        config.server_uri_len = server.len();
+        config.stream_protocol = crate::stack::SipralTransport::Tls as u32;
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status = unsafe { sipral_account_add(handle, &raw const config, &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { crate::account::sipral_account_register(handle, account, 0) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 0);
+        let srv = observed.locating.clone().remove(0);
+        assert_eq!(srv.name, "_sips._tcp.pbx.example.com");
+        let targets = "300 0 0 5061 nova.example.com, 300 1 0 5061 orion.example.com";
+        assert_eq!(
+            answer(handle, account, &srv, SipralDnsAnswer::Records, targets),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 0);
+        let hosts = observed.locating.clone();
+        for (asked, address) in hosts[1..3]
+            .iter()
+            .zip(["300 192.0.2.54", "300 198.51.100.55"])
+        {
+            assert_eq!(
+                answer(handle, account, asked, SipralDnsAnswer::Records, address),
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+        }
+        poll(handle, 0);
+        let tls = crate::stack::SipralTransport::Tls as u32;
+        assert_eq!(observed.wanted, [(tls, "192.0.2.54:5061".to_owned())]);
+
+        // the application could not connect, on the number it would have bound
+        let status = unsafe {
+            crate::transport::sipral_stack_transport_failed(
+                handle,
+                9,
+                crate::transport::SipralTransportError::ConnectionRefused as u32,
+                0,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        poll(handle, 0);
+        assert_eq!(
+            observed.wanted.last(),
+            Some(&(tls, "198.51.100.55:5061".to_owned())),
+            "{:?}",
+            observed.wanted
+        );
+    }
+
     #[test]
     fn a_call_before_the_first_answer_is_the_wrong_moment() {
         let mut observed = Observed::default();

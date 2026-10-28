@@ -1516,13 +1516,24 @@ impl UserAgent {
 
     /// A REGISTER this layer sent on its own could not leave. One whose
     /// `Contact` the registrar cannot reach stops there, since no retry can
-    /// change the address; anything else backs off and tries again.
+    /// change the address; one on a connection of its own whose connection
+    /// never came goes at once to the next address its server's lookup gave
+    /// (RFC 3263 §4.3), as a REGISTER that timed out would; anything else
+    /// backs off and tries again.
     pub(crate) fn register_unsent(&mut self, account: AccountId, error: &UaError, now: Instant) {
         if matches!(error, UaError::UnreachableAddress { .. }) {
             self.give_up(account, RegistrationFailure::UnreachableContact, None, None);
-        } else {
-            self.retry_later(account, None, None, None, now);
+            return;
         }
+        let no_connection = matches!(error, UaError::Send(SendError::NeedsStreamTransport))
+            && self
+                .accounts
+                .get(&account)
+                .is_some_and(|config| config.own_stream.is_some());
+        if no_connection && self.fail_over_registration(account, now) {
+            return;
+        }
+        self.retry_later(account, None, None, None, now);
     }
 
     /// Something recoverable: schedule the next attempt (RFC 5626 §4.5).
