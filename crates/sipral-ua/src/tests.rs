@@ -15787,6 +15787,131 @@ fn message_summary_says_nothing_once_the_subscription_stops() {
     );
 }
 
+/// A `message-summary` NOTIFY outside any dialog, the way a PBX that ties the
+/// mailbox to the extension sends it: no subscription, no `To` tag.
+fn unasked_summary(call_id: &str, event: &str, body: &str) -> Vec<u8> {
+    format!(
+        "NOTIFY sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK-{call_id}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=pbx\r\n\
+To: <sip:alice@192.0.2.1>\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 1 NOTIFY\r\n\
+Contact: <sip:pbx@192.0.2.9:5060>\r\n\
+Event: {event}\r\n\
+Subscription-State: active\r\n\
+Content-Type: application/simple-message-summary\r\n\
+Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// The status of the one response that went out.
+fn answered_with(agent: &mut UserAgent) -> u16 {
+    let out = transmits(agent);
+    let response = only(&out, "SIP/2.0 ");
+    String::from_utf8_lossy(&response[8..11])
+        .parse()
+        .expect("a status code")
+}
+
+#[test]
+fn an_unasked_message_summary_is_refused_481_by_default() {
+    // RFC 6665 §4.1.3: a NOTIFY that matches no subscription "MUST return a
+    // 481"; taking one is the account's choice, never the default
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let body = simple_message_summary(true, 3, 1, 0, 0);
+    deliver(
+        &mut agent,
+        &unasked_summary("mwi-1", "message-summary", &body),
+        t0,
+    );
+    assert_eq!(answered_with(&mut agent), 481);
+    let seen = events(&mut agent);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(*event, UaEvent::MessagesWaitingUnasked { .. })),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_account_that_takes_unasked_message_summaries_reads_its_servers() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().accepts_unsolicited_message_summary());
+    let body = simple_message_summary(true, 3, 1, 1, 0);
+    deliver(
+        &mut agent,
+        &unasked_summary("mwi-2", "message-summary", &body),
+        t0,
+    );
+    assert_eq!(answered_with(&mut agent), 200);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::MessagesWaitingUnasked {
+                account,
+                waiting: true,
+                new: 3,
+                old: 1,
+                urgent_new: 1,
+                urgent_old: 0,
+                ref message_account,
+            } if account == id
+                && message_account.as_deref() == Some("sip:alice@vmail.example.com")
+        )),
+        "{seen:?}"
+    );
+
+    // a body that does not read is still answered, and leaves the lamp alone
+    deliver(
+        &mut agent,
+        &unasked_summary("mwi-3", "message-summary", "Voice-Message: x"),
+        t0,
+    );
+    assert_eq!(answered_with(&mut agent), 200);
+    let seen = events(&mut agent);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(*event, UaEvent::MessagesWaitingUnasked { .. })),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_unasked_message_summary_from_elsewhere_or_of_another_package_is_still_481() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account().accepts_unsolicited_message_summary());
+    let body = simple_message_summary(true, 3, 1, 0, 0);
+    // not the server the account registers with: anybody could light the lamp
+    deliver_from(
+        &mut agent,
+        &unasked_summary("mwi-4", "message-summary", &body),
+        elsewhere(),
+        t0,
+    );
+    assert_eq!(answered_with(&mut agent), 481);
+    // the server, but not the mailbox's package
+    deliver(&mut agent, &unasked_summary("mwi-5", "dialog", &body), t0);
+    assert_eq!(answered_with(&mut agent), 481);
+    let seen = events(&mut agent);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(*event, UaEvent::MessagesWaitingUnasked { .. })),
+        "{seen:?}"
+    );
+}
+
 // -- presence (RFC 3856) and publication (RFC 3903) --------------------------
 
 /// A presence document about `entity`, open or closed, with the RPID

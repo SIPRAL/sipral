@@ -853,6 +853,7 @@ class Stack:
         websocket_host: str | None = None,
         websocket_resource: str | None = None,
         webrtc: bool = False,
+        unsolicited_mwi: bool = False,
         instance_id: str | None = None,
         headers=None,
     ) -> Account:
@@ -887,6 +888,14 @@ class Stack:
         ``webrtc`` makes the account a PBX WebRTC line (Asterisk's
         ``webrtc=yes``): its calls offer and require DTLS-SRTP on
         ``UDP/TLS/RTP/SAVPF`` with ICE and BUNDLE, whatever ``srtp`` says.
+        ``unsolicited_mwi`` (off by default) answers 200 to a
+        `message-summary` NOTIFY no subscription asked for, sent from the
+        account's ``registrar_address`` to the account, and raises it as
+        `SIPRAL_EVENT_KIND_MESSAGES_WAITING` with the account's handle and
+        ``fields["subscription"]`` `SIPRAL_HANDLE_NONE`: a deliberate
+        departure from RFC 6665 Section 4.1.3 (off, such a NOTIFY is answered
+        481 and raises nothing), for a PBX that refuses a subscription to the
+        mailbox and notifies unasked.
 
         ``session_timer`` (:class:`sipral.enums.SessionTimer`): ``0`` default,
         ``OFF``, or ``INTERVAL`` with ``session_interval_seconds`` (90+,
@@ -971,6 +980,7 @@ class Stack:
             recording_in_clear=recording_in_clear,
             realms=realms,
             webrtc=webrtc,
+            unsolicited_mwi=unsolicited_mwi,
             instance_id=instance_id,
             headers=headers,
         )

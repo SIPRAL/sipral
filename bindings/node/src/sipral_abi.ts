@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 9;
+export const SIPRAL_ABI_VERSION_MINOR = 10;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5041,6 +5041,20 @@ export interface SipralAccountConfig {
    * Zero.
    */
   reserved_1_4: number;
+  /**
+   * A `sipral_toggle_t`: whether a `message-summary` NOTIFY no
+   * subscription asked for is taken, from the address the account
+   * registers with and addressed to it, for a PBX that ties the
+   * mailbox to the extension and notifies unasked. On, it is answered
+   * 200 and raised as `SIPRAL_EVENT_KIND_MESSAGES_WAITING` with the
+   * account's handle and no subscription. Zero or off: refused 481, as
+   * RFC 6665 §4.1.3 asks. ABI 1.10.
+   */
+  unsolicited_mwi: number;
+  /**
+   * Zero.
+   */
+  reserved_1_10: number;
 }
 koffi.struct('sipral_account_config_t', {
   size: 'size_t',
@@ -5109,6 +5123,8 @@ koffi.struct('sipral_account_config_t', {
   websocket_resource_len: 'size_t',
   webrtc: 'sipral_toggle_t',
   reserved_1_4: 'uint32_t',
+  unsolicited_mwi: 'sipral_toggle_t',
+  reserved_1_10: 'uint32_t',
 });
 
 /**
@@ -6762,7 +6778,9 @@ export interface SipralMessageEvent {
   message: Wide;
   /**
    * SIPRAL_EVENT_KIND_MESSAGES_WAITING: which subscription reported
-   * it. SIPRAL_HANDLE_NONE on the other kinds.
+   * it, or SIPRAL_HANDLE_NONE for a server that reported it unasked
+   * to an account with `unsolicited_mwi` on, the event's `account`
+   * naming it (ABI 1.10). SIPRAL_HANDLE_NONE on the other kinds.
    */
   subscription: Wide;
   /**
@@ -13130,7 +13148,7 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_poll_result_t: [48, 28, 32],
   sipral_stack_settings_t: [136, 128, 136],
   sipral_header_t: [32, 16, 16],
-  sipral_account_config_t: [504, 280, 288],
+  sipral_account_config_t: [512, 288, 296],
   sipral_call_config_t: [168, 100, 100],
   sipral_codec_info_t: [32, 28, 28],
   sipral_codec_candidate_t: [24, 20, 20],

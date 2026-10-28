@@ -23,7 +23,8 @@ Below they are X, Y, A and B. Each scenario is short:
 5. Message waiting (RFC 3842): B subscribes to its own message-summary, X
    calls B, B refuses the call busy so the PBX sends it to voicemail, X
    leaves four seconds of tone and hangs up, and B's new-message count has
-   to rise.
+   to rise. A PBX that refuses the subscription and notifies unasked is read
+   from those NOTIFYs, which the accounts take (``unsolicited_mwi``).
 
 A scenario the PBX does not carry -- no MESSAGE routing, no voicemail on B
 -- fails with what the PBX answered, and the next one runs.
@@ -117,7 +118,7 @@ class Features(base.Run):
             self.sent[fields["message"]] = fields["status_code"]
         elif kind == EventKind.MESSAGE_RECEIVED:
             self.received.append((extension, fields["content_type"], fields["body"]))
-        elif kind == EventKind.MESSAGES_WAITING:
+        elif kind == EventKind.MESSAGES_WAITING and extension == self.b:
             self.waiting.append((time.monotonic(), fields["waiting"], fields["new_messages"]))
         elif kind == EventKind.SUBSCRIPTION_CHANGED:
             from sipral.enums import SubscriptionState
@@ -304,17 +305,12 @@ class Features(base.Run):
         user = self.extensions[b][0]
         account.subscribe(f"sip:{user}@{self.host}", "message-summary")
         await self.until(lambda: bool(self.waiting) or self.subscription_ended is not None, PATIENCE_S)
-        if not self.waiting and self.subscription_ended is not None:
+        if self.subscription_ended is not None:
             # a PBX that ties the mailbox to the endpoint refuses the
-            # subscription and NOTIFYs unasked, which this stack answers 481
-            # (RFC 6665 §4.1.3): nothing is left, and the extension's own
-            # phones are not rung for it
-            self.result(
-                False, label,
-                f"{b}'s subscription to its own message-summary refused {self.subscription_ended}: "
-                "the PBX sends message waiting unsolicited, which the stack does not take",
-            )
-            return
+            # subscription and NOTIFYs unasked, which the accounts take
+            # (`unsolicited_mwi`, vitalpbx.py): the count has to rise all the
+            # same, from those
+            say(f"note {b}: subscription refused {self.subscription_ended}; reading the PBX's unasked NOTIFYs")
         if self.waiting:
             before = self.waiting[-1][2]
         else:

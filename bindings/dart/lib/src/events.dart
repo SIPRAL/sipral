@@ -62,6 +62,7 @@ final class SipralStackEvent {
     this.subscriptionStatusCode,
     this.transferStatusCode,
     this.statistics,
+    this.messageSummary,
     this.challengeRefusal,
     this.challengeServer,
     this.challengeRealms,
@@ -106,6 +107,8 @@ final class SipralStackEvent {
         kind == SipralEventKind.mediaStatistics
             ? event.payload.media.statistics
             : ffi.nullptr;
+    final summary =
+        kind == SipralEventKind.messagesWaiting ? event.payload.message : null;
     String? text(ffi.Pointer<ffi.Char> data, int length) =>
         data == ffi.nullptr ? null : _decode(data.cast(), length);
     return SipralStackEvent._(
@@ -185,6 +188,24 @@ final class SipralStackEvent {
               ),
       statistics:
           record == ffi.nullptr ? null : SipralMediaStatistics._(record.ref),
+      messageSummary:
+          summary == null
+              ? null
+              : SipralMessageSummary._(
+                subscription:
+                    summary.subscription == Sipral.handleNone
+                        ? null
+                        : summary.subscription,
+                waiting: summary.waiting != 0,
+                newMessages: summary.newMessages,
+                oldMessages: summary.oldMessages,
+                urgentNewMessages: summary.urgentNewMessages,
+                urgentOldMessages: summary.urgentOldMessages,
+                messageAccount: text(
+                  summary.messageAccount,
+                  summary.messageAccountLen,
+                ),
+              ),
       transport: lost?.transport,
       transportError: lost?.error,
       tlsFailure: lost?.tls,
@@ -321,6 +342,9 @@ final class SipralStackEvent {
   /// `SipralEventKind.mediaStatistics`, copied during the callback.
   final SipralMediaStatistics? statistics;
 
+  /// The mailbox's state, for `SipralEventKind.messagesWaiting`.
+  final SipralMessageSummary? messageSummary;
+
   @override
   String toString() =>
       'SipralStackEvent(kind: $kind, account: $account, call: $call)';
@@ -402,6 +426,44 @@ final class SipralNetworkTestResult {
 
   /// Where the STUN server saw it.
   final String? mapped;
+}
+
+/// A `message-summary` NOTIFY (RFC 3842), read for
+/// `SipralEventKind.messagesWaiting`. The counts are `Voice-Message`'s
+/// (RFC 3458 §6.2), zero when the body had no such line.
+final class SipralMessageSummary {
+  SipralMessageSummary._({
+    required this.subscription,
+    required this.waiting,
+    required this.newMessages,
+    required this.oldMessages,
+    required this.urgentNewMessages,
+    required this.urgentOldMessages,
+    required this.messageAccount,
+  });
+
+  /// The subscription that reported it, or null for a server that reported
+  /// it unasked to an account added with `unsolicitedMwi`; the event's
+  /// [SipralStackEvent.account] names that account.
+  final int? subscription;
+
+  /// `Messages-Waiting: yes`.
+  final bool waiting;
+
+  /// New messages.
+  final int newMessages;
+
+  /// Old messages.
+  final int oldMessages;
+
+  /// New messages flagged urgent.
+  final int urgentNewMessages;
+
+  /// Old messages flagged urgent.
+  final int urgentOldMessages;
+
+  /// `Message-Account`, when sent.
+  final String? messageAccount;
 }
 
 String? _nonEmpty(String? text) => text == null || text.isEmpty ? null : text;

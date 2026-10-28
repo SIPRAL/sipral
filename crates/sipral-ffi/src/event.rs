@@ -1134,7 +1134,9 @@ record! {
         /// [`SipralEventKind::MessageSent`]: which send; stale after this.
         pub message: SipralHandle,
         /// [`SipralEventKind::MessagesWaiting`]: which subscription reported
-        /// it. [`SIPRAL_HANDLE_NONE`] on the other kinds.
+        /// it, or [`SIPRAL_HANDLE_NONE`] for a server that reported it unasked
+        /// to an account with `unsolicited_mwi` on, the event's `account`
+        /// naming it (ABI 1.10). [`SIPRAL_HANDLE_NONE`] on the other kinds.
         pub subscription: SipralHandle,
         /// [`SipralEventKind::MessageSent`]: the final status. Zero on the
         /// other two kinds.
@@ -2159,6 +2161,24 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
 }
 
 /// An event with nothing in it but zeroes, for a kind to fill in.
+/// A messages-waiting payload: the status line, the `voice-message` counts
+/// (new, old, urgent new, urgent old) and `Message-Account`; no subscription.
+fn mailbox_payload(waiting: bool, counts: [u32; 4], account: Option<&str>) -> SipralMessageEvent {
+    let mut payload = empty_message_payload();
+    payload.waiting = u32::from(waiting);
+    [
+        payload.new_messages,
+        payload.old_messages,
+        payload.urgent_new_messages,
+        payload.urgent_old_messages,
+    ] = counts;
+    if let Some(text) = account {
+        payload.message_account = text.as_ptr().cast::<c_char>();
+        payload.message_account_len = text.len();
+    }
+    payload
+}
+
 const fn empty_message_payload() -> SipralMessageEvent {
     SipralMessageEvent {
         message: SIPRAL_HANDLE_NONE,
@@ -2230,6 +2250,13 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
             attach(&mut out, response.as_ref());
             Some(out)
         }
+        _ => about_a_mailbox(known, event),
+    }
+}
+
+/// A mailbox's state, told by a subscription or unasked.
+fn about_a_mailbox(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+    match *event {
         UaEvent::MessagesWaiting {
             subscription,
             waiting,
@@ -2239,25 +2266,46 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
             urgent_new,
             urgent_old,
         } => {
-            let mut payload = empty_message_payload();
+            let mut payload = mailbox_payload(
+                waiting,
+                [new, old, urgent_new, urgent_old],
+                account.as_deref(),
+            );
             payload.subscription = known
                 .subscriptions
                 .name_of(subscription)
                 .unwrap_or(SIPRAL_HANDLE_NONE);
-            payload.waiting = u32::from(waiting);
-            payload.new_messages = new;
-            payload.old_messages = old;
-            payload.urgent_new_messages = urgent_new;
-            payload.urgent_old_messages = urgent_old;
-            if let Some(text) = account.as_deref() {
-                payload.message_account = text.as_ptr().cast::<c_char>();
-                payload.message_account_len = text.len();
-            }
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::MessagesWaiting,
                 payload!(message: payload),
             ))
+        }
+        // the same kind, the account named and no subscription
+        UaEvent::MessagesWaitingUnasked {
+            account,
+            waiting,
+            ref message_account,
+            new,
+            old,
+            urgent_new,
+            urgent_old,
+        } => {
+            let payload = mailbox_payload(
+                waiting,
+                [new, old, urgent_new, urgent_old],
+                message_account.as_deref(),
+            );
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::MessagesWaiting,
+                payload!(message: payload),
+            );
+            out.account = known
+                .accounts
+                .name_of(account)
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            Some(out)
         }
         _ => None,
     }

@@ -3,7 +3,8 @@
 //
 // What an account carries beyond calls, against this test's own peer
 // writing RFC text by hand on loopback, or a second stack: presence
-// published and watched, a conference's picture, a MESSAGE, an OAuth 2.0
+// published and watched, a conference's picture, a message-summary NOTIFY
+// no subscription asked for, a MESSAGE, an OAuth 2.0
 // token a registrar asked for, a network test, a server located by its
 // name, and a media socket mapped through STUN.
 
@@ -218,6 +219,73 @@ describe('a dialog subscription', () => {
     assert.equal(dialog?.remoteIdentity, 'sip:carol@example.com');
     assert.equal(dialog?.remoteDisplay, 'Carol');
     assert.equal(line.lamp(), SipralDialogPhase.Confirmed);
+  });
+});
+
+/** A `message-summary` NOTIFY no subscription asked for, as a PBX that ties the mailbox to the extension sends it. */
+function unaskedNotify(stack: Stack, sender: string, callId: string): string {
+  const body = 'Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n';
+  return (
+    `NOTIFY sip:alice@${stack.bindAddress} SIP/2.0\r\n` +
+    `Via: SIP/2.0/UDP ${sender};branch=z9hG4bK-${callId}\r\n` +
+    'Max-Forwards: 70\r\n' +
+    'From: <sip:alice@example.invalid>;tag=pbx\r\n' +
+    'To: <sip:alice@example.invalid>\r\n' +
+    `Call-ID: ${callId}\r\n` +
+    'CSeq: 1 NOTIFY\r\n' +
+    'Event: message-summary\r\n' +
+    'Subscription-State: active\r\n' +
+    'Content-Type: application/simple-message-summary\r\n' +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
+  );
+}
+
+/** The next response `server` receives whose `Call-ID` is `callId`. */
+function responseTo(server: Peer, callId: string, timeoutMs = 15000): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no response to ${callId} within ${timeoutMs} ms`)), timeoutMs);
+    server.responder = (message) => {
+      if (message.startsWith('SIP/2.0') && header('Call-ID', message) === callId) {
+        clearTimeout(timer);
+        resolve(message);
+      }
+      return null;
+    };
+  });
+}
+
+describe('a message-summary NOTIFY no subscription asked for', () => {
+  test('is taken from the registrar address by an account that allows it, and raised with no subscription', async () => {
+    const stack = await open();
+    const server = await peer();
+    const account = stack.addAccount('sip:alice@example.invalid', { registrarAddress: server.address, unsolicitedMwi: true });
+    const waiting = kind(stack, SipralEventKind.MessagesWaiting);
+    const answered = responseTo(server, 'unasked-1');
+    server.send(unaskedNotify(stack, server.address, 'unasked-1'), stack.bindAddress);
+    assert.ok((await answered).startsWith('SIP/2.0 200'));
+    const told = await waiting;
+    assert.equal(told.account, account.handle);
+    assert.equal(told.fields.subscription, 0n);
+    assert.equal(told.fields.waiting, 1);
+    assert.equal(told.fields.newMessages, 2);
+    assert.equal(told.fields.oldMessages, 5);
+  });
+
+  test('is refused 481 by an account that does not, and raises nothing', async () => {
+    const stack = await open();
+    const server = await peer();
+    stack.addAccount('sip:alice@example.invalid', { registrarAddress: server.address });
+    const raised: number[] = [];
+    stack.on('event', (event) => {
+      if (event.kind === SipralEventKind.MessagesWaiting) {
+        raised.push(event.kind);
+      }
+    });
+    const answered = responseTo(server, 'unasked-2');
+    server.send(unaskedNotify(stack, server.address, 'unasked-2'), stack.bindAddress);
+    assert.ok((await answered).startsWith('SIP/2.0 481'));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(raised, []);
   });
 });
 

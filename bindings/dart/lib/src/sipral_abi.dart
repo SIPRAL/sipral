@@ -3570,6 +3570,20 @@ final class SipralAccountConfig extends ffi.Struct {
   /// Zero.
   @ffi.Uint32()
   external int reserved14;
+
+  /// A `SipralToggle`: whether a `message-summary` NOTIFY no
+  /// subscription asked for is taken, from the address the account
+  /// registers with and addressed to it, for a PBX that ties the
+  /// mailbox to the extension and notifies unasked. On, it is answered
+  /// 200 and raised as `SIPRAL_EVENT_KIND_MESSAGES_WAITING` with the
+  /// account's handle and no subscription. Zero or off: refused 481, as
+  /// RFC 6665 §4.1.3 asks. ABI 1.10.
+  @ffi.Uint32()
+  external int unsolicitedMwi;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved110;
 }
 
 /// What a call is placed with.
@@ -4832,7 +4846,9 @@ final class SipralMessageEvent extends ffi.Struct {
   external int message;
 
   /// SipralEventKind.messagesWaiting: which subscription reported
-  /// it. SIPRAL_HANDLE_NONE on the other kinds.
+  /// it, or SIPRAL_HANDLE_NONE for a server that reported it unasked
+  /// to an account with `unsolicited_mwi` on, the event's `account`
+  /// naming it (ABI 1.10). SIPRAL_HANDLE_NONE on the other kinds.
   @ffi.Uint64()
   external int subscription;
 
@@ -6909,7 +6925,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 9;
+  static const int abiVersionMinor = 10;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7194,7 +7210,7 @@ final class Sipral {
         'sipral_poll_result_t': [ffi.sizeOf<SipralPollResult>(), 48, 28, 32],
         'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 136, 128, 136],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
-        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 504, 280, 288],
+        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 512, 288, 296],
         'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 168, 100, 100],
         'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
         'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],

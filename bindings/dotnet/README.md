@@ -338,6 +338,12 @@ puts RFC 5626's `+sip.instance` on the `Contact` of every REGISTER, which a
 push proxy (RFC 8599) refuses to do without, and the fields on every REGISTER:
 the first, the answer to a challenge, the refresh and the de-registration.
 
+`AddAccount(..., unsolicitedMwi: true)` takes a `message-summary` NOTIFY no
+subscription asked for, from the account's server and addressed to it, as
+`SipralEventKind.MessagesWaiting` with the account's handle and no
+subscription, for a PBX that notifies voicemail unasked; off by default, when
+it is refused 481 as RFC 6665 §4.1.3 asks.
+
 `new SipralStack()` with no `bindHost` listens on every interface and
 advertises the address of the operating system's route toward the server of
 its first account (`SipralStack.AdvertisedAddress`,

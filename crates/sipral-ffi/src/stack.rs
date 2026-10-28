@@ -2167,6 +2167,10 @@ pub(crate) mod tests {
         pub(crate) transports_lost: Vec<(u32, u32, u32, u32, String)>,
         /// Every local conference event.
         pub(crate) local_conferences: Vec<crate::local_conference::SipralLocalConferenceEvent>,
+        /// Every messages-waiting event: account, subscription, waiting, new, old.
+        pub(crate) waiting: Vec<(SipralHandle, SipralHandle, u32, u32, u32)>,
+        /// Every transport-wanted event: protocol and destination.
+        pub(crate) wanted: Vec<(u32, String)>,
         /// Every lookup, location and failed location.
         pub(crate) locating: Vec<crate::locate::tests::Locating>,
         /// Filled by the callbacks that call back into the library.
@@ -2487,6 +2491,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// A transport asked for, or a mailbox's state, kept in `observed`.
+    ///
+    /// # Safety
+    ///
+    /// `event` as the callback hands it over.
+    unsafe fn asked_or_told(observed: &mut Observed, event: &SipralEvent) {
+        if event.kind == SipralEventKind::TransportWanted {
+            let asked = unsafe { event.payload.transport_wanted };
+            let destination = if asked.destination.is_null() {
+                String::new()
+            } else {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        asked.destination.cast::<u8>(),
+                        asked.destination_len,
+                    )
+                };
+                String::from_utf8_lossy(bytes).into_owned()
+            };
+            observed.wanted.push((asked.protocol, destination));
+        }
+        if event.kind == SipralEventKind::MessagesWaiting {
+            let told = unsafe { event.payload.message };
+            observed.waiting.push((
+                event.account,
+                told.subscription,
+                told.waiting,
+                told.new_messages,
+                told.old_messages,
+            ));
+        }
+    }
+
     pub(crate) unsafe extern "C" fn record(event: *const SipralEvent, user_data: *mut c_void) {
         let observed = unsafe { &mut *user_data.cast::<Observed>() };
         let event = unsafe { &*event };
@@ -2524,6 +2561,7 @@ pub(crate) mod tests {
             let told = unsafe { told(event) };
             observed.protocols.push(told);
         }
+        unsafe { asked_or_told(observed, event) };
         if event.kind == SipralEventKind::AudioDevicesChanged {
             let audio = unsafe { event.payload.audio };
             observed

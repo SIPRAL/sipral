@@ -369,6 +369,15 @@ export interface AccountOptions {
    * DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE and BUNDLE, whatever `srtp` says.
    */
   webrtc?: boolean;
+  /**
+   * Take a `message-summary` NOTIFY no subscription asked for, from the
+   * account's registrar address and addressed to it, for a PBX that ties the
+   * mailbox to the extension and notifies unasked: it is answered 200 and
+   * raised as `MessagesWaiting` with the account and no subscription. This
+   * departs from RFC 6665 §4.1.3 on purpose; off by default, when such a
+   * NOTIFY is refused 481 and nothing is raised.
+   */
+  unsolicitedMwi?: boolean;
 }
 
 /** How a call is placed or answered. */

@@ -18,7 +18,7 @@ namespace Sipral.Tests;
 /// <summary>
 /// Protocols beyond audio: real-time text, RTCP feedback, focus and L16
 /// between two stacks; and, against a hand-written peer, conference state,
-/// presence and SIPREC recording.
+/// presence, a message summary nobody subscribed to and SIPREC recording.
 /// </summary>
 public sealed class ProtocolTests : IDisposable
 {
@@ -286,6 +286,64 @@ public sealed class ProtocolTests : IDisposable
         Assert.Equal("0", Peer.Header("Expires", ending));
     }
 
+    /// <summary>A <c>message-summary</c> NOTIFY no subscription asked for,
+    /// the way a PBX that ties the mailbox to the extension sends it.</summary>
+    private static string UnaskedSummary(string to, string from)
+    {
+        const string body = "Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n";
+        return $"NOTIFY sip:alice@{to} SIP/2.0\r\n" +
+            $"Via: SIP/2.0/UDP {from};branch=z9hG4bK-unasked-1\r\n" +
+            "Max-Forwards: 70\r\n" +
+            "From: <sip:alice@example.invalid>;tag=pbx\r\n" +
+            "To: <sip:alice@example.invalid>\r\n" +
+            "Call-ID: unasked-1\r\n" +
+            "CSeq: 1 NOTIFY\r\n" +
+            "Event: message-summary\r\n" +
+            "Subscription-State: active\r\n" +
+            "Content-Type: application/simple-message-summary\r\n" +
+            $"Content-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n" + body;
+    }
+
+    [Fact]
+    public async Task AnUnaskedMessageSummaryIsTakenByAnAccountThatAllowsIt()
+    {
+        var stack = Stack();
+        using var pbx = new Peer();
+        var account = stack.AddAccount("sip:alice@example.invalid", registrarAddress: pbx.Address, unsolicitedMwi: true);
+        pbx.Send(UnaskedSummary(stack.BindAddress, pbx.Address), stack.BindAddress);
+
+        Assert.StartsWith("SIP/2.0 200", await pbx.ResponseAsync());
+        var told = await FirstMatchingAsync(stack.Events, e => e.Kind == SipralEventKind.MessagesWaiting);
+        Assert.Equal(account.Handle, told.Account);
+        var waiting = told.MessageInfo!;
+        Assert.Equal(global::Sipral.Sipral.HandleNone, waiting.Subscription);
+        Assert.True(waiting.Waiting);
+        Assert.Equal(2u, waiting.NewMessages);
+        Assert.Equal(5u, waiting.OldMessages);
+    }
+
+    [Fact]
+    public async Task AnUnaskedMessageSummaryIsRefusedByDefault()
+    {
+        var stack = Stack();
+        using var pbx = new Peer();
+        stack.AddAccount("sip:alice@example.invalid", registrarAddress: pbx.Address);
+        pbx.Send(UnaskedSummary(stack.BindAddress, pbx.Address), stack.BindAddress);
+
+        Assert.StartsWith("SIP/2.0 481", await pbx.ResponseAsync());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await foreach (var args in stack.Events.WithCancellation(cts.Token))
+            {
+                Assert.NotEqual(SipralEventKind.MessagesWaiting, args.Kind);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     [Fact]
     public async Task ACallIsRecordedToARecordingServer()
     {
@@ -548,6 +606,19 @@ public sealed class ProtocolTests : IDisposable
             {
                 var text = Encoding.UTF8.GetString(await DatagramAsync());
                 if (text.StartsWith(method + " ", StringComparison.Ordinal))
+                {
+                    return text;
+                }
+            }
+        }
+
+        /// <summary>The next response, skipping requests.</summary>
+        public async Task<string> ResponseAsync()
+        {
+            while (true)
+            {
+                var text = Encoding.UTF8.GetString(await DatagramAsync());
+                if (text.StartsWith("SIP/2.0 ", StringComparison.Ordinal))
                 {
                     return text;
                 }

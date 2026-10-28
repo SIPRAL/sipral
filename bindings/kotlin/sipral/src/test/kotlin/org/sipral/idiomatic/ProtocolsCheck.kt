@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Sytek
 //
 // Real-time text, RTCP feedback, linear audio and conference focus between
-// two clients on 127.0.0.1; conference state and presence against a
-// notifier and compositor played on a local socket; and recording to a
+// two clients on 127.0.0.1; conference state, presence and unasked message
+// waiting against a notifier and compositor played on a local socket; and
+// recording to a
 // SIPREC server on a TCP port. Run by IdiomaticCheck.kt's main under
 // -Xcheck:jni.
 
@@ -31,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.sipral.SipralActivity
 import org.sipral.SipralBasic
 import org.sipral.SipralCodec
@@ -630,6 +632,84 @@ private suspend fun aRecordingPastAThousandConnectionsStillReachesItsServer(): S
     return "a recording bound past a thousand connections reaches its server"
 }
 
+/** A `message-summary` NOTIFY outside any dialog, sent unasked the way a PBX
+ * that ties the mailbox to the extension sends it. */
+private fun unaskedNotify(to: String, from: String, callId: String): String {
+    val body = "Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n"
+    return "NOTIFY sip:alice@$to SIP/2.0\r\n" +
+        "Via: SIP/2.0/UDP $from;branch=z9hG4bK-$callId\r\n" +
+        "Max-Forwards: 70\r\n" +
+        "From: <sip:alice@example.invalid>;tag=pbx\r\n" +
+        "To: <sip:alice@example.invalid>\r\n" +
+        "Call-ID: $callId\r\n" +
+        "CSeq: 1 NOTIFY\r\n" +
+        "Event: message-summary\r\n" +
+        "Subscription-State: active\r\n" +
+        "Content-Type: application/simple-message-summary\r\n" +
+        "Content-Length: ${body.toByteArray().size}\r\n\r\n" + body
+}
+
+/** The next response [peer] receives within ten seconds. */
+private suspend fun responseAt(peer: FakePeer): String = withTimeout(10_000) {
+    val buffer = ByteArray(65536)
+    var found: String? = null
+    while (found == null) {
+        val packet = DatagramPacket(buffer, buffer.size)
+        try {
+            peer.socket.receive(packet)
+        } catch (_: SocketTimeoutException) {
+            delay(10)
+            continue
+        }
+        val text = String(packet.data, 0, packet.length, Charsets.UTF_8)
+        if (text.startsWith("SIP/2.0 ")) {
+            found = text
+        }
+    }
+    found
+}
+
+private suspend fun anUnaskedMessageSummaryIsTakenOnlyByAnAccountThatAllowsIt(): String {
+    val waitingKind = SipralEventKind.MESSAGES_WAITING.value.toLong()
+    val taken = FakePeer().use { pbx ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            val account = client.addAccount(
+                aor = "sip:alice@example.invalid", registrarAddress = pbx.address, unsolicitedMwi = true,
+            )
+            val (_, told) = client.events.awaitNext(
+                timeoutMs = 10_000,
+                matches = { it.kind == waitingKind },
+            ) {
+                pbx.send(unaskedNotify(client.bindAddress, pbx.address, "unasked-1"), parseHostPort(client.bindAddress))
+            }
+            val answer = responseAt(pbx)
+            assertTrue(answer.startsWith("SIP/2.0 200"), answer)
+            assertEquals(account.handle, told.account)
+            val counts = told.payload.message
+            assertEquals(0L, counts.subscription)
+            assertEquals(1L, counts.waiting)
+            assertEquals(2L, counts.newMessages)
+            assertEquals(5L, counts.oldMessages)
+            "2 new and 5 old"
+        }
+    }
+    FakePeer().use { pbx ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = pbx.address)
+            coroutineScope {
+                val raised = async(start = CoroutineStart.UNDISPATCHED) {
+                    withTimeoutOrNull(2_000) { client.events.first { it.kind == waitingKind } }
+                }
+                pbx.send(unaskedNotify(client.bindAddress, pbx.address, "unasked-2"), parseHostPort(client.bindAddress))
+                val answer = responseAt(pbx)
+                assertTrue(answer.startsWith("SIP/2.0 481"), answer)
+                assertNull(raised.await(), "an account that did not allow it raised an unasked notification")
+            }
+        }
+    }
+    return "an unasked message summary taken ($taken) only by an account that allows it, refused 481 otherwise"
+}
+
 suspend fun protocolsChecks(): String = listOf(
     realTimeTextIsTypedAndReadBothWays(),
     aFarEndThatTookNoTextLeavesNoneToSend(),
@@ -640,6 +720,7 @@ suspend fun protocolsChecks(): String = listOf(
     aConferenceIsReadBackWholeFromItsNotifications(),
     presenceIsPublishedAndWhatTheCompositorGrantedIsTold(),
     aWatchedPresentityIsToldWithItsActivityAndNote(),
+    anUnaskedMessageSummaryIsTakenOnlyByAnAccountThatAllowsIt(),
     aCallIsRecordedToARecordingServerOverItsOwnConnection(),
     anEncryptedCallIsOfferedToItsRecorderAsSrtp(),
     anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(),

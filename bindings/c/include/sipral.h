@@ -136,7 +136,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)9)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)10)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5118,6 +5118,20 @@ struct sipral_account_config {
      * Zero.
      */
     uint32_t reserved_1_4;
+    /**
+     * A `sipral_toggle_t`: whether a `message-summary` NOTIFY no
+     * subscription asked for is taken, from the address the account
+     * registers with and addressed to it, for a PBX that ties the
+     * mailbox to the extension and notifies unasked. On, it is answered
+     * 200 and raised as `SIPRAL_EVENT_KIND_MESSAGES_WAITING` with the
+     * account's handle and no subscription. Zero or off: refused 481, as
+     * RFC 6665 §4.1.3 asks. ABI 1.10.
+     */
+    sipral_toggle_t unsolicited_mwi;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_1_10;
 };
 
 /**
@@ -6475,7 +6489,9 @@ struct sipral_message_event {
     sipral_handle_t message;
     /**
      * SIPRAL_EVENT_KIND_MESSAGES_WAITING: which subscription reported
-     * it. SIPRAL_HANDLE_NONE on the other kinds.
+     * it, or SIPRAL_HANDLE_NONE for a server that reported it unasked
+     * to an account with `unsolicited_mwi` on, the event's `account`
+     * naming it (ABI 1.10). SIPRAL_HANDLE_NONE on the other kinds.
      */
     sipral_handle_t subscription;
     /**

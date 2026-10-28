@@ -1203,7 +1203,14 @@ extension to another; and message waiting on a voicemail left. On 16 October
 event) and the MESSAGE passed. Message waiting did not: this VitalPBX ties
 each mailbox to the endpoint, answers a subscription to `message-summary`
 404, and sends its NOTIFYs unasked, which the stack answers 481 as RFC 6665
-§4.1.3 has it for a NOTIFY outside any subscription. SDES, DTLS-SRTP and
+§4.1.3 has it for a NOTIFY outside any subscription. On 28 October the step
+ran again with the accounts taking an unasked mailbox state
+(`unsolicited_mwi`, `docs/04-ua.md`), and every result passed again but that
+one: each extension's unasked NOTIFY at registration (`Messages-Waiting: no`)
+was answered 200 and read, a capture on the lab VM shows, but after the busy
+extension's caller was answered and left six seconds of tone, the PBX sent no
+NOTIFY at all, so the count had nothing to rise from; the tenant's mailbox for
+that extension is a setting of the PBX's, not tried here. SDES, DTLS-SRTP and
 G.729 are not tried: the tenant's extensions offer PCMA alone and no media
 encryption.
 

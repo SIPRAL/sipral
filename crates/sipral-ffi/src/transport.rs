@@ -1251,6 +1251,8 @@ pub(crate) mod tests {
         account
     }
 
+            unsolicited_mwi: 0,
+            reserved_1_10: 0,
     /// An account with its own `aor`, on `transport`, registering at `registrar`.
     fn line_on(
         stack: SipralHandle,
@@ -1295,6 +1297,90 @@ pub(crate) mod tests {
             unsafe { sipral_account_register(handle, account, 1_000) },
             SipralStatus::Ok,
             "{}",
+    /// The mailbox state a PBX sends with no subscription, out of any dialog.
+    fn unasked_summary(call_id: &str) -> Vec<u8> {
+        let body = "Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n";
+        format!(
+            "NOTIFY sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP {REGISTRAR};branch=z9hG4bK-{call_id}\r\n\
+             Max-Forwards: 70\r\n\
+             From: <{AOR}>;tag=pbx\r\n\
+             To: <sip:alice@192.0.2.10:5060>\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 NOTIFY\r\n\
+             Event: message-summary\r\n\
+             Subscription-State: active\r\n\
+             Content-Type: application/simple-message-summary\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// ABI 1.10: `unsolicited_mwi` on takes a PBX's unasked NOTIFY as the
+    /// account's mailbox, with no subscription named; left at zero it is
+    /// refused 481, and a value that is no toggle is refused at the add.
+    #[test]
+    fn an_unasked_message_summary_reaches_an_account_that_takes_one() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let config = SipralAccountConfig {
+            unsolicited_mwi: crate::media::SipralToggle::On as u32,
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&config), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            feed(handle, REGISTRAR, &unasked_summary("mwi-on"), 1_000),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_000);
+        let (answer, to, _) = take_one(handle);
+        assert!(
+            answer.starts_with(b"SIP/2.0 200 "),
+            "{:?}",
+            start_of(&answer)
+        );
+        assert_eq!(to, REGISTRAR);
+        assert_eq!(
+            observed.waiting,
+            vec![(account, SIPRAL_HANDLE_NONE, 1, 2, 5)]
+        );
+
+        let mut plain = Observed::default();
+        let other = stack(&mut plain);
+        line(other);
+        assert_eq!(
+            feed(other, REGISTRAR, &unasked_summary("mwi-off"), 1_000),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(other, 1_000);
+        let (refused, _, _) = take_one(other);
+        assert!(
+            refused.starts_with(b"SIP/2.0 481 "),
+            "{:?}",
+            start_of(&refused)
+        );
+        assert!(plain.waiting.is_empty(), "{:?}", plain.waiting);
+
+        let wrong = SipralAccountConfig {
+            unsolicited_mwi: 7,
+            ..account_config()
+        };
+        let status = unsafe { sipral_account_add(other, ptr::from_ref(&wrong), &raw mut account) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        unsafe {
+            sipral_stack_destroy(handle);
+            sipral_stack_destroy(other);
+        }
+    }
+
             last_error_text()
         );
         poll(handle, 1_000);

@@ -672,6 +672,8 @@ mod tests {
             websocket_resource_len: 0,
             webrtc: 0,
             reserved_1_4: 0,
+            unsolicited_mwi: 0,
+            reserved_1_10: 0,
         }
     }
 

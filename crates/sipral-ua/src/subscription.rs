@@ -997,9 +997,67 @@ impl UserAgent {
             // §4.1.3: 489 for an unsupported package
             Matched::WrongPackage => self.refuse_notify(transaction, BAD_EVENT, now),
             Matched::Nobody => {
-                self.refuse_notify(transaction, StatusCode::CALL_DOES_NOT_EXIST, now);
+                if !self.take_unsolicited_summary(transaction, request, now) {
+                    self.refuse_notify(transaction, StatusCode::CALL_DOES_NOT_EXIST, now);
+                }
             }
         }
+    }
+
+    /// A `message-summary` NOTIFY no subscription asked for, taken for an
+    /// account that takes one
+    /// ([`Account::accepts_unsolicited_message_summary`]) when it came from
+    /// the address that account registers with: answered 200, raised as
+    /// [`UaEvent::MessagesWaitingUnasked`] when its body reads, and `true`.
+    /// `false` leaves it to the 481 (RFC 6665 §4.1.3).
+    fn take_unsolicited_summary(
+        &mut self,
+        transaction: TransactionId<sipral_core::transaction::NonInviteServer>,
+        request: &OwnedMessage,
+        now: Instant,
+    ) -> bool {
+        let raw = request.as_raw();
+        if !raw
+            .event()
+            .is_ok_and(|event| event.package() == b"message-summary")
+        {
+            return false;
+        }
+        let Some(account) = self.line_for(&raw) else {
+            return false;
+        };
+        let source = self.guard.source();
+        let taken = self.accounts.get(&account).is_some_and(|config| {
+            config.unsolicited_summary && source.is_some_and(|peer| peer.ip() == config.remote.ip())
+        });
+        if !taken {
+            return false;
+        }
+        self.endpoint
+            .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)
+            .ok();
+        let typed = raw
+            .content_type()
+            .is_ok_and(|kind| kind.is("application", "simple-message-summary"));
+        // a body that does not read leaves the lamp as it was, as a
+        // subscription's does
+        let Some(document) = typed
+            .then(|| MessageSummary::parse(raw.body()).ok())
+            .flatten()
+        else {
+            return true;
+        };
+        let voice = document.voice_message();
+        self.events.push_back(UaEvent::MessagesWaitingUnasked {
+            account,
+            waiting: document.waiting,
+            message_account: document.account.clone(),
+            new: voice.map_or(0, |class| class.new),
+            old: voice.map_or(0, |class| class.old),
+            urgent_new: voice.map_or(0, |class| class.new_urgent),
+            urgent_old: voice.map_or(0, |class| class.old_urgent),
+        });
+        true
     }
 
     /// §4.4.1: same `Call-ID`, `To` tag equal to our `From` tag, same `Event`.
@@ -1325,7 +1383,8 @@ impl UserAgent {
     ///
     /// A malformed body leaves the last good reading standing. An unsolicited
     /// `message-summary` NOTIFY, which several PBXs send, never gets here:
-    /// `match_notify` answers it 481 like any other (RFC 6665 §4.1.3).
+    /// `match_notify` answers it 481 like any other (RFC 6665 §4.1.3), unless
+    /// its account takes one (`take_unsolicited_summary`).
     fn merge_message_summary(&mut self, subscription: SubscriptionHandle, request: &OwnedMessage) {
         let raw = request.as_raw();
         let body = raw.body();

@@ -325,6 +325,13 @@ stack's (`expiresSeconds`), a `Supported` is merged with the stack's own
 refuses them with `INVALID_ARGUMENT`. `InstanceCheck.kt` shows both on all
 four REGISTERs a challenging loopback registrar sees.
 
+`addAccount(..., unsolicitedMwi = true)` (ABI 1.10) takes a `message-summary`
+NOTIFY nobody subscribed to from the registrar's address, for a PBX that
+notifies unasked and refuses the subscription: answered 200 and raised as
+`MESSAGES_WAITING` with the event's `account` set and no subscription. It
+departs from RFC 6665 §4.1.3 on purpose and is off by default, when such a
+NOTIFY is answered 481 (`ProtocolsCheck.kt` shows both).
+
 `SipralClient.events` and `SipralCall.events` (and `SipralCall.digits`,
 derived from it) are a `kotlinx.coroutines.flow.SharedFlow` with `replay =
 0`: a fresh subscriber never sees a value emitted before it subscribed, no

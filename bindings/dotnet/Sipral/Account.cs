@@ -146,6 +146,7 @@ public sealed class Account
         uint privacy,
         IEnumerable<string>? trustedPeers,
         AccountSecurity? security,
+        bool unsolicitedMwi,
         AccountLocation location)
     {
         security ??= new AccountSecurity();
@@ -282,6 +283,7 @@ public sealed class Account
             config.StirAttestation = (uint)security.StirAttestation;
             config.RecordingInClear = security.RecordingInClear ? (uint)SipralToggle.On : 0;
             config.Webrtc = security.Webrtc ? (uint)SipralToggle.On : 0;
+            config.UnsolicitedMwi = unsolicitedMwi ? (uint)SipralToggle.On : 0;
             if (instanceBytes is not null)
             {
                 config.InstanceId = instancePin.Pointer;

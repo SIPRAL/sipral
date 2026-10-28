@@ -113,6 +113,9 @@ object SipralJava {
      * ([SipralAccountSecurity.webrtc]). [instanceId] is the `+sip.instance`
      * URN every REGISTER's `Contact` carries (RFC 5626 §4.1), and [headers]
      * go on every REGISTER, as [SipralClient.addAccount] takes them.
+     * [unsolicitedMwi] takes message-waiting notifications nobody subscribed
+     * to from the registrar's address, departing from RFC 6665 §4.1.3 on
+     * purpose, and is off by default ([SipralClient.addAccount]).
      */
     @JvmStatic
     @JvmOverloads
@@ -131,6 +134,7 @@ object SipralJava {
         webrtc: Boolean = false,
         instanceId: String? = null,
         headers: List<SipralHeader> = emptyList(),
+        unsolicitedMwi: Boolean = false,
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
@@ -145,6 +149,7 @@ object SipralJava {
         security = SipralAccountSecurity(webrtc = webrtc),
         instanceId = instanceId,
         headers = headers,
+        unsolicitedMwi = unsolicitedMwi,
     )
 
     /** The challenge a `CHALLENGE_DECLINED` [event] reports, or null for

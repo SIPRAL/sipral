@@ -11,7 +11,7 @@
 # appended member at a time. A dash means the library fills that
 # struct in itself and no caller ever declares one.
 sipral_abi_version_t reserved 24 24 20 20 20 20
-sipral_account_config_t recording_in_clear 392 504 208 280 216 288
+sipral_account_config_t recording_in_clear 392 512 208 288 216 296
 sipral_audio_device_t present 32 32 28 28 28 28
 sipral_audio_info_t reserved 48 48 44 44 48 48
 sipral_audio_transmit_t - - 56 - 36 - 40

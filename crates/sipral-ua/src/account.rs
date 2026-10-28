@@ -201,6 +201,9 @@ pub struct Account {
     /// The `Host` and resource of its own WebSocket, where set.
     pub(crate) websocket_host: Option<Box<str>>,
     pub(crate) websocket_resource: Option<Box<str>>,
+    /// A `message-summary` NOTIFY from the account's server outside any
+    /// subscription is taken rather than refused 481.
+    pub(crate) unsolicited_summary: bool,
 }
 
 impl Account {
@@ -276,6 +279,7 @@ impl Account {
             own_stream: None,
             websocket_host: None,
             websocket_resource: None,
+            unsolicited_summary: false,
         }
     }
 
@@ -580,6 +584,29 @@ impl Account {
             value: Box::from(value),
         });
         self
+    }
+
+    /// Take the mailbox state a server sends with no subscription asked for
+    /// it: a `message-summary` NOTIFY outside any dialog, from the address
+    /// the account registers with, addressed to the account, is answered 200
+    /// and raised as
+    /// [`UaEvent::MessagesWaitingUnasked`](crate::UaEvent::MessagesWaitingUnasked).
+    ///
+    /// A deliberate deviation from RFC 6665 §4.1.3, which answers a NOTIFY
+    /// matching no subscription 481, for the PBXs that tie a mailbox to the
+    /// extension, refuse a subscription to it and notify unasked. Off by
+    /// default; a NOTIFY from any other address, inside a dialog, or naming
+    /// another package is still refused.
+    #[must_use]
+    pub const fn accepts_unsolicited_message_summary(mut self) -> Self {
+        self.unsolicited_summary = true;
+        self
+    }
+
+    /// Whether [`Account::accepts_unsolicited_message_summary`] was set.
+    #[must_use]
+    pub const fn takes_unsolicited_message_summary(&self) -> bool {
+        self.unsolicited_summary
     }
 
     /// Accept MESSAGE bodies of `media_type`, besides `text/plain` (always

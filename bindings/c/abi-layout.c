@@ -196,7 +196,7 @@ _Static_assert(offsetof(sipral_header_t, name_len) == SIPRAL_LAYOUT(8, 4, 4), "s
 _Static_assert(offsetof(sipral_header_t, value) == SIPRAL_LAYOUT(16, 8, 8), "sipral_header_t::value");
 _Static_assert(offsetof(sipral_header_t, value_len) == SIPRAL_LAYOUT(24, 12, 12), "sipral_header_t::value_len");
 
-_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(504, 280, 288), "sipral_account_config_t");
+_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(512, 288, 296), "sipral_account_config_t");
 _Static_assert(offsetof(sipral_account_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_account_config_t::size");
 _Static_assert(offsetof(sipral_account_config_t, aor) == SIPRAL_LAYOUT(8, 4, 4), "sipral_account_config_t::aor");
 _Static_assert(offsetof(sipral_account_config_t, aor_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_account_config_t::aor_len");
@@ -263,6 +263,8 @@ _Static_assert(offsetof(sipral_account_config_t, websocket_resource) == SIPRAL_L
 _Static_assert(offsetof(sipral_account_config_t, websocket_resource_len) == SIPRAL_LAYOUT(488, 268, 276), "sipral_account_config_t::websocket_resource_len");
 _Static_assert(offsetof(sipral_account_config_t, webrtc) == SIPRAL_LAYOUT(496, 272, 280), "sipral_account_config_t::webrtc");
 _Static_assert(offsetof(sipral_account_config_t, reserved_1_4) == SIPRAL_LAYOUT(500, 276, 284), "sipral_account_config_t::reserved_1_4");
+_Static_assert(offsetof(sipral_account_config_t, unsolicited_mwi) == SIPRAL_LAYOUT(504, 280, 288), "sipral_account_config_t::unsolicited_mwi");
+_Static_assert(offsetof(sipral_account_config_t, reserved_1_10) == SIPRAL_LAYOUT(508, 284, 292), "sipral_account_config_t::reserved_1_10");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
 _Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(168, 100, 100), "sipral_call_config_t");

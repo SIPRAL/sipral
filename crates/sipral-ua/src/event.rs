@@ -609,6 +609,28 @@ pub enum UaEvent {
         /// What came of it.
         outcome: crate::ProbeOutcome,
     },
+    /// A server reported an account's mailbox with no subscription asked for
+    /// it, to an account that takes that
+    /// ([`Account::accepts_unsolicited_message_summary`](crate::Account::accepts_unsolicited_message_summary)).
+    ///
+    /// The members are [`UaEvent::MessagesWaiting`]'s, for the account in
+    /// place of a subscription.
+    MessagesWaitingUnasked {
+        /// Whose server sent it.
+        account: AccountId,
+        /// The overall status line (RFC 3842 §3.5).
+        waiting: bool,
+        /// `Message-Account`, when the notifier sent one.
+        message_account: Option<Box<str>>,
+        /// New voice messages (RFC 3458 §6.2).
+        new: u32,
+        /// Old ones.
+        old: u32,
+        /// New ones flagged urgent.
+        urgent_new: u32,
+        /// Old ones flagged urgent.
+        urgent_old: u32,
+    },
     /// A message-summary NOTIFY reported a mailbox (RFC 3842 §3.9).
     ///
     /// The counts are the `voice-message` class's (RFC 3458 §6.2); every class

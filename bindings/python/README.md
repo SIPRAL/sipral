@@ -210,6 +210,9 @@ answers an incoming call 302 with a `Diversion`.
 `session_interval_seconds` (RFC 4028), `privacy` (`Privacy.ID` places every
 call anonymous in `From`) and `trusted_peers`, the addresses whose asserted
 identity the account believes and toward which alone it asserts its own.
+`unsolicited_mwi=True` (off by default, against RFC 6665 §4.1.3 on purpose)
+accepts the `message-summary` NOTIFY a PBX sends from the account's server
+without a subscription, as `EventKind.MESSAGES_WAITING` with no subscription.
 
 ## STIR/SHAKEN, SRTP per account and the encryption report
 

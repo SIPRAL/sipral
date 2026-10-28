@@ -875,7 +875,17 @@ public sealed partial class SipralStack : IDisposable
     /// the answer to a challenge, the refresh and the de-registration
     /// included; <c>Expires</c> is the stack's
     /// (<paramref name="expiresSeconds"/>), and they need a
-    /// <paramref name="registrar"/>.</summary>
+    /// <paramref name="registrar"/>.
+    ///
+    /// <paramref name="unsolicitedMwi"/> takes a <c>message-summary</c>
+    /// NOTIFY no subscription asked for, from the address the account
+    /// registers with and addressed to it: answered 200 and raised as
+    /// <see cref="SipralEventKind.MessagesWaiting"/> with the account's
+    /// handle and no subscription. It is for a PBX (VitalPBX) that ties the
+    /// mailbox to the extension, refuses a subscription to it and notifies
+    /// unasked, and departs from RFC 6665 §4.1.3 on purpose; off by default,
+    /// when such a NOTIFY is answered 481 and nothing is raised
+    /// (<c>sipral_account_config_t::unsolicited_mwi</c>).</summary>
     public Account AddAccount(
         string aor,
         string? registrarAddress = null,
@@ -900,7 +910,8 @@ public sealed partial class SipralStack : IDisposable
         string? websocketResource = null,
         SipralClientCertificate? tlsClientCertificate = null,
         string? instanceId = null,
-        IEnumerable<(string Name, string Value)>? headers = null)
+        IEnumerable<(string Name, string Value)>? headers = null,
+        bool unsolicitedMwi = false)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
@@ -918,7 +929,7 @@ public sealed partial class SipralStack : IDisposable
             : null;
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
-            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
+            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security, unsolicitedMwi,
             new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
                 websocketHost, websocketResource, tlsClientCertificate, instanceId, headers?.ToArray()));
         lock (_accounts)

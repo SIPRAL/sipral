@@ -1096,6 +1096,17 @@ class SipralClient private constructor(
      * checked as a call's are: `Expires` is the stack's ([expiresSeconds]),
      * a `Supported` is merged with the stack's (`gruu` with an instance id),
      * and an account with no [registrar] refuses them.
+     *
+     * [unsolicitedMwi] takes message-waiting notifications nobody subscribed
+     * to, for a PBX that ties the mailbox to the extension, refuses a
+     * subscription to it and notifies unasked (VitalPBX): an out-of-dialog
+     * `NOTIFY` with `Event: message-summary` from the IP address of
+     * [registrarAddress], addressed to the account, is answered 200 and raised
+     * as `SIPRAL_EVENT_KIND_MESSAGES_WAITING` with the event's `account` set
+     * and `payload.message.subscription` zero. This departs from RFC 6665
+     * §4.1.3 on purpose, so it is off by default, and such a `NOTIFY` is then
+     * answered 481 and raises nothing. A subscribed `message-summary` works
+     * the same either way.
      */
     fun addAccount(
         aor: String,
@@ -1122,6 +1133,7 @@ class SipralClient private constructor(
         clientCertificate: SipralClientCertificate? = null,
         instanceId: String? = null,
         headers: List<SipralHeader> = emptyList(),
+        unsolicitedMwi: Boolean = false,
     ): SipralAccount {
         require((registrarAddress == null) != (serverUri == null)) {
             "an account names its server by registrarAddress or by serverUri, one of the two"
@@ -1155,6 +1167,7 @@ class SipralClient private constructor(
             security = security,
             instanceId = instanceId,
             headers = headers,
+            unsolicitedMwi = unsolicitedMwi,
         )
         synchronized(movingLock) { accounts[account.handle] = account }
         return account

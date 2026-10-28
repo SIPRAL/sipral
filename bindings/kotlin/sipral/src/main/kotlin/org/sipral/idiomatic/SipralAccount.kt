@@ -143,6 +143,7 @@ class SipralAccount internal constructor(
             security: SipralAccountSecurity,
             instanceId: String?,
             headers: List<SipralHeader>,
+            unsolicitedMwi: Boolean,
         ): SipralAccount {
             val written = contact ?: if (location.advertised != null) {
                 client.defaultContact(aor, location.advertised, location.streamProtocol)
@@ -187,6 +188,7 @@ class SipralAccount internal constructor(
                 websocketHost = location.websocketHost,
                 websocketResource = location.websocketResource,
                 webrtc = if (security.webrtc) SipralToggle.ON.value.toLong() else 0,
+                unsolicitedMwi = if (unsolicitedMwi) SipralToggle.ON.value.toLong() else 0,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(

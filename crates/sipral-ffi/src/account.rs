@@ -304,6 +304,16 @@ record! {
         pub webrtc: Number<SipralToggle>,
         /// Zero.
         pub reserved_1_4: u32,
+        /// A `SipralToggle`: whether a `message-summary` NOTIFY no
+        /// subscription asked for is taken, from the address the account
+        /// registers with and addressed to it, for a PBX that ties the
+        /// mailbox to the extension and notifies unasked. On, it is answered
+        /// 200 and raised as `SIPRAL_EVENT_KIND_MESSAGES_WAITING` with the
+        /// account's handle and no subscription. Zero or off: refused 481, as
+        /// RFC 6665 §4.1.3 asks. ABI 1.10.
+        pub unsolicited_mwi: Number<SipralToggle>,
+        /// Zero.
+        pub reserved_1_10: u32,
     }
 }
 
@@ -787,6 +797,9 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     }
     account = unsafe { with_call_options(account, config) }?;
     account = unsafe { crate::security::with_stir(state, account, config) }?;
+    if crate::media::toggled(config.unsolicited_mwi, "unsolicited_mwi", false)? {
+        account = account.accepts_unsolicited_message_summary();
+    }
     if config.expires_seconds != 0 {
         account = account.expires(expiry(config.expires_seconds)?);
     }
@@ -1095,6 +1108,8 @@ pub(crate) mod tests {
             websocket_resource_len: 0,
             webrtc: 0,
             reserved_1_4: 0,
+            unsolicited_mwi: 0,
+            reserved_1_10: 0,
         }
     }
 

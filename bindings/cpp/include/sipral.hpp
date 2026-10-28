@@ -314,6 +314,10 @@ struct AccountOptions {
     sipral_srtp_t srtp = static_cast<sipral_srtp_t>(0);
     /** A PBX WebRTC line: DTLS-SRTP on UDP/TLS/RTP/SAVPF, ICE and BUNDLE, whatever srtp says. */
     bool webrtc = false;
+    /** Take the mailbox state the server sends with no subscription (SIPRAL_EVENT_KIND_MESSAGES_WAITING with
+     * this account and no subscription) rather than refusing it 481; for a PBX that ties the mailbox to the
+     * extension. */
+    bool unsolicited_mwi = false;
     std::string auth_user;
     std::string auth_password;
 };
@@ -549,6 +553,7 @@ public:
         config.stream_protocol = options.stream_protocol;
         config.srtp = options.srtp;
         config.webrtc = options.webrtc ? SIPRAL_TOGGLE_ON : SIPRAL_TOGGLE_DEFAULT;
+        config.unsolicited_mwi = options.unsolicited_mwi ? SIPRAL_TOGGLE_ON : SIPRAL_TOGGLE_DEFAULT;
         config.auth_user = text(options.auth_user);
         config.auth_user_len = options.auth_user.size();
         config.auth_password = text(options.auth_password);

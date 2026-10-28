@@ -5,8 +5,9 @@
  * fatal) and run against the shared library: a refused stack is an Error
  * with its status, an account goes with its object, a call's INVITE passes a
  * message hook that adds a header, a hook that throws keeps the message
- * and has its exception come out of the next poll(), and an account that is a
- * WebRTC line offers DTLS-SRTP on UDP/TLS/RTP/SAVPF.
+ * and has its exception come out of the next poll(), an account that is a
+ * WebRTC line offers DTLS-SRTP on UDP/TLS/RTP/SAVPF, and one that takes a
+ * PBX's unasked mailbox state reads it.
  *
  * Exits 0 when every check holds; prints each one that did not.
  */
@@ -157,6 +158,48 @@ int main()
     }
     expect(offered, "a WebRTC line's INVITE did not offer DTLS-SRTP on UDP/TLS/RTP/SAVPF");
 
+    // the mailbox state a PBX sends unasked, taken by an account that says so
+    std::vector<std::pair<sipral::Handle, std::uint32_t>> waiting;
+    sipral::StackOptions told;
+    told.bind_address = "127.0.0.1:5997";
+    told.on_event = [&waiting](const sipral::Event &event) {
+        if (event.kind() == SIPRAL_EVENT_KIND_MESSAGES_WAITING &&
+            event.raw().payload.message.subscription == SIPRAL_HANDLE_NONE) {
+            waiting.emplace_back(event.account(), event.raw().payload.message.new_messages);
+        }
+    };
+    sipral::Stack mailbox(std::move(told));
+    sipral::AccountOptions extension = alice();
+    extension.unsolicited_mwi = true;
+    sipral::Account lamp = mailbox.add_account(extension);
+    const std::string body = "Messages-Waiting: yes\r\nVoice-Message: 4/1 (0/0)\r\n";
+    const std::string notify = "NOTIFY sip:alice@127.0.0.1 SIP/2.0\r\n"
+                               "Via: SIP/2.0/UDP 127.0.0.1:5999;branch=z9hG4bK-smoke-mwi\r\n"
+                               "Max-Forwards: 70\r\n"
+                               "From: <sip:alice@127.0.0.1>;tag=pbx\r\n"
+                               "To: <sip:alice@127.0.0.1>\r\n"
+                               "Call-ID: smoke-mwi\r\n"
+                               "CSeq: 1 NOTIFY\r\n"
+                               "Event: message-summary\r\n"
+                               "Subscription-State: active\r\n"
+                               "Content-Type: application/simple-message-summary\r\n"
+                               "Content-Length: " +
+                               std::to_string(body.size()) + "\r\n\r\n" + body;
+    const std::string pbx = "127.0.0.1:5999";
+    const std::string self = "127.0.0.1:5997";
+    expect(sipral_stack_receive_datagram(mailbox.handle(), SIPRAL_TRANSPORT_MAIN,
+                                         reinterpret_cast<const std::uint8_t *>(notify.data()), notify.size(),
+                                         pbx.data(), pbx.size(), self.data(), self.size(),
+                                         sipral::now_ms()) == SIPRAL_STATUS_OK,
+           "the unasked NOTIFY was not taken in");
+    mailbox.poll();
+    bool answered = false;
+    for (const auto &message : sent(mailbox.handle())) {
+        answered = answered || message.rfind("SIP/2.0 200 ", 0) == 0;
+    }
+    expect(answered, "an account with unsolicited_mwi did not answer the unasked NOTIFY 200");
+    expect(waiting.size() == 1 && waiting[0].first == lamp.handle() && waiting[0].second == 4,
+           "the unasked mailbox state did not reach the account with its four new messages");
 
     expect(sipral::advertised_address("0.0.0.0:0", "127.0.0.1:5999").rfind("127.0.0.1:", 0) == 0,
            "the way toward loopback is not loopback");

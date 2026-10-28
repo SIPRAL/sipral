@@ -1318,6 +1318,15 @@ public final class SipralStack: @unchecked Sendable {
     /// `push` puts RFC 8599's `pn-*` parameters on every REGISTER's
     /// `Contact` (`SipralPush`); `Account.pushEcho()` reads the answer.
     ///
+    /// `unsolicitedMwi` takes a `message-summary` NOTIFY no subscription
+    /// asked for, sent to the account from its `registrarAddress`: it is
+    /// answered 200 and raised as `SipralEventKind.messagesWaiting` with the
+    /// event's `account` set and `messageData.subscription` equal to
+    /// `Sipral.handleNone`. It departs from RFC 6665 §4.1.3 on purpose, for
+    /// PBXs that tie the mailbox to the extension, refuse a subscription to
+    /// it and notify unasked. Off by default: such a NOTIFY is answered 481
+    /// and nothing is raised (`sipral_account_config_t::unsolicited_mwi`).
+    ///
     /// `instanceId` is the `+sip.instance` URN of RFC 5626 §4.1
     /// (`urn:uuid:...`, angle brackets optional), on the `Contact` of every
     /// REGISTER, de-registration included: kept across launches, it lets the
@@ -1354,7 +1363,8 @@ public final class SipralStack: @unchecked Sendable {
         trustedPeers: [String] = [],
         realms: [String] = [],
         security: AccountSecurity = AccountSecurity(),
-        push: SipralPush? = nil
+        push: SipralPush? = nil,
+        unsolicitedMwi: Bool = false
     ) throws -> Account {
         guard (registrarAddress == nil) != (serverUri == nil) else {
             throw SipralError(
@@ -1400,7 +1410,8 @@ public final class SipralStack: @unchecked Sendable {
             trustedPeers: trustedPeers,
             realms: realms,
             security: security,
-            push: push
+            push: push,
+            unsolicitedMwi: unsolicitedMwi
         )
         movingQueue.sync { accounts[account.handle] = account }
         return account

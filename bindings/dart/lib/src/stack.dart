@@ -369,6 +369,15 @@ final class SipralStack {
   /// its calls offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF` with ICE
   /// and BUNDLE, whatever the stack's SRTP policy says.
   ///
+  /// [unsolicitedMwi] accepts a `message-summary` NOTIFY no subscription
+  /// asked for, sent to the account from its registrar's address: it is
+  /// answered 200 and raised as `SipralEventKind.messagesWaiting` with
+  /// [SipralStackEvent.account] naming the account and no
+  /// [SipralMessageSummary.subscription]. This departs from RFC 6665
+  /// §4.1.3, which answers such a NOTIFY 481, on purpose, for PBXs that tie
+  /// the mailbox to the extension and notify unasked. Off by default, and
+  /// off it is answered 481 and nothing is raised.
+  ///
   /// [clientCertificate] is what its TLS or WSS connection presents when the
   /// server asks for one; the stack's `clientCertificate` when null. A
   /// refusal is `SipralEventKind.transportFailed` with
@@ -396,6 +405,7 @@ final class SipralStack {
     String? websocketHost,
     String? websocketResource,
     bool webrtc = false,
+    bool unsolicitedMwi = false,
     SipralClientCertificate? clientCertificate,
     String? instanceId,
     List<(String, String)> headers = const [],
@@ -494,6 +504,7 @@ final class SipralStack {
         ..websocketResource = websocketResourceText.$1
         ..websocketResourceLen = websocketResourceText.$2
         ..webrtc = webrtc ? SipralToggle.on : 0
+        ..unsolicitedMwi = unsolicitedMwi ? SipralToggle.on : 0
         ..instanceId = instanceText.$1
         ..instanceIdLen = instanceText.$2
         ..headers = headers.isEmpty ? ffi.nullptr : fields

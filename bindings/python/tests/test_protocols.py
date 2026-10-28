@@ -463,6 +463,60 @@ class Protocols(unittest.IsolatedAsyncioTestCase):
         ending = await asyncio.to_thread(notifier.request, "SUBSCRIBE")
         self.assertEqual(header("Expires", ending), "0")
 
+    def unasked_mwi(self, stack: Stack, pbx: Peer, call_id: str) -> str:
+        """A `message-summary` NOTIFY no subscription asked for, sent the way
+        a PBX tying the mailbox to the extension sends it; the answer's
+        status line."""
+        body = "Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n"
+        pbx.send(
+            f"NOTIFY sip:alice@{stack.bind_address} SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP {pbx.address};branch=z9hG4bK-{call_id}\r\n"
+            "Max-Forwards: 70\r\n"
+            "From: <sip:alice@example.invalid>;tag=pbx\r\n"
+            "To: <sip:alice@example.invalid>\r\n"
+            f"Call-ID: {call_id}\r\n"
+            "CSeq: 1 NOTIFY\r\n"
+            "Event: message-summary\r\n"
+            "Subscription-State: active\r\n"
+            "Content-Type: application/simple-message-summary\r\n"
+            f"Content-Length: {len(body.encode())}\r\n\r\n" + body,
+            stack.bind_address,
+        )
+        while True:
+            text = pbx.datagram().decode()
+            if text.startswith("SIP/2.0 ") and header("Call-ID", text) == call_id:
+                return text.split("\r\n", 1)[0]
+
+    async def test_an_unasked_message_summary_reaches_an_account_that_accepts_it(self) -> None:
+        stack = self.stack()
+        pbx = self.peer()
+        account = stack.add_account(
+            "sip:alice@example.invalid", registrar_address=pbx.address, unsolicited_mwi=True
+        )
+        status = await asyncio.to_thread(self.unasked_mwi, stack, pbx, "unasked-1")
+        self.assertTrue(status.startswith("SIP/2.0 200"), status)
+        told = await self.first(stack.events, EventKind.MESSAGES_WAITING)
+        self.assertEqual(told.account, account.handle)
+        self.assertEqual(told.fields["subscription"], lib.SIPRAL_HANDLE_NONE)
+        self.assertTrue(told.fields["waiting"])
+        self.assertEqual(told.fields["new_messages"], 2)
+        self.assertEqual(told.fields["old_messages"], 5)
+
+    async def test_an_unasked_message_summary_is_refused_by_default(self) -> None:
+        stack = self.stack()
+        pbx = self.peer()
+        stack.add_account("sip:alice@example.invalid", registrar_address=pbx.address)
+        status = await asyncio.to_thread(self.unasked_mwi, stack, pbx, "unasked-2")
+        self.assertTrue(status.startswith("SIP/2.0 481"), status)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.0
+        while loop.time() < deadline:
+            try:
+                event = await asyncio.wait_for(stack.events.get(), timeout=0.2)
+            except TimeoutError:
+                continue
+            self.assertNotEqual(event.kind, EventKind.MESSAGES_WAITING)
+
     # -- a recording server ------------------------------------------------
 
     async def test_a_call_is_recorded_to_a_recording_server(self) -> None:

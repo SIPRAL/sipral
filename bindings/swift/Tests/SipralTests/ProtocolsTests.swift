@@ -291,6 +291,56 @@ final class ProtocolsTests: XCTestCase {
         XCTAssertEqual(FakePeer.header("Expires", in: unsubscribe.message), "0")
     }
 
+    /// A `message-summary` NOTIFY no subscription asked for, sent the way a
+    /// PBX that ties the mailbox to the extension sends it: what the
+    /// registrar's socket hears back, and every event the stack raised.
+    private func unasked(unsolicitedMwi: Bool) async throws -> (answer: String?, account: Account, events: [SipralEvent]) {
+        let pbx = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { pbx.close() }
+        let alice = try SipralStack(audio: .application)
+        defer { alice.close() }
+        let account = try alice.addAccount(
+            aor: "sip:alice@example.invalid", registrarAddress: pbx.localAddress, unsolicitedMwi: unsolicitedMwi
+        )
+        let events = Recorder(alice.events())
+        let body = "Messages-Waiting: yes\r\nVoice-Message: 2/5 (0/0)\r\n"
+        let notify = "NOTIFY sip:alice@\(alice.bindAddress) SIP/2.0\r\n"
+            + "Via: SIP/2.0/UDP \(pbx.localAddress);branch=z9hG4bK-unasked-1\r\n"
+            + "Max-Forwards: 70\r\n"
+            + "From: <sip:alice@example.invalid>;tag=pbx\r\n"
+            + "To: <sip:alice@example.invalid>\r\n"
+            + "Call-ID: unasked-1\r\n"
+            + "CSeq: 1 NOTIFY\r\n"
+            + "Event: message-summary\r\n"
+            + "Subscription-State: active\r\n"
+            + "Content-Type: application/simple-message-summary\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n\r\n"
+            + body
+        pbx.send(Array(notify.utf8), to: alice.bindAddress)
+        let answered = await FakePeer.request(on: pbx, "SIP/2.0", within: 10)
+        // refused, a second is long enough for an event that should not come
+        _ = await events.first(within: unsolicitedMwi ? 10 : 1) { $0.kind == .messagesWaiting }
+        return (answered?.message, account, events.elements)
+    }
+
+    func testAnUnaskedMessageSummaryIsTakenOnlyByAnAccountThatAllowsIt() async throws {
+        let taken = try await unasked(unsolicitedMwi: true)
+        let answer = try XCTUnwrap(taken.answer, "the NOTIFY was not answered")
+        XCTAssertTrue(answer.hasPrefix("SIP/2.0 200"), answer)
+        let waiting = try XCTUnwrap(taken.events.first { $0.kind == .messagesWaiting }, "no messagesWaiting")
+        XCTAssertEqual(waiting.account, taken.account.handle)
+        let data = try XCTUnwrap(waiting.messageData)
+        XCTAssertEqual(data.subscription, Sipral.handleNone)
+        XCTAssertTrue(data.waiting)
+        XCTAssertEqual(data.newMessages, 2)
+        XCTAssertEqual(data.oldMessages, 5)
+
+        let refused = try await unasked(unsolicitedMwi: false)
+        let refusal = try XCTUnwrap(refused.answer, "the NOTIFY was not answered")
+        XCTAssertTrue(refusal.hasPrefix("SIP/2.0 481"), refusal)
+        XCTAssertFalse(refused.events.contains { $0.kind == .messagesWaiting })
+    }
+
     static let room = """
     <?xml version="1.0"?>
     <conference-info xmlns="urn:ietf:params:xml:ns:conference-info" entity="sip:room@sipral.invalid" state="full" version="1">

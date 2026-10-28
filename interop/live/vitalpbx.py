@@ -378,6 +378,9 @@ class Run:
                 auth_user=user,
                 auth_password=secret,
                 expires_seconds=300,
+                # VitalPBX ties the mailbox to the extension and notifies it
+                # unasked; taken from this registrar alone
+                unsolicited_mwi=True,
             )
             self.forwarders.append(asyncio.create_task(self.forward(extension, stack)))
 

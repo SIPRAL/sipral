@@ -2551,7 +2551,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 9
+    public static let abiVersionMinor: UInt32 = 10
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2890,7 +2890,7 @@ public enum Sipral {
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 504, 280, 288),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 512, 288, 296),
         ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 168, 100, 100),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),

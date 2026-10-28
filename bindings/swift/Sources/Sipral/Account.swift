@@ -194,7 +194,8 @@ public final class Account: @unchecked Sendable {
         trustedPeers: [String],
         realms: [String],
         security: AccountSecurity,
-        push: SipralPush? = nil
+        push: SipralPush? = nil,
+        unsolicitedMwi: Bool = false
     ) throws -> Account {
         let given = contact
         let contact = contact ?? defaultContact(
@@ -305,6 +306,7 @@ public final class Account: @unchecked Sendable {
             config.stir_attestation = security.stirAttestation.rawValue
             config.recording_in_clear = security.recordingInClear ? UInt64(SipralToggle.on.rawValue) : 0
             config.webrtc = security.webrtc ? SipralToggle.on.rawValue : 0
+            config.unsolicited_mwi = unsolicitedMwi ? SipralToggle.on.rawValue : 0
             return try key.withUnsafeBufferPointer { keyBytes in
                 if !keyBytes.isEmpty {
                     config.stir_key = keyBytes.baseAddress

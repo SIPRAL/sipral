@@ -4346,3 +4346,42 @@ Bytes off a connection, the SIP servers' as well as the TURN server's, are
 now handed in again for up to half a second while another thread is inside
 the stack (`SIPRAL_STATUS_BUSY`) rather than dropped, which had left a hole
 in the stream.
+
+## What ABI 1.10 added
+
+### A mailbox's state taken unasked, by an account that says so
+
+Two members appended to `sipral_account_config_t` behind its `size`, no entry
+point, no event kind and no status code: `bindings/c/abi-sizes.txt` grows the
+account's length by eight octets on every layout (512 on 64-bit, 288 and 296
+on the two 32-bit ones) and its pin stays where 1.0 put it. A binding printed
+at 1.9 loads against a 1.10 library and works as it did, its shorter struct
+read with `unsolicited_mwi` zero; one printed at 1.10 is refused by a 1.9
+library, with both versions named.
+
+- `unsolicited_mwi`, a `sipral_toggle_t`. `SIPRAL_TOGGLE_ON` takes a
+  `message-summary` `NOTIFY` that no subscription asked for, for a PBX that
+  ties the mailbox to the extension and notifies unasked: one outside any
+  dialog, from the IP address the account registers with and addressed to
+  the account, is answered 200 and raised as
+  `SIPRAL_EVENT_KIND_MESSAGES_WAITING`, its event's `account` the account's
+  handle and its `subscription` `SIPRAL_HANDLE_NONE`, the counts where a
+  subscription's go. `SIPRAL_TOGGLE_DEFAULT` and `SIPRAL_TOGGLE_OFF` answer
+  it 481, as RFC 6665 §4.1.3 asks; any other value is
+  `SIPRAL_STATUS_INVALID_ARGUMENT`. `04-ua.md`, "Notifications outside a
+  subscription we created are refused", has the reasoning and its limits.
+- `reserved_1_10`, zero, which keeps the struct a whole multiple of its
+  alignment.
+
+**In the layers.** Each takes it on the account, off unless asked: Swift
+`addAccount(..., unsolicitedMwi: true)`, Kotlin `addAccount(...,
+unsolicitedMwi = true)` and the JVM jar's `SipralJava.addAccount(...,
+unsolicitedMwi)`, .NET `AddAccount(..., unsolicitedMwi: true)`, Python
+`add_account(..., unsolicited_mwi=True)`, Dart `addAccount(...,
+unsolicitedMwi: true)`, Node `stack.addAccount(aor, {unsolicitedMwi: true})`
+and C++ `AccountOptions::unsolicited_mwi`. The event reaches each as any
+messages-waiting event does, with the account and no subscription; Dart's
+`SipralStackEvent.messageSummary` now carries the counts, which its layer had
+not read before. Each layer's tests have a fake PBX on loopback send the
+unasked `NOTIFY` and read 200 and the event with the option, 481 and nothing
+without it. React Native, which has no subscriptions, does not take it.
