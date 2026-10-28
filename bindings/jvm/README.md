@@ -77,7 +77,9 @@ asks the library to convert both ways for a speech service at its own rate;
 `getSampleRate()` and `getFrameSamples()` follow it. `SipralJava.addAccount`
 takes a `SipralTransport.TCP` or `TLS` (and a certificate pin) after the
 credentials, for an account on a connection of its own beside the client's
-UDP socket; `client.settings()` is a plain method. `SipralJava.placeCall`
+UDP socket, and `unsolicitedMwi` takes the mailbox state a PBX sends from the
+registrar's address with no subscription, rather than refusing it 481 as RFC
+6665 §4.1.3 asks (off by default); `client.settings()` is a plain method. `SipralJava.placeCall`
 and `SipralJava.answerCall` take a call's own codecs, `"PCMA,PCMU"`, after
 the media host, in place of the client's; an answer keeps the offer's order
 (RFC 3264 §6.1), so answering it chooses which codecs rather than which

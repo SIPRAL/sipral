@@ -452,6 +452,13 @@ challenge, each refresh, the de-registration — checked as a call's are:
 the `gruu` an instance brings, and an account without a `registrar`, which
 sends no REGISTER, refuses them.
 
+`addAccount(unsolicitedMwi: true)` takes a `message-summary` NOTIFY no
+subscription asked for, sent to the account from its `registrarAddress`, for
+a PBX that ties the mailbox to the extension, refuses a subscription to it
+and notifies unasked: it is answered 200 and raised as `.messagesWaiting`
+with the event's `account` set and no subscription. It departs from RFC 6665
+§4.1.3 on purpose and is off by default, when such a NOTIFY is answered 481.
+
 ### STIR/SHAKEN, SRTP per account and the encryption report
 
 `addAccount(..., security: AccountSecurity(stirKey: key,

@@ -168,7 +168,11 @@ application's thread.
   `instanceId` puts RFC 5626's `+sip.instance` on the `Contact` of every
   REGISTER, which a push proxy (RFC 8599) refuses to do without, and
   `headers` go on every REGISTER: the first, the answer to a challenge, the
-  refresh and the de-registration.
+  refresh and the de-registration. `unsolicitedMwi: true` takes a
+  `message-summary` NOTIFY no subscription asked for, from the account's
+  registrar address, as `MessagesWaiting` with the account and no
+  subscription, for a PBX that notifies voicemail unasked; off by default,
+  when it is refused 481 as RFC 6665 §4.1.3 asks.
 - **Calls:** `hold`, `resume`, `transfer`, `transferTo`, `join` (a three-way
   call mixed here), `hangupFor` (a `Reason`), `setHeaders`, `sendText` (RFC
   4103), `setFocus`, `conferenceUri`, `subscribeConference`, `recordTo` (RFC

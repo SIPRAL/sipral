@@ -191,6 +191,11 @@ first, the answer to a challenge, the refresh and the de-registration. A
 field that would break a line is refused before it crosses; the library
 checks the rest as it does a call's.
 
+`webrtc: true` puts the account on a PBX WebRTC line (Asterisk's
+`webrtc=yes`): its calls offer and require DTLS-SRTP on `UDP/TLS/RTP/SAVPF`,
+with ICE, rtcp-mux and BUNDLE, whatever the client's `srtp` says; the native
+halves pass it to the Swift and Kotlin layers' account security.
+
 ### A message hook
 
 The other layers hand every SIP message to a function that answers before
