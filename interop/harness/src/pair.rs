@@ -317,7 +317,43 @@ pub(crate) fn run(
         }
     }
 
+    // both bindings go back, as every other flow's does: the dialling
+    // account is the one the rest of the run registers as, and a contact of
+    // this pair's left at the server is where Asterisk would send the next
+    // flow's MESSAGE echo
+    give_back(&mut answering.endpoint, answering.account);
+    give_back(&mut dialling.endpoint, dialling.account);
     verdict(&answering)
+}
+
+/// How long a binding is given to go back before the flow moves on.
+const GIVE_BACK: Duration = Duration::from_secs(5);
+
+/// Unregister `account`, and drive `endpoint` until the server has said so
+/// or [`GIVE_BACK`] has passed.
+fn give_back(endpoint: &mut Endpoint, account: AccountId) {
+    let started = Instant::now();
+    if endpoint.agent.unregister(account, started).is_err() {
+        return;
+    }
+    while started.elapsed() < GIVE_BACK {
+        let now = Instant::now();
+        let gone = endpoint.pump(now).iter().any(|event| {
+            matches!(
+                event,
+                Event::Signalling(
+                    UaEvent::Unregistered { .. } | UaEvent::RegistrationFailed { .. }
+                )
+            )
+        });
+        if gone {
+            return;
+        }
+        endpoint.timers(now);
+        if !endpoint.read_sip(now) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 /// What the flow proved, or the first thing it did not.
@@ -437,10 +473,6 @@ mod tests {
         let peer = UdpSocket::bind(SocketAddr::new(LOOPBACK, 0)).expect("a peer socket");
         peer.send_to(b"OPTIONS sip:test SIP/2.0\r\n\r\n", local)
             .expect("sending on loopback");
-        // the kernel's own queue, not this process's: `turn`'s very first
-        // call may run before the datagram sent above has actually landed
-        // on the socket it reads
-        std::thread::sleep(Duration::from_millis(20));
 
         let mut callee = Callee {
             endpoint,
@@ -453,8 +485,18 @@ mod tests {
             narrowing: Narrowing::default(),
             done: false,
         };
+        // the datagram lands when the kernel, and any network filter on the
+        // machine, lets it, which can be a second for a binary's first
+        // loopback traffic: turns until it is there, and only a turn that
+        // never reads fails
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut read = callee.turn(now);
+        while !read && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            read = callee.turn(Instant::now());
+        }
         assert!(
-            callee.turn(now),
+            read,
             "a datagram sitting on the socket was never read off it"
         );
     }

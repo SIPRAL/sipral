@@ -226,9 +226,16 @@ pub(crate) fn run_folded(constant: [u8; 32]) -> [u8; 32] {
 /// ACK reaches it, and through a proxy that Record-Routes, the ACK takes the
 /// long way while the digit goes straight there: baresip enables its RTP
 /// receiver only on the ACK, and a digit that arrives before it is never
-/// heard. Its first audio comes from the same step that enables its
-/// receiver, so that audio proves the digit will be heard.
+/// heard. Its first audio is the sign the call has got that far, but not
+/// proof the receiver is on: on 27 and 28 October two runs in six still lost
+/// the digit sent the moment that audio came, so the digit goes
+/// `AFTER_AUDIO` later.
 const SETTLE: Duration = Duration::from_secs(1);
+
+/// How long after the far end's first audio (or `SETTLE`) the test digit
+/// goes: the ACK through the proxy reaches the phone in milliseconds, and
+/// a person pressing a key takes longer than this.
+const AFTER_AUDIO: Duration = Duration::from_millis(500);
 
 /// Audible frames `Flow::G729` has to hear back from the echo: half a second
 /// of twenty-millisecond frames.
@@ -1687,6 +1694,9 @@ struct Script {
     listen_until: Option<Instant>,
     /// When to stop waiting for the far end to be worth handing over.
     settled_by: Option<Instant>,
+    /// When the test digit goes, once the far end's audio has come
+    /// (`AFTER_AUDIO`).
+    dial_at: Option<Instant>,
     /// How much audible audio had come back when the resume was agreed, so
     /// `Flow::Dtls` can tell audio after it from audio before the hold.
     audible_at_resume: Option<u32>,
@@ -1779,6 +1789,7 @@ impl Script {
             asked: false,
             listen_until: None,
             settled_by: None,
+            dial_at: None,
             audible_at_resume: None,
             sent_message: None,
             subscription: None,
@@ -2102,6 +2113,10 @@ impl Script {
             self.settled_by = None;
             self.advance(endpoint, now);
         }
+        if self.dial_at.is_some_and(|due| now >= due) {
+            self.dial_at = None;
+            self.dial_test_digit(endpoint, now);
+        }
         if self.step == Step::Done || now > self.started + patience() {
             self.step = Step::Done;
         }
@@ -2198,7 +2213,9 @@ impl Script {
                 self.step = Step::AwaitingAudio;
                 self.settled_by = Some(now + SETTLE);
             }
-            Step::AwaitingAudio => self.dial_test_digit(endpoint, now),
+            // the far end's audio, or SETTLE's cap: the digit goes a moment
+            // later, see AFTER_AUDIO
+            Step::AwaitingAudio => self.dial_at = Some(now + AFTER_AUDIO),
             Step::Talking if self.flow == Flow::DtmfInfo => self.send_dtmf_by_info(endpoint, now),
             // no `listen_until`, unlike every flow in the arm above: this
             // one's own claim is that it never asks for the call to end

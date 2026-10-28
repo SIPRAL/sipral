@@ -575,10 +575,10 @@ LAB_START_DOTNET_S=240
 # and the PipeWire step, which compiles the facade inside its container
 # before its call
 LAB_START_BUILD_S=1800
-# The most calls one run of the harness's ordinary flows places: nineteen
+# The most calls one run of the harness's ordinary flows places: twenty
 # flows against Asterisk, the transfers, the local conference and the call
 # muted on its own placing more than one call each.
-LAB_SUITE_CALLS=24
+LAB_SUITE_CALLS=25
 LAB_RUN_TIMED_OUT=124
 LAB_RUN_SEQ=0
 lab_run() {
@@ -1166,11 +1166,15 @@ wait_for asterisk "Asterisk Ready" || exit 1
 # own image is musl -- the two are not interchangeable, and the error when they
 # are swapped is "no such file or directory" for a file that is plainly there.
 flows() {
-    local server="$1" capture="$2"
+    local server="$1" capture="$2" wide=
+    # the `inbound` flow's account, called with a wide offer to narrow: only
+    # Asterisk has one (interop/asterisk/pjsip.conf's labuser-wide)
+    [ "$server" = asterisk ] && wide=labuser-wide
     lab_run "the harness's flows against $server" $((LAB_START_APT_S + LAB_SUITE_CALLS * LAB_CALL_S)) \
         --network "$LAB_NETWORK" \
         --cap-add NET_RAW --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 \
+        ${wide:+-e SIPRAL_USER_WIDE=$wide -e SIPRAL_PASS_WIDE=labpass} \
         ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
         -v "$HARNESS:/harness:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
