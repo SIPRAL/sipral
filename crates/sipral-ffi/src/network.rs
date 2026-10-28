@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Networking ready to use (ABI 1.5): the sockets, the TLS and RFC 3263's lookups run for a
+//! Networking ready to use (ABI 1.6): the sockets, the TLS and RFC 3263's lookups run for a
 //! stack by the library, for an application that would otherwise write them.
 //!
 //! Everything else in this ABI leaves the I/O to the caller (`crate::transport`). These entry
@@ -82,7 +82,7 @@ codes! {
 }
 
 record! {
-    /// How the networking component connects and resolves (ABI 1.5). Set `size` to
+    /// How the networking component connects and resolves (ABI 1.6). Set `size` to
     /// `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
     /// platform's trust store and resolver, and no client certificate.
     #[derive(Clone, Copy)]
@@ -194,7 +194,7 @@ pub(crate) fn forget(stack: SipralHandle) {
 }
 
 entry! {
-    /// Have the library run this stack's networking (ABI 1.5).
+    /// Have the library run this stack's networking (ABI 1.6).
     ///
     /// From now on [`sipral_network_run`] does what the loop of `sipral_stack_poll`,
     /// `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
@@ -236,7 +236,7 @@ entry! {
 }
 
 entry! {
-    /// One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+    /// One turn of the loop the component runs for this stack (ABI 1.6): poll the stack, write
     /// what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
     /// of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
     /// again. The callback runs inside it, on this thread, as it does inside
@@ -263,7 +263,7 @@ entry! {
 }
 
 entry! {
-    /// Stop running this stack's networking (ABI 1.5): every socket and connection the
+    /// Stop running this stack's networking (ABI 1.6): every socket and connection the
     /// component opened is closed, its media sockets with them, and the stack's events go to
     /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
     /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
@@ -287,7 +287,7 @@ entry! {
 
 entry! {
     /// Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
-    /// (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+    /// (ABI 1.6): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
     /// ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
     ///
     /// For the address to name in `bind_address` and `Contact`, with
@@ -338,7 +338,7 @@ entry! {
 }
 
 entry! {
-    /// Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+    /// Open a UDP socket for one call's media (ABI 1.6), on the address the stack advertises,
     /// at a port from its RTP range when it has one (the odd one above kept for RTCP), and
     /// write its `host:port`, NUL-terminated, into `buffer`, for
     /// `sipral_call_config_t::media_address` or an answer's.
@@ -379,7 +379,7 @@ entry! {
 
 entry! {
     /// Give a call's media to the socket [`sipral_network_media_open`] opened at `address`
-    /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+    /// (ABI 1.6), once `sipral_call_media` has minted its handle: from now on every packet that
     /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
     /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
     /// [`sipral_network_run`], or on its TURN connection when the stack marks it so. Before,
@@ -414,7 +414,7 @@ entry! {
 
 entry! {
     /// One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
-    /// socket the call's handle is attached to (ABI 1.5). The frame is as
+    /// socket the call's handle is attached to (ABI 1.6). The frame is as
     /// `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
     /// with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
     ///
@@ -443,7 +443,7 @@ entry! {
 }
 
 entry! {
-    /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+    /// Close the media socket at `address` (ABI 1.6), and give its port back to the stack's
     /// range. For a socket whose call never came to media; one whose call ended has closed
     /// already. A socket the stack's STUN client was told of is released at the next
     /// [`sipral_network_run`] with `sipral_stack_nat_unmap`, its relay given back from it with

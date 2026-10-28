@@ -13,7 +13,7 @@
 # there reaches the artefacts without an edit here.
 #
 # `package_features 0|1` (1: with Opus) sets
-#   FFI_FEATURES       the comma-separated feature list, "dtls,ice,stun" today
+#   FFI_FEATURES       the comma-separated feature list, "dtls,ice,stun,stir" today
 #   FFI_FEATURE_ARGS   the cargo arguments that build exactly that list
 #   VARIANT_SUFFIX     "" without Opus and "-opus" with it, for artefact names
 #   VARIANT_LABEL      one line naming the variant, for logs and metadata

@@ -355,7 +355,7 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_LOCAL_CONFERENCE ((uint32_t)16777216)
 
 /**
- * See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+ * See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.6):
  * `sipral_network_start` and the entry points beside it run the
  * sockets, TLS and RFC 3263 lookups for a stack. Set when this library
  * was built with sipral-ffi's `network` feature, which the bindings'
@@ -8556,7 +8556,7 @@ struct sipral_isup {
 };
 
 /**
- * How the networking component connects and resolves (ABI 1.5). Set `size` to
+ * How the networking component connects and resolves (ABI 1.6). Set `size` to
  * `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
  * platform's trust store and resolver, and no client certificate.
  */
@@ -11792,7 +11792,7 @@ sipral_status_t sipral_isup_read(const uint8_t *body, size_t body_len, sipral_is
 sipral_status_t sipral_isup_number(const uint8_t *body, size_t body_len, sipral_isup_number_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
- * Have the library run this stack's networking (ABI 1.5).
+ * Have the library run this stack's networking (ABI 1.6).
  *
  * From now on sipral_network_run does what the loop of `sipral_stack_poll`,
  * `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
@@ -11819,7 +11819,7 @@ sipral_status_t sipral_isup_number(const uint8_t *body, size_t body_len, sipral_
 sipral_status_t sipral_network_start(sipral_handle_t stack, const sipral_network_config_t *config, uint64_t now_ms);
 
 /**
- * One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+ * One turn of the loop the component runs for this stack (ABI 1.6): poll the stack, write
  * what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
  * of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
  * again. The callback runs inside it, on this thread, as it does inside
@@ -11836,7 +11836,7 @@ sipral_status_t sipral_network_start(sipral_handle_t stack, const sipral_network
 sipral_status_t sipral_network_run(sipral_handle_t stack, uint64_t now_ms, uint32_t wait_ms);
 
 /**
- * Stop running this stack's networking (ABI 1.5): every socket and connection the
+ * Stop running this stack's networking (ABI 1.6): every socket and connection the
  * component opened is closed, its media sockets with them, and the stack's events go to
  * the callback alone again. The stack is told nothing; a stack about to be destroyed needs
  * no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
@@ -11850,7 +11850,7 @@ sipral_status_t sipral_network_stop(sipral_handle_t stack);
 
 /**
  * Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
- * (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+ * (ABI 1.6): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
  * ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
  *
  * For the address to name in `bind_address` and `Contact`, with
@@ -11868,7 +11868,7 @@ sipral_status_t sipral_network_stop(sipral_handle_t stack);
 sipral_status_t sipral_network_locate(const sipral_network_config_t *config, const char *server_uri, size_t server_uri_len, sipral_transport_t protocol, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
- * Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+ * Open a UDP socket for one call's media (ABI 1.6), on the address the stack advertises,
  * at a port from its RTP range when it has one (the odd one above kept for RTCP), and
  * write its `host:port`, NUL-terminated, into `buffer`, for
  * `sipral_call_config_t::media_address` or an answer's.
@@ -11894,7 +11894,7 @@ sipral_status_t sipral_network_media_open(sipral_handle_t stack, char *buffer, s
 
 /**
  * Give a call's media to the socket sipral_network_media_open opened at `address`
- * (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+ * (ABI 1.6), once `sipral_call_media` has minted its handle: from now on every packet that
  * arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
  * `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
  * sipral_network_run, or on its TURN connection when the stack marks it so. Before,
@@ -11912,7 +11912,7 @@ sipral_status_t sipral_network_media_attach(sipral_handle_t stack, const char *a
 
 /**
  * One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
- * socket the call's handle is attached to (ABI 1.5). The frame is as
+ * socket the call's handle is attached to (ABI 1.6). The frame is as
  * `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
  * with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
  *
@@ -11925,7 +11925,7 @@ sipral_status_t sipral_network_media_attach(sipral_handle_t stack, const char *a
 sipral_status_t sipral_network_media_capture(sipral_handle_t stack, sipral_handle_t media, uint64_t now_ms, const int16_t *samples, size_t sample_count);
 
 /**
- * Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+ * Close the media socket at `address` (ABI 1.6), and give its port back to the stack's
  * range. For a socket whose call never came to media; one whose call ended has closed
  * already. A socket the stack's STUN client was told of is released at the next
  * sipral_network_run with `sipral_stack_nat_unmap`, its relay given back from it with

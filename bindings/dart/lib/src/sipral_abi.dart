@@ -6697,7 +6697,7 @@ final class SipralIsup extends ffi.Struct {
   external int callingCategory;
 }
 
-/// How the networking component connects and resolves (ABI 1.5). Set `size` to
+/// How the networking component connects and resolves (ABI 1.6). Set `size` to
 /// `sizeof(sipral_network_config_t)` and zero the rest first: zero everywhere is the
 /// platform's trust store and resolver, and no client certificate.
 final class SipralNetworkConfig extends ffi.Struct {
@@ -7065,7 +7065,7 @@ final class Sipral {
   /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
   static const int featureLocalConference = 16777216;
 
-  /// See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.5):
+  /// See SIPRAL_FEATURE_DTMF. The networking component (ABI 1.6):
   /// `sipral_network_start` and the entry points beside it run the
   /// sockets, TLS and RFC 3263 lookups for a stack. Set when this library
   /// was built with sipral-ffi's `network` feature, which the bindings'
@@ -10353,7 +10353,7 @@ final class Sipral {
       ffi.Int32 Function(ffi.Pointer<ffi.Uint8> body, ffi.Size bodyLen, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(ffi.Pointer<ffi.Uint8> body, int bodyLen, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_isup_number');
 
-  /// Have the library run this stack's networking (ABI 1.5).
+  /// Have the library run this stack's networking (ABI 1.6).
   ///
   /// From now on sipral_network_run does what the loop of `sipral_stack_poll`,
   /// `sipral_stack_poll_transmit` and `sipral_stack_receive_*` has the application do. The
@@ -10380,7 +10380,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralNetworkConfig> config, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<SipralNetworkConfig> config, int nowMs)>('sipral_network_start');
 
-  /// One turn of the loop the component runs for this stack (ABI 1.5): poll the stack, write
+  /// One turn of the loop the component runs for this stack (ABI 1.6): poll the stack, write
   /// what it queued, act on what it asked for, then wait up to `wait_ms` — less when a timer
   /// of the stack's is due sooner — for anything to arrive, hand it in, and poll and write
   /// again. The callback runs inside it, on this thread, as it does inside
@@ -10397,7 +10397,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint64 nowMs, ffi.Uint32 waitMs),
       int Function(int stack, int nowMs, int waitMs)>('sipral_network_run');
 
-  /// Stop running this stack's networking (ABI 1.5): every socket and connection the
+  /// Stop running this stack's networking (ABI 1.6): every socket and connection the
   /// component opened is closed, its media sockets with them, and the stack's events go to
   /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
   /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
@@ -10411,7 +10411,7 @@ final class Sipral {
       int Function(int stack)>('sipral_network_stop');
 
   /// Where RFC 3263 finds `server_uri`'s server for `protocol`, before any stack exists
-  /// (ABI 1.5): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
+  /// (ABI 1.6): NAPTR when the domain publishes it, SRV, then A or AAAA, ranked as the stack
   /// ranks them, every address comma-separated `host:port` and NUL-terminated into `buffer`.
   ///
   /// For the address to name in `bind_address` and `Contact`, with
@@ -10429,7 +10429,7 @@ final class Sipral {
       ffi.Int32 Function(ffi.Pointer<SipralNetworkConfig> config, ffi.Pointer<ffi.Char> serverUri, ffi.Size serverUriLen, ffi.Uint32 protocol, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(ffi.Pointer<SipralNetworkConfig> config, ffi.Pointer<ffi.Char> serverUri, int serverUriLen, int protocol, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_network_locate');
 
-  /// Open a UDP socket for one call's media (ABI 1.5), on the address the stack advertises,
+  /// Open a UDP socket for one call's media (ABI 1.6), on the address the stack advertises,
   /// at a port from its RTP range when it has one (the odd one above kept for RTCP), and
   /// write its `host:port`, NUL-terminated, into `buffer`, for
   /// `sipral_call_config_t::media_address` or an answer's.
@@ -10455,7 +10455,7 @@ final class Sipral {
       int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_network_media_open');
 
   /// Give a call's media to the socket sipral_network_media_open opened at `address`
-  /// (ABI 1.5), once `sipral_call_media` has minted its handle: from now on every packet that
+  /// (ABI 1.6), once `sipral_call_media` has minted its handle: from now on every packet that
   /// arrives there goes to `sipral_media_receive`, and what `sipral_media_poll_transmit`,
   /// `sipral_media_poll_rtcp` and the call's RTCP goodbye hand out leaves from it, inside
   /// sipral_network_run, or on its TURN connection when the stack marks it so. Before,
@@ -10473,7 +10473,7 @@ final class Sipral {
       int Function(int stack, ffi.Pointer<ffi.Char> address, int addressLen, int call, int media)>('sipral_network_media_attach');
 
   /// One frame of the microphone, encoded by `sipral_media_capture` and sent from the media
-  /// socket the call's handle is attached to (ABI 1.5). The frame is as
+  /// socket the call's handle is attached to (ABI 1.6). The frame is as
   /// `sipral_media_capture` takes it, `sample_count` samples at the codec's rate; a frame
   /// with nothing to send, on hold, sends nothing and is `SIPRAL_STATUS_OK`.
   ///
@@ -10486,7 +10486,7 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, SipralHandle media, ffi.Uint64 nowMs, ffi.Pointer<ffi.Int16> samples, ffi.Size sampleCount),
       int Function(int stack, int media, int nowMs, ffi.Pointer<ffi.Int16> samples, int sampleCount)>('sipral_network_media_capture');
 
-  /// Close the media socket at `address` (ABI 1.5), and give its port back to the stack's
+  /// Close the media socket at `address` (ABI 1.6), and give its port back to the stack's
   /// range. For a socket whose call never came to media; one whose call ended has closed
   /// already. A socket the stack's STUN client was told of is released at the next
   /// sipral_network_run with `sipral_stack_nat_unmap`, its relay given back from it with

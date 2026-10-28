@@ -142,7 +142,7 @@ constants! {
     /// and rate: `sipral_local_conference_create`,
     /// `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`.
     pub const SIPRAL_FEATURE_LOCAL_CONFERENCE: u32 = 1 << 24;
-    /// See [`SIPRAL_FEATURE_DTMF`]. The networking component (ABI 1.5):
+    /// See [`SIPRAL_FEATURE_DTMF`]. The networking component (ABI 1.6):
     /// `sipral_network_start` and the entry points beside it run the
     /// sockets, TLS and RFC 3263 lookups for a stack. Set when this library
     /// was built with sipral-ffi's `network` feature, which the bindings'
