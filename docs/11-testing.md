@@ -1670,8 +1670,11 @@ and nothing is written outside `C:\sipral-gate`. The machine is named by
 `SIPRAL_WINDOWS_SSH` (ssh's own arguments) or by a file outside the tree that
 `scripts/check.sh` names, beside the private names; it needs rustup with the pinned toolchain,
 Visual Studio's C++ build tools and Python 3 at `SIPRAL_WINDOWS_PYTHON`
-(default `C:\Python312\python.exe`). A machine that is not named or does not
-answer fails the step. `SIPRAL_WINDOWS=off` leaves it out on purpose, for
+(default `C:\Python312\python.exe`). The same area builds
+`bindings/dotnet/samples/Sipral.Sample.Wpf`, whose `net10.0-windows` only
+Windows builds, there with `dotnet build -warnaserror` and the .NET 10 SDK,
+against the layer as the tree has it; the window is not opened. A machine
+that is not named or does not answer fails the step. `SIPRAL_WINDOWS=off` leaves it out on purpose, for
 working offline, and prints a `skip`: such a run has not checked Windows. An area is a list of
 the gate's own step functions, so `scripts/check.sh --only kotlin,jvm` runs
 exactly what the complete gate runs for those two and nothing else, and

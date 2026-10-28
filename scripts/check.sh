@@ -80,8 +80,9 @@ areas:
            stand-ins for each service, in a virtual environment with
            websockets.
   windows  bindings/python tested on a Windows machine over ssh, against a
-           sipral_ffi.dll built there from this tree (SIPRAL_WINDOWS_SSH;
-           SIPRAL_WINDOWS=off leaves it out, as a skip).
+           sipral_ffi.dll built there from this tree, and the WPF sample
+           built there (SIPRAL_WINDOWS_SSH; SIPRAL_WINDOWS=off leaves it out,
+           as a skip).
   dart     bindings/dart analysed, formatted and tested, pub.sh --dry-run.
   rn       bindings/react-native: jest, tsc, codegen, the Android library
            with Gradle, the iOS half, npm.sh --dry-run.
@@ -1891,10 +1892,9 @@ step_dotnet_compiles() {
             && pass "dotnet build" || fail "dotnet build -c Release, in bindings/dotnet/Sipral"
         # The lab's own headless agent (scripts/lab.sh's csharp_agent) -- net10.0,
         # not net10.0-windows, so it builds here same as the layer it sits on.
-        # bindings/dotnet/samples/Sipral.Sample.Wpf is deliberately not built on
-        # this machine: it targets net10.0-windows, which only Windows carries,
-        # and the layer it is a thin skeleton over is exactly what the dotnet
-        # build above and the "the dotnet bindings" step below already cover.
+        # bindings/dotnet/samples/Sipral.Sample.Wpf is not built on this
+        # machine: it targets net10.0-windows, which only Windows carries, and
+        # the windows area builds it there (step_windows_wpf).
         (cd "$ROOT/bindings/dotnet/samples/Sipral.Sample.Agent" && dotnet build -c Release --nologo) >/dev/null 2>&1 \
             && pass "dotnet build, the sample agent" \
             || fail "dotnet build -c Release, in bindings/dotnet/samples/Sipral.Sample.Agent"
@@ -2415,6 +2415,51 @@ step_windows_python() {
     else
         fail "python -m unittest discover, bindings/python/tests, on Windows x64:"
         sed 's/^/        /' "$work/out"
+    fi
+    ssh "${ssh_args[@]}" "if exist $base\\$run rmdir /s /q $base\\$run" >/dev/null 2>&1
+    rm -rf "$work"
+}
+
+# bindings/dotnet/samples/Sipral.Sample.Wpf targets net10.0-windows, which
+# only Windows builds, so the dotnet area leaves it out on this machine. Here
+# it is built on the machine the step above uses, with -warnaserror, against
+# the layer as this tree has it, committed or not: a change to the layer the
+# sample no longer compiles against fails here rather than in the hands of
+# whoever opens it next. It needs the .NET 10 SDK under C:\Program Files\dotnet;
+# the run's directory under C:\sipral-gate is removed afterwards. The window
+# is not opened: what this holds is that the sample builds.
+step_windows_wpf() {
+    step "the WPF sample on Windows"
+    if [ "${SIPRAL_WINDOWS:-}" = off ]; then
+        skip "the WPF sample on Windows: SIPRAL_WINDOWS=off"
+        return
+    fi
+    local spec="${SIPRAL_WINDOWS_SSH:-}"
+    if [ -z "$spec" ] && [ -s "$ROOT/intern/ops/windows-host.txt" ]; then
+        spec=$(head -1 "$ROOT/intern/ops/windows-host.txt")
+    fi
+    if [ -z "$spec" ]; then
+        fail "the WPF sample on Windows: no machine named (SIPRAL_WINDOWS_SSH, or intern/ops/windows-host.txt; SIPRAL_WINDOWS=off to leave it out)"
+        return
+    fi
+    local ssh_args work run base
+    # shellcheck disable=SC2206 # the spec is ssh's own arguments, split as a shell would
+    ssh_args=(-o BatchMode=yes -o ConnectTimeout=20 $spec)
+    work=$(mktemp -d)
+    run="wpf-$(hostname -s 2>/dev/null || echo host)-$$"
+    base="C:\\sipral-gate"
+    tracked 'bindings/dotnet/Sipral/*' 'bindings/dotnet/samples/Sipral.Sample.Wpf/*' >"$work/list"
+    # macOS's tar adds a ._ file of extended attributes beside each file that
+    # has any; one beside the .csproj is a second project to dotnet build
+    if ! COPYFILE_DISABLE=1 tar -czf "$work/src.tgz" -T "$work/list" 2>"$work/out" \
+        || ! ssh "${ssh_args[@]}" "mkdir $base\\$run && tar -xzf - -C $base/$run" <"$work/src.tgz" >>"$work/out" 2>&1; then
+        fail "the WPF sample on Windows: copying the tree to $base\\$run failed:"
+        sed 's/^/        /' "$work/out"
+    elif ssh "${ssh_args[@]}" "cd /d $base\\$run\\bindings\\dotnet\\samples\\Sipral.Sample.Wpf && set DOTNET_CLI_TELEMETRY_OPTOUT=1&& \"C:\\Program Files\\dotnet\\dotnet.exe\" build -c Release -warnaserror --nologo" >"$work/out" 2>&1; then
+        pass "dotnet build -warnaserror, bindings/dotnet/samples/Sipral.Sample.Wpf, on Windows x64"
+    else
+        fail "dotnet build -warnaserror, bindings/dotnet/samples/Sipral.Sample.Wpf, on Windows x64:"
+        tail -40 "$work/out" | sed 's/^/        /'
     fi
     ssh "${ssh_args[@]}" "if exist $base\\$run rmdir /s /q $base\\$run" >/dev/null 2>&1
     rm -rf "$work"
@@ -3187,7 +3232,7 @@ area_jvm() { need_library; step_jvm; step_jvm_package; }
 area_python() { need_library; step_python; step_wheels; step_linux_arm64; }
 area_pipecat() { need_library; step_pipecat; }
 area_agents() { need_library; step_agents; }
-area_windows() { step_windows_python; }
+area_windows() { step_windows_python; step_windows_wpf; }
 area_dart() { need_library; step_dart; step_pub; }
 area_rn() { need_library; step_react_native; step_npm; }
 area_node() { need_library; step_node; }
@@ -3262,7 +3307,7 @@ route() {
         Package.swift)
             route_to "swift rn" "the Swift package a release publishes, which the React Native pod resolves" ;;
         bindings/dotnet/*)
-            route_to dotnet "the .NET layer" ;;
+            route_to "dotnet windows" "the .NET layer, whose WPF sample the windows area builds on Windows" ;;
         bindings/kotlin/*)
             route_to "kotlin jvm rn" "the Kotlin layer, which bindings/jvm compiles over and sipral.aar carries" ;;
         bindings/jvm/*)
