@@ -4385,3 +4385,117 @@ messages-waiting event does, with the account and no subscription; Dart's
 not read before. Each layer's tests have a fake PBX on loopback send the
 unasked `NOTIFY` and read 200 and the event with the option, 481 and nothing
 without it. React Native, which has no subscriptions, does not take it.
+
+## What ABI 1.11 added
+
+Two entry points, one struct, two members appended to `sipral_isup_t` behind
+its `size` and four to `sipral_transport_wanted_event_t`, no event kind and no
+status code: `bindings/c/abi-sizes.txt` grows `sipral_isup_t`'s length by
+eight octets on every layout (80 on 64-bit, 76 on the two 32-bit ones), its
+pin staying where 1.4 put it, at `calling_category`, and gains
+`sipral_stream_opening_t`, pinned at its whole first length (64 on 64-bit, 36
+on the two 32-bit ones). The event's arm grows from 40 octets to 72 on 64-bit
+and from 20 to 36 on 32-bit, inside the payload union, whose length did not
+move. A binding printed at 1.10 loads against a 1.11 library and works as it
+did, its shorter struct filled as far as it declared it and the event's new
+members unread; one printed at 1.11 is refused by a 1.10 library, with both
+versions named.
+
+### One TLS connection per identity
+
+A TLS connection is checked against one name and one pin, and until 1.11
+every layer that opened the stack's connections itself opened one per
+address: a multi-tenant PBX serving a SIP domain per tenant from one address
+had every tenant's account on the first tenant's connection, held to the
+first tenant's domain. `sipral-ua` keeps accounts of different identities
+apart on connections said to be checked against one before they are bound
+(`04-ua.md`), which only the networking component could say. Now any layer
+can:
+
+- `sipral_transport_wanted_event_t` gains `server_name` and `server_name_len`,
+  the name the server's certificate must carry, lowercase: the host of the
+  `server_uri` of the accounts the connection is for when that is a name (RFC
+  5922 §7.3), empty for the address; and `tls_pin_sha256` and
+  `tls_pin_sha256_len`, the one certificate trusted, as `openssl x509
+  -fingerprint` writes it, empty for none. Both are empty on TCP and WS. For
+  an account's own connection the event is raised once for each identity
+  waiting for a connection there, the same one possibly again with a later
+  account's ask; for a request that outgrew a datagram, once, with the
+  identity of the first account at that address, as the networking component
+  reads it.
+- `sipral_stack_stream_opening(stack, opening)` says that a connection is
+  being opened under `opening->transport`, of `protocol` to `destination`,
+  checked against `server_name` and `tls_pin_sha256` as the event named them.
+  Said before connecting, it is what makes the connection the accounts of
+  that identity alone once `sipral_stack_transport_bind` binds it, and what
+  makes a failure reported on that number move on those accounts alone. A
+  datagram protocol, a missing destination, a name or a pin on TCP or WS, a
+  pin that is not a SHA-256 fingerprint or a name that is not UTF-8 is
+  `SIPRAL_STATUS_INVALID_ARGUMENT`. A connection bound with nothing said of
+  it is any account's, as it was at 1.10, so a layer that never calls this
+  works as it did.
+
+**In the layers.** Swift, Kotlin and the JVM jar on the same sources, .NET,
+Python, Dart and Node each key the connections they open by destination,
+name and pin, open one for each identity the stack asks for with none open
+or opening, check it against that name (unless the application gave
+`tlsServerName`, which still wins) and that pin, and say so with
+`sipral_stack_stream_opening` before connecting; an ask for an identity that
+already has a connection there reuses it. Each layer's event carries the two
+new members (Swift `TransportWantedEventData.serverName` and `.tlsPinSha256`,
+.NET `SipralTransportWantedEventInfo.ServerName` and `.TlsPinSha256`, Python
+`fields["server_name"]` and `fields["tls_pin_sha256"]`, Node
+`fields.serverName` and `fields.tlsPinSha256`, Kotlin's generated event).
+Each layer's tests run one TLS server on loopback whose certificate names one
+SIP domain, and two accounts that SRV places at its address: the first
+registers, the second is refused for the name and never reaches the server,
+and the first one's call still goes over its own connection. Dart, which
+trusts no private authority, tells two pins apart instead of two domains.
+React Native rides on the Swift and Kotlin layers. `bindings/c/smoke.c` hands
+the new struct over at every length.
+
+### A SIP server's certificate read with the authorities above it
+
+`sipral_certificate_check_domain_in_chain(certificate, certificate_len,
+issuers, issuers_len, domain, domain_len, rules, platform_matched,
+out_identity)` is `sipral_certificate_check_domain` with `issuers`, the DER
+of the certificates above the leaf in the chain the platform verified, one
+after another in any order, the anchor among them or not. A `sip:` URI in
+the leaf's `subjectAltName` names the domain only while every
+`nameConstraints` extension among them allows the host of each of its `sip:`
+URIs, read as the `dNSName` or address it stands for, which is what the
+platforms check a `dNSName` against and skip for a URI: an intermediate
+constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for
+`sip:example.com`. A constraint on URIs, or one that cannot be read, allows
+none. The answers and `out_identity` are the 1.8 call's, with
+`SIPRAL_STATUS_INVALID_ARGUMENT` besides for `issuers` that do not end where
+a certificate does; no issuers, a length of zero, reads the leaf alone. The
+1.8 call is unchanged and reads the leaf alone, for a caller with no chain.
+`22-tls.md`, "What the platform checks, and what RFC 5922 adds", has the
+reasoning.
+
+### A cause's coding standard
+
+- `cause_coding`: whose list `cause_value` is from (Q.850 §2.2.2), 0 ITU-T,
+  1 ISO/IEC, 2 national, 3 specific to the location; zero without cause
+  indicators. Only at 0 is `cause_value` the Q.850 cause of that number,
+  which is why the call's own `cause_q850` already leaves any other out.
+- `reserved_1_11`, zero, which keeps the struct a whole multiple of its
+  alignment.
+
+**In the layers.** Every layer that runs its own TLS for SIP and called the
+1.8 check now calls this one with the chain its platform gives: Swift the
+chain `SecTrust` built, the anchor included; Kotlin and the JVM jar the
+`X509Certificate[]` the server sent; .NET the elements of the `X509Chain`
+that was built; Python `SSLSocket.get_verified_chain()` from 3.13 on, the
+leaf alone before it; Node.js the issuer certificates of the verified peer
+certificate. Each layer's tests serve, on loopback, a certificate that names
+the domain only by a `sip:` URI under an intermediate constrained to
+`corp.test`, which is refused as a name mismatch under either rules, and one
+whose URI is inside `corp.test`, which is taken. Dart verifies with
+`dart:io` alone and does not call either check; C++ does not wrap them.
+.NET's `SipralTlsTrust.PrivateAuthority` now builds a chain the platform
+refused again through the intermediates the server sent, so a private authority
+that signs through an intermediate is trusted beside the platform's anchors
+as it already was alone. `cause_coding` reaches each generated binding with
+the struct; `bindings/c/smoke.c` reads a national cause.

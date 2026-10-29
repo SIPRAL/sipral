@@ -40,7 +40,9 @@ impl CodingStandard {
         }
     }
 
-    const fn code(self) -> u8 {
+    /// The two-bit value.
+    #[must_use]
+    pub const fn code(self) -> u8 {
         match self {
             Self::Itu => 0,
             Self::Iso => 1,

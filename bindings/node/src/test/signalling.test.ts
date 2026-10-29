@@ -16,6 +16,8 @@ import { after, describe, test } from 'node:test';
 import {
   type Call,
   SipralCallEndReason,
+  SipralDnsAnswer,
+  SipralDnsRecordType,
   SipralDomainRules,
   SipralError,
   SipralEventKind,
@@ -29,7 +31,7 @@ import {
   TlsTrust,
   sipDomainOf,
 } from '../index.js';
-import { Peer, SERVER_NAME, StreamServer, answer, certificateNaming, certificates, header, kind, until } from './helpers.js';
+import { Peer, SERVER_NAME, StreamServer, answer, certificateNaming, certificates, constrainedChain, header, kind, until } from './helpers.js';
 
 const made = certificates();
 const opened: Stack[] = [];
@@ -215,8 +217,87 @@ describe('a stack signalling over TLS', { skip: made === null ? 'no openssl comm
     assert.equal(sipDomainOf('sip:[2001:db8::7]:5061'), null);
   });
 
+  test('refuses a sip: URI the intermediate above it may not name, and takes one it may', async () => {
+    // held to the name constraints Node checks a DNS name against and skips for a URI
+    const outside = constrainedChain(`URI:sip:${SERVER_NAME}`);
+    const inside = constrainedChain('URI:sip:pbx.corp.test');
+    assert.ok(outside !== null && inside !== null);
+    const refusing = await server(outside);
+    const allowing = await server(inside);
+    for (const rules of [SipralDomainRules.Platform, SipralDomainRules.Rfc5922]) {
+      const alice = await Stack.open({
+        signalling: SipralTransport.Tls,
+        signallingServer: refusing.address,
+        tlsServerName: SERVER_NAME,
+        tlsTrust: TlsTrust.onlyAuthority(outside.root),
+        tlsDomainRules: rules,
+      });
+      opened.push(alice);
+      const event = await kind(alice, SipralEventKind.TransportFailed);
+      assert.equal(event.fields.tls, SipralTlsFailure.NameMismatch, `rules ${rules}: ${String(event.fields.detail)}`);
+      const bob = await stack({
+        signalling: SipralTransport.Tls,
+        signallingServer: allowing.address,
+        tlsServerName: 'pbx.corp.test',
+        tlsTrust: TlsTrust.onlyAuthority(inside.root),
+        tlsDomainRules: rules,
+      });
+      assert.ok(bob.connected, `rules ${rules} refused a sip: URI inside the intermediate's constraint`);
+    }
+  });
+
   test('options that check nothing are refused', () => {
     assert.throws(() => TlsTrust.fromOptions({ rejectUnauthorized: false }), TypeError);
+  });
+
+  test('accounts of two domains at one address are each held to their own domain', async () => {
+    // the server's certificate names the first domain alone, and SRV puts
+    // both at its address: each account's connection is checked against its
+    // own domain, rather than the second riding the first one's
+    const tenant = 'tenant.sipral.test';
+    const registrar = await server(certificate);
+    const port = registrar.address.split(':')[1];
+    const alice = await stack({
+      bindHost: '127.0.0.1',
+      tlsTrust: TlsTrust.onlyAuthority(certificate.cert),
+      resolver: async (name, record) => {
+        if (record === SipralDnsRecordType.Srv && (name === `_sips._tcp.${SERVER_NAME}` || name === `_sips._tcp.${tenant}`)) {
+          return { answer: SipralDnsAnswer.Records, records: [`300 10 60 ${port} host.sipral.test`] };
+        }
+        if (record === SipralDnsRecordType.A && name === 'host.sipral.test') {
+          return { answer: SipralDnsAnswer.Records, records: ['300 127.0.0.1'] };
+        }
+        return { answer: SipralDnsAnswer.Nothing, records: [] };
+      },
+    });
+    const line = (user: string, domain: string) =>
+      alice.addAccount(`sip:${user}@${domain}`, {
+        serverUri: `sips:${domain}`,
+        registrar: `sips:${domain}`,
+        streamProtocol: SipralTransport.Tls,
+      });
+    const first = line('alice', SERVER_NAME);
+    await first.registered();
+    const [[connection]] = registrar.registers() as [[number, string]];
+
+    const second = line('bob', tenant);
+    const refused = kind(alice, SipralEventKind.TransportFailed, 10000);
+    second.register();
+    const event = await refused;
+    assert.equal(event.fields.tls, SipralTlsFailure.NameMismatch, String(event.fields.detail));
+    assert.equal(second.registrarAddress, registrar.address, 'located at the same address');
+    assert.notEqual(second.registrationState, SipralRegistrationState.Registered);
+    assert.ok(!registrar.registers().some(([, message]) => message.includes('sip:bob@')));
+    assert.equal(registrar.reached, 2, 'a connection for each domain');
+
+    const call = await alice.placeCall(first, `sip:carol@${SERVER_NAME}`);
+    try {
+      await until(() => registrar.messages.some(([, message]) => message.startsWith('INVITE sip:carol@')), 10000);
+      const invite = registrar.messages.find(([, message]) => message.startsWith('INVITE '));
+      assert.equal(invite?.[0], connection, "the call went over the first tenant's connection");
+    } finally {
+      call.hangup();
+    }
   });
 
   test("an account's pin decides on the certificate a server presented", async () => {

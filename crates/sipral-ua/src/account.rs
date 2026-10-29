@@ -632,7 +632,9 @@ impl Account {
     /// [`UaEvent::TransportWanted`](crate::UaEvent::TransportWanted)
     /// (for WebSocket, the TCP/TLS connection bound as `Ws`/`Wss`; the
     /// handshake is [`crate::websocket`]'s). The first transport of
-    /// `protocol` bound to the server's address is adopted; until then a
+    /// `protocol` bound to the server's address is adopted, unless it was
+    /// said to be checked against another account's name or pin
+    /// ([`StreamIdentity`](crate::StreamIdentity)); until then a
     /// REGISTER waits and a call fails for an unknown transport. Each account
     /// keeps its own flow, and its calls keep it. Implies
     /// [`Account::transport_protocol`]; a datagram protocol changes nothing

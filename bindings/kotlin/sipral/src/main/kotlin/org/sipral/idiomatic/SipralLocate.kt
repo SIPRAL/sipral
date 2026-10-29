@@ -176,30 +176,6 @@ fun routeHost(peer: String?): String {
     }
 }
 
-/**
- * The domain a `sip:` or `sips:` [uri] names (`sips:example.com:5061` and
- * `sip:example.com;transport=tls` both give `example.com`), the name RFC
- * 5922 §7.3 checks a server's certificate against; null when its host is an
- * IP address, which is then the destination itself, or when it is not such
- * a URI.
- */
-internal fun sipDomainOf(uri: String): String? {
-    val scheme = uri.substringBefore(':', "").lowercase()
-    if (scheme != "sip" && scheme != "sips") {
-        return null
-    }
-    val rest = uri.substringAfter(':').substringBefore(';').substringBefore('?')
-    val hostPort = rest.substringAfterLast('@')
-    if (hostPort.startsWith("[")) {
-        return null
-    }
-    val host = hostPort.substringBefore(':').trimEnd('.')
-    if (host.isEmpty() || Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(host)) {
-        return null
-    }
-    return host
-}
-
 /** Whether [text] is `host:port` with an IP address, not a name, for its
  * host. */
 internal fun isAddress(text: String): Boolean {

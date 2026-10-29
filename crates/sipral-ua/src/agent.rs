@@ -154,6 +154,9 @@ pub struct UserAgent {
     pub(crate) flows_asked: std::collections::HashSet<AccountId>,
     /// Accounts whose connection was lost since the last round.
     pub(crate) flows_lost: Vec<AccountId>,
+    /// The connections said to be checked against one identity, being
+    /// opened or open ([`UserAgent::stream_opening`]).
+    pub(crate) streams_checked: HashMap<TransportId, crate::flow::Checked>,
     /// 64·T1 for RFC 6665 §4.1.2.4's Timer N, copied once because the
     /// endpoint does not hand its configuration back.
     pub(crate) timer_n: Duration,
@@ -253,6 +256,7 @@ impl UserAgent {
             flows_wanted: HashMap::new(),
             flows_asked: std::collections::HashSet::new(),
             flows_lost: Vec::new(),
+            streams_checked: HashMap::new(),
             timer_n,
             sdp_limits,
             life: Machine::default(),

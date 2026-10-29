@@ -840,7 +840,10 @@ abstract final class SipralEventKind {
   /// `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
   /// Bind with
   /// sipral_stack_transport_bind
-  /// and ask again.
+  /// and ask again. Raised too for an account's own connection, and,
+  /// since ABI 1.11, once for each identity a connection there is to be
+  /// checked against, said before connecting with
+  /// sipral_stack_stream_opening.
   static const int transportWanted = 18;
 
   /// B5. No media has arrived for longer than the configured threshold.
@@ -4367,6 +4370,51 @@ final class SipralTransportFailure extends ffi.Struct {
   external int detailLen;
 }
 
+/// A connection being opened, and what it is checked against, for
+/// sipral_stack_stream_opening (ABI 1.11). All caller-filled; the texts are read during
+/// the call.
+///
+/// `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
+/// for it, as it named them; the name a connection is checked against in their place, a
+/// binding's own setting, does not go here.
+final class SipralStreamOpening extends ffi.Struct {
+  /// `sizeof` this struct, as the caller's header declares it.
+  @ffi.Size()
+  external int size;
+
+  /// The number it will be bound as with sipral_stack_transport_bind.
+  @ffi.Uint32()
+  external int transport;
+
+  /// What it speaks, as a `SipralTransport`: TCP, TLS, WS or WSS.
+  @ffi.Uint32()
+  external int protocol;
+
+  /// Its far end, `host:port`, the `remote` it will be bound with. Not NUL-terminated.
+  external ffi.Pointer<ffi.Char> destination;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int destinationLen;
+
+  /// The name the server's certificate was or will be checked against. Length zero for the
+  /// address, and on a protocol without TLS. Not NUL-terminated.
+  external ffi.Pointer<ffi.Char> serverName;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int serverNameLen;
+
+  /// The fingerprint of the one certificate trusted, in any form
+  /// `sipral_account_config_t::tls_pin_sha256` takes. Length zero for none, and on a
+  /// protocol without TLS. Not NUL-terminated.
+  external ffi.Pointer<ffi.Char> tlsPinSha256;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int tlsPinSha256Len;
+}
+
 /// What a SipralEventKind.registrationChanged carries.
 final class SipralRegistrationEvent extends ffi.Struct {
   /// A SipralRegistrationState.
@@ -4726,7 +4774,15 @@ final class SipralRecoveryEvent extends ffi.Struct {
 }
 
 /// What a SipralEventKind.transportWanted carries: a request RFC
-/// 3261 §18.1.1 kept off a datagram, with no stream open for it.
+/// 3261 §18.1.1 kept off a datagram, with no stream open for it, or an
+/// account's own connection, both sizes zero.
+///
+/// A TLS or WSS connection is checked against one identity, the server's
+/// name and pin below, and carries the accounts of that identity alone
+/// once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
+/// raised for each identity waiting for a connection there, the same one
+/// possibly again, and one connection is opened for each that has none
+/// open or opening.
 final class SipralTransportWantedEvent extends ffi.Struct {
   /// What to open, as a SipralTransport; zero for an unknown one.
   @ffi.Uint32()
@@ -4747,6 +4803,27 @@ final class SipralTransportWantedEvent extends ffi.Struct {
   /// headroom, or 1300 when the MTU is unknown.
   @ffi.Uint32()
   external int limitBytes;
+
+  /// The name the server's certificate must carry, lowercase: the host
+  /// of the account's `server_uri` when that is a name (RFC 5922 §7.3),
+  /// the SIP domain and not the host SRV turned it into. Empty checks
+  /// the address `destination` names, and is all a protocol without
+  /// TLS has. Not NUL-terminated (ABI 1.11).
+  external ffi.Pointer<ffi.Char> serverName;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int serverNameLen;
+
+  /// The SHA-256 fingerprint of the one certificate trusted, as
+  /// `openssl x509 -fingerprint` writes it, upper case with colons;
+  /// empty for none, the platform's checks then apply. Not
+  /// NUL-terminated (ABI 1.11).
+  external ffi.Pointer<ffi.Char> tlsPinSha256;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int tlsPinSha256Len;
 }
 
 /// What a SipralEventKind.subscriptionChanged and a
@@ -6639,7 +6716,8 @@ final class SipralIsup extends ffi.Struct {
   @ffi.Uint32()
   external int hasCause;
 
-  /// The Q.850 cause value: 16 normal call clearing, 17 user busy.
+  /// The cause value: 16 normal call clearing, 17 user busy, when
+  /// `cause_coding` is 0 and the value is Q.850's.
   @ffi.Uint32()
   external int causeValue;
 
@@ -6711,6 +6789,18 @@ final class SipralIsup extends ffi.Struct {
   /// message, which is also the category "unknown".
   @ffi.Uint32()
   external int callingCategory;
+
+  /// Whose list `cause_value` is from, the cause's coding standard
+  /// (Q.850 §2.2.2): 0 ITU-T, the values Q.850 lists; 1 ISO/IEC; 2
+  /// national; 3 specific to the location. Only at 0 is `cause_value`
+  /// the Q.850 cause of that number. Zero without cause indicators.
+  /// ABI 1.11.
+  @ffi.Uint32()
+  external int causeCoding;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved111;
 }
 
 /// How the networking component connects and resolves (ABI 1.6). Set `size` to
@@ -6925,7 +7015,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 10;
+  static const int abiVersionMinor = 11;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7221,12 +7311,13 @@ final class Sipral {
         'sipral_processor_frame_t': [ffi.sizeOf<SipralProcessorFrame>(), 64, 32, 32],
         'sipral_transmit_t': [ffi.sizeOf<SipralTransmit>(), 88, 48, 48],
         'sipral_transport_failure_t': [ffi.sizeOf<SipralTransportFailure>(), 40, 24, 24],
+        'sipral_stream_opening_t': [ffi.sizeOf<SipralStreamOpening>(), 64, 36, 36],
         'sipral_registration_event_t': [ffi.sizeOf<SipralRegistrationEvent>(), 40, 36, 40],
         'sipral_call_event_t': [ffi.sizeOf<SipralCallEvent>(), 328, 208, 216],
         'sipral_transfer_event_t': [ffi.sizeOf<SipralTransferEvent>(), 24, 16, 16],
         'sipral_media_event_t': [ffi.sizeOf<SipralMediaEvent>(), 96, 80, 80],
         'sipral_recovery_event_t': [ffi.sizeOf<SipralRecoveryEvent>(), 16, 16, 16],
-        'sipral_transport_wanted_event_t': [ffi.sizeOf<SipralTransportWantedEvent>(), 40, 20, 20],
+        'sipral_transport_wanted_event_t': [ffi.sizeOf<SipralTransportWantedEvent>(), 72, 36, 36],
         'sipral_subscription_event_t': [ffi.sizeOf<SipralSubscriptionEvent>(), 56, 56, 56],
         'sipral_announce_event_t': [ffi.sizeOf<SipralAnnounceEvent>(), 16, 16, 16],
         'sipral_resolve_event_t': [ffi.sizeOf<SipralResolveEvent>(), 32, 24, 24],
@@ -7274,7 +7365,7 @@ final class Sipral {
         'sipral_local_conference_member_t': [ffi.sizeOf<SipralLocalConferenceMember>(), 40, 36, 40],
         'sipral_pinned_certificate_t': [ffi.sizeOf<SipralPinnedCertificate>(), 40, 36, 40],
         'sipral_network_test_config_t': [ffi.sizeOf<SipralNetworkTestConfig>(), 48, 36, 40],
-        'sipral_isup_t': [ffi.sizeOf<SipralIsup>(), 72, 68, 68],
+        'sipral_isup_t': [ffi.sizeOf<SipralIsup>(), 80, 76, 76],
         'sipral_network_config_t': [ffi.sizeOf<SipralNetworkConfig>(), 216, 124, 124],
       };
 
@@ -8905,6 +8996,32 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Uint32 transport, ffi.Uint64 nowMs),
       int Function(int stack, int transport, int nowMs)>('sipral_stack_stream_closed');
 
+  /// Say that a connection is being opened, to be bound as `opening->transport`, and what it
+  /// is checked against (ABI 1.11).
+  ///
+  /// Said before connecting, or at the latest before sipral_stack_transport_bind: once
+  /// bound it carries the accounts on a connection of their own whose identity is this one
+  /// alone, and an account of another asks for its own with
+  /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
+  /// serves a SIP domain per tenant from one address, and a certificate valid for one
+  /// tenant's domain says nothing of another's. If it cannot be opened,
+  /// sipral_stack_transport_failed_with on the same number moves on the accounts of this
+  /// identity alone. A connection bound with nothing said of it is any account's, as the
+  /// application checked it. Forgotten when it fails or closes, or when another is said to be
+  /// opened for the same identity there before this one was bound.
+  ///
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
+  /// destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
+  /// a name that is not UTF-8.
+  ///
+  /// Safety
+  ///
+  /// `opening` must point at a `sipral_stream_opening_t` whose `size` member says how long it
+  /// is, and its texts must be readable for the lengths beside them.
+  late final int Function(int stack, ffi.Pointer<SipralStreamOpening> opening) stackStreamOpening = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralStreamOpening> opening),
+      int Function(int stack, ffi.Pointer<SipralStreamOpening> opening)>('sipral_stack_stream_opening');
+
   /// Replace the STUN server list without recreating the stack.
   ///
   /// `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
@@ -10198,6 +10315,11 @@ final class Sipral {
   /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
   /// (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
   ///
+  /// The leaf is read alone: a `sip:` URI in its `subjectAltName` is held to no name
+  /// constraint of the authorities above it, which the platforms apply to a `dNSName` and
+  /// skip for a URI. `sipral_certificate_check_domain_in_chain` (ABI 1.11) takes those
+  /// authorities too, and is the call to make where the platform hands the chain over.
+  ///
   /// `domain` is the name the connection is checked against: the host of the account's
   /// `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
   /// `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
@@ -10216,6 +10338,33 @@ final class Sipral {
   late final int Function(ffi.Pointer<ffi.Uint8> certificate, int certificateLen, ffi.Pointer<ffi.Char> domain, int domainLen, int rules, int platformMatched, ffi.Pointer<ffi.Uint32> outIdentity) certificateCheckDomain = library.lookupFunction<
       ffi.Int32 Function(ffi.Pointer<ffi.Uint8> certificate, ffi.Size certificateLen, ffi.Pointer<ffi.Char> domain, ffi.Size domainLen, ffi.Uint32 rules, ffi.Uint32 platformMatched, ffi.Pointer<ffi.Uint32> outIdentity),
       int Function(ffi.Pointer<ffi.Uint8> certificate, int certificateLen, ffi.Pointer<ffi.Char> domain, int domainLen, int rules, int platformMatched, ffi.Pointer<ffi.Uint32> outIdentity)>('sipral_certificate_check_domain');
+
+  /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`,
+  /// as `sipral_certificate_check_domain` does, with `issuers` the certificates above it in
+  /// the chain the platform verified (ABI 1.11).
+  ///
+  /// `issuers` is their DER, one certificate after another in any order, the anchor among
+  /// them or not; the chain the server sent serves where the platform hands over no chain of
+  /// its own, since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
+  /// names the domain only while every `nameConstraints` extension among them allows the
+  /// host of each of the leaf's `sip:` URIs, read as the `dNSName` or address it stands for:
+  /// an authority constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for
+  /// `sip:example.com`. A constraint on URIs, or one that cannot be read, allows none. A
+  /// `dNSName` is the platform's to hold to those constraints, and is read as the call
+  /// without issuers reads it. No issuers, a length of zero, reads the leaf alone.
+  ///
+  /// The answers are `sipral_certificate_check_domain`'s, `out_identity` included, and
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` besides for `issuers` that do not end where a
+  /// certificate does.
+  ///
+  /// Safety
+  ///
+  /// `certificate` must be readable for `certificate_len` bytes, `issuers` for `issuers_len`
+  /// bytes, `domain` for `domain_len` bytes, and `out_identity` must be null or point at one
+  /// `sipral_domain_identity_t`.
+  late final int Function(ffi.Pointer<ffi.Uint8> certificate, int certificateLen, ffi.Pointer<ffi.Uint8> issuers, int issuersLen, ffi.Pointer<ffi.Char> domain, int domainLen, int rules, int platformMatched, ffi.Pointer<ffi.Uint32> outIdentity) certificateCheckDomainInChain = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8> certificate, ffi.Size certificateLen, ffi.Pointer<ffi.Uint8> issuers, ffi.Size issuersLen, ffi.Pointer<ffi.Char> domain, ffi.Size domainLen, ffi.Uint32 rules, ffi.Uint32 platformMatched, ffi.Pointer<ffi.Uint32> outIdentity),
+      int Function(ffi.Pointer<ffi.Uint8> certificate, int certificateLen, ffi.Pointer<ffi.Uint8> issuers, int issuersLen, ffi.Pointer<ffi.Char> domain, int domainLen, int rules, int platformMatched, ffi.Pointer<ffi.Uint32> outIdentity)>('sipral_certificate_check_domain_in_chain');
 
   /// The `host:port` to advertise for a socket bound at `bound` whose
   /// traffic goes to `peer` (both `host:port` addresses, not names),

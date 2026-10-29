@@ -94,8 +94,9 @@ document was checked — and never looks at a `sip:` URI.
 
 **What Sipral does with it.** Once the platform has verified the chain,
 every connection to a SIP server has its name read by one rule, in the core
-(`sipral_core::domain_certificate`; `sipral_certificate_check_domain` in
-the C ABI, ABI 1.8), under one of two settings:
+(`sipral_core::domain_certificate`; `sipral_certificate_check_domain_in_chain`
+in the C ABI, ABI 1.11, and `sipral_certificate_check_domain` for the leaf
+alone, ABI 1.8), under one of two settings:
 
 | `domain_rules` | A `sip:` URI naming the domain | A `dNSName` that is the domain | A wildcard covering it | A `dNSName` beside a `sip:` URI for another domain |
 |---|---|---|---|---|
@@ -107,9 +108,10 @@ The default accepts what every other SIP client accepts, wildcards included
 own form, the `sip:` URI, which no platform reads. `RFC5922` is for the
 deployment that wants RFC 5922 and nothing else; a refusal under it is a
 name mismatch, `SIPRAL_TLS_FAILURE_NAME_MISMATCH`, its detail saying which
-reading refused it. The C entry point takes the leaf's DER, the domain, the
-rules and whether the platform's own check accepted the name, so an
-application's verifier needs nothing else: `SIPRAL_STATUS_OK` accepts,
+reading refused it. The C entry point takes the leaf's DER, the DER of the
+authorities above it one after another, the domain, the rules and whether
+the platform's own check accepted the name, so an application's verifier
+needs nothing else: `SIPRAL_STATUS_OK` accepts,
 `SIPRAL_STATUS_CERTIFICATE_REFUSED` refuses. The C sample below runs its own
 check, written before the entry point existed; the same check in C# and in
 Kotlin is further down, and all three refused the wildcard certificate and
@@ -121,11 +123,20 @@ only where every one of those constraints allows its host, read as the
 `dNSName` or address it stands for: an intermediate constrained to
 `corp.example` vouches for `sip:pbx.corp.example`, never for
 `sip:example.com`. The networking component reads the constraints in the
-chain the server sent, and on iOS in the chain the Security framework built;
-`sipral_certificate_check_domain` takes the leaf alone, so a layer that calls
-it from its own TLS does not hold a `sip:` URI to them yet. An address is
-named by a `sip:` URI alone, never by a `dNSName` that spells it, as the
-HTTPS rules read it.
+chain the server sent, and on iOS in the chain the Security framework built.
+A layer that runs its own TLS hands `sipral_certificate_check_domain_in_chain`
+the chain its platform gives: Swift the chain `SecTrust` built, the anchor
+included; Kotlin and the JVM jar the `X509Certificate[]` the server sent;
+.NET the elements of the `X509Chain` built; Python the verified chain
+`SSLSocket.get_verified_chain` returns from 3.13 on, and the leaf alone
+before it, which holds a `sip:` URI to no constraint; Node.js the issuer
+certificates of the verified peer certificate, the anchor included. Each
+layer's tests serve a certificate naming the domain only by a `sip:` URI
+under an intermediate constrained to `corp.test`, and the connection is
+refused as a name mismatch, while a URI inside `corp.test` is taken.
+`sipral_certificate_check_domain` still takes the leaf alone, for a caller
+that has no chain. An address is named by a `sip:` URI alone, never by a
+`dNSName` that spells it, as the HTTPS rules read it.
 
 Each layer takes the setting where it takes its trust, and applies it to its
 own signalling connection and to every account's own connection:
@@ -732,6 +743,13 @@ Certification Authorities.
 the same store: `ssl.create_default_context()` loads the system's root
 store there.
 
+**A private CA beside them** for SIP over TLS is
+`SipralTlsTrust.PrivateAuthority(cert)`: where the platform refuses the
+chain, the binding builds it again with the CA as a custom root, through
+the intermediates the server sent (`SipralSignalling.cs`), so a CA that
+signs through an intermediate is trusted beside the platform's anchors as
+it is alone under `OnlyAuthority`.
+
 **Pinning one authority:** `turnTrustedCertificates` — the binding then
 builds the chain with `X509ChainTrustMode.CustomRootTrust` over those roots
 alone (`SipralStack.cs`, `OpenTurnStream`). For SIP over TLS, the same
@@ -880,10 +898,11 @@ application's own `NWProtocolTLS.Options`.
 
 **RFC 5922 on Apple platforms** needs the `subjectAltName` entries, and the
 Security framework has no public call that returns them on iOS. So the Swift
-layer hands the leaf's DER (`SecCertificateCopyData`) to the core's own
-reading, `sipral_certificate_check_domain`, once the Security framework has
-evaluated the chain ("What the platform checks, and what RFC 5922 adds",
-above). An application that controls its SIP servers' certificates gets more
+layer hands the leaf's DER (`SecCertificateCopyData`), and the DER of every
+certificate above it in the chain the Security framework built, to the
+core's own reading, `sipral_certificate_check_domain_in_chain`, once the
+Security framework has evaluated the chain ("What the platform checks, and
+what RFC 5922 adds", above). An application that controls its SIP servers' certificates gets more
 still by pinning the private authority that issues only them, so that no
 certificate from a public authority is trusted in the first place.
 

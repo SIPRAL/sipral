@@ -117,14 +117,22 @@ connections with the platform's APIs.
 | `SIPRAL_NETWORK_TRUST_PINNED` (3) | the one certificate whose SHA-256 fingerprint is `pin_sha256`, read as `tls_pin_sha256` is (`22-tls.md`, "A PBX's own certificate, pinned") |
 
 An account's own `tls_pin_sha256` wins over the configured trust for the
-connections to its server. One connection to an address carries every account
-whose server is there, so the pin of any of them holds it; accounts there that
-pin different certificates are refused before anything is sent, with `tls`
-none and a `detail` that says so. The name is checked by the rules HTTPS uses, as
-every binding checks it: `tls_server_name` when the configuration gives one;
-else the host of the `server_uri` of the account whose located addresses
-include the one connected to — the SIP domain the user configured, not the
-host its SRV record named (RFC 5922 §7.3); else the address itself. A `sip:`
+connections to its server. Each connection is opened for the accounts that
+asked for it and is checked against their name and pin: accounts whose server
+is at one address share a connection only when both are the same, and an
+account whose name or pin differs gets a connection of its own, even while
+another to that address is open. A PBX that serves a SIP domain for each
+tenant from one address is reached over one connection per domain, and a
+certificate that names one tenant's domain is refused for another's. Every
+language layer that opens the stack's connections itself does the same from
+ABI 1.11, with the name and pin `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` names and
+`sipral_stack_stream_opening` (`08-ffi.md`, "What ABI 1.11 added"). The name
+is checked by the rules HTTPS uses, as every binding checks it:
+`tls_server_name` when the configuration gives one; else the host of the
+account's `server_uri` — the SIP domain the user configured, not the host its
+SRV record named (RFC 5922 §7.3); else the address itself. A connection for a
+request that outgrew a datagram is checked against the first account at that
+address. A `sip:`
 URI in `subjectAltName` naming that domain is accepted besides (RFC 5922
 §7.1), and with `domain_rules` `SIPRAL_DOMAIN_RULES_RFC5922` the name is read
 by RFC 5922 alone, which refuses a wildcard (`22-tls.md`, "What the platform
@@ -231,7 +239,12 @@ located by SRV and reached over TLS checked against the domain.
 `crates/sipral-ffi/src/network/tests.rs` does the same through the C ABI:
 a stack registers over TLS at a domain only an SRV record names, places a call,
 carries its audio both ways, holds it, resumes it and hangs up, everything over
-the one connection the component opened, with no socket of the test's own. Its
+the one connection the component opened, with no socket of the test's own.
+Two accounts at the address of a server whose certificate names one domain
+are each held to their own: the account of that domain registers, the other's
+connection is refused for the name, and the first keeps registering; two
+accounts there pinning different certificates are each held to their own pin
+the same way. Its
 `relayed` tests run a STUN server and a TURN server of their own: a media
 socket is mapped, its relay allocated on the TCP connection the component
 opened, and given back on it with a Refresh of lifetime zero before the

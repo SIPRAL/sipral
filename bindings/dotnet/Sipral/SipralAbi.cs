@@ -970,7 +970,10 @@ public enum SipralEventKind : uint
     /// `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
     /// Bind with
     /// sipral_stack_transport_bind
-    /// and ask again.
+    /// and ask again. Raised too for an account's own connection, and,
+    /// since ABI 1.11, once for each identity a connection there is to be
+    /// checked against, said before connecting with
+    /// sipral_stack_stream_opening.
     /// </summary>
     TransportWanted = 18,
     /// <summary>
@@ -5597,6 +5600,68 @@ public struct SipralTransportFailure
 }
 
 /// <summary>
+/// A connection being opened, and what it is checked against, for
+/// sipral_stack_stream_opening (ABI 1.11). All caller-filled; the texts are read during
+/// the call.
+///
+/// `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
+/// for it, as it named them; the name a connection is checked against in their place, a
+/// binding's own setting, does not go here.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralStreamOpening
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The number it will be bound as with sipral_stack_transport_bind.
+    /// </summary>
+    public uint Transport;
+    /// <summary>
+    /// What it speaks, as a `SipralTransport`: TCP, TLS, WS or WSS.
+    /// </summary>
+    public uint Protocol;
+    /// <summary>
+    /// Its far end, `host:port`, the `remote` it will be bound with. Not NUL-terminated.
+    /// </summary>
+    public IntPtr Destination;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint DestinationLen;
+    /// <summary>
+    /// The name the server's certificate was or will be checked against. Length zero for the
+    /// address, and on a protocol without TLS. Not NUL-terminated.
+    /// </summary>
+    public IntPtr ServerName;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerNameLen;
+    /// <summary>
+    /// The fingerprint of the one certificate trusted, in any form
+    /// `sipral_account_config_t::tls_pin_sha256` takes. Length zero for none, and on a
+    /// protocol without TLS. Not NUL-terminated.
+    /// </summary>
+    public IntPtr TlsPinSha256;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TlsPinSha256Len;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralStreamOpening Sized()
+    {
+        var value = default(SipralStreamOpening);
+        value.Size = (nuint)Marshal.SizeOf<SipralStreamOpening>();
+        return value;
+    }
+}
+
+/// <summary>
 /// What a SipralEventKind.RegistrationChanged carries.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -5996,7 +6061,15 @@ public struct SipralRecoveryEvent
 
 /// <summary>
 /// What a SipralEventKind.TransportWanted carries: a request RFC
-/// 3261 §18.1.1 kept off a datagram, with no stream open for it.
+/// 3261 §18.1.1 kept off a datagram, with no stream open for it, or an
+/// account's own connection, both sizes zero.
+///
+/// A TLS or WSS connection is checked against one identity, the server's
+/// name and pin below, and carries the accounts of that identity alone
+/// once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
+/// raised for each identity waiting for a connection there, the same one
+/// possibly again, and one connection is opened for each that has none
+/// open or opening.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct SipralTransportWantedEvent
@@ -6022,6 +6095,29 @@ public struct SipralTransportWantedEvent
     /// headroom, or 1300 when the MTU is unknown.
     /// </summary>
     public uint LimitBytes;
+    /// <summary>
+    /// The name the server's certificate must carry, lowercase: the host
+    /// of the account's `server_uri` when that is a name (RFC 5922 §7.3),
+    /// the SIP domain and not the host SRV turned it into. Empty checks
+    /// the address `destination` names, and is all a protocol without
+    /// TLS has. Not NUL-terminated (ABI 1.11).
+    /// </summary>
+    public IntPtr ServerName;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerNameLen;
+    /// <summary>
+    /// The SHA-256 fingerprint of the one certificate trusted, as
+    /// `openssl x509 -fingerprint` writes it, upper case with colons;
+    /// empty for none, the platform's checks then apply. Not
+    /// NUL-terminated (ABI 1.11).
+    /// </summary>
+    public IntPtr TlsPinSha256;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint TlsPinSha256Len;
 }
 
 /// <summary>
@@ -8490,7 +8586,8 @@ public struct SipralIsup
     /// </summary>
     public uint HasCause;
     /// <summary>
-    /// The Q.850 cause value: 16 normal call clearing, 17 user busy.
+    /// The cause value: 16 normal call clearing, 17 user busy, when
+    /// `cause_coding` is 0 and the value is Q.850's.
     /// </summary>
     public uint CauseValue;
     /// <summary>
@@ -8562,6 +8659,18 @@ public struct SipralIsup
     /// message, which is also the category "unknown".
     /// </summary>
     public uint CallingCategory;
+    /// <summary>
+    /// Whose list `cause_value` is from, the cause's coding standard
+    /// (Q.850 §2.2.2): 0 ITU-T, the values Q.850 lists; 1 ISO/IEC; 2
+    /// national; 3 specific to the location. Only at 0 is `cause_value`
+    /// the Q.850 cause of that number. Zero without cause indicators.
+    /// ABI 1.11.
+    /// </summary>
+    public uint CauseCoding;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved111;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -9166,6 +9275,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_stream_closed(ulong stack, uint transport, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_stream_opening(ulong stack, in SipralStreamOpening opening);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_stun_servers(ulong stack, sbyte[] servers, nuint serversLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -9427,6 +9539,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_certificate_check_domain(byte[] certificate, nuint certificateLen, sbyte[] domain, nuint domainLen, uint rules, uint platformMatched, out uint identity);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_certificate_check_domain_in_chain(byte[] certificate, nuint certificateLen, byte[] issuers, nuint issuersLen, sbyte[] domain, nuint domainLen, uint rules, uint platformMatched, out uint identity);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_advertised_address(sbyte[] bound, nuint boundLen, sbyte[] peer, nuint peerLen, sbyte[] buffer, nuint capacity, out nuint needed);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -9536,7 +9651,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 10;
+    public const uint AbiVersionMinor = 11;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -9943,12 +10058,13 @@ public static partial class Sipral
         ("sipral_processor_frame_t", Marshal.SizeOf<SipralProcessorFrame>(), 64, 32, 32),
         ("sipral_transmit_t", Marshal.SizeOf<SipralTransmit>(), 88, 48, 48),
         ("sipral_transport_failure_t", Marshal.SizeOf<SipralTransportFailure>(), 40, 24, 24),
+        ("sipral_stream_opening_t", Marshal.SizeOf<SipralStreamOpening>(), 64, 36, 36),
         ("sipral_registration_event_t", Marshal.SizeOf<SipralRegistrationEvent>(), 40, 36, 40),
         ("sipral_call_event_t", Marshal.SizeOf<SipralCallEvent>(), 328, 208, 216),
         ("sipral_transfer_event_t", Marshal.SizeOf<SipralTransferEvent>(), 24, 16, 16),
         ("sipral_media_event_t", Marshal.SizeOf<SipralMediaEvent>(), 96, 80, 80),
         ("sipral_recovery_event_t", Marshal.SizeOf<SipralRecoveryEvent>(), 16, 16, 16),
-        ("sipral_transport_wanted_event_t", Marshal.SizeOf<SipralTransportWantedEvent>(), 40, 20, 20),
+        ("sipral_transport_wanted_event_t", Marshal.SizeOf<SipralTransportWantedEvent>(), 72, 36, 36),
         ("sipral_subscription_event_t", Marshal.SizeOf<SipralSubscriptionEvent>(), 56, 56, 56),
         ("sipral_announce_event_t", Marshal.SizeOf<SipralAnnounceEvent>(), 16, 16, 16),
         ("sipral_resolve_event_t", Marshal.SizeOf<SipralResolveEvent>(), 32, 24, 24),
@@ -9996,7 +10112,7 @@ public static partial class Sipral
         ("sipral_local_conference_member_t", Marshal.SizeOf<SipralLocalConferenceMember>(), 40, 36, 40),
         ("sipral_pinned_certificate_t", Marshal.SizeOf<SipralPinnedCertificate>(), 40, 36, 40),
         ("sipral_network_test_config_t", Marshal.SizeOf<SipralNetworkTestConfig>(), 48, 36, 40),
-        ("sipral_isup_t", Marshal.SizeOf<SipralIsup>(), 72, 68, 68),
+        ("sipral_isup_t", Marshal.SizeOf<SipralIsup>(), 80, 76, 76),
         ("sipral_network_config_t", Marshal.SizeOf<SipralNetworkConfig>(), 216, 124, 124),
     };
 
@@ -12099,6 +12215,35 @@ public static partial class Sipral
     }
 
     /// <summary>
+    /// Say that a connection is being opened, to be bound as `opening-&gt;transport`, and what it
+    /// is checked against (ABI 1.11).
+    ///
+    /// Said before connecting, or at the latest before sipral_stack_transport_bind: once
+    /// bound it carries the accounts on a connection of their own whose identity is this one
+    /// alone, and an account of another asks for its own with
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
+    /// serves a SIP domain per tenant from one address, and a certificate valid for one
+    /// tenant's domain says nothing of another's. If it cannot be opened,
+    /// sipral_stack_transport_failed_with on the same number moves on the accounts of this
+    /// identity alone. A connection bound with nothing said of it is any account's, as the
+    /// application checked it. Forgotten when it fails or closes, or when another is said to be
+    /// opened for the same identity there before this one was bound.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
+    /// destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
+    /// a name that is not UTF-8.
+    ///
+    /// Safety
+    ///
+    /// `opening` must point at a `sipral_stream_opening_t` whose `size` member says how long it
+    /// is, and its texts must be readable for the lengths beside them.
+    /// </summary>
+    public static void StackStreamOpening(ulong stack, in SipralStreamOpening opening)
+    {
+        Check(NativeMethods.sipral_stack_stream_opening(stack, in opening));
+    }
+
+    /// <summary>
     /// Replace the STUN server list without recreating the stack.
     ///
     /// `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
@@ -13776,6 +13921,11 @@ public static partial class Sipral
     /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
     /// (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
     ///
+    /// The leaf is read alone: a `sip:` URI in its `subjectAltName` is held to no name
+    /// constraint of the authorities above it, which the platforms apply to a `dNSName` and
+    /// skip for a URI. `sipral_certificate_check_domain_in_chain` (ABI 1.11) takes those
+    /// authorities too, and is the call to make where the platform hands the chain over.
+    ///
     /// `domain` is the name the connection is checked against: the host of the account's
     /// `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
     /// `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
@@ -13798,6 +13948,40 @@ public static partial class Sipral
         var domainSigned = new sbyte[domainBytes.Length];
         Buffer.BlockCopy(domainBytes, 0, domainSigned, 0, domainBytes.Length);
         Check(NativeMethods.sipral_certificate_check_domain(certificate, (nuint)certificate.Length, domainSigned, (nuint)domainSigned.Length, rules, platformMatched, out var identity));
+        return identity;
+    }
+
+    /// <summary>
+    /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`,
+    /// as `sipral_certificate_check_domain` does, with `issuers` the certificates above it in
+    /// the chain the platform verified (ABI 1.11).
+    ///
+    /// `issuers` is their DER, one certificate after another in any order, the anchor among
+    /// them or not; the chain the server sent serves where the platform hands over no chain of
+    /// its own, since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
+    /// names the domain only while every `nameConstraints` extension among them allows the
+    /// host of each of the leaf's `sip:` URIs, read as the `dNSName` or address it stands for:
+    /// an authority constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for
+    /// `sip:example.com`. A constraint on URIs, or one that cannot be read, allows none. A
+    /// `dNSName` is the platform's to hold to those constraints, and is read as the call
+    /// without issuers reads it. No issuers, a length of zero, reads the leaf alone.
+    ///
+    /// The answers are `sipral_certificate_check_domain`'s, `out_identity` included, and
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` besides for `issuers` that do not end where a
+    /// certificate does.
+    ///
+    /// Safety
+    ///
+    /// `certificate` must be readable for `certificate_len` bytes, `issuers` for `issuers_len`
+    /// bytes, `domain` for `domain_len` bytes, and `out_identity` must be null or point at one
+    /// `sipral_domain_identity_t`.
+    /// </summary>
+    public static uint CertificateCheckDomainInChain(byte[] certificate, byte[] issuers, string domain, uint rules, uint platformMatched)
+    {
+        var domainBytes = Encoding.UTF8.GetBytes(domain);
+        var domainSigned = new sbyte[domainBytes.Length];
+        Buffer.BlockCopy(domainBytes, 0, domainSigned, 0, domainBytes.Length);
+        Check(NativeMethods.sipral_certificate_check_domain_in_chain(certificate, (nuint)certificate.Length, issuers, (nuint)issuers.Length, domainSigned, (nuint)domainSigned.Length, rules, platformMatched, out var identity));
         return identity;
     }
 

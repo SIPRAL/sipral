@@ -1042,7 +1042,10 @@ enum class SipralEventKind(val value: Int) {
      * `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
      * Bind with
      * sipral_stack_transport_bind
-     * and ask again.
+     * and ask again. Raised too for an account's own connection, and,
+     * since ABI 1.11, once for each identity a connection there is to be
+     * checked against, said before connecting with
+     * sipral_stack_stream_opening.
      */
     TRANSPORT_WANTED(18),
     /**
@@ -5259,7 +5262,8 @@ data class SipralIsup(
      */
     val hasCause: Long,
     /**
-     * The Q.850 cause value: 16 normal call clearing, 17 user busy.
+     * The cause value: 16 normal call clearing, 17 user busy, when
+     * `cause_coding` is 0 and the value is Q.850's.
      */
     val causeValue: Long,
     /**
@@ -5331,9 +5335,21 @@ data class SipralIsup(
      * message, which is also the category "unknown".
      */
     val callingCategory: Long,
+    /**
+     * Whose list `cause_value` is from, the cause's coding standard
+     * (Q.850 §2.2.2): 0 ITU-T, the values Q.850 lists; 1 ISO/IEC; 2
+     * national; 3 specific to the location. Only at 0 is `cause_value`
+     * the Q.850 cause of that number. Zero without cause indicators.
+     * ABI 1.11.
+     */
+    val causeCoding: Long,
+    /**
+     * Zero.
+     */
+    val reserved111: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 17
+        const val SLOTS: Int = 19
 
         fun of(slots: LongArray): SipralIsup = SipralIsup(
             slots[0],
@@ -5353,6 +5369,8 @@ data class SipralIsup(
             slots[14],
             slots[15],
             slots[16],
+            slots[17],
+            slots[18],
         )
     }
 }
@@ -6161,6 +6179,45 @@ class SipralTransportFailure(
      * The platform's words, not NUL-terminated. Null with length zero for none.
      */
     val detail: String? = null,
+)
+
+/**
+ * A connection being opened, and what it is checked against, for
+ * sipral_stack_stream_opening (ABI 1.11). All caller-filled; the texts are read during
+ * the call.
+ *
+ * `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
+ * for it, as it named them; the name a connection is checked against in their place, a
+ * binding's own setting, does not go here.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralStreamOpening(
+    /**
+     * The number it will be bound as with sipral_stack_transport_bind.
+     */
+    val transport: Long = 0,
+    /**
+     * What it speaks, as a `SipralTransport`: TCP, TLS, WS or WSS.
+     */
+    val protocol: Long = 0,
+    /**
+     * Its far end, `host:port`, the `remote` it will be bound with. Not NUL-terminated.
+     */
+    val destination: String? = null,
+    /**
+     * The name the server's certificate was or will be checked against. Length zero for the
+     * address, and on a protocol without TLS. Not NUL-terminated.
+     */
+    val serverName: String? = null,
+    /**
+     * The fingerprint of the one certificate trusted, in any form
+     * `sipral_account_config_t::tls_pin_sha256` takes. Length zero for none, and on a
+     * protocol without TLS. Not NUL-terminated.
+     */
+    val tlsPinSha256: String? = null,
 )
 
 /**
@@ -6995,7 +7052,15 @@ data class SipralRecoveryEvent(
 
 /**
  * What a SipralEventKind.TRANSPORT_WANTED carries: a request RFC
- * 3261 §18.1.1 kept off a datagram, with no stream open for it.
+ * 3261 §18.1.1 kept off a datagram, with no stream open for it, or an
+ * account's own connection, both sizes zero.
+ *
+ * A TLS or WSS connection is checked against one identity, the server's
+ * name and pin below, and carries the accounts of that identity alone
+ * once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
+ * raised for each identity waiting for a connection there, the same one
+ * possibly again, and one connection is opened for each that has none
+ * open or opening.
  */
 data class SipralTransportWantedEvent(
     /**
@@ -7015,6 +7080,21 @@ data class SipralTransportWantedEvent(
      * headroom, or 1300 when the MTU is unknown.
      */
     val limitBytes: Long,
+    /**
+     * The name the server's certificate must carry, lowercase: the host
+     * of the account's `server_uri` when that is a name (RFC 5922 §7.3),
+     * the SIP domain and not the host SRV turned it into. Empty checks
+     * the address `destination` names, and is all a protocol without
+     * TLS has. Not NUL-terminated (ABI 1.11).
+     */
+    val serverName: String?,
+    /**
+     * The SHA-256 fingerprint of the one certificate trusted, as
+     * `openssl x509 -fingerprint` writes it, upper case with colons;
+     * empty for none, the platform's checks then apply. Not
+     * NUL-terminated (ABI 1.11).
+     */
+    val tlsPinSha256: String?,
 )
 
 /**
@@ -8045,6 +8125,21 @@ class SipralEvent(
      */
     private val payloadTransportWantedDestination: String? = null,
     /**
+     * The name the server's certificate must carry, lowercase: the host
+     * of the account's `server_uri` when that is a name (RFC 5922 §7.3),
+     * the SIP domain and not the host SRV turned it into. Empty checks
+     * the address `destination` names, and is all a protocol without
+     * TLS has. Not NUL-terminated (ABI 1.11).
+     */
+    private val payloadTransportWantedServerName: String? = null,
+    /**
+     * The SHA-256 fingerprint of the one certificate trusted, as
+     * `openssl x509 -fingerprint` writes it, upper case with colons;
+     * empty for none, the platform's checks then apply. Not
+     * NUL-terminated (ABI 1.11).
+     */
+    private val payloadTransportWantedTlsPinSha256: String? = null,
+    /**
      * For SipralEventKind.TRANSPORT_WANTED.
      */
     private val payloadTransportWantedNumbers: LongArray? = null,
@@ -8303,7 +8398,7 @@ class SipralEvent(
             SipralTransferEvent((payloadTransferNumbers?.get(0) ?: 0L), (payloadTransferNumbers?.get(1) ?: 0L), payloadTransferTarget),
             SipralMediaEvent((payloadMediaNumbers?.get(0) ?: 0L), (payloadMediaNumbers?.get(1) ?: 0L), (payloadMediaNumbers?.get(2) ?: 0L), (payloadMediaNumbers?.get(3) ?: 0L), (payloadMediaNumbers?.get(4) ?: 0L), payloadMediaReason, payloadMediaStatistics?.let { SipralStreamStats.of(it) }, (payloadMediaNumbers?.get(5) ?: 0L), (payloadMediaNumbers?.get(6) ?: 0L), (payloadMediaNumbers?.get(7) ?: 0L), (payloadMediaNumbers?.get(8) ?: 0L), (payloadMediaNumbers?.get(9) ?: 0L), (payloadMediaNumbers?.get(10) ?: 0L), (payloadMediaNumbers?.get(11) ?: 0L), (payloadMediaNumbers?.get(12) ?: 0L), (payloadMediaNumbers?.get(13) ?: 0L)),
             SipralRecoveryEvent((payloadRecoveryNumbers?.get(0) ?: 0L), (payloadRecoveryNumbers?.get(1) ?: 0L), (payloadRecoveryNumbers?.get(2) ?: 0L), (payloadRecoveryNumbers?.get(3) ?: 0L)),
-            SipralTransportWantedEvent((payloadTransportWantedNumbers?.get(0) ?: 0L), payloadTransportWantedDestination, (payloadTransportWantedNumbers?.get(1) ?: 0L), (payloadTransportWantedNumbers?.get(2) ?: 0L)),
+            SipralTransportWantedEvent((payloadTransportWantedNumbers?.get(0) ?: 0L), payloadTransportWantedDestination, (payloadTransportWantedNumbers?.get(1) ?: 0L), (payloadTransportWantedNumbers?.get(2) ?: 0L), payloadTransportWantedServerName, payloadTransportWantedTlsPinSha256),
             SipralSubscriptionEvent((payloadSubscriptionNumbers?.get(0) ?: 0L), (payloadSubscriptionNumbers?.get(1) ?: 0L), (payloadSubscriptionNumbers?.get(2) ?: 0L), (payloadSubscriptionNumbers?.get(3) ?: 0L), (payloadSubscriptionNumbers?.get(4) ?: 0L), (payloadSubscriptionNumbers?.get(5) ?: 0L), (payloadSubscriptionNumbers?.get(6) ?: 0L), (payloadSubscriptionNumbers?.get(7) ?: 0L), (payloadSubscriptionNumbers?.get(8) ?: 0L)),
             SipralAnnounceEvent((payloadAnnounceNumbers?.get(0) ?: 0L), (payloadAnnounceNumbers?.get(1) ?: 0L)),
             SipralResolveEvent((payloadResolveNumbers?.get(0) ?: 0L), payloadResolveHost, (payloadResolveNumbers?.get(1) ?: 0L), (payloadResolveNumbers?.get(2) ?: 0L)),
@@ -8394,10 +8489,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?, payloadTokenServer: ByteArray?, payloadTokenRealm: ByteArray?, payloadTokenScope: ByteArray?, payloadTokenAuthzServer: ByteArray?, payloadTokenErrorCode: ByteArray?, payloadTokenNumbers: LongArray?, payloadNetworkTestLocal: ByteArray?, payloadNetworkTestMapped: ByteArray?, payloadNetworkTestNumbers: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedServerName: ByteArray?, payloadTransportWantedTlsPinSha256: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?, payloadTokenServer: ByteArray?, payloadTokenRealm: ByteArray?, payloadTokenScope: ByteArray?, payloadTokenAuthzServer: ByteArray?, payloadTokenErrorCode: ByteArray?, payloadTokenNumbers: LongArray?, payloadNetworkTestLocal: ByteArray?, payloadNetworkTestMapped: ByteArray?, payloadNetworkTestNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers, payloadTokenServer?.let { String(it, Charsets.UTF_8) }, payloadTokenRealm?.let { String(it, Charsets.UTF_8) }, payloadTokenScope?.let { String(it, Charsets.UTF_8) }, payloadTokenAuthzServer?.let { String(it, Charsets.UTF_8) }, payloadTokenErrorCode?.let { String(it, Charsets.UTF_8) }, payloadTokenNumbers, payloadNetworkTestLocal?.let { String(it, Charsets.UTF_8) }, payloadNetworkTestMapped?.let { String(it, Charsets.UTF_8) }, payloadNetworkTestNumbers))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedServerName?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedTlsPinSha256?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers, payloadTokenServer?.let { String(it, Charsets.UTF_8) }, payloadTokenRealm?.let { String(it, Charsets.UTF_8) }, payloadTokenScope?.let { String(it, Charsets.UTF_8) }, payloadTokenAuthzServer?.let { String(it, Charsets.UTF_8) }, payloadTokenErrorCode?.let { String(it, Charsets.UTF_8) }, payloadTokenNumbers, payloadNetworkTestLocal?.let { String(it, Charsets.UTF_8) }, payloadNetworkTestMapped?.let { String(it, Charsets.UTF_8) }, payloadNetworkTestNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -9014,7 +9109,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 10)
+        agree(1, 11)
     }
 
     /**
@@ -9134,6 +9229,7 @@ internal object SipralNative {
     external fun sipral_stack_transport_failed(stack: Long, transport: Long, error: Long, nowMs: Long): Int
     external fun sipral_stack_transport_failed_with(stack: Long, failureTransport: Long, failureError: Long, failureTls: Long, failureDetail: ByteArray?, nowMs: Long): Int
     external fun sipral_stack_stream_closed(stack: Long, transport: Long, nowMs: Long): Int
+    external fun sipral_stack_stream_opening(stack: Long, openingTransport: Long, openingProtocol: Long, openingDestination: ByteArray?, openingServerName: ByteArray?, openingTlsPinSha256: ByteArray?): Int
     external fun sipral_stack_stun_servers(stack: Long, servers: ByteArray, nowMs: Long): Int
     external fun sipral_stack_nat_map(stack: Long, local: ByteArray, nowMs: Long): Int
     external fun sipral_stack_nat_unmap(stack: Long, local: ByteArray, nowMs: Long): Int
@@ -9221,6 +9317,7 @@ internal object SipralNative {
     external fun sipral_account_looked_up(stack: Long, account: Long, name: ByteArray, record: Long, answer: Long, records: ByteArray, nowMs: Long): Int
     external fun sipral_account_check_certificate(stack: Long, account: Long, certificate: ByteArray, unixSeconds: Long, pinned: LongArray): Int
     external fun sipral_certificate_check_domain(certificate: ByteArray, domain: ByteArray, rules: Long, platformMatched: Long, identity: LongArray): Int
+    external fun sipral_certificate_check_domain_in_chain(certificate: ByteArray, issuers: ByteArray, domain: ByteArray, rules: Long, platformMatched: Long, identity: LongArray): Int
     external fun sipral_advertised_address(bound: ByteArray, peer: ByteArray, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_stack_diagnostic_trace(stack: Long, on: Long): Int
     external fun sipral_stack_srtp_suite_order(stack: Long, outSuites: IntArray, count: LongArray): Int
@@ -9260,7 +9357,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 10
+    const val ABI_VERSION_MINOR: Long = 11
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9669,12 +9766,13 @@ object Sipral {
         "sipral_processor_frame_t" to intArrayOf(64, 32, 32),
         "sipral_transmit_t" to intArrayOf(88, 48, 48),
         "sipral_transport_failure_t" to intArrayOf(40, 24, 24),
+        "sipral_stream_opening_t" to intArrayOf(64, 36, 36),
         "sipral_registration_event_t" to intArrayOf(40, 36, 40),
         "sipral_call_event_t" to intArrayOf(328, 208, 216),
         "sipral_transfer_event_t" to intArrayOf(24, 16, 16),
         "sipral_media_event_t" to intArrayOf(96, 80, 80),
         "sipral_recovery_event_t" to intArrayOf(16, 16, 16),
-        "sipral_transport_wanted_event_t" to intArrayOf(40, 20, 20),
+        "sipral_transport_wanted_event_t" to intArrayOf(72, 36, 36),
         "sipral_subscription_event_t" to intArrayOf(56, 56, 56),
         "sipral_announce_event_t" to intArrayOf(16, 16, 16),
         "sipral_resolve_event_t" to intArrayOf(32, 24, 24),
@@ -9722,7 +9820,7 @@ object Sipral {
         "sipral_local_conference_member_t" to intArrayOf(40, 36, 40),
         "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
         "sipral_network_test_config_t" to intArrayOf(48, 36, 40),
-        "sipral_isup_t" to intArrayOf(72, 68, 68),
+        "sipral_isup_t" to intArrayOf(80, 76, 76),
         "sipral_network_config_t" to intArrayOf(216, 124, 124),
     )
 
@@ -11806,6 +11904,37 @@ object Sipral {
     }
 
     /**
+     * Say that a connection is being opened, to be bound as `opening->transport`, and what it
+     * is checked against (ABI 1.11).
+     *
+     * Said before connecting, or at the latest before sipral_stack_transport_bind: once
+     * bound it carries the accounts on a connection of their own whose identity is this one
+     * alone, and an account of another asks for its own with
+     * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
+     * serves a SIP domain per tenant from one address, and a certificate valid for one
+     * tenant's domain says nothing of another's. If it cannot be opened,
+     * sipral_stack_transport_failed_with on the same number moves on the accounts of this
+     * identity alone. A connection bound with nothing said of it is any account's, as the
+     * application checked it. Forgotten when it fails or closes, or when another is said to be
+     * opened for the same identity there before this one was bound.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
+     * destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
+     * a name that is not UTF-8.
+     *
+     * Safety
+     *
+     * `opening` must point at a `sipral_stream_opening_t` whose `size` member says how long it
+     * is, and its texts must be readable for the lengths beside them.
+     */
+    fun stackStreamOpening(stack: Long, opening: SipralStreamOpening) {
+        val openingDestination = opening.destination?.toByteArray(Charsets.UTF_8)
+        val openingServerName = opening.serverName?.toByteArray(Charsets.UTF_8)
+        val openingTlsPinSha256 = opening.tlsPinSha256?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_stream_opening(stack, opening.transport, opening.protocol, openingDestination, openingServerName, openingTlsPinSha256))
+    }
+
+    /**
      * Replace the STUN server list without recreating the stack.
      *
      * `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
@@ -13394,6 +13523,11 @@ object Sipral {
      * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
      * (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
      *
+     * The leaf is read alone: a `sip:` URI in its `subjectAltName` is held to no name
+     * constraint of the authorities above it, which the platforms apply to a `dNSName` and
+     * skip for a URI. `sipral_certificate_check_domain_in_chain` (ABI 1.11) takes those
+     * authorities too, and is the call to make where the platform hands the chain over.
+     *
      * `domain` is the name the connection is checked against: the host of the account's
      * `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
      * `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
@@ -13414,6 +13548,38 @@ object Sipral {
         val domainBytes = domain.toByteArray(Charsets.UTF_8)
         val identitySlot = LongArray(1)
         check(SipralNative.sipral_certificate_check_domain(certificate, domainBytes, rules, platformMatched, identitySlot))
+        return identitySlot[0]
+    }
+
+    /**
+     * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`,
+     * as `sipral_certificate_check_domain` does, with `issuers` the certificates above it in
+     * the chain the platform verified (ABI 1.11).
+     *
+     * `issuers` is their DER, one certificate after another in any order, the anchor among
+     * them or not; the chain the server sent serves where the platform hands over no chain of
+     * its own, since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
+     * names the domain only while every `nameConstraints` extension among them allows the
+     * host of each of the leaf's `sip:` URIs, read as the `dNSName` or address it stands for:
+     * an authority constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for
+     * `sip:example.com`. A constraint on URIs, or one that cannot be read, allows none. A
+     * `dNSName` is the platform's to hold to those constraints, and is read as the call
+     * without issuers reads it. No issuers, a length of zero, reads the leaf alone.
+     *
+     * The answers are `sipral_certificate_check_domain`'s, `out_identity` included, and
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` besides for `issuers` that do not end where a
+     * certificate does.
+     *
+     * Safety
+     *
+     * `certificate` must be readable for `certificate_len` bytes, `issuers` for `issuers_len`
+     * bytes, `domain` for `domain_len` bytes, and `out_identity` must be null or point at one
+     * `sipral_domain_identity_t`.
+     */
+    fun certificateCheckDomainInChain(certificate: ByteArray, issuers: ByteArray, domain: String, rules: Long, platformMatched: Long): Long {
+        val domainBytes = domain.toByteArray(Charsets.UTF_8)
+        val identitySlot = LongArray(1)
+        check(SipralNative.sipral_certificate_check_domain_in_chain(certificate, issuers, domainBytes, rules, platformMatched, identitySlot))
         return identitySlot[0]
     }
 

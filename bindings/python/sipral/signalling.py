@@ -391,15 +391,24 @@ def check_name(sock: ssl.SSLSocket, server_name: str, rules: int, matched_alread
     """Hold a connection whose chain was trusted to ``server_name`` under
     ``rules`` (a `SipralDomainRules`): by default the HTTPS rules, with a
     ``sip:`` URI that names the domain accepted besides; RFC 5922 alone
-    with ``SIPRAL_DOMAIN_RULES_RFC5922`` (``sipral_certificate_check_domain``).
+    with ``SIPRAL_DOMAIN_RULES_RFC5922``. A ``sip:`` URI is held to the name
+    constraints of the authorities above the leaf in the chain OpenSSL
+    verified (``sipral_certificate_check_domain_in_chain``).
     ``matched_already`` says OpenSSL checked the name itself and it held.
     Raises :class:`NameRefused`."""
     leaf = sock.getpeercert(binary_form=True) or b""
     matched = matched_already or https_names(sock.getpeercert() or {}, server_name)
     if matched and rules == lib.SIPRAL_DOMAIN_RULES_PLATFORM:
         return
+    # the verified chain is the ssl module's from Python 3.13 on; before it
+    # there is none to read, and the leaf is read alone, its sip: URI held to
+    # no authority's name constraints
+    verified = sock.get_verified_chain() if hasattr(sock, "get_verified_chain") else [leaf]
+    issuers = b"".join(verified[1:])
     domain = server_name.encode("utf-8")
-    status = lib.sipral_certificate_check_domain(leaf, len(leaf), domain, len(domain), rules, int(matched), ffi.NULL)
+    status = lib.sipral_certificate_check_domain_in_chain(
+        leaf, len(leaf), issuers, len(issuers), domain, len(domain), rules, int(matched), ffi.NULL
+    )
     if status != lib.SIPRAL_STATUS_OK:
         raise NameRefused(_last_error_message() or f"no name in the server's certificate is {server_name}")
 

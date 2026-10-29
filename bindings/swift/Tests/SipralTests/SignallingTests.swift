@@ -29,14 +29,22 @@ final class FakeRegistrar: @unchecked Sendable {
     /// machine's.
     let host: String
 
-    init(identity: SecIdentity? = nil, plainToTls: Bool = false, host: String = "127.0.0.1") throws {
+    /// `chain`, when given, is what the handshake sends: the identity's
+    /// certificate first, the intermediates after it.
+    init(
+        identity: SecIdentity? = nil, chain: [SecCertificate] = [], plainToTls: Bool = false,
+        host: String = "127.0.0.1"
+    ) throws {
         self.plainToTls = plainToTls
         self.host = host
         let tcp = NWProtocolTCP.Options()
         let parameters: NWParameters
         if let identity {
             let tls = NWProtocolTLS.Options()
-            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, sec_identity_create(identity)!)
+            let sent = chain.isEmpty
+                ? sec_identity_create(identity)!
+                : sec_identity_create_with_certificates(identity, chain as CFArray)!
+            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, sent)
             parameters = NWParameters(tls: tls, tcp: tcp)
         } else {
             parameters = NWParameters(tls: nil, tcp: tcp)
@@ -295,6 +303,31 @@ final class SignallingTests: XCTestCase {
         }
     }
 
+    /// A `sip:` URI is held to the name constraints of the intermediate
+    /// above it, which the platform checks a `dNSName` against and skips
+    /// for a URI: one constrained to `corp.test` vouches for
+    /// `sip:pbx.corp.test` and never for `sip:registrar.sipral.test`.
+    func testASipUriTheIntermediateMayNotNameIsRefused() async throws {
+        let outside = try Self.constrainedChain("outside", names: "URI:sip:\(Self.serverName)")
+        let registrar = try FakeRegistrar(identity: outside.identity, chain: outside.chain)
+        defer { registrar.stop() }
+        for rules in [SipralDomainRules.platform, .rfc5922] {
+            let stack = try stack(registrar.address, trust: .onlyAuthority(outside.root), rules: rules)
+            defer { stack.close() }
+            let failed = try await refusal(stack)
+            XCTAssertEqual(failed.tls, .nameMismatch, "\(rules): \(failed.detail ?? "")")
+        }
+
+        let inside = try Self.constrainedChain("inside", names: "URI:sip:pbx.corp.test")
+        let allowed = try FakeRegistrar(identity: inside.identity, chain: inside.chain)
+        defer { allowed.stop() }
+        for rules in [SipralDomainRules.platform, .rfc5922] {
+            let stack = try stack(allowed.address, name: "pbx.corp.test", trust: .onlyAuthority(inside.root), rules: rules)
+            defer { stack.close() }
+            XCTAssertTrue(stack.connected, "\(rules): a sip: URI inside the constraint names the domain")
+        }
+    }
+
     /// A wildcard is the platform's to accept, and RFC 5922 alone refuses it.
     func testAWildcardIsTrustedUnlessRfc5922AloneIsAsked() async throws {
         let (identity, der) = try Self.certificate("wildcard", names: "DNS:*.sipral.test")
@@ -487,8 +520,71 @@ final class SignallingTests: XCTestCase {
             "-keyout", key, "-out", pem,
         ] + dates)
         try openssl(["x509", "-in", pem, "-outform", "der", "-out", der])
+        return (try imported(key: key, certificate: pem, p12: p12), [UInt8](try Data(contentsOf: URL(fileURLWithPath: der))))
+    }
+
+    /// A root, an intermediate it signs that may name `corp.test` and the
+    /// names under it alone, and the registrar's identity, signed by the
+    /// intermediate, whose `subjectAltName` is `names`: the identity, the
+    /// chain the registrar sends (its certificate, then the intermediate),
+    /// and the root's DER for the stack to trust.
+    static func constrainedChain(
+        _ name: String, names: String
+    ) throws -> (identity: SecIdentity, chain: [SecCertificate], root: [UInt8]) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sipral-\(name)-\(UInt32.random(in: 0...UInt32.max))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = { (file: String) in directory.appendingPathComponent(file).path }
+        let extensions = path("extensions.cnf")
+        try """
+        [authority]
+        basicConstraints = critical, CA:TRUE
+        keyUsage = critical, keyCertSign, cRLSign
+        [constrained]
+        basicConstraints = critical, CA:TRUE
+        keyUsage = critical, keyCertSign, cRLSign
+        nameConstraints = critical, permitted;DNS:corp.test
+        [server]
+        basicConstraints = critical, CA:FALSE
+        keyUsage = critical, digitalSignature
+        extendedKeyUsage = serverAuth
+        subjectAltName = \(names)
+
+        """.write(toFile: extensions, atomically: true, encoding: .utf8)
+        let signed = { (file: String, subject: String, section: String, by: String) in
+            try openssl([
+                "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+                "-subj", subject, "-keyout", path("\(file).key"), "-out", path("\(file).csr"),
+            ])
+            let signer = file == by
+                ? ["-signkey", path("\(file).key")]
+                : ["-CA", path("\(by).pem"), "-CAkey", path("\(by).key")]
+            try openssl(["x509", "-req", "-in", path("\(file).csr")] + signer + [
+                "-set_serial", "\(UInt32.random(in: 2...UInt32.max))",
+                "-extfile", extensions, "-extensions", section, "-days", "1", "-out", path("\(file).pem"),
+            ])
+        }
+        try signed("root", "/CN=Sipral Test Root", "authority", "root")
+        try signed("middle", "/CN=Sipral Test Corp", "constrained", "root")
+        try signed("server", "/CN=pbx.corp.test", "server", "middle")
+        for file in ["root", "middle", "server"] {
+            try openssl(["x509", "-in", path("\(file).pem"), "-outform", "der", "-out", path("\(file).der")])
+        }
+        let der = { (file: String) in try Data(contentsOf: URL(fileURLWithPath: path("\(file).der"))) }
+        guard let server = SecCertificateCreateWithData(nil, try der("server") as CFData),
+              let middle = SecCertificateCreateWithData(nil, try der("middle") as CFData) else {
+            throw XCTSkip("the test chain could not be read")
+        }
+        let identity = try imported(key: path("server.key"), certificate: path("server.pem"), p12: path("server.p12"))
+        return (identity, [server, middle], [UInt8](try der("root")))
+    }
+
+    /// The identity of `key` and `certificate`, put through a PKCS #12 file
+    /// at `p12` and imported into memory alone -- never into a keychain.
+    private static func imported(key: String, certificate: String, p12: String) throws -> SecIdentity {
         try openssl([
-            "pkcs12", "-export", "-inkey", key, "-in", pem, "-passout", "pass:sipral", "-out", p12,
+            "pkcs12", "-export", "-inkey", key, "-in", certificate, "-passout", "pass:sipral", "-out", p12,
             "-certpbe", "PBE-SHA1-3DES", "-keypbe", "PBE-SHA1-3DES", "-macalg", "sha1",
         ])
         guard #available(macOS 15.0, iOS 18.0, *) else {
@@ -505,7 +601,7 @@ final class SignallingTests: XCTestCase {
               let identity = first[kSecImportItemIdentity as String] else {
             throw XCTSkip("the test certificate could not be imported: \(imported)")
         }
-        return (identity as! SecIdentity, [UInt8](try Data(contentsOf: URL(fileURLWithPath: der))))
+        return identity as! SecIdentity
     }
 
     private static func openssl(_ arguments: [String]) throws {

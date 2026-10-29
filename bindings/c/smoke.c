@@ -50,7 +50,7 @@
     X(sipral_local_conference_config) X(sipral_local_conference_info)         \
     X(sipral_local_conference_member) X(sipral_pinned_certificate)            \
     X(sipral_network_test_config) X(sipral_isup) X(sipral_hooked_message)     \
-    X(sipral_network_config)
+    X(sipral_network_config) X(sipral_stream_opening)
 
 static int failures;
 
@@ -1003,6 +1003,23 @@ static sipral_status_t transport_failure_at(struct fixture *fixture, size_t decl
     return sipral_stack_transport_failed_with(fixture->stack, &failure, 0);
 }
 
+/* A TLS connection to a tenant's server being opened, checked against the
+ * tenant's domain, as one SIPRAL_EVENT_KIND_TRANSPORT_WANTED named it. */
+static sipral_status_t stream_opening_at(struct fixture *fixture, size_t declared)
+{
+    static const char remote[] = "203.0.113.10:5061";
+    static const char name[] = "tenant.example.com";
+    sipral_stream_opening_t opening = { 0 };
+    opening.size = declared;
+    opening.transport = 3;
+    opening.protocol = SIPRAL_TRANSPORT_TLS;
+    opening.destination = remote;
+    opening.destination_len = strlen(remote);
+    opening.server_name = name;
+    opening.server_name_len = strlen(name);
+    return sipral_stack_stream_opening(fixture->stack, &opening);
+}
+
 /* A local conference on the fixture's stack, made as declared and ended
  * again at once. */
 static sipral_status_t local_conference_config_at(struct fixture *fixture, size_t declared)
@@ -1296,6 +1313,7 @@ static const struct {
     { "sipral_network_test_config_t", network_test_config_at },
     { "sipral_isup_t", isup_at },
     { "sipral_network_config_t", network_config_at },
+    { "sipral_stream_opening_t", stream_opening_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])
@@ -2934,7 +2952,17 @@ static void a_carriers_rel_is_found_and_read(void)
     expect("a REL did not read as one",
            sipral_isup_read(bye + offset, len, &read) == SIPRAL_STATUS_OK &&
                read.message_type == 12 && read.has_cause == 1 && read.cause_value == 16 &&
-               read.cause_location == 4);
+               read.cause_location == 4 && read.cause_coding == 0);
+    /* the same cause under the national coding standard, bits 7 and 6 of
+     * its first octet (Q.850 §2.2.2) */
+    uint8_t national[sizeof smoke_rel];
+    memcpy(national, smoke_rel, sizeof smoke_rel);
+    national[4] = 0xc4;
+    sipral_isup_t coded = { 0 };
+    coded.size = sizeof coded;
+    expect("a national cause did not say its coding standard",
+           sipral_isup_read(national, sizeof national, &coded) == SIPRAL_STATUS_OK &&
+               coded.has_cause == 1 && coded.cause_value == 16 && coded.cause_coding == 2);
     char number[32];
     size_t needed = 0;
     expect("a number a REL does not carry was not just the NUL",

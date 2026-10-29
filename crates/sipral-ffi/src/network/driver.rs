@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_char;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -23,12 +23,13 @@ use std::time::{Duration, Instant};
 use sipral_core::endpoint::{
     AddressFamily, Query, RecordType, TransportErrorKind, TransportId, TransportProtocol,
 };
-use sipral_core::msg::{HostRef, Uri};
+use sipral_core::msg::Uri;
 use sipral_core::pin::CertificatePin;
 use sipral_net::{
     ClientCertificate, Failure, Happening, HostTrust, MediaSender, Network, NetworkConfig,
     Resolver, StreamSender, StreamTarget, TlsFailure, Trust,
 };
+use sipral_ua::StreamIdentity;
 
 use super::SipralNetworkConfig;
 use crate::diagnostics::copy_out;
@@ -54,8 +55,9 @@ use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
 use crate::transport::{
     SIPRAL_MESSAGE_BYTES, SIPRAL_TRANSPORT_MAIN, SipralTransmit, SipralTransportFailure,
-    sipral_stack_poll_transmit, sipral_stack_receive_datagram, sipral_stack_receive_stream,
-    sipral_stack_stream_closed, sipral_stack_transport_bind, sipral_stack_transport_failed_with,
+    identities_asked, sipral_stack_poll_transmit, sipral_stack_receive_datagram,
+    sipral_stack_receive_stream, sipral_stack_stream_closed, sipral_stack_transport_bind,
+    sipral_stack_transport_failed_with,
 };
 
 /// The first transport number the component binds its connections under; the ones below are
@@ -73,6 +75,9 @@ enum Seen {
     Wanted {
         protocol: TransportProtocol,
         destination: SocketAddr,
+        /// Asked for a request that outgrew a datagram (RFC 3261 §18.1.1), not for an
+        /// account's own connection.
+        outgrown: bool,
     },
     Lookup {
         account: SipralHandle,
@@ -94,11 +99,13 @@ enum Seen {
 }
 
 /// One connection the component opened, or is opening.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Stream {
     protocol: TransportProtocol,
     destination: SocketAddr,
     bound: bool,
+    /// What it is checked against, and so whose requests it carries.
+    identity: StreamIdentity,
 }
 
 /// Where a media socket stands with the stack's STUN client.
@@ -451,6 +458,7 @@ fn seen(event: &SipralEvent) -> Option<Seen> {
             Some(Seen::Wanted {
                 protocol,
                 destination,
+                outgrown: wanted.request_bytes != 0 || wanted.limit_bytes != 0,
             })
         }
         SipralEventKind::LookupWanted => {
@@ -622,74 +630,6 @@ fn report(stack: SipralHandle, transport: u32, failure: &Failure, now_ms: u64) {
         patiently(|| unsafe { sipral_stack_transport_failed_with(stack, &raw const told, now_ms) });
 }
 
-/// The name and the pin a TLS connection to `destination` is checked against: the configured
-/// name, else the host of the `server_uri` of the first account located there (RFC 5922 §7.3);
-/// the pin of any account located there or whose registrar URI names that address, since the
-/// connection carries every one of them. Accounts there that pin different certificates are
-/// refused, since one connection cannot be held to two; another thread inside the stack for
-/// longer than the patience is `SIPRAL_STATUS_BUSY`, never a guess.
-fn target_for(
-    stack: SipralHandle,
-    destination: SocketAddr,
-    configured: Option<&String>,
-) -> Result<StreamTarget, Fail> {
-    let (name, pin) = patiently(|| {
-        with_stack(stack, |state| {
-            let mut name = None;
-            let mut pin: Option<CertificatePin> = None;
-            for id in state.agent.accounts() {
-                let Some(account) = state.agent.account(id) else {
-                    continue;
-                };
-                let located = state.agent.located_targets(id).contains(&destination);
-                let named_here = account
-                    .registrar()
-                    .and_then(Uri::sip)
-                    .is_some_and(|sip| literal(sip.host) == Some(destination.ip()));
-                if !located && !named_here {
-                    continue;
-                }
-                if located && name.is_none() {
-                    name = account.server().and_then(host_name);
-                }
-                match (pin, account.pinned_certificate()) {
-                    (Some(held), Some(own)) if held != *own => {
-                        return Err(fail(
-                            SipralStatus::WrongState,
-                            format!(
-                                "the accounts whose server is at {destination} pin different \
-                                 certificates, and one connection there carries them all: give \
-                                 them the same tls_pin_sha256"
-                            ),
-                        ));
-                    }
-                    (None, Some(own)) => pin = Some(*own),
-                    _ => {}
-                }
-            }
-            Ok((name, pin))
-        })
-    })?;
-    Ok(StreamTarget::new(configured.cloned().or(name), pin))
-}
-
-/// A URI's host, when it is a name.
-fn host_name(uri: &Uri) -> Option<String> {
-    match uri.sip()?.host {
-        HostRef::Name(name) => Some(name.to_owned()),
-        HostRef::Ipv4(_) | HostRef::Ipv6(_) => None,
-    }
-}
-
-/// A URI host's address, when it is a literal one.
-const fn literal(host: HostRef<'_>) -> Option<IpAddr> {
-    match host {
-        HostRef::Ipv4(address) => Some(IpAddr::V4(address)),
-        HostRef::Ipv6(address) => Some(IpAddr::V6(address)),
-        HostRef::Name(_) => None,
-    }
-}
-
 pub(super) unsafe fn start(
     stack: SipralHandle,
     config: Option<&SipralNetworkConfig>,
@@ -856,7 +796,7 @@ fn turn(shared: &Shared, clock: &Clock) -> Result<Duration, Fail> {
     stun(shared, &mut driver, clock);
     close_released(shared, &mut driver, &released);
     media(shared, &mut driver, clock);
-    act(shared, &mut driver, clock);
+    act(shared, &mut driver);
     flush(stack, &mut driver, clock);
     Ok(if polled.has_deadline == 0 {
         IDLE
@@ -964,7 +904,7 @@ fn transmit_into(
 }
 
 /// What the connections asked for meanwhile, opened, or closed after what was queued for them.
-fn act(shared: &Shared, driver: &mut Driver, clock: &Clock) {
+fn act(shared: &Shared, driver: &mut Driver) {
     let noted = std::mem::take(&mut *locked(&shared.notes));
     let mut later = Vec::new();
     for note in noted {
@@ -972,13 +912,15 @@ fn act(shared: &Shared, driver: &mut Driver, clock: &Clock) {
             Seen::Wanted {
                 protocol,
                 destination,
+                outgrown,
             } => {
-                if !open_stream(shared, driver, protocol, destination, clock) {
+                if !open_stream(shared, driver, protocol, destination, outgrown) {
                     // asked again at the next turn: a connection checked against a guess would
                     // refuse the right server, or accept the wrong one
                     later.push(Seen::Wanted {
                         protocol,
                         destination,
+                        outgrown,
                     });
                 }
             }
@@ -1039,59 +981,79 @@ fn act(shared: &Shared, driver: &mut Driver, clock: &Clock) {
     }
 }
 
-/// Open the connection the stack asked for, unless one being made answers it too; `false` when
-/// what it is checked against could not be read yet, with nothing done.
+/// Open the connections the stack asked for: one for each identity waiting for a connection
+/// there (`sipral_ua`'s flow module), or for a request that outgrew a datagram one checked
+/// against the first account there, unless one being made answers it too. Each is said to the
+/// stack to be checked against its identity before it is bound, so it carries the accounts of
+/// that identity alone. `false` when the stack could not be read yet, with nothing done.
 fn open_stream(
     shared: &Shared,
     driver: &mut Driver,
     protocol: TransportProtocol,
     destination: SocketAddr,
-    clock: &Clock,
+    outgrown: bool,
 ) -> bool {
     if protocol == TransportProtocol::Udp {
         return true;
     }
-    let same = driver
-        .streams
-        .iter()
-        .find(|(_, stream)| stream.protocol == protocol && stream.destination == destination)
-        .map(|(id, stream)| (*id, stream.bound));
-    // the one being made answers this ask too
-    if same.is_some_and(|(_, bound)| !bound) {
-        return true;
-    }
-    let target = target_for(shared.stack, destination, driver.server_name.as_ref());
-    if target.wait_and_ask_again() {
-        return false;
-    }
-    // the stack has given that one up: a new one in its place
-    if let Some((id, true)) = same {
-        driver.streams.remove(&id);
-        driver.network.close(TransportId(id));
-    }
-    let id = next_transport(driver);
-    match target {
-        Ok(target) => {
-            driver
-                .network
-                .connect(TransportId(id), protocol, destination, target);
-            driver.streams.insert(
-                id,
-                Stream {
+    let opening = patiently(|| {
+        with_stack(shared.stack, |state| {
+            let identities = identities_asked(state, protocol, destination, outgrown);
+            let mut opening = Vec::new();
+            for identity in identities {
+                let same = driver
+                    .streams
+                    .iter()
+                    .find(|(_, stream)| {
+                        stream.protocol == protocol
+                            && stream.destination == destination
+                            && stream.identity == identity
+                    })
+                    .map(|(id, stream)| (*id, stream.bound));
+                // the one being made answers this ask too
+                if same.is_some_and(|(_, bound)| !bound) {
+                    continue;
+                }
+                let id = next_transport(driver);
+                state.agent.stream_opening(
+                    TransportId(id),
                     protocol,
                     destination,
-                    bound: false,
-                },
-            );
+                    identity.clone(),
+                );
+                opening.push((id, identity, same.map(|(given_up, _)| given_up)));
+            }
+            Ok(opening)
+        })
+    });
+    let opening = match opening {
+        Ok(opening) => opening,
+        // a stack destroyed meanwhile has nothing waiting
+        Err(failure) => return !failure.status.wait_and_ask_again(),
+    };
+    for (id, identity, given_up) in opening {
+        // the stack has given that one up: a new one in its place
+        if let Some(old) = given_up {
+            driver.streams.remove(&old);
+            driver.network.close(TransportId(old));
         }
-        Err(refused) => {
-            let failure = Failure::new(
-                TransportErrorKind::Other,
-                TlsFailure::None,
-                refused.message(),
-            );
-            report(shared.stack, id, &failure, clock.now());
-        }
+        let name = driver
+            .server_name
+            .clone()
+            .or_else(|| identity.server_name().map(str::to_owned));
+        let target = StreamTarget::new(name, identity.pin().copied());
+        driver
+            .network
+            .connect(TransportId(id), protocol, destination, target);
+        driver.streams.insert(
+            id,
+            Stream {
+                protocol,
+                destination,
+                bound: false,
+                identity,
+            },
+        );
     }
     true
 }

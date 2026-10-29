@@ -5,6 +5,13 @@
 
 part of 'idiomatic.dart';
 
+/// Where an account's own connection goes and what it is checked against,
+/// as `SipralEventKind.transportWanted` named them: the server's name and
+/// pin, each empty for none. One connection is opened for each, since a
+/// certificate valid for one tenant's domain says nothing of another's at
+/// the same address.
+typedef _StreamTarget = ({String destination, String serverName, String pin});
+
 /// A SIP stack on one UDP socket: the class an application opens first.
 ///
 /// [open] binds the socket and creates the stack; [close] hangs up what is
@@ -143,10 +150,11 @@ final class SipralStack {
 
   final SipralClientCertificate? _clientCertificate;
 
-  /// Per-account stream connections, keyed by transport number.
+  /// Per-account stream connections, keyed by transport number, with what
+  /// each is checked against; and those being opened.
   final Map<int, Socket> _streams = {};
-  final Map<int, String> _streamDestinations = {};
-  final Set<String> _streamsOpening = {};
+  final Map<int, _StreamTarget> _streamTargets = {};
+  final Set<_StreamTarget> _streamsOpening = {};
   int _nextStream = _firstStream;
 
   /// The stack's handle.
@@ -799,29 +807,78 @@ final class SipralStack {
     SipralTransport.wss,
   };
 
-  /// Answers `SipralEventKind.transportWanted`; WS/WSS go over TCP/TLS. A
-  /// failed connection is reported; the stack asks again with the account's
-  /// next REGISTER.
-  Future<void> _openStream(String destination, int protocol) async {
+  /// The 64 hexadecimal digits a fingerprint is, upper case, in any form an
+  /// account's `tlsPin` takes; empty for none.
+  static String _pinDigits(String? pin) {
+    var text = (pin ?? '').trim();
+    final lowered = text.toLowerCase();
+    for (final prefix in const ['sha256 fingerprint=', 'sha-256 ', 'sha256=']) {
+      if (lowered.startsWith(prefix)) {
+        text = text.substring(prefix.length);
+        break;
+      }
+    }
+    return text.replaceAll(RegExp('[: ]'), '').toUpperCase();
+  }
+
+  /// Say that the connection about to be made under [id] is checked
+  /// against [target] (`sipral_stack_stream_opening`), so that once bound
+  /// it carries the accounts of that identity alone.
+  void _sayOpening(int id, _StreamTarget target, int protocol) {
+    using((arena) {
+      final destination = _text(arena, target.destination);
+      final name = _text(arena, target.serverName);
+      final pin = _text(arena, target.pin);
+      final opening = arena<SipralStreamOpening>();
+      opening.ref
+        ..size = ffi.sizeOf<SipralStreamOpening>()
+        ..transport = id
+        ..protocol = protocol
+        ..destination = destination.$1
+        ..destinationLen = destination.$2
+        ..serverName = name.$1
+        ..serverNameLen = name.$2
+        ..tlsPinSha256 = pin.$1
+        ..tlsPinSha256Len = pin.$2;
+      _checkNow(
+        _sipral,
+        'sipral_stack_stream_opening',
+        () => _sipral.stackStreamOpening(_handle, opening),
+      );
+    });
+  }
+
+  /// Answers `SipralEventKind.transportWanted`, one connection for each
+  /// identity asked for at a destination, said with [_sayOpening] and
+  /// checked against it; WS/WSS go over TCP/TLS. A failed connection is
+  /// reported, which moves on the accounts of that identity alone; the stack
+  /// asks again with the account's next REGISTER.
+  Future<void> _openStream(_StreamTarget target, int protocol) async {
+    final destination = target.destination;
     if (_closed ||
-        _streamsOpening.contains(destination) ||
-        _streamDestinations.containsValue(destination)) {
+        _streamsOpening.contains(target) ||
+        _streamTargets.containsValue(target)) {
       return;
     }
     final address = _parseAddress(destination);
     if (address == null) {
       return;
     }
-    _streamsOpening.add(destination);
+    _streamsOpening.add(target);
     final id = _nextStream++;
     final tls =
         protocol == SipralTransport.tls || protocol == SipralTransport.wss;
+    // one of the accounts the connection is for, whose pin is the one asked
+    // for and whose certificate it presents
     final account =
         _accounts.values
             .where(
               (one) =>
                   one.streamProtocol == protocol &&
-                  one.registrarAddress == destination,
+                  one.registrarAddress == destination &&
+                  (sipDomainOf(one.serverUri)?.toLowerCase() ?? '') ==
+                      target.serverName &&
+                  _pinDigits(one._tlsPin) == _pinDigits(target.pin),
             )
             .firstOrNull;
     final certificate =
@@ -831,7 +888,8 @@ final class SipralStack {
     StreamSubscription<Uint8List>? early;
     final held = <Uint8List>[];
     try {
-      final pinned = account?._tlsPin != null;
+      _sayOpening(id, target, protocol);
+      final pinned = target.pin.isNotEmpty;
       // a certificate that cannot be presented now is refused here, before
       // anything reaches the server
       final context =
@@ -853,8 +911,9 @@ final class SipralStack {
         final began = DateTime.now();
         final name =
             _tlsServerName ??
-            sipDomainOf(account?.serverUri) ??
-            address.$1.address;
+            (target.serverName.isEmpty
+                ? address.$1.address
+                : target.serverName);
         final secured = await SecureSocket.secure(
           plain,
           host: name,
@@ -866,7 +925,7 @@ final class SipralStack {
         );
         if (pinned) {
           final leaf = secured.peerCertificate;
-          if (leaf == null || !_pinned(account!, leaf)) {
+          if (leaf == null || account == null || !_pinned(account, leaf)) {
             secured.destroy();
             throw const HandshakeException(
               'the server\'s certificate is not the one the account pins',
@@ -921,7 +980,7 @@ final class SipralStack {
         socket = plain;
       }
     } catch (refused) {
-      _streamsOpening.remove(destination);
+      _streamsOpening.remove(target);
       _sayNoStream(
         id,
         destination,
@@ -932,14 +991,14 @@ final class SipralStack {
       _poll();
       return;
     }
-    _streamsOpening.remove(destination);
+    _streamsOpening.remove(target);
     if (_closed) {
       unawaited(early?.cancel());
       socket.destroy();
       return;
     }
     _streams[id] = socket;
-    _streamDestinations[id] = destination;
+    _streamTargets[id] = target;
     // a write that fails is reported here as well as to the listener below,
     // which is the one that acts on it
     unawaited(socket.done.then<void>((_) {}, onError: (Object _) {}));
@@ -978,7 +1037,7 @@ final class SipralStack {
         _loseStream(id);
       } else {
         _streams.remove(id)?.destroy();
-        _streamDestinations.remove(id);
+        _streamTargets.remove(id);
         if (!_closed) {
           _sayNoStream(
             id,
@@ -1079,7 +1138,7 @@ final class SipralStack {
       if (status != SipralStatus.ok) {
         // the framing is lost: the stack retired the transport itself
         _streams.remove(id)?.destroy();
-        _streamDestinations.remove(id);
+        _streamTargets.remove(id);
       }
     });
     _poll();
@@ -1088,7 +1147,7 @@ final class SipralStack {
   /// The stack asks for a new connection after `sipral_stack_stream_closed`.
   void _loseStream(int id) {
     final socket = _streams.remove(id);
-    _streamDestinations.remove(id);
+    _streamTargets.remove(id);
     if (socket == null || _closed) {
       return;
     }
@@ -1276,7 +1335,7 @@ final class SipralStack {
       socket.destroy();
     }
     _streams.clear();
-    _streamDestinations.clear();
+    _streamTargets.clear();
     _sipral.stackDestroy(_handle);
     _socket.close();
     _callback.close();
@@ -1418,7 +1477,7 @@ final class SipralStack {
       // longer held, so nothing happens for it
       final retired = event.transport;
       if (event.kind == SipralEventKind.transportFailed && retired != null) {
-        _streamDestinations.remove(retired);
+        _streamTargets.remove(retired);
         _streams.remove(retired)?.destroy();
       }
       if (event.kind == SipralEventKind.transportWanted) {
@@ -1427,13 +1486,18 @@ final class SipralStack {
             wanted.destination == ffi.nullptr
                 ? null
                 : _decode(wanted.destination.cast(), wanted.destinationLen);
-        // only per-account connections; this layer opens no stream for a
-        // request that outgrew a datagram
+        // only per-account connections, one for each identity asked for;
+        // this layer opens no stream for a request that outgrew a datagram
         if (destination != null &&
             wanted.requestBytes == 0 &&
             wanted.limitBytes == 0) {
           final protocol = wanted.protocol;
-          Timer.run(() => unawaited(_openStream(destination, protocol)));
+          final _StreamTarget target = (
+            destination: destination,
+            serverName: _decode(wanted.serverName.cast(), wanted.serverNameLen),
+            pin: _decode(wanted.tlsPinSha256.cast(), wanted.tlsPinSha256Len),
+          );
+          Timer.run(() => unawaited(_openStream(target, protocol)));
         }
       }
       final targets = event.locatedTargets;

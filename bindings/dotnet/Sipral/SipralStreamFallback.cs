@@ -21,13 +21,20 @@ using static Sipral.Interop.NativeText;
 namespace Sipral;
 
 /// <summary>What <see cref="SipralEventKind.TransportWanted"/> carries: a
-/// request too large for a datagram (RFC 3261 §18.1.1), its destination and
-/// the two sizes.</summary>
+/// request too large for a datagram (RFC 3261 §18.1.1), or an account's own
+/// connection, its destination and the two sizes, and what the connection is
+/// checked against: <paramref name="ServerName"/>, the SIP domain of the
+/// accounts it is for, lowercase (RFC 5922 §7.3), empty for the address; and
+/// <paramref name="TlsPinSha256"/>, the one certificate trusted, empty for
+/// none. One connection is opened for each such identity at an
+/// address.</summary>
 public sealed record SipralTransportWantedEventInfo(
     SipralTransport Protocol,
     string? Destination,
     ulong RequestBytes,
-    uint LimitBytes);
+    uint LimitBytes,
+    string ServerName = "",
+    string TlsPinSha256 = "");
 
 public sealed partial class SipralStack
 {
@@ -47,19 +54,25 @@ public sealed partial class SipralStack
 
     private readonly ConcurrentQueue<uint> _streamsLetGo = new();
 
-    // Guards the connections by transport id and the destinations being
-    // connected to.
+    // Guards the connections by transport id and those being connected.
     private readonly object _streamLock = new();
     private readonly Dictionary<uint, SipStream> _sipStreams = new();
-    private readonly HashSet<string> _streamsOpening = new();
+    private readonly HashSet<StreamTarget> _streamsOpening = new();
     private uint _nextStream = FirstStream;
+
+    // Where a connection the stack asked for goes and what it is checked
+    // against, as TransportWanted named them: one is opened for each, since a
+    // certificate valid for one tenant's domain says nothing of another's at
+    // the same address. Empty: the address, and no pin.
+    private sealed record StreamTarget(string Destination, string ServerName, string Pin);
 
     // A TCP connection for an oversized request, or an account's own
     // TCP/TLS connection.
     private sealed class SipStream
     {
         public required uint Transport { get; init; }
-        public required string Destination { get; init; }
+        public required StreamTarget Target { get; init; }
+        public string Destination => Target.Destination;
         public required TcpClient Client { get; init; }
         public required Stream Stream { get; init; }
         // over TLS: how a later failure reads for the client certificate
@@ -94,19 +107,21 @@ public sealed partial class SipralStack
     // for the new one the stack asks for.
     internal void NoteStreamLetGo(uint transport) => _streamsLetGo.Enqueue(transport);
 
-    // One connecting thread per new destination, or with streamFallback off
-    // a report that none is coming. Retired connections are closed first.
+    // One connecting thread per destination and identity asked for with
+    // none open or opening, or with streamFallback off a report that none is
+    // coming. Retired connections are closed first.
     private void ActOnStreamsWanted()
     {
         while (_streamsLetGo.TryDequeue(out var letGo))
         {
             LoseSipStream(letGo, tell: false);
         }
-        var seen = new HashSet<string>();
+        var seen = new HashSet<StreamTarget>();
         while (_streamsAsked.TryDequeue(out var wanted))
         {
             var destination = wanted.Destination!;
-            if (!seen.Add(destination))
+            var target = new StreamTarget(destination, wanted.ServerName, wanted.TlsPinSha256);
+            if (!seen.Add(target))
             {
                 continue;
             }
@@ -122,15 +137,15 @@ public sealed partial class SipralStack
             uint transport;
             lock (_streamLock)
             {
-                if (_streamsOpening.Contains(destination)
-                    || _sipStreams.Values.Any(stream => stream.Destination == destination))
+                if (_streamsOpening.Contains(target)
+                    || _sipStreams.Values.Any(stream => stream.Target == target))
                 {
                     continue;
                 }
                 transport = _nextStream++;
                 if (opens)
                 {
-                    _streamsOpening.Add(destination);
+                    _streamsOpening.Add(target);
                 }
             }
             if (!opens)
@@ -139,7 +154,7 @@ public sealed partial class SipralStack
                     $"to {destination} not tried: streamFallback is off");
                 continue;
             }
-            new Thread(() => OpenSipStream(transport, destination, over, bound))
+            new Thread(() => OpenSipStream(transport, target, over, bound))
             {
                 IsBackground = true,
                 Name = "sipral-stream",
@@ -147,18 +162,10 @@ public sealed partial class SipralStack
         }
     }
 
-    // The pin of an account on that server if it has one, else tlsTrust.
-    private SipralTlsTrust StreamTrust(string destination)
-    {
-        Account? pinned;
-        lock (_accounts)
-        {
-            pinned = _accounts.FirstOrDefault(account
-                => account.StreamProtocol is SipralTransport.Tls or SipralTransport.Wss
-                && account.RegistrarAddress == destination && account.TlsPin is not null);
-        }
-        return pinned?.TlsPin is { } pin ? SipralTlsTrust.Pinned(pin) : _tlsTrust;
-    }
+    // The pin the stack asked the connection to be held to if there is one,
+    // else tlsTrust.
+    private SipralTlsTrust StreamTrust(StreamTarget target) =>
+        target.Pin.Length > 0 ? SipralTlsTrust.Pinned(target.Pin) : _tlsTrust;
 
     // The client certificate of an account on that server if it has one,
     // else tlsClientCertificate.
@@ -174,60 +181,68 @@ public sealed partial class SipralStack
         return own?.ClientCertificate ?? _tlsClientCertificate;
     }
 
-    // The name a TLS connection to destination checks the certificate
-    // against: tlsServerName when given; else the domain of the serverUri of
-    // an account on its own connection there, the SIP domain the user
+    // The name a TLS connection checks the certificate against:
+    // tlsServerName when given; else the one the stack asked for, the domain
+    // of the serverUri of the accounts it is for, the SIP domain the user
     // configured rather than the host its SRV record named (RFC 5922 §7.3);
     // else host, the address connected to.
-    private string StreamServerName(string destination, string host)
+    private string StreamServerName(StreamTarget target, string host) =>
+        _givenTlsServerName ?? (target.ServerName.Length > 0 ? target.ServerName : host);
+
+    // sipral_stack_stream_opening: the connection about to be made under
+    // transport is checked against target, and once bound carries the
+    // accounts of that identity alone.
+    private void SayOpening(uint transport, StreamTarget target, SipralTransport bound)
     {
-        if (_givenTlsServerName is { } given)
+        var texts = new[] { target.Destination, target.ServerName, target.Pin }.Select(Encoding.UTF8.GetBytes).ToArray();
+        var pinned = texts.Select(text => GCHandle.Alloc(text, GCHandleType.Pinned)).ToArray();
+        try
         {
-            return given;
+            var opening = SipralStreamOpening.Sized();
+            opening.Transport = transport;
+            opening.Protocol = (uint)bound;
+            opening.Destination = pinned[0].AddrOfPinnedObject();
+            opening.DestinationLen = (nuint)texts[0].Length;
+            opening.ServerName = pinned[1].AddrOfPinnedObject();
+            opening.ServerNameLen = (nuint)texts[1].Length;
+            opening.TlsPinSha256 = pinned[2].AddrOfPinnedObject();
+            opening.TlsPinSha256Len = (nuint)texts[2].Length;
+            SipralErrors.Call(() => NativeMethods.sipral_stack_stream_opening(Handle, in opening),
+                "sipral_stack_stream_opening");
         }
-        lock (_accounts)
+        finally
         {
-            return _accounts
-                .Where(account => account.StreamProtocol is SipralTransport.Tls or SipralTransport.Wss
-                    && account.RegistrarAddress == destination)
-                .Select(account => SipDomainOf(account.ServerUri))
-                .FirstOrDefault(domain => domain is not null) ?? host;
+            foreach (var one in pinned)
+            {
+                one.Free();
+            }
         }
     }
 
-    // The domain a sip: or sips: URI names (sips:example.com:5061 and
-    // sip:example.com;transport=tls both give example.com); null for an IP
-    // address, which is the destination itself, or for no such URI.
-    internal static string? SipDomainOf(string? uri)
-    {
-        var colon = uri?.IndexOf(':') ?? -1;
-        if (uri is null || colon < 0
-            || !(uri[..colon].Equals("sip", StringComparison.OrdinalIgnoreCase)
-                || uri[..colon].Equals("sips", StringComparison.OrdinalIgnoreCase)))
-        {
-            return null;
-        }
-        var rest = uri[(colon + 1)..].Split(';', '?')[0];
-        var hostPort = rest[(rest.LastIndexOf('@') + 1)..];
-        if (hostPort.StartsWith('['))
-        {
-            return null;
-        }
-        var host = hostPort.Split(':')[0].TrimEnd('.');
-        return host.Length == 0 || System.Text.RegularExpressions.Regex.IsMatch(host, @"^\d{1,3}(\.\d{1,3}){3}$")
-            ? null
-            : host;
-    }
-
-    // Connects (to streamServer instead, for TCP, when given), binds it as
-    // the stream to destination, as `bound` (WS/WSS for a WebSocket), and
-    // reads it. A failure is reported on the same transport id, which ends
-    // whatever was waiting.
+    // Says so (SayOpening), connects (to streamServer instead, for TCP, when
+    // given), checked against target, binds it as the stream to its
+    // destination, as `bound` (WS/WSS for a WebSocket), and reads it. A
+    // failure is reported on the same transport id, which ends whatever was
+    // waiting: the accounts of that identity alone.
     private void OpenSipStream(
-        uint transport, string destination, SipralTransport over = SipralTransport.Tcp, SipralTransport? bound = null)
+        uint transport, StreamTarget target, SipralTransport over = SipralTransport.Tcp, SipralTransport? bound = null)
     {
         SipStream stream;
+        var destination = target.Destination;
         var server = over == SipralTransport.Tcp ? _streamServer ?? destination : destination;
+        try
+        {
+            SayOpening(transport, target, bound ?? over);
+        }
+        catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
+        {
+            lock (_streamLock)
+            {
+                _streamsOpening.Remove(target);
+            }
+            SayNoStream(transport, SipralTransportError.Other, $"to {destination} not tried: {ex.Message}", over);
+            return;
+        }
         try
         {
             // a client certificate that cannot be presented is reported
@@ -254,8 +269,8 @@ public sealed partial class SipralStack
             {
                 var tls = new SslStream(carried, leaveInnerStreamOpen: false);
                 var verdict = new SipralTlsTrust.Verdict();
-                var options = new SslClientAuthenticationOptions { TargetHost = StreamServerName(destination, host) };
-                StreamTrust(destination).Apply(options, verdict, _tlsDomainRules);
+                var options = new SslClientAuthenticationOptions { TargetHost = StreamServerName(target, host) };
+                StreamTrust(target).Apply(options, verdict, _tlsDomainRules);
                 use!.Apply(options);
                 var began = Stopwatch.GetTimestamp();
                 try
@@ -280,7 +295,7 @@ public sealed partial class SipralStack
             stream = new SipStream
             {
                 Transport = transport,
-                Destination = destination,
+                Target = target,
                 Client = client,
                 Stream = carried,
                 Use = use,
@@ -293,21 +308,21 @@ public sealed partial class SipralStack
         {
             lock (_streamLock)
             {
-                _streamsOpening.Remove(destination);
+                _streamsOpening.Remove(target);
             }
             var socket = ex as SocketException ?? ex.InnerException as SocketException;
             var refused = ex as SignallingRefusedException ?? (socket is not null ? Refused(socket) : null);
             var error = refused?.Error ?? SipralTransportError.Other;
-            var target = server == destination ? destination : $"{server} (for {destination})";
+            var reached = server == destination ? destination : $"{server} (for {destination})";
             var said = refused?.Message ?? ex.Message;
             SayNoStream(transport, error,
-                $"to {target} {Verdict(error)}{(said.Length == 0 ? "" : ": " + said)}", over,
+                $"to {reached} {Verdict(error)}{(said.Length == 0 ? "" : ": " + said)}", over,
                 refused?.Tls ?? SipralTlsFailure.None);
             return;
         }
         lock (_streamLock)
         {
-            _streamsOpening.Remove(destination);
+            _streamsOpening.Remove(target);
             if (_closed.IsSet)
             {
                 stream.Stream.Dispose();

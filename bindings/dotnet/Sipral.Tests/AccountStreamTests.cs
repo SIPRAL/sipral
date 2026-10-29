@@ -129,9 +129,72 @@ public sealed class AccountStreamTests
         account.Register();
         Assert.True(await Registered(account), $"refused: {string.Join("; ", failed)}");
         Assert.Equal(registrar.Address, account.RegistrarAddress);
-        Assert.Equal("pbx.example.com", SipralStack.SipDomainOf("sips:alice@pbx.example.com:5061;transport=tls"));
-        Assert.Null(SipralStack.SipDomainOf("sips:198.51.100.7:5061"));
-        Assert.Null(SipralStack.SipDomainOf("sip:[2001:db8::7]:5061"));
+    }
+
+    /// <summary>Two accounts whose SIP domains SRV places at one address,
+    /// against a server whose certificate names the first domain alone: each
+    /// gets a connection checked against its own domain, so the first
+    /// registers, the second is refused for the name rather than riding the
+    /// first one's connection, and the first goes on working.</summary>
+    [Fact]
+    public async Task AccountsOfTwoDomainsAtOneAddressAreEachHeldToTheirOwnDomain()
+    {
+        const string tenant = "tenant.sipral.test";
+        using var certificate = SignallingTests.Good();
+        using var registrar = new SignallingTests.Registrar(certificate);
+        var port = registrar.Address.Split(':')[1];
+        using var stack = new SipralStack(audio: SipralAudio.Application, bindHost: "127.0.0.1",
+            tlsTrust: SipralTlsTrust.OnlyAuthority(certificate),
+            resolver: (name, record) => (record, name) switch
+            {
+                (SipralDnsRecordType.Srv, $"_sips._tcp.{ServerName}" or $"_sips._tcp.{tenant}") =>
+                    new SipralLookup(SipralDnsAnswer.Records, new[] { $"300 10 60 {port} host.sipral.test" }),
+                (SipralDnsRecordType.A, "host.sipral.test") =>
+                    new SipralLookup(SipralDnsAnswer.Records, new[] { "300 127.0.0.1" }),
+                _ => SipralLookup.Nothing,
+            });
+        var failed = new ConcurrentQueue<SipralTransportFailedEventInfo>();
+        var wanted = new ConcurrentQueue<SipralTransportWantedEventInfo>();
+        stack.EventReceived += (_, args) =>
+        {
+            if (args.TransportFailed is { } lost)
+            {
+                failed.Enqueue(lost);
+            }
+            if (args.TransportWanted is { } asked)
+            {
+                wanted.Enqueue(asked);
+            }
+        };
+        var first = stack.AddAccount($"sip:alice@{ServerName}", registrar: $"sips:{ServerName}",
+            serverUri: $"sips:{ServerName}", streamProtocol: SipralTransport.Tls);
+        first.Register();
+        Assert.True(await Registered(first), $"refused: {string.Join("; ", failed.Select(one => one.Detail))}");
+        var (connection, _) = Assert.Single(registrar.Registers());
+
+        var second = stack.AddAccount($"sip:bob@{tenant}", registrar: $"sips:{tenant}",
+            serverUri: $"sips:{tenant}", streamProtocol: SipralTransport.Tls);
+        second.Register();
+        Assert.True(await Until(() => !failed.IsEmpty), "the second tenant's connection was never refused");
+        var refused = Assert.Single(failed);
+        Assert.Equal(SipralTlsFailure.NameMismatch, refused.Tls);
+        Assert.Equal(registrar.Address, second.RegistrarAddress);
+        Assert.NotEqual(SipralRegistrationState.Registered, second.RegistrationState());
+        Assert.DoesNotContain(registrar.Registers(), one => one.Message.Contains("sip:bob@"));
+        Assert.Equal(new[] { ServerName, tenant }, wanted.Select(one => one.ServerName).Distinct().OrderBy(one => one));
+
+        var call = stack.PlaceCall(first, $"sip:carol@{ServerName}");
+        try
+        {
+            Assert.True(await Until(() => registrar.Requests().Any(r => r.Message.StartsWith("INVITE sip:carol@", StringComparison.Ordinal))),
+                "the first tenant's call never reached its server");
+            var invite = registrar.Requests().First(r => r.Message.StartsWith("INVITE ", StringComparison.Ordinal));
+            Assert.Equal(connection, invite.Connection);
+        }
+        finally
+        {
+            call.Close();
+        }
     }
 
     [Fact]

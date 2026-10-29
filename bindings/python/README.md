@@ -587,6 +587,11 @@ The stack asks for the connection with `EventKind.TRANSPORT_WANTED`,
 nothing outgrown, and this package opens it to the account's server
 whatever `stream_fallback` says: a TLS one held to the account's `tls_pin`
 when it has one, to `tls_trust` under `tls_server_name` otherwise. The
+stack names the domain and the pin with each ask (`fields["server_name"]`,
+`fields["tls_pin_sha256"]`), and this package opens one connection for each
+pair and says which before binding it (`sipral_stack_stream_opening`, ABI
+1.11): two tenants of one PBX at one address are each checked against their
+own domain, and accounts of the same domain and pin share one connection. The
 account's REGISTER and every request of its calls go over it, its `Contact`
 names the protocol, and a connection that closes is opened again and the
 account registered again. Until it is open a call the account places

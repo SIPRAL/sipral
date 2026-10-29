@@ -50,37 +50,20 @@ private fun header(name: String, message: String): String? =
     message.split("\r\n").firstOrNull { it.lowercase().startsWith("${name.lowercase()}:") }
         ?.substringAfter(':')?.trim()
 
-/** A key store holding one self-signed certificate for [SERVER_NAME], made
- * with keytool; [start] dates it, as keytool reads `-startdate`, and
- * [names] is its `subjectAltName` as keytool writes one. */
-private class Credential(
-    directory: File,
-    name: String,
-    start: String?,
-    days: Int,
-    names: String = "dns:$SERVER_NAME",
-) {
-    val store: KeyStore
-    val certificate: X509Certificate
+/** A key store whose `registrar` entry the registrar serves with: the
+ * secondary constructor makes one self-signed certificate for
+ * [SERVER_NAME] with keytool; [start] dates it, as keytool reads
+ * `-startdate`, and [names] is its `subjectAltName` as keytool writes one. */
+private class Credential(val store: KeyStore) {
+    val certificate: X509Certificate = store.getCertificate("registrar") as X509Certificate
 
-    init {
-        val file = File(directory, "$name.p12")
-        val keytool = File(System.getProperty("java.home"), "bin/keytool").path
-        val command = mutableListOf(
-            keytool, "-genkeypair", "-alias", "registrar", "-keyalg", "EC", "-groupname", "secp256r1",
-            "-dname", "CN=$SERVER_NAME", "-ext", "SAN=$names", "-ext", "EKU=serverAuth",
-            "-validity", days.toString(), "-storetype", "PKCS12", "-keystore", file.path,
-            "-storepass", "changeit", "-keypass", "changeit",
-        )
-        if (start != null) {
-            command += listOf("-startdate", start)
-        }
-        val made = ProcessBuilder(command).redirectErrorStream(true).start()
-        val said = made.inputStream.readBytes().toString(Charsets.UTF_8)
-        check(made.waitFor(60, TimeUnit.SECONDS) && made.exitValue() == 0) { "keytool: $said" }
-        store = KeyStore.getInstance("PKCS12").apply { file.inputStream().use { load(it, "changeit".toCharArray()) } }
-        certificate = store.getCertificate("registrar") as X509Certificate
-    }
+    constructor(
+        directory: File,
+        name: String,
+        start: String?,
+        days: Int,
+        names: String = "dns:$SERVER_NAME",
+    ) : this(selfSigned(directory, name, start, days, names))
 
     /** The context a registrar serves with; with [clients], one that trusts
      * that authority alone for the certificate a client presents. */
@@ -97,6 +80,71 @@ private class Credential(
         }
         return SSLContext.getInstance("TLS").apply { init(keys.keyManagers, trust, null) }
     }
+}
+
+private fun selfSigned(directory: File, name: String, start: String?, days: Int, names: String): KeyStore {
+    val file = File(directory, "$name.p12")
+    val keytool = File(System.getProperty("java.home"), "bin/keytool").path
+    val command = mutableListOf(
+        keytool, "-genkeypair", "-alias", "registrar", "-keyalg", "EC", "-groupname", "secp256r1",
+        "-dname", "CN=$SERVER_NAME", "-ext", "SAN=$names", "-ext", "EKU=serverAuth",
+        "-validity", days.toString(), "-storetype", "PKCS12", "-keystore", file.path,
+        "-storepass", "changeit", "-keypass", "changeit",
+    )
+    if (start != null) {
+        command += listOf("-startdate", start)
+    }
+    val made = ProcessBuilder(command).redirectErrorStream(true).start()
+    val said = made.inputStream.readBytes().toString(Charsets.UTF_8)
+    check(made.waitFor(60, TimeUnit.SECONDS) && made.exitValue() == 0) { "keytool: $said" }
+    return KeyStore.getInstance("PKCS12").apply { file.inputStream().use { load(it, "changeit".toCharArray()) } }
+}
+
+/**
+ * A registrar's credential under an intermediate that may name `corp.test`
+ * and the names under it alone, made with keytool in [directory]: a root,
+ * the intermediate it signs, and the registrar's key the intermediate
+ * certifies with [names] as its `subjectAltName`, held with that chain so
+ * the handshake sends the intermediate. The root is for the client to trust.
+ */
+private fun constrained(directory: File, name: String, names: String): Pair<Credential, X509Certificate> {
+    val password = "changeit"
+    fun store(file: String, alias: String, dname: String, vararg ext: String) = keytool(
+        directory, "-genkeypair", "-alias", alias, "-keyalg", "EC", "-groupname", "secp256r1",
+        "-dname", dname, *ext, "-validity", "1", "-storetype", "PKCS12", "-keystore", file,
+        "-storepass", password, "-keypass", password,
+    )
+    fun signed(file: String, alias: String, by: String, out: String, vararg ext: String) {
+        keytool(directory, "-certreq", "-alias", alias, "-keystore", file, "-storepass", password, "-file", "$out.csr")
+        keytool(
+            directory, "-gencert", "-rfc", "-alias", "authority", "-keystore", by, "-storepass", password,
+            "-infile", "$out.csr", "-outfile", "$out.pem", *ext, "-validity", "1",
+        )
+    }
+    fun imported(file: String, alias: String, pem: String) = keytool(
+        directory, "-importcert", "-noprompt", "-alias", alias, "-file", pem, "-keystore", file, "-storepass", password,
+    )
+    val root = "$name-root.p12"
+    store(root, "authority", "CN=Sipral $name root", "-ext", "bc:c=ca:true", "-ext", "ku:c=keyCertSign,cRLSign")
+    keytool(directory, "-exportcert", "-rfc", "-alias", "authority", "-keystore", root, "-storepass", password, "-file", "$name-root.pem")
+    val middle = "$name-middle.p12"
+    store(middle, "authority", "CN=Sipral $name intermediate")
+    // nameConstraints (RFC 5280 §4.2.1.10): permittedSubtrees, one dNSName, corp.test
+    signed(
+        middle, "authority", root, "$name-middle",
+        "-ext", "bc:c=ca:true", "-ext", "ku:c=keyCertSign,cRLSign", "-ext", "2.5.29.30:c=300fa00d300b8209636f72702e74657374",
+    )
+    imported(middle, "root", "$name-root.pem")
+    imported(middle, "authority", "$name-middle.pem")
+    val server = "$name-server.p12"
+    store(server, "registrar", "CN=pbx.corp.test")
+    signed(server, "registrar", middle, "$name-server", "-ext", "SAN=$names", "-ext", "EKU=serverAuth")
+    imported(server, "root", "$name-root.pem")
+    imported(server, "middle", "$name-middle.pem")
+    imported(server, "registrar", "$name-server.pem")
+    fun opened(file: String) =
+        KeyStore.getInstance("PKCS12").apply { File(directory, file).inputStream().use { load(it, password.toCharArray()) } }
+    return Credential(opened(server)) to opened(root).getCertificate("authority") as X509Certificate
 }
 
 /** A registrar on a TCP port of loopback, over TLS when given a
@@ -431,6 +479,31 @@ private suspend fun aSipUriNamesTheDomainAndRfc5922AloneRefusesAWildcard(directo
     return "a sip: URI naming the domain is trusted, and a wildcard is refused under RFC 5922 alone"
 }
 
+/** A `sip:` URI is held to the name constraints of the intermediate the
+ * server sends, which PKIX checks a `dNSName` against and skips for a URI:
+ * one constrained to `corp.test` vouches for `sip:pbx.corp.test` and never
+ * for `sip:`[SERVER_NAME]. */
+private suspend fun aSipUriTheIntermediateMayNotNameIsRefused(directory: File): String {
+    val (outside, outsideRoot) = constrained(directory, "outside", "uri:sip:$SERVER_NAME")
+    Registrar(outside).use { registrar ->
+        for (rules in SipralDomainRules.entries) {
+            over(registrar.address, trust = SipralTlsTrust.OnlyAuthority(outsideRoot), rules = rules).use {
+                val failed = refusal(it)
+                assertEquals(SipralTlsFailure.NAME_MISMATCH.value.toLong(), failed.tls, "$rules: ${failed.detail}")
+            }
+        }
+    }
+    val (inside, insideRoot) = constrained(directory, "inside", "uri:sip:pbx.corp.test")
+    Registrar(inside).use { registrar ->
+        for (rules in SipralDomainRules.entries) {
+            over(registrar.address, name = "pbx.corp.test", trust = SipralTlsTrust.OnlyAuthority(insideRoot), rules = rules).use {
+                assertTrue(it.connected, "$rules refused a sip: URI inside the intermediate's constraint")
+            }
+        }
+    }
+    return "a sip: URI the intermediate may not name is refused, and one it may is trusted"
+}
+
 private suspend fun aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(): String {
     Registrar().use { registrar ->
         over(registrar.address, signalling = SipralTransport.TCP, name = null).use { client ->
@@ -647,6 +720,61 @@ private suspend fun aServerLocatedBySrvIsCheckedAgainstItsSipDomain(good: Creden
         }
     }
     return "a server located by SRV is checked against its SIP domain, and a given name still wins"
+}
+
+/** Two accounts whose SIP domains SRV places at one address, on their own
+ * TLS connections, against a server whose certificate names the first
+ * domain alone: each gets a connection checked against its own domain, so
+ * the first registers, the second is refused for the name rather than
+ * riding the first one's connection, and the first goes on working. */
+private suspend fun accountsOfTwoDomainsAtOneAddressAreEachHeldToTheirOwnDomain(good: Credential): String {
+    val tenant = "tenant.sipral.test"
+    Registrar(good).use { tls ->
+        val port = tls.address.substringAfterLast(':')
+        val resolver: SipralResolver = { name, record ->
+            when {
+                record == org.sipral.SipralDnsRecordType.SRV && (name.endsWith(".$SERVER_NAME") || name.endsWith(".$tenant")) ->
+                    SipralLookup(org.sipral.SipralDnsAnswer.RECORDS, listOf("300 10 60 $port host.sipral.test"))
+                record == org.sipral.SipralDnsRecordType.A && name == "host.sipral.test" ->
+                    SipralLookup(org.sipral.SipralDnsAnswer.RECORDS, listOf("300 127.0.0.1"))
+                else -> SipralLookup.NOTHING
+            }
+        }
+        SipralClient.open(
+            audio = SipralAudioMode.Application, bindHost = "127.0.0.1", resolver = resolver,
+            tlsTrust = SipralTlsTrust.OnlyAuthority(good.certificate),
+        ).use { client ->
+            fun SipralClient.account(user: String, domain: String) = addAccount(
+                aor = "sip:$user@$domain", registrar = "sip:$domain", serverUri = "sip:$domain",
+                streamProtocol = SipralTransport.TLS,
+            )
+            val first = client.account("alice", SERVER_NAME)
+            first.register()
+            registered(client, first)
+            val (connection, _) = tls.registers().single()
+
+            val second = client.account("bob", tenant)
+            val (_, event) = client.events.awaitNext(SipralEventKind.TRANSPORT_FAILED, timeoutMs = 10_000) {
+                second.register()
+            }
+            val refused = assertNotNull(transportFailedOf(event))
+            assertEquals(SipralTlsFailure.NAME_MISMATCH.value.toLong(), refused.tls, refused.detail ?: "")
+            assertEquals(tls.address, second.registrarAddress, "located at the same address")
+            assertNotEquals(SipralRegistrationState.REGISTERED, second.registrationState)
+            assertTrue(tls.registers().none { it.second.contains("sip:bob@") }, "the second tenant never reached the server")
+            assertEquals(2, tls.accepted, "a connection for each domain")
+
+            client.placeCall(first, "sip:carol@$SERVER_NAME").use {
+                assertTrue(
+                    eventually { tls.all().any { it.second.startsWith("INVITE sip:carol@") } },
+                    "the first tenant's call never reached its server",
+                )
+                val invite = tls.all().first { it.second.startsWith("INVITE ") }
+                assertEquals(connection, invite.first, "the call went over the first tenant's connection")
+            }
+        }
+    }
+    return "accounts of two domains at one address are each held to their own domain"
 }
 
 /** An account on its own TCP connection re-registers over a new one when
@@ -966,11 +1094,13 @@ internal suspend fun tlsSignallingChecks(): String {
             everyFormAnAdministratorCopiesIsRead(),
             eachRefusalSaysWhy(good, expired),
             aSipUriNamesTheDomainAndRfc5922AloneRefusesAWildcard(directory),
+            aSipUriTheIntermediateMayNotNameIsRefused(directory),
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
             aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),
             anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good),
             aServerLocatedBySrvIsCheckedAgainstItsSipDomain(good),
+            accountsOfTwoDomainsAtOneAddressAreEachHeldToTheirOwnDomain(good),
             anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(),
             anAccountOverAWebSocketAsksForItsResourceAndHost(),
             theSettingsAreReadBack(),

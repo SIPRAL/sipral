@@ -58,15 +58,20 @@ public sealed class SignallingTests
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
         private readonly X509Certificate2? _certificate;
+        private readonly X509Certificate2Collection? _intermediates;
         private readonly bool _plainToTls;
         private readonly object _lock = new();
         private readonly List<(int Connection, string Message)> _requests = new();
         private readonly List<TcpClient> _open = new();
         private int _connections;
 
-        public Registrar(X509Certificate2? certificate = null, bool plainToTls = false)
+        /// <summary><paramref name="intermediates"/>, when given, are sent
+        /// after the certificate in the handshake.</summary>
+        public Registrar(X509Certificate2? certificate = null, bool plainToTls = false,
+            X509Certificate2Collection? intermediates = null)
         {
             _certificate = certificate;
+            _intermediates = intermediates;
             _plainToTls = plainToTls;
             _listener.Start();
             new Thread(Accept) { IsBackground = true }.Start();
@@ -138,7 +143,18 @@ public sealed class SignallingTests
                 if (_certificate is not null)
                 {
                     var tls = new SslStream(stream);
-                    tls.AuthenticateAsServer(_certificate);
+                    if (_intermediates is null)
+                    {
+                        tls.AuthenticateAsServer(_certificate);
+                    }
+                    else
+                    {
+                        tls.AuthenticateAsServer(new SslServerAuthenticationOptions
+                        {
+                            ServerCertificateContext =
+                                SslStreamCertificateContext.Create(_certificate, _intermediates, offline: true),
+                        });
+                    }
                     stream = tls;
                 }
                 lock (_lock)
@@ -436,6 +452,119 @@ public sealed class SignallingTests
             trust: SipralTlsTrust.PrivateAuthority(certificate)))
         {
             Assert.Equal(SipralTlsFailure.NameMismatch, (await Refused(stack)).Tls);
+        }
+    }
+
+    /// <summary>A root, an intermediate it signs (that may name
+    /// <c>corp.test</c> and the names under it alone, when
+    /// <paramref name="constrained"/>), and the registrar's certificate the
+    /// intermediate signs, its subjectAltName what <paramref name="named"/>
+    /// puts there: the registrar's certificate with its key, the
+    /// intermediate it sends beside it, and the root to trust.</summary>
+    private static (X509Certificate2 Leaf, X509Certificate2Collection Intermediates, X509Certificate2 Root) Chain(
+        bool constrained, Action<SubjectAlternativeNameBuilder> named)
+    {
+        var now = DateTimeOffset.UtcNow;
+        CertificateRequest Authority(string name, ECDsa key)
+        {
+            var request = new CertificateRequest($"CN={name}", key, HashAlgorithmName.SHA256);
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            request.CertificateExtensions.Add(
+                new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+            return request;
+        }
+        using var rootKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var root = Authority("Sipral test root", rootKey).CreateSelfSigned(now.AddMinutes(-5), now.AddDays(1));
+        using var middleKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var middleRequest = Authority("Sipral test intermediate", middleKey);
+        if (constrained)
+        {
+            // nameConstraints (RFC 5280 §4.2.1.10): permittedSubtrees, one dNSName, corp.test
+            middleRequest.CertificateExtensions.Add(new X509Extension(
+                "2.5.29.30", Convert.FromHexString("300fa00d300b8209636f72702e74657374"), critical: true));
+        }
+        using var middleSigned = middleRequest.Create(root, now.AddMinutes(-5), now.AddDays(1),
+            new byte[] { 2, 4, 6, 8, 1, 3, 5, 7 });
+        using var middle = middleSigned.CopyWithPrivateKey(middleKey);
+        using var leafKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var leafRequest = new CertificateRequest(
+            constrained ? "CN=pbx.corp.test" : $"CN={ServerName}", leafKey, HashAlgorithmName.SHA256);
+        var names = new SubjectAlternativeNameBuilder();
+        named(names);
+        leafRequest.CertificateExtensions.Add(names.Build());
+        leafRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
+        using var signed = leafRequest.Create(middle, now.AddMinutes(-4), now.AddHours(23),
+            new byte[] { 7, 5, 3, 1, 8, 6, 4, 2 });
+        using var withKey = signed.CopyWithPrivateKey(leafKey);
+        return (
+            X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null),
+            new X509Certificate2Collection(X509CertificateLoader.LoadCertificate(middle.Export(X509ContentType.Cert))),
+            X509CertificateLoader.LoadCertificate(root.Export(X509ContentType.Cert)));
+    }
+
+    /// <summary>A private CA whose registrar certificate an intermediate
+    /// signed, the intermediate sent in the handshake: trusted beside the
+    /// platform's anchors as when it is the only one.</summary>
+    [Fact]
+    public async Task APrivateAuthorityWithAnIntermediateIsTrustedBesideThePlatformsAsAlone()
+    {
+        var (leaf, intermediates, root) = Chain(constrained: false, names => names.AddDnsName(ServerName));
+        using (leaf)
+        using (root)
+        {
+            foreach (var (trust, which) in new[]
+                {
+                    (SipralTlsTrust.PrivateAuthority(root), "beside the platform's"),
+                    (SipralTlsTrust.OnlyAuthority(root), "alone"),
+                })
+            {
+                using var registrar = new Registrar(leaf, intermediates: intermediates);
+                using var stack = Over(registrar.Address, trust: trust);
+                Assert.True(stack.Connected, $"the root {which} refused the chain the registrar sent");
+                var account = stack.AddAccount($"sip:alice@{ServerName}", registrar.Address, registrar: $"sip:{ServerName}");
+                account.Register();
+                await Registered(stack);
+            }
+        }
+    }
+
+    /// <summary>A <c>sip:</c> URI is held to the name constraints of the
+    /// intermediate above it, which the platform checks a dNSName against
+    /// and skips for a URI: one constrained to <c>corp.test</c> vouches for
+    /// <c>sip:pbx.corp.test</c> and never for <c>sip:registrar.sipral.test</c>,
+    /// under either trust that names the root.</summary>
+    [Fact]
+    public async Task ASipUriTheIntermediateMayNotNameIsRefused()
+    {
+        var (outside, outsideMiddle, outsideRoot) =
+            Chain(constrained: true, names => names.AddUri(new Uri($"sip:{ServerName}")));
+        var (inside, insideMiddle, insideRoot) =
+            Chain(constrained: true, names => names.AddUri(new Uri("sip:pbx.corp.test")));
+        using (outside)
+        using (outsideRoot)
+        using (inside)
+        using (insideRoot)
+        {
+            foreach (var only in new[] { true, false })
+            {
+                foreach (var rules in new[] { SipralDomainRules.Platform, SipralDomainRules.Rfc5922 })
+                {
+                    using (var registrar = new Registrar(outside, intermediates: outsideMiddle))
+                    using (var stack = Over(registrar.Address, rules: rules, trust: only
+                        ? SipralTlsTrust.OnlyAuthority(outsideRoot) : SipralTlsTrust.PrivateAuthority(outsideRoot)))
+                    {
+                        var failed = await Refused(stack);
+                        Assert.True(SipralTlsFailure.NameMismatch == failed.Tls, $"{rules}, only {only}: {failed.Detail}");
+                    }
+                    using (var registrar = new Registrar(inside, intermediates: insideMiddle))
+                    using (var stack = Over(registrar.Address, name: "pbx.corp.test", rules: rules, trust: only
+                        ? SipralTlsTrust.OnlyAuthority(insideRoot) : SipralTlsTrust.PrivateAuthority(insideRoot)))
+                    {
+                        Assert.True(stack.Connected, $"{rules}, only {only}: a sip: URI inside the constraint was refused");
+                    }
+                }
+            }
         }
     }
 

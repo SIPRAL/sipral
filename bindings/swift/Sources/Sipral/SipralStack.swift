@@ -118,11 +118,21 @@ public final class SipralStack: @unchecked Sendable {
     /// Where such a connection goes, when not to the address asked for
     /// (`streamServer`).
     private let streamServer: String?
-    /// Connections for requests too large for a datagram, those being
-    /// opened, and those asked for during the current poll. All guarded by
-    /// `signallingQueue`.
-    private var streamLinks: [UInt32: (destination: String, link: SignallingConnection)] = [:]
-    private var streamsOpening: Set<String> = []
+    /// Where a connection the stack asked for goes and what it is checked
+    /// against, as `transportWanted` named them: one is opened for each,
+    /// since a certificate valid for one tenant's domain says nothing of
+    /// another's at the same address.
+    private struct StreamTarget: Hashable {
+        let destination: String
+        /// Empty for the address.
+        let serverName: String
+        /// Empty for none.
+        let pin: String
+    }
+    /// Connections the stack asked for, those being opened, and those asked
+    /// for during the current poll. All guarded by `signallingQueue`.
+    private var streamLinks: [UInt32: (target: StreamTarget, link: SignallingConnection)] = [:]
+    private var streamsOpening: Set<StreamTarget> = []
     private var streamsAsked: [TransportWantedEventData] = []
     /// The given `tlsServerName`; `nil` means the address's host.
     private let givenTlsServerName: String?
@@ -806,8 +816,9 @@ public final class SipralStack: @unchecked Sendable {
         signallingQueue.sync { streamsLetGo.append(id) }
     }
 
-    /// Answer `transportWanted` after the poll: open each missing connection
-    /// off the poll thread, or with `streamFallback` off, say none is coming.
+    /// Answer `transportWanted` after the poll: open each missing connection,
+    /// one for each identity asked for at an address, off the poll thread, or
+    /// with `streamFallback` off, say none is coming.
     private func actOnStreamsWanted() {
         let letGo = signallingQueue.sync { () -> [UInt32] in
             defer { streamsLetGo = [] }
@@ -820,19 +831,22 @@ public final class SipralStack: @unchecked Sendable {
             defer { streamsAsked = [] }
             return streamsAsked
         }
-        var seen: Set<String> = []
-        for wanted in asked where seen.insert(wanted.destination).inserted {
+        var seen: Set<StreamTarget> = []
+        for wanted in asked {
+            let target = StreamTarget(
+                destination: wanted.destination, serverName: wanted.serverName, pin: wanted.tlsPinSha256
+            )
+            guard seen.insert(target).inserted else { continue }
             let destination = wanted.destination
             // An account's own connection is opened whatever
             // `streamFallback` says.
             let opens = streamFallback || (wanted.requestBytes == 0 && wanted.limitBytes == 0)
             let id = signallingQueue.sync { () -> UInt32? in
-                if streamsOpening.contains(destination)
-                    || streamLinks.values.contains(where: { $0.destination == destination }) {
+                if streamsOpening.contains(target) || streamLinks.values.contains(where: { $0.target == target }) {
                     return nil
                 }
                 if opens {
-                    streamsOpening.insert(destination)
+                    streamsOpening.insert(target)
                 }
                 return takeLinkId()
             }
@@ -846,57 +860,29 @@ public final class SipralStack: @unchecked Sendable {
             let bound = SipralTransport(rawValue: wanted.protocolRaw) ?? .tcp
             let over: SipralTransport = bound == .tls || bound == .wss ? .tls : .tcp
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.openStreamLink(id, to: destination, over: over, boundAs: bound)
+                self?.openStreamLink(id, to: target, over: over, boundAs: bound)
             }
         }
     }
 
-    /// The account's pin for that server if it has one, else `tlsTrust`.
-    private func streamTrust(to destination: String) -> TLSTrust {
-        let pinned = movingQueue.sync {
-            accounts.values.first {
-                ($0.streamProtocol == .tls || $0.streamProtocol == .wss) && $0.registrarAddress == destination
-                    && $0.tlsPin != nil
-            }
-        }
-        if let pin = pinned?.tlsPin, let trust = try? TLSTrust.pinned(pin) {
+    /// The pin the stack asked a connection to be held to if there is one,
+    /// else `tlsTrust`.
+    private func streamTrust(for target: StreamTarget) -> TLSTrust {
+        if !target.pin.isEmpty, let trust = try? TLSTrust.pinned(target.pin) {
             return trust
         }
         return tlsTrust
     }
 
-    /// The name the certificate of a TLS connection to `destination` must
-    /// carry: `tlsServerName` when given, else the host of the server URI of
-    /// the account located there (RFC 5922 §7.3: the domain configured, not
-    /// the host or address SRV and the lookup turned it into), else the
-    /// address connected to, as the C networking component has it.
-    private func streamServerName(to destination: String) -> String {
+    /// The name the certificate of a TLS connection must carry:
+    /// `tlsServerName` when given, else the one the stack asked for, the host
+    /// of the server URI of the accounts it is for (RFC 5922 §7.3: the domain
+    /// configured, not the host or address SRV and the lookup turned it
+    /// into), else the address connected to, as the C networking component
+    /// has it.
+    private func streamServerName(for target: StreamTarget) -> String {
         if let givenTlsServerName { return givenTlsServerName }
-        let located = movingQueue.sync {
-            accounts.values.first {
-                ($0.streamProtocol == .tls || $0.streamProtocol == .wss) && $0.registrarAddress == destination
-                    && $0.serverUri != nil
-            }
-        }
-        return located?.serverUri.flatMap(Self.serverName(of:)) ?? UDPSocket.parse(destination).host
-    }
-
-    /// The host of a SIP or SIPS URI when it is a name; `nil` for an address
-    /// or a URI with no host.
-    static func serverName(of uri: String) -> String? {
-        guard let colon = uri.firstIndex(of: ":") else { return nil }
-        var rest = uri[uri.index(after: colon)...]
-        if let at = rest.lastIndex(of: "@") {
-            rest = rest[rest.index(after: at)...]
-        }
-        if let end = rest.firstIndex(where: { $0 == ";" || $0 == "?" }) {
-            rest = rest[..<end]
-        }
-        // a bracketed IPv6 reference is an address
-        guard !rest.hasPrefix("[") else { return nil }
-        let host = rest.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-        guard !host.isEmpty, !isAddress("\(host):5061") else { return nil }
-        return host
+        return target.serverName.isEmpty ? UDPSocket.parse(target.destination).host : target.serverName
     }
 
     /// The certificate the account with its own TLS connection to that
@@ -911,39 +897,70 @@ public final class SipralStack: @unchecked Sendable {
         return own?.tlsClientIdentity ?? tlsClientIdentity
     }
 
-    /// Connect (TCP, or TLS for such an account) to `destination` or to
-    /// `streamServer`, and bind it under `id` as `boundAs` (`.ws`/`.wss` for
-    /// a WebSocket). A failure is reported under the same id, which ends
-    /// whatever waited for it.
+    /// Say that a connection to the destination of `target` is being opened
+    /// under `id` and checked against it (`sipral_stack_stream_opening`), so
+    /// that once bound it carries the accounts of that identity alone.
+    private func sayOpening(_ id: UInt32, _ target: StreamTarget, boundAs: SipralTransport) throws {
+        try target.destination.withCString { destination in
+            try target.serverName.withCString { name in
+                try target.pin.withCString { pin in
+                    var opening = sipral_stream_opening_t.sized()
+                    opening.transport = id
+                    opening.protocol = boundAs.rawValue
+                    opening.destination = destination
+                    opening.destination_len = target.destination.utf8.count
+                    opening.server_name = name
+                    opening.server_name_len = target.serverName.utf8.count
+                    opening.tls_pin_sha256 = pin
+                    opening.tls_pin_sha256_len = target.pin.utf8.count
+                    _ = try retryingBusy { try Sipral.stackStreamOpening(stack: handle, opening: opening) }
+                }
+            }
+        }
+    }
+
+    /// Connect (TCP, or TLS for such an account) to the destination of
+    /// `target` or to `streamServer`, checked against it, after saying so,
+    /// and bind it under `id` as `boundAs` (`.ws`/`.wss` for a WebSocket). A
+    /// failure is reported under the same id, which ends whatever waited for
+    /// it: the accounts of that identity alone.
     private func openStreamLink(
-        _ id: UInt32, to destination: String, over: SipralTransport = .tcp, boundAs: SipralTransport? = nil
+        _ id: UInt32, to target: StreamTarget, over: SipralTransport = .tcp, boundAs: SipralTransport? = nil
     ) {
+        let destination = target.destination
         let made: SignallingConnection
         let server = over == .tcp ? streamServer ?? destination : destination
         do {
+            try sayOpening(id, target, boundAs: boundAs ?? over)
+        } catch {
+            signallingQueue.sync { _ = streamsOpening.remove(target) }
+            sayNoStream(id, .other, "to \(destination) not tried: \(error)", over: over)
+            return
+        }
+        do {
             made = try SignallingConnection(
                 server: server, bindHost: signallingQueue.sync { linkHost }, transport: over,
-                serverName: over == .tls ? streamServerName(to: destination) : UDPSocket.parse(server).host,
-                trust: over == .tls ? streamTrust(to: destination) : .platform, domainRules: tlsDomainRules,
+                serverName: over == .tls ? streamServerName(for: target) : UDPSocket.parse(server).host,
+                trust: over == .tls ? streamTrust(for: target) : .platform, domainRules: tlsDomainRules,
                 identity: over == .tls ? streamIdentity(to: destination) : nil, patienceMs: Self.patienceMs
             )
         } catch {
-            signallingQueue.sync { _ = streamsOpening.remove(destination) }
+            signallingQueue.sync { _ = streamsOpening.remove(target) }
             let refusal = error as? SignallingRefusal
             let kind = refusal?.error ?? .other
-            let target = server == destination ? destination : "\(server) (for \(destination))"
+            let reached = server == destination ? destination : "\(server) (for \(destination))"
             let said = refusal?.detail ?? "\(error)"
             sayNoStream(
-                id, kind, "to \(target) \(Self.verdict(kind))\(said.isEmpty ? "" : ": \(said)")", over: over,
+                id, kind, "to \(reached) \(Self.verdict(kind))\(said.isEmpty ? "" : ": \(said)")", over: over,
                 tls: over == .tls ? refusal?.tls ?? SipralTlsFailure.none : SipralTlsFailure.none
             )
             return
         }
         let closing = isClosed
         signallingQueue.sync {
-            streamsOpening.remove(destination)
+            streamsOpening.remove(target)
             if !closing {
-                streamLinks[id] = (destination, made)
+                streamLinks[id] = (target, made)
             }
         }
         guard !closing else {

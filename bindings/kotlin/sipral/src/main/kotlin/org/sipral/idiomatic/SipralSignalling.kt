@@ -317,7 +317,9 @@ private class NameMismatch(cause: CertificateException) : CertificateException(c
  * than untrusted; and dates are checked on every certificate, including an
  * authority pinned as sole anchor, which PKIX alone does not. The name is
  * read by [rules]: the HTTPS rules with a `sip:` URI naming the domain
- * accepted besides, or RFC 5922 alone (`sipral_certificate_check_domain`).
+ * accepted besides, or RFC 5922 alone, a `sip:` URI held to the name
+ * constraints of the authorities above it
+ * (`sipral_certificate_check_domain_in_chain`).
  */
 private class Checking(
     private val trust: List<X509ExtendedTrustManager>,
@@ -348,9 +350,12 @@ private class Checking(
         if (https == null && rules == SipralDomainRules.PLATFORM) {
             return
         }
+        // the authorities the server sent above its certificate, whose name
+        // constraints a sip: URI is held to; the path PKIX built is among them
+        val issuers = chain.drop(1).fold(ByteArray(0)) { all, certificate -> all + certificate.encoded }
         try {
-            Sipral.certificateCheckDomain(
-                chain[0].encoded, serverName, rules.value.toLong(), if (https == null) 1L else 0L,
+            Sipral.certificateCheckDomainInChain(
+                chain[0].encoded, issuers, serverName, rules.value.toLong(), if (https == null) 1L else 0L,
             )
         } catch (refused: SipralException) {
             throw NameMismatch(https ?: CertificateException(refused.message))

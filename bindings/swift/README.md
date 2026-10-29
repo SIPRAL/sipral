@@ -788,7 +788,12 @@ nothing outgrown, and this layer opens it to the account's server whatever
 one, to `tlsTrust` otherwise, for the name `tlsServerName` gives, else the
 host of the account's `serverUri` (RFC 5922 §7.3: the SIP domain
 configured, not the address SRV and the lookup led to), else the address
-connected to. Once located, the account's `Contact` moves to the route
+connected to. The stack names that domain and the pin with each ask
+(`TransportWantedEventData.serverName`, `.tlsPinSha256`), and this layer
+opens one connection for each pair and says which before binding it
+(`sipral_stack_stream_opening`, ABI 1.11): two tenants of one PBX at one
+address are each checked against their own domain, and accounts of the
+same domain and pin share one connection. Once located, the account's `Contact` moves to the route
 toward its server while the connection is being opened; the REGISTER goes
 the moment the connection is up, and the connection is asked for once. The account's REGISTER
 and every request of its calls go over it, its `Contact` names the protocol,

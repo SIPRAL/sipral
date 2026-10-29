@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR 10
+#define SIPRAL_ABI_VERSION_MINOR 11
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -456,6 +456,7 @@ typedef struct sipral_media_packet sipral_media_packet_t;
 typedef struct sipral_processor_frame sipral_processor_frame_t;
 typedef struct sipral_transmit sipral_transmit_t;
 typedef struct sipral_transport_failure sipral_transport_failure_t;
+typedef struct sipral_stream_opening sipral_stream_opening_t;
 typedef struct sipral_registration_event sipral_registration_event_t;
 typedef struct sipral_call_event sipral_call_event_t;
 typedef struct sipral_transfer_event sipral_transfer_event_t;
@@ -1472,7 +1473,10 @@ enum {
      * `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
      * Bind with
      * sipral_stack_transport_bind
-     * and ask again.
+     * and ask again. Raised too for an account's own connection, and,
+     * since ABI 1.11, once for each identity a connection there is to be
+     * checked against, said before connecting with
+     * sipral_stack_stream_opening.
      */
     SIPRAL_EVENT_KIND_TRANSPORT_WANTED = 18,
     /**
@@ -5886,6 +5890,57 @@ struct sipral_transport_failure {
 };
 
 /**
+ * A connection being opened, and what it is checked against, for
+ * sipral_stack_stream_opening (ABI 1.11). All caller-filled; the texts are read during
+ * the call.
+ *
+ * `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
+ * for it, as it named them; the name a connection is checked against in their place, a
+ * binding's own setting, does not go here.
+ */
+struct sipral_stream_opening {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * The number it will be bound as with sipral_stack_transport_bind.
+     */
+    uint32_t transport;
+    /**
+     * What it speaks, as a `sipral_transport_t`: TCP, TLS, WS or WSS.
+     */
+    sipral_transport_t protocol;
+    /**
+     * Its far end, `host:port`, the `remote` it will be bound with. Not NUL-terminated.
+     */
+    const char *destination;
+    /**
+     * How many bytes of it.
+     */
+    size_t destination_len;
+    /**
+     * The name the server's certificate was or will be checked against. Length zero for the
+     * address, and on a protocol without TLS. Not NUL-terminated.
+     */
+    const char *server_name;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_name_len;
+    /**
+     * The fingerprint of the one certificate trusted, in any form
+     * `sipral_account_config_t::tls_pin_sha256` takes. Length zero for none, and on a
+     * protocol without TLS. Not NUL-terminated.
+     */
+    const char *tls_pin_sha256;
+    /**
+     * How many bytes of it.
+     */
+    size_t tls_pin_sha256_len;
+};
+
+/**
  * What a SIPRAL_EVENT_KIND_REGISTRATION_CHANGED carries.
  */
 struct sipral_registration_event {
@@ -6275,7 +6330,15 @@ struct sipral_recovery_event {
 
 /**
  * What a SIPRAL_EVENT_KIND_TRANSPORT_WANTED carries: a request RFC
- * 3261 §18.1.1 kept off a datagram, with no stream open for it.
+ * 3261 §18.1.1 kept off a datagram, with no stream open for it, or an
+ * account's own connection, both sizes zero.
+ *
+ * A TLS or WSS connection is checked against one identity, the server's
+ * name and pin below, and carries the accounts of that identity alone
+ * once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
+ * raised for each identity waiting for a connection there, the same one
+ * possibly again, and one connection is opened for each that has none
+ * open or opening.
  */
 struct sipral_transport_wanted_event {
     /**
@@ -6299,6 +6362,29 @@ struct sipral_transport_wanted_event {
      * headroom, or 1300 when the MTU is unknown.
      */
     uint32_t limit_bytes;
+    /**
+     * The name the server's certificate must carry, lowercase: the host
+     * of the account's `server_uri` when that is a name (RFC 5922 §7.3),
+     * the SIP domain and not the host SRV turned it into. Empty checks
+     * the address `destination` names, and is all a protocol without
+     * TLS has. Not NUL-terminated (ABI 1.11).
+     */
+    const char *server_name;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_name_len;
+    /**
+     * The SHA-256 fingerprint of the one certificate trusted, as
+     * `openssl x509 -fingerprint` writes it, upper case with colons;
+     * empty for none, the platform's checks then apply. Not
+     * NUL-terminated (ABI 1.11).
+     */
+    const char *tls_pin_sha256;
+    /**
+     * How many bytes of it.
+     */
+    size_t tls_pin_sha256_len;
 };
 
 /**
@@ -8419,7 +8505,8 @@ struct sipral_isup {
      */
     uint32_t has_cause;
     /**
-     * The Q.850 cause value: 16 normal call clearing, 17 user busy.
+     * The cause value: 16 normal call clearing, 17 user busy, when
+     * `cause_coding` is 0 and the value is Q.850's.
      */
     uint32_t cause_value;
     /**
@@ -8491,6 +8578,18 @@ struct sipral_isup {
      * message, which is also the category "unknown".
      */
     uint32_t calling_category;
+    /**
+     * Whose list `cause_value` is from, the cause's coding standard
+     * (Q.850 §2.2.2): 0 ITU-T, the values Q.850 lists; 1 ISO/IEC; 2
+     * national; 3 specific to the location. Only at 0 is `cause_value`
+     * the Q.850 cause of that number. Zero without cause indicators.
+     * ABI 1.11.
+     */
+    uint32_t cause_coding;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_1_11;
 };
 
 /**
@@ -10266,6 +10365,32 @@ sipral_status_t sipral_stack_transport_failed_with(sipral_handle_t stack, const 
 sipral_status_t sipral_stack_stream_closed(sipral_handle_t stack, uint32_t transport, uint64_t now_ms);
 
 /**
+ * Say that a connection is being opened, to be bound as `opening->transport`, and what it
+ * is checked against (ABI 1.11).
+ *
+ * Said before connecting, or at the latest before sipral_stack_transport_bind: once
+ * bound it carries the accounts on a connection of their own whose identity is this one
+ * alone, and an account of another asks for its own with
+ * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
+ * serves a SIP domain per tenant from one address, and a certificate valid for one
+ * tenant's domain says nothing of another's. If it cannot be opened,
+ * sipral_stack_transport_failed_with on the same number moves on the accounts of this
+ * identity alone. A connection bound with nothing said of it is any account's, as the
+ * application checked it. Forgotten when it fails or closes, or when another is said to be
+ * opened for the same identity there before this one was bound.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
+ * destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
+ * a name that is not UTF-8.
+ *
+ * Safety
+ *
+ * `opening` must point at a `sipral_stream_opening_t` whose `size` member says how long it
+ * is, and its texts must be readable for the lengths beside them.
+ */
+sipral_status_t sipral_stack_stream_opening(sipral_handle_t stack, const sipral_stream_opening_t *opening);
+
+/**
  * Replace the STUN server list without recreating the stack.
  *
  * `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
@@ -11559,6 +11684,11 @@ sipral_status_t sipral_account_check_certificate(sipral_handle_t stack, sipral_h
  * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
  * (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
  *
+ * The leaf is read alone: a `sip:` URI in its `subjectAltName` is held to no name
+ * constraint of the authorities above it, which the platforms apply to a `dNSName` and
+ * skip for a URI. `sipral_certificate_check_domain_in_chain` (ABI 1.11) takes those
+ * authorities too, and is the call to make where the platform hands the chain over.
+ *
  * `domain` is the name the connection is checked against: the host of the account's
  * `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
  * `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
@@ -11576,6 +11706,33 @@ sipral_status_t sipral_account_check_certificate(sipral_handle_t stack, sipral_h
  * bytes, and `out_identity` must be null or point at one `sipral_domain_identity_t`.
  */
 sipral_status_t sipral_certificate_check_domain(const uint8_t *certificate, size_t certificate_len, const char *domain, size_t domain_len, sipral_domain_rules_t rules, uint32_t platform_matched, sipral_domain_identity_t *out_identity);
+
+/**
+ * Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`,
+ * as `sipral_certificate_check_domain` does, with `issuers` the certificates above it in
+ * the chain the platform verified (ABI 1.11).
+ *
+ * `issuers` is their DER, one certificate after another in any order, the anchor among
+ * them or not; the chain the server sent serves where the platform hands over no chain of
+ * its own, since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
+ * names the domain only while every `nameConstraints` extension among them allows the
+ * host of each of the leaf's `sip:` URIs, read as the `dNSName` or address it stands for:
+ * an authority constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for
+ * `sip:example.com`. A constraint on URIs, or one that cannot be read, allows none. A
+ * `dNSName` is the platform's to hold to those constraints, and is read as the call
+ * without issuers reads it. No issuers, a length of zero, reads the leaf alone.
+ *
+ * The answers are `sipral_certificate_check_domain`'s, `out_identity` included, and
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` besides for `issuers` that do not end where a
+ * certificate does.
+ *
+ * Safety
+ *
+ * `certificate` must be readable for `certificate_len` bytes, `issuers` for `issuers_len`
+ * bytes, `domain` for `domain_len` bytes, and `out_identity` must be null or point at one
+ * `sipral_domain_identity_t`.
+ */
+sipral_status_t sipral_certificate_check_domain_in_chain(const uint8_t *certificate, size_t certificate_len, const uint8_t *issuers, size_t issuers_len, const char *domain, size_t domain_len, sipral_domain_rules_t rules, uint32_t platform_matched, sipral_domain_identity_t *out_identity);
 
 /**
  * The `host:port` to advertise for a socket bound at `bound` whose
@@ -11975,12 +12132,13 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_processor_frame_t": (64, 32, 32),
     "sipral_transmit_t": (88, 48, 48),
     "sipral_transport_failure_t": (40, 24, 24),
+    "sipral_stream_opening_t": (64, 36, 36),
     "sipral_registration_event_t": (40, 36, 40),
     "sipral_call_event_t": (328, 208, 216),
     "sipral_transfer_event_t": (24, 16, 16),
     "sipral_media_event_t": (96, 80, 80),
     "sipral_recovery_event_t": (16, 16, 16),
-    "sipral_transport_wanted_event_t": (40, 20, 20),
+    "sipral_transport_wanted_event_t": (72, 36, 36),
     "sipral_subscription_event_t": (56, 56, 56),
     "sipral_announce_event_t": (16, 16, 16),
     "sipral_resolve_event_t": (32, 24, 24),
@@ -12028,6 +12186,6 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_local_conference_member_t": (40, 36, 40),
     "sipral_pinned_certificate_t": (40, 36, 40),
     "sipral_network_test_config_t": (48, 36, 40),
-    "sipral_isup_t": (72, 68, 68),
+    "sipral_isup_t": (80, 76, 76),
     "sipral_network_config_t": (216, 124, 124),
 }

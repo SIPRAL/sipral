@@ -97,7 +97,12 @@ else to the domain of its `serverUri` (§7.3), else to the address. A connection
 (`fields.tls`: untrusted, another name, expired, a handshake refused), and is
 made again, one second later and twice as long after each failure, up to
 thirty; the accounts register again on it. On a UDP stack an account may have
-a TCP or TLS connection of its own (`streamProtocol`), and a request too
+a TCP or TLS connection of its own (`streamProtocol`): the stack names the
+domain and the pin with each ask (`fields.serverName`, `fields.tlsPinSha256`),
+and this package opens one connection for each pair and says which before
+binding it (`sipral_stack_stream_opening`, ABI 1.11), so two tenants of one
+PBX at one address are each checked against their own domain, and accounts of
+the same domain and pin share one connection. A request too
 large for a datagram goes on a TCP connection the stack opens, to
 `streamServer` when the server takes TCP on another port.
 

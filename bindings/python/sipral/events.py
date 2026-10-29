@@ -656,6 +656,10 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "destination": _text(wanted.destination, wanted.destination_len),
             "request_bytes": int(wanted.request_bytes),
             "limit_bytes": int(wanted.limit_bytes),
+            # what the connection is checked against, empty for the address
+            # and for no pin: one is opened for each
+            "server_name": _text(wanted.server_name, wanted.server_name_len) or "",
+            "tls_pin_sha256": _text(wanted.tls_pin_sha256, wanted.tls_pin_sha256_len) or "",
         }
 
     if kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:

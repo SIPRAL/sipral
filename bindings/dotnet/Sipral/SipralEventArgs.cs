@@ -290,7 +290,8 @@ public sealed class SipralEventArgs : EventArgs
         {
             var w = evt.Payload.TransportWanted;
             transportWanted = new SipralTransportWantedEventInfo((SipralTransport)w.Protocol,
-                ReadUtf8(w.Destination, w.DestinationLen), w.RequestBytes, w.LimitBytes);
+                ReadUtf8(w.Destination, w.DestinationLen), w.RequestBytes, w.LimitBytes,
+                ReadUtf8(w.ServerName, w.ServerNameLen) ?? "", ReadUtf8(w.TlsPinSha256, w.TlsPinSha256Len) ?? "");
         }
 
         SipralConferenceEventInfo? conference = null;

@@ -107,8 +107,9 @@ public struct TransportFailedEventData: Sendable {
 }
 
 /// What `SipralEventKind.transportWanted` carries: a request too large for
-/// a datagram (RFC 3261 §18.1.1). `SipralStack(streamFallback:)` opens the
-/// stream itself.
+/// a datagram (RFC 3261 §18.1.1), or an account's own connection, with what
+/// it is checked against. `SipralStack(streamFallback:)` opens the stream
+/// itself, one for each identity asked for at an address.
 public struct TransportWantedEventData: Sendable {
     /// What to open, a `SipralTransport` raw value.
     public let protocolRaw: UInt32
@@ -118,6 +119,13 @@ public struct TransportWantedEventData: Sendable {
     public let requestBytes: Int
     /// The largest a datagram may carry here.
     public let limitBytes: UInt32
+    /// The name the server's certificate must carry, lowercase: the SIP
+    /// domain of the accounts it is for (RFC 5922 §7.3). Empty checks the
+    /// address.
+    public let serverName: String
+    /// The fingerprint of the one certificate trusted, upper case with
+    /// colons; empty for none.
+    public let tlsPinSha256: String
 }
 
 /// A connection that could not be made, and what the stack is to call it.
@@ -249,11 +257,14 @@ final class SignallingConnection: @unchecked Sendable {
                     }
                     let chain = SecTrustCopyCertificateChain(evaluated) as? [SecCertificate] ?? []
                     let leaf = chain.first.map { [UInt8](SecCertificateCopyData($0) as Data) } ?? []
+                    // every authority of the chain SecTrust built, the anchor included,
+                    // whose name constraints a sip: URI is held to
+                    let issuers = chain.dropFirst().flatMap { [UInt8](SecCertificateCopyData($0) as Data) }
                     if chainHeld {
                         do {
-                            _ = try Sipral.certificateCheckDomain(
-                                certificate: leaf, domain: serverName, rules: domainRules.rawValue,
-                                platformMatched: trusted ? 1 : 0
+                            _ = try Sipral.certificateCheckDomainInChain(
+                                certificate: leaf, issuers: issuers, domain: serverName,
+                                rules: domainRules.rawValue, platformMatched: trusted ? 1 : 0
                             )
                             complete(true)
                         } catch {

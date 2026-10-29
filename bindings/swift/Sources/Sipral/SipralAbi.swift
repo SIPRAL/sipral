@@ -603,7 +603,10 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
     /// Bind with
     /// sipral_stack_transport_bind
-    /// and ask again.
+    /// and ask again. Raised too for an account's own connection, and,
+    /// since ABI 1.11, once for each identity a connection there is to be
+    /// checked against, said before connecting with
+    /// sipral_stack_stream_opening.
     case transportWanted = 18
     /// B5. No media has arrived for longer than the configured threshold.
     /// `payload.media.silent_for_ms` says how long. The call is left up.
@@ -2179,6 +2182,16 @@ public extension sipral_transport_failure_t {
     }
 }
 
+public extension sipral_stream_opening_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 public extension sipral_event_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
@@ -2551,7 +2564,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 10
+    public static let abiVersionMinor: UInt32 = 11
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2901,12 +2914,13 @@ public enum Sipral {
         ("sipral_processor_frame_t", MemoryLayout<sipral_processor_frame_t>.size, 64, 32, 32),
         ("sipral_transmit_t", MemoryLayout<sipral_transmit_t>.size, 88, 48, 48),
         ("sipral_transport_failure_t", MemoryLayout<sipral_transport_failure_t>.size, 40, 24, 24),
+        ("sipral_stream_opening_t", MemoryLayout<sipral_stream_opening_t>.size, 64, 36, 36),
         ("sipral_registration_event_t", MemoryLayout<sipral_registration_event_t>.size, 40, 36, 40),
         ("sipral_call_event_t", MemoryLayout<sipral_call_event_t>.size, 328, 208, 216),
         ("sipral_transfer_event_t", MemoryLayout<sipral_transfer_event_t>.size, 24, 16, 16),
         ("sipral_media_event_t", MemoryLayout<sipral_media_event_t>.size, 96, 80, 80),
         ("sipral_recovery_event_t", MemoryLayout<sipral_recovery_event_t>.size, 16, 16, 16),
-        ("sipral_transport_wanted_event_t", MemoryLayout<sipral_transport_wanted_event_t>.size, 40, 20, 20),
+        ("sipral_transport_wanted_event_t", MemoryLayout<sipral_transport_wanted_event_t>.size, 72, 36, 36),
         ("sipral_subscription_event_t", MemoryLayout<sipral_subscription_event_t>.size, 56, 56, 56),
         ("sipral_announce_event_t", MemoryLayout<sipral_announce_event_t>.size, 16, 16, 16),
         ("sipral_resolve_event_t", MemoryLayout<sipral_resolve_event_t>.size, 32, 24, 24),
@@ -2954,7 +2968,7 @@ public enum Sipral {
         ("sipral_local_conference_member_t", MemoryLayout<sipral_local_conference_member_t>.size, 40, 36, 40),
         ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
         ("sipral_network_test_config_t", MemoryLayout<sipral_network_test_config_t>.size, 48, 36, 40),
-        ("sipral_isup_t", MemoryLayout<sipral_isup_t>.size, 72, 68, 68),
+        ("sipral_isup_t", MemoryLayout<sipral_isup_t>.size, 80, 76, 76),
         ("sipral_network_config_t", MemoryLayout<sipral_network_config_t>.size, 216, 124, 124),
     ]
 
@@ -5063,6 +5077,35 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Say that a connection is being opened, to be bound as `opening->transport`, and what it
+    /// is checked against (ABI 1.11).
+    ///
+    /// Said before connecting, or at the latest before sipral_stack_transport_bind: once
+    /// bound it carries the accounts on a connection of their own whose identity is this one
+    /// alone, and an account of another asks for its own with
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
+    /// serves a SIP domain per tenant from one address, and a certificate valid for one
+    /// tenant's domain says nothing of another's. If it cannot be opened,
+    /// sipral_stack_transport_failed_with on the same number moves on the accounts of this
+    /// identity alone. A connection bound with nothing said of it is any account's, as the
+    /// application checked it. Forgotten when it fails or closes, or when another is said to be
+    /// opened for the same identity there before this one was bound.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
+    /// destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
+    /// a name that is not UTF-8.
+    ///
+    /// Safety
+    ///
+    /// `opening` must point at a `sipral_stream_opening_t` whose `size` member says how long it
+    /// is, and its texts must be readable for the lengths beside them.
+    public static func stackStreamOpening(stack: SipralHandle, opening: sipral_stream_opening_t) throws {
+        try ensureAbi()
+        var opening = opening
+        let status = sipral_stack_stream_opening(stack, &opening)
+        try check(status)
+    }
+
     /// Replace the STUN server list without recreating the stack.
     ///
     /// `servers` is comma-separated `host:port` in order of preference. Every mapped socket is
@@ -6801,6 +6844,11 @@ public enum Sipral {
     /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`
     /// (ABI 1.8), once the platform has verified its chain, its dates and what else it checks.
     ///
+    /// The leaf is read alone: a `sip:` URI in its `subjectAltName` is held to no name
+    /// constraint of the authorities above it, which the platforms apply to a `dNSName` and
+    /// skip for a URI. `sipral_certificate_check_domain_in_chain` (ABI 1.11) takes those
+    /// authorities too, and is the call to make where the platform hands the chain over.
+    ///
     /// `domain` is the name the connection is checked against: the host of the account's
     /// `server_uri` (RFC 5922 §7.3), not the one its SRV record led to.
     /// `platform_matched` is the platform's own verdict on the name, by the HTTPS rules: one
@@ -6824,6 +6872,46 @@ public enum Sipral {
                 Array(domain.utf8).withUnsafeBufferPointer { raw1 in
                     raw1.withMemoryRebound(to: CChar.self) { p1 in
                         sipral_certificate_check_domain(p0.baseAddress, p0.count, p1.baseAddress, p1.count, rules, platformMatched, &identity)
+                    }
+                }
+            }
+        try check(status)
+        return identity
+    }
+
+    /// Read a TLS server's leaf certificate (DER) for the SIP domain `domain`, under `rules`,
+    /// as `sipral_certificate_check_domain` does, with `issuers` the certificates above it in
+    /// the chain the platform verified (ABI 1.11).
+    ///
+    /// `issuers` is their DER, one certificate after another in any order, the anchor among
+    /// them or not; the chain the server sent serves where the platform hands over no chain of
+    /// its own, since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
+    /// names the domain only while every `nameConstraints` extension among them allows the
+    /// host of each of the leaf's `sip:` URIs, read as the `dNSName` or address it stands for:
+    /// an authority constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for
+    /// `sip:example.com`. A constraint on URIs, or one that cannot be read, allows none. A
+    /// `dNSName` is the platform's to hold to those constraints, and is read as the call
+    /// without issuers reads it. No issuers, a length of zero, reads the leaf alone.
+    ///
+    /// The answers are `sipral_certificate_check_domain`'s, `out_identity` included, and
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` besides for `issuers` that do not end where a
+    /// certificate does.
+    ///
+    /// Safety
+    ///
+    /// `certificate` must be readable for `certificate_len` bytes, `issuers` for `issuers_len`
+    /// bytes, `domain` for `domain_len` bytes, and `out_identity` must be null or point at one
+    /// `sipral_domain_identity_t`.
+    public static func certificateCheckDomainInChain(certificate: [UInt8], issuers: [UInt8], domain: String, rules: UInt32, platformMatched: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var identity = UInt32()
+        let status =
+            certificate.withUnsafeBufferPointer { p0 in
+                issuers.withUnsafeBufferPointer { p1 in
+                    Array(domain.utf8).withUnsafeBufferPointer { raw2 in
+                        raw2.withMemoryRebound(to: CChar.self) { p2 in
+                            sipral_certificate_check_domain_in_chain(p0.baseAddress, p0.count, p1.baseAddress, p1.count, p2.baseAddress, p2.count, rules, platformMatched, &identity)
+                        }
                     }
                 }
             }

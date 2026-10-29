@@ -212,39 +212,52 @@ fn sip_server(pki: Pki, rtp: SocketAddr, offers: Sender<SocketAddr>) -> (SocketA
     let heard: Heard = Arc::default();
     let noted = Arc::clone(&heard);
     thread::spawn(move || {
+        // each connection on a thread of its own: accounts at this address may hold several
         for tcp in listener.incoming() {
             let Ok(tcp) = tcp else { continue };
-            let mut stream =
-                StreamOwned::new(ServerConnection::new(Arc::clone(&config)).unwrap(), tcp);
-            let mut buffer = Vec::new();
-            let mut chunk = [0_u8; 8192];
-            let mut invites = 0;
-            while let Ok(read) = stream.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-                while let Some((head, body, taken)) = framed(&buffer) {
-                    buffer.drain(..taken);
-                    let method = head.split(' ').next().unwrap_or_default().to_owned();
-                    if method == "INVITE" {
-                        invites += 1;
-                        if let Some(target) = offered(&body) {
-                            let _ = offers.send(target);
-                        }
-                    }
-                    noted.lock().unwrap().push((method, body.clone()));
-                    if let Some(response) = answer(&head, &body, own, rtp, invites) {
-                        if stream.write_all(response.as_bytes()).is_err() {
-                            return;
-                        }
-                        let _ = stream.flush();
-                    }
-                }
-            }
+            let stream = StreamOwned::new(ServerConnection::new(Arc::clone(&config)).unwrap(), tcp);
+            let noted = Arc::clone(&noted);
+            let offers = offers.clone();
+            thread::spawn(move || serve_sip(stream, own, rtp, &offers, &noted));
         }
     });
     (own, heard)
+}
+
+/// One connection to [`sip_server`], served until it closes.
+fn serve_sip(
+    mut stream: StreamOwned<ServerConnection, std::net::TcpStream>,
+    own: SocketAddr,
+    rtp: SocketAddr,
+    offers: &Sender<SocketAddr>,
+    noted: &Heard,
+) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut invites = 0;
+    while let Ok(read) = stream.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        while let Some((head, body, taken)) = framed(&buffer) {
+            buffer.drain(..taken);
+            let method = head.split(' ').next().unwrap_or_default().to_owned();
+            if method == "INVITE" {
+                invites += 1;
+                if let Some(target) = offered(&body) {
+                    let _ = offers.send(target);
+                }
+            }
+            noted.lock().unwrap().push((method, body.clone()));
+            if let Some(response) = answer(&head, &body, own, rtp, invites) {
+                if stream.write_all(response.as_bytes()).is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+            }
+        }
+    }
 }
 
 /// The far end of the call's audio: PCMU every 20 ms to wherever the last offer said, and a
@@ -294,20 +307,28 @@ fn far_end() -> (SocketAddr, Sender<SocketAddr>, Arc<AtomicUsize>) {
 /// A name server on loopback that knows the domain by its SRV record alone, pointing at the
 /// SIP server's port on a host it knows by its A record.
 fn name_server(sip: SocketAddr) -> SocketAddr {
+    name_server_for(sip, &[DOMAIN])
+}
+
+/// The same for every one of `domains`, all of them served at `sip`: one PBX that hosts a SIP
+/// domain for each tenant.
+fn name_server_for(sip: SocketAddr, domains: &[&str]) -> SocketAddr {
     let mut table: HashMap<(String, DnsType), RData> = HashMap::new();
-    table.insert(
-        (format!("_sips._tcp.{DOMAIN}"), DnsType::SRV),
-        RData::SRV(SRV::new(
-            10,
-            0,
-            sip.port(),
-            Name::from_ascii(format!("pbx.{DOMAIN}.")).unwrap(),
-        )),
-    );
-    table.insert(
-        (format!("pbx.{DOMAIN}"), DnsType::A),
-        RData::A(A(Ipv4Addr::LOCALHOST)),
-    );
+    for domain in domains {
+        table.insert(
+            (format!("_sips._tcp.{domain}"), DnsType::SRV),
+            RData::SRV(SRV::new(
+                10,
+                0,
+                sip.port(),
+                Name::from_ascii(format!("pbx.{domain}.")).unwrap(),
+            )),
+        );
+        table.insert(
+            (format!("pbx.{domain}"), DnsType::A),
+            RData::A(A(Ipv4Addr::LOCALHOST)),
+        );
+    }
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let address = socket.local_addr().unwrap();
     thread::spawn(move || {
@@ -926,7 +947,7 @@ fn register_at(stack: SipralHandle, account: SipralHandle, origin: Instant, hook
 }
 
 #[test]
-fn a_connection_to_an_address_two_accounts_share_is_checked_against_the_one_that_pins() {
+fn a_connection_to_an_address_two_accounts_are_at_is_checked_against_the_one_that_asked() {
     let pki = pki();
     let pin = pin_of(&pki);
     let (rtp, offers, _) = far_end();
@@ -943,8 +964,38 @@ fn a_connection_to_an_address_two_accounts_share_is_checked_against_the_one_that
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
+/// How many REGISTERs the server has read.
+fn registers_heard(heard: &Heard) -> usize {
+    heard
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(method, _)| method == "REGISTER")
+        .count()
+}
+
+fn registered(stack: SipralHandle, account: SipralHandle) -> bool {
+    let mut state = 0_u32;
+    let read = unsafe { sipral_account_registration_state(stack, account, &raw mut state) };
+    read == SipralStatus::Ok && state == SipralRegistrationState::Registered as u32
+}
+
+/// Register `account` once more and run until the server has read `count` REGISTERs.
+fn register_again(stack: SipralHandle, account: SipralHandle, origin: Instant, heard: &Heard) {
+    let count = registers_heard(heard) + 1;
+    assert_eq!(
+        unsafe { sipral_account_register(stack, account, now(origin)) },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    run_until(stack, origin, "registered again", || {
+        registers_heard(heard) >= count && registered(stack, account)
+    });
+}
+
 #[test]
-fn accounts_at_one_address_that_pin_different_certificates_are_refused_before_connecting() {
+fn accounts_at_one_address_that_pin_different_certificates_are_each_held_to_their_own_pin() {
     let pki = pki();
     let pin = pin_of(&pki);
     let (rtp, offers, _) = far_end();
@@ -952,22 +1003,132 @@ fn accounts_at_one_address_that_pin_different_certificates_are_refused_before_co
     let origin = Instant::now();
     let mut hooked = Box::new(Hooked::default());
     let stack = hooked_stack(&mut hooked, origin, None);
-    let other = "00".repeat(32);
-    let _older = line_at(stack, "bob", sip, SipralTransport::Tls, Some(&other));
+    let wrong = "00".repeat(32);
+    let other = line_at(stack, "bob", sip, SipralTransport::Tls, Some(&wrong));
     let pinned = line_at(stack, "alice", sip, SipralTransport::Tls, Some(&pin));
+    register_at(stack, pinned, origin, &hooked);
+
+    // the connection alice registered over is open, and bob does not take it over
     assert_eq!(
-        unsafe { sipral_account_register(stack, pinned, now(origin)) },
+        unsafe { sipral_account_register(stack, other, now(origin)) },
         SipralStatus::Ok
     );
-    run_until(stack, origin, "the refusal", || {
+    run_until(stack, origin, "bob's connection refused", || {
         !hooked.observed.transports_lost.is_empty()
     });
     let (_, _, _, tls, detail) = hooked.observed.transports_lost[0].clone();
-    assert_eq!(tls, 0, "refused before any handshake: {detail}");
-    assert!(detail.contains("pin different certificates"), "{detail}");
+    assert_eq!(tls, 1, "not the certificate bob pins: {detail}");
+    assert!(!registered(stack, other), "bob is held to his own pin");
+    assert_eq!(registers_heard(&heard), 1, "only alice reached the server");
+
+    register_again(stack, pinned, origin, &heard);
+    assert_eq!(
+        hooked.observed.transports_lost.len(),
+        1,
+        "alice's connection was never touched: {:?}",
+        hooked.observed.transports_lost
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// A second tenant of the PBX: its SIP domain is served at the same address as [`DOMAIN`].
+const TENANT: &str = "tenant.test";
+
+/// An account at `domain` on a TLS connection of its own, its server found from the domain.
+fn tenant_at(stack: SipralHandle, user: &str, domain: &str) -> SipralHandle {
+    let aor = format!("sip:{user}@{domain}");
+    let registrar = format!("sip:{domain}");
+    let server = format!("sips:{domain}");
+    let contact = format!("sip:{user}@127.0.0.1;transport=tls");
+    let mut line = account_config();
+    (line.aor, line.aor_len) = text(&aor);
+    (line.registrar, line.registrar_len) = text(&registrar);
+    (line.contact, line.contact_len) = text(&contact);
+    (line.registrar_address, line.registrar_address_len) = (ptr::null(), 0);
+    (line.server_uri, line.server_uri_len) = text(&server);
+    line.stream_protocol = SipralTransport::Tls as u32;
+    let mut account = SIPRAL_HANDLE_NONE;
+    assert_eq!(
+        unsafe { sipral_account_add(stack, &raw const line, &raw mut account) },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    account
+}
+
+#[test]
+fn accounts_of_two_domains_at_one_address_are_each_held_to_their_own_domain() {
+    // the server's certificate names the first domain only
+    let pki = pki();
+    let authority = pki.pem.clone();
+    let (rtp, offers, _) = far_end();
+    let (sip, heard) = sip_server(pki, rtp, offers);
+    let servers = name_server_for(sip, &[DOMAIN, TENANT]).to_string();
+    let origin = Instant::now();
+    let (authority_pem, authority_pem_len) = text(&authority);
+    let (name_servers, name_servers_len) = text(&servers);
+    let network = SipralNetworkConfig {
+        trust: super::SipralNetworkTrust::OnlyAuthority as u32,
+        authority_pem,
+        authority_pem_len,
+        name_servers,
+        name_servers_len,
+        ..network_config()
+    };
+    let mut observed = Observed::default();
+    let mut stack_config = config(record, &mut observed);
+    (stack_config.bind_address, stack_config.bind_address_len) = text("127.0.0.1:0");
+    let (status, stack) = create(&stack_config);
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    assert_eq!(
+        unsafe { sipral_network_start(stack, &raw const network, now(origin)) },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    let first = tenant_at(stack, "alice", DOMAIN);
+    assert_eq!(
+        unsafe { sipral_account_register(stack, first, now(origin)) },
+        SipralStatus::Ok
+    );
+    run_until(stack, origin, "the first tenant registered", || {
+        registered(stack, first)
+    });
     assert!(
-        heard.lock().unwrap().is_empty(),
-        "nothing reached the server"
+        observed.transports_lost.is_empty(),
+        "{:?}",
+        observed.transports_lost
+    );
+
+    // the second tenant's server is at the same address, and that connection was held to the
+    // first tenant's name
+    let second = tenant_at(stack, "bob", TENANT);
+    assert_eq!(
+        unsafe { sipral_account_register(stack, second, now(origin)) },
+        SipralStatus::Ok
+    );
+    run_until(
+        stack,
+        origin,
+        "the second tenant's connection refused",
+        || !observed.transports_lost.is_empty(),
+    );
+    let (_, _, _, tls, detail) = observed.transports_lost[0].clone();
+    assert_eq!(tls, 2, "the certificate does not name {TENANT}: {detail}");
+    assert!(!registered(stack, second), "held to its own domain");
+    assert_eq!(
+        registers_heard(&heard),
+        1,
+        "only the first tenant reached the server"
+    );
+
+    register_again(stack, first, origin, &heard);
+    assert_eq!(
+        observed.transports_lost.len(),
+        1,
+        "the first tenant's connection was never touched: {:?}",
+        observed.transports_lost
     );
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }

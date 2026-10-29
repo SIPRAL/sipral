@@ -74,7 +74,8 @@ record! {
         pub message_type: u32,
         /// Whether the message carried cause indicators.
         pub has_cause: u32,
-        /// The Q.850 cause value: 16 normal call clearing, 17 user busy.
+        /// The cause value: 16 normal call clearing, 17 user busy, when
+        /// `cause_coding` is 0 and the value is Q.850's.
         pub cause_value: u32,
         /// Where it arose (Q.850 Table 1): 0 the user, 2 the public network
         /// serving the local user, 3 a transit network, 4 the public network
@@ -119,6 +120,14 @@ record! {
         /// subscriber, 15 a payphone, 13 a test call; zero for any other
         /// message, which is also the category "unknown".
         pub calling_category: u32,
+        /// Whose list `cause_value` is from, the cause's coding standard
+        /// (Q.850 §2.2.2): 0 ITU-T, the values Q.850 lists; 1 ISO/IEC; 2
+        /// national; 3 specific to the location. Only at 0 is `cause_value`
+        /// the Q.850 cause of that number. Zero without cause indicators.
+        /// ABI 1.11.
+        pub cause_coding: u32,
+        /// Zero.
+        pub reserved_1_11: u32,
     }
 }
 
@@ -272,6 +281,8 @@ entry! {
             original_redirecting_reason: redirection
                 .map_or(0, |info| u32::from(info.original_reason.code())),
             calling_category: message.calling_category().map_or(0, u32::from),
+            cause_coding: cause.map_or(0, |cause| u32::from(cause.coding.code())),
+            reserved_1_11: 0,
         };
         unsafe { write_versioned(out_isup, out) }
     }
@@ -395,6 +406,7 @@ mod tests {
         assert_eq!(status, SipralStatus::Ok);
         assert_eq!((out.message_type, out.has_cause), (12, 1));
         assert_eq!((out.cause_value, out.cause_location), (17, 4));
+        assert_eq!((out.cause_coding, out.reserved_1_11), (0, 0), "ITU-T's");
 
         let acm = IsupBuilder::address_complete(BackwardCall {
             called_status: CalledStatus::SubscriberFree,
@@ -404,6 +416,29 @@ mod tests {
         .expect("an ACM");
         let (_, out) = read(&acm);
         assert_eq!((out.message_type, out.called_status), (6, 1));
+        assert_eq!((out.has_cause, out.cause_coding), (0, 0));
+    }
+
+    #[test]
+    fn a_cause_of_a_national_coding_standard_says_so() {
+        let mut rel = IsupBuilder::release(Cause::new(17, Location::PublicRemote))
+            .build()
+            .expect("a REL");
+        // octet 1 of the cause indicators: ext, coding standard 00, spare, location 0100
+        let at = rel
+            .windows(2)
+            .position(|pair| pair == [0x84, 0x91])
+            .expect("the cause indicators");
+        for (coding, octet) in [(2, 0xc4), (1, 0xa4), (3, 0xe4)] {
+            if let Some(first) = rel.get_mut(at) {
+                *first = octet;
+            }
+            let (status, out) = read(&rel);
+            assert_eq!(status, SipralStatus::Ok);
+            assert_eq!(out.size, size_of::<SipralIsup>());
+            assert_eq!((out.has_cause, out.cause_value), (1, 17));
+            assert_eq!((out.cause_coding, out.cause_location), (coding, 4));
+        }
     }
 
     #[test]

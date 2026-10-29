@@ -599,6 +599,11 @@ one, to `tlsTrust` otherwise. The name checked is `tlsServerName` when
 `open` was given one; else, for an account named by `serverUri`, the URI's
 domain — the SIP domain the user configured, not the host or address its
 SRV record named (RFC 5922 §7.3); else the address connected to. The
+stack names that domain and the pin with each ask, and the client opens one
+connection for each pair and says which before binding it
+(`sipral_stack_stream_opening`, ABI 1.11): two tenants of one PBX at one
+address are each checked against their own domain, and accounts of the
+same domain and pin share one connection. The
 account's REGISTER and every request of its calls go over it, its
 `Contact` names the protocol, and a connection that closes is opened again
 and the account registered again. Until it is open a call the account

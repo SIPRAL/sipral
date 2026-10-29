@@ -52,6 +52,15 @@
 //! ends with `SIPRAL_CALL_END_REASON_UNREACHABLE` and `cause_sip` 513 (a registration fails
 //! the same way). Silence gets the same after ten seconds (`sipral_ua::STREAM_WAIT`).
 //!
+//! # One connection per identity
+//!
+//! A TLS connection is checked against one name and one pin, so the event names them
+//! (`server_name`, `tls_pin_sha256`), once for each identity waiting for a connection there:
+//! accounts of two SIP domains served from one address each get their own. The application
+//! opens one per identity it has none open or opening for, says which before connecting
+//! ([`sipral_stack_stream_opening`]), checks the certificate against it, and binds it; it then
+//! carries the accounts of that identity alone.
+//!
 //! # A datagram, a stream, and a WebSocket
 //!
 //! A datagram carries one message and its source. Stream bytes are fragments, framed below
@@ -74,11 +83,16 @@
 //! unreachable is one destination, not the socket.
 
 use std::ffi::c_char;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ptr;
 use std::slice;
 
-use sipral_core::endpoint::{Input, ReceiveError, Transmit, TransportErrorKind, TransportId};
+use sipral_core::endpoint::{
+    Input, ReceiveError, Transmit, TransportErrorKind, TransportId, TransportProtocol,
+};
+use sipral_core::msg::{HostRef, Uri};
+use sipral_core::pin::CertificatePin;
+use sipral_ua::StreamIdentity;
 
 use crate::abi::{Number, codes, constants, record};
 use crate::error::{Fail, entry, fail};
@@ -238,6 +252,51 @@ record! {
 unsafe impl Versioned for SipralTransportFailure {
     const NAME: &'static str = "sipral_transport_failure";
     const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralTransportFailure, detail_len);
+
+    fn set_declared_size(&mut self, bytes: usize) {
+        self.size = bytes;
+    }
+}
+
+record! {
+    /// A connection being opened, and what it is checked against, for
+    /// [`sipral_stack_stream_opening`] (ABI 1.11). All caller-filled; the texts are read during
+    /// the call.
+    ///
+    /// `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
+    /// for it, as it named them; the name a connection is checked against in their place, a
+    /// binding's own setting, does not go here.
+    #[derive(Clone, Copy)]
+    pub struct SipralStreamOpening {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// The number it will be bound as with [`sipral_stack_transport_bind`].
+        pub transport: u32,
+        /// What it speaks, as a `SipralTransport`: TCP, TLS, WS or WSS.
+        pub protocol: Number<SipralTransport>,
+        /// Its far end, `host:port`, the `remote` it will be bound with. Not NUL-terminated.
+        pub destination: *const c_char,
+        /// How many bytes of it.
+        pub destination_len: usize,
+        /// The name the server's certificate was or will be checked against. Length zero for the
+        /// address, and on a protocol without TLS. Not NUL-terminated.
+        pub server_name: *const c_char,
+        /// How many bytes of it.
+        pub server_name_len: usize,
+        /// The fingerprint of the one certificate trusted, in any form
+        /// `sipral_account_config_t::tls_pin_sha256` takes. Length zero for none, and on a
+        /// protocol without TLS. Not NUL-terminated.
+        pub tls_pin_sha256: *const c_char,
+        /// How many bytes of it.
+        pub tls_pin_sha256_len: usize,
+    }
+}
+
+// Safety: plain data; the pointers are the caller's and are read only during the call.
+unsafe impl Versioned for SipralStreamOpening {
+    const NAME: &'static str = "sipral_stream_opening";
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralStreamOpening, tls_pin_sha256_len);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -774,6 +833,154 @@ entry! {
     }
 }
 
+entry! {
+    /// Say that a connection is being opened, to be bound as `opening->transport`, and what it
+    /// is checked against (ABI 1.11).
+    ///
+    /// Said before connecting, or at the latest before [`sipral_stack_transport_bind`]: once
+    /// bound it carries the accounts on a connection of their own whose identity is this one
+    /// alone, and an account of another asks for its own with
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
+    /// serves a SIP domain per tenant from one address, and a certificate valid for one
+    /// tenant's domain says nothing of another's. If it cannot be opened,
+    /// [`sipral_stack_transport_failed_with`] on the same number moves on the accounts of this
+    /// identity alone. A connection bound with nothing said of it is any account's, as the
+    /// application checked it. Forgotten when it fails or closes, or when another is said to be
+    /// opened for the same identity there before this one was bound.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
+    /// destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
+    /// a name that is not UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// `opening` must point at a `sipral_stream_opening_t` whose `size` member says how long it
+    /// is, and its texts must be readable for the lengths beside them.
+    fn sipral_stack_stream_opening(stack: SipralHandle, opening: *const SipralStreamOpening) {
+        let opening = unsafe { read_versioned(opening) }?;
+        let protocol = crate::stack::transport_of(opening.protocol)?.protocol();
+        if !protocol.is_reliable() {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "{protocol} is a datagram transport, and an identity is a connection's"
+                ),
+            ));
+        }
+        let destination = unsafe {
+            address(opening.destination, opening.destination_len, "destination")
+        }?;
+        let name = unsafe {
+            crate::text::text(opening.server_name, opening.server_name_len, "server_name")
+        }?
+        .filter(|name| !name.is_empty());
+        let pin = unsafe {
+            crate::text::text(
+                opening.tls_pin_sha256,
+                opening.tls_pin_sha256_len,
+                "tls_pin_sha256",
+            )
+        }?
+        .filter(|pin| !pin.is_empty());
+        if !protocol.is_secure() {
+            let given = [("server_name", name.is_some()), ("tls_pin_sha256", pin.is_some())];
+            if let Some((member, _)) = given.into_iter().find(|(_, given)| *given) {
+                return Err(fail(
+                    SipralStatus::InvalidArgument,
+                    format!(
+                        "{member} is given for a connection that speaks {protocol}, and \
+                         only one over TLS is checked against it"
+                    ),
+                ));
+            }
+        }
+        let pin = pin
+            .map(|pin| {
+                CertificatePin::parse(pin).map_err(|error| {
+                    fail(
+                        SipralStatus::InvalidArgument,
+                        format!("tls_pin_sha256 is {pin:?}: {error}"),
+                    )
+                })
+            })
+            .transpose()?;
+        with_stack(stack, |state| {
+            state.agent.stream_opening(
+                TransportId(opening.transport),
+                protocol,
+                destination,
+                StreamIdentity::new(name, pin),
+            );
+            Ok(())
+        })
+    }
+}
+
+/// The identities a connection of `protocol` to `destination` is asked for with: each one
+/// whose accounts wait for a connection of their own there (`sipral_ua`'s flow module), or,
+/// for a request that outgrew a datagram (`outgrown`), the one [`identity_at`] gives.
+pub(crate) fn identities_asked(
+    state: &StackState,
+    protocol: TransportProtocol,
+    destination: SocketAddr,
+    outgrown: bool,
+) -> Vec<StreamIdentity> {
+    if outgrown {
+        vec![identity_at(state, protocol, destination)]
+    } else {
+        state.agent.stream_identities_wanted(protocol, destination)
+    }
+}
+
+/// What a TLS connection to `destination` for a request that outgrew a datagram is checked
+/// against: that of the first account there — located there, with the host of its
+/// `server_uri` as the name (RFC 5922 §7.3), or whose registrar URI names that address — and
+/// its pin. An account's own connection is checked against its own identity.
+fn identity_at(
+    state: &StackState,
+    protocol: TransportProtocol,
+    destination: SocketAddr,
+) -> StreamIdentity {
+    if !protocol.is_secure() {
+        return StreamIdentity::default();
+    }
+    for id in state.agent.accounts() {
+        let Some(account) = state.agent.account(id) else {
+            continue;
+        };
+        let located = state.agent.located_targets(id).contains(&destination);
+        let named_here = account
+            .registrar()
+            .and_then(Uri::sip)
+            .is_some_and(|sip| literal(sip.host) == Some(destination.ip()));
+        if !located && !named_here {
+            continue;
+        }
+        let name = located
+            .then(|| account.server().and_then(host_name))
+            .flatten();
+        return StreamIdentity::new(name, account.pinned_certificate().copied());
+    }
+    StreamIdentity::default()
+}
+
+/// A URI's host, when it is a name.
+fn host_name(uri: &Uri) -> Option<&str> {
+    match uri.sip()?.host {
+        HostRef::Name(name) => Some(name),
+        HostRef::Ipv4(_) | HostRef::Ipv6(_) => None,
+    }
+}
+
+/// A URI host's address, when it is a literal one.
+const fn literal(host: HostRef<'_>) -> Option<IpAddr> {
+    match host {
+        HostRef::Ipv4(address) => Some(IpAddr::V4(address)),
+        HostRef::Ipv6(address) => Some(IpAddr::V6(address)),
+        HostRef::Name(_) => None,
+    }
+}
+
 /// Retire a transport and queue its event.
 ///
 /// A failure on a transport that is not up is a connection that could not be opened. It
@@ -781,7 +988,9 @@ entry! {
 /// (`sipral_ua::UserAgent::stream_unavailable`), or is raised while an account waits for its
 /// own connection, whose REGISTER then goes on at once to the next address its server's lookup
 /// gave (`sipral_ua::UserAgent::flow_unavailable`, RFC 3263 §4.3) when every account waiting
-/// waits for the same server. Otherwise a never-bound number is refused.
+/// waits for the same server; a connection said to be checked against one identity
+/// (`sipral_ua::UserAgent::stream_opening`, as the networking component says it) moves on
+/// the accounts of that identity alone. Otherwise a never-bound number is refused.
 ///
 /// The failure names no server, so it ends the requests waiting for a stream only when it can
 /// answer nothing else: one server asked a stream of, and no account waiting for a connection
@@ -811,7 +1020,7 @@ fn lose(
         // an account's own connection that could not be opened: on to the
         // next address its server's lookup gave, when it is clear whose
         if answers_the_flow {
-            state.agent.flow_unavailable(now);
+            state.agent.flow_unavailable_on(TransportId(transport), now);
         }
         state.lost.push(Lost {
             transport,
@@ -1013,9 +1222,10 @@ fn received_badly(error: &ReceiveError) -> Fail {
 pub(crate) mod tests {
     use super::{
         SIPRAL_MESSAGE_BYTES, SIPRAL_TRANSPORT_DETAIL_BYTES, SIPRAL_TRANSPORT_MAIN,
-        SipralTlsFailure, SipralTransmit, SipralTransportError, SipralTransportFailure,
-        sipral_stack_poll_transmit, sipral_stack_receive_datagram, sipral_stack_receive_stream,
-        sipral_stack_stream_closed, sipral_stack_transport_bind, sipral_stack_transport_failed,
+        SipralStreamOpening, SipralTlsFailure, SipralTransmit, SipralTransportError,
+        SipralTransportFailure, sipral_stack_poll_transmit, sipral_stack_receive_datagram,
+        sipral_stack_receive_stream, sipral_stack_stream_closed, sipral_stack_stream_opening,
+        sipral_stack_transport_bind, sipral_stack_transport_failed,
         sipral_stack_transport_failed_with,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
@@ -2280,6 +2490,290 @@ pub(crate) mod tests {
             [(9, SipralTlsFailure::Untrusted as u32, said.to_owned())]
         );
         assert!(drain(handle).is_empty(), "nothing over the stack's UDP");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What each [`SipralEventKind::TransportWanted`] said a connection is checked against:
+    /// where to, the server's name and the pin, and the transports said to have failed, copied
+    /// out during the callback.
+    #[derive(Default)]
+    struct Identities {
+        asked: Vec<(String, String, String)>,
+        lost: Vec<u32>,
+    }
+
+    unsafe extern "C" fn keep_identities(
+        event: *const crate::event::SipralEvent,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let identities = unsafe { &mut *user_data.cast::<Identities>() };
+        let event = unsafe { &*event };
+        if event.kind == SipralEventKind::TransportFailed {
+            identities
+                .lost
+                .push(unsafe { event.payload.transport_failed }.transport);
+        }
+        if event.kind != SipralEventKind::TransportWanted {
+            return;
+        }
+        let payload = unsafe { event.payload.transport_wanted };
+        let text = |pointer: *const c_char, len: usize| {
+            if pointer.is_null() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(unsafe {
+                    std::slice::from_raw_parts(pointer.cast::<u8>(), len)
+                })
+                .into_owned()
+            }
+        };
+        identities.asked.push((
+            text(payload.destination, payload.destination_len),
+            text(payload.server_name, payload.server_name_len),
+            text(payload.tls_pin_sha256, payload.tls_pin_sha256_len),
+        ));
+    }
+
+    /// An account of `aor` on a TLS connection of its own to [`REGISTRAR`], pinned to `pin`.
+    fn pinned_on_tls(handle: SipralHandle, aor: &'static str, pin: &'static str) -> SipralHandle {
+        let on_tls = SipralAccountConfig {
+            aor: aor.as_ptr().cast::<c_char>(),
+            aor_len: aor.len(),
+            stream_protocol: SipralTransport::Tls as u32,
+            tls_pin_sha256: pin.as_ptr().cast::<c_char>(),
+            tls_pin_sha256_len: pin.len(),
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tls), &raw mut account) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        account
+    }
+
+    /// A connection of `protocol` to `destination`, to be bound as `transport`, checked against
+    /// `server_name` and `pin`.
+    fn opening(
+        transport: u32,
+        protocol: SipralTransport,
+        destination: &str,
+        server_name: &str,
+        pin: &str,
+    ) -> SipralStreamOpening {
+        SipralStreamOpening {
+            size: size_of::<SipralStreamOpening>(),
+            transport,
+            protocol: protocol as u32,
+            destination: destination.as_ptr().cast::<c_char>(),
+            destination_len: destination.len(),
+            server_name: server_name.as_ptr().cast::<c_char>(),
+            server_name_len: server_name.len(),
+            tls_pin_sha256: pin.as_ptr().cast::<c_char>(),
+            tls_pin_sha256_len: pin.len(),
+        }
+    }
+
+    fn bind_tls(handle: SipralHandle, transport: u32, now_ms: u64) {
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                transport,
+                SipralTransport::Tls as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                now_ms,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    }
+
+    /// Whose REGISTER left on which transport, by the user part of its `From`.
+    fn registers_by_transport(handle: SipralHandle) -> Vec<(u32, String)> {
+        let mut buffers = Buffers::new();
+        let mut out = Vec::new();
+        loop {
+            let mut transmit = buffers.transmit();
+            let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                return out;
+            }
+            let (message, _, _) = buffers.taken(&transmit);
+            if message.starts_with(b"REGISTER ") {
+                let from =
+                    String::from_utf8_lossy(&header(&message, HeaderName::From)).into_owned();
+                let user = from
+                    .split("sip:")
+                    .nth(1)
+                    .and_then(|rest| rest.split('@').next())
+                    .unwrap_or_default()
+                    .to_owned();
+                out.push((transmit.transport, user));
+            }
+        }
+    }
+
+    /// Two accounts at one address that pin different certificates: each identity is asked for
+    /// with its own pin, a connection said to be checked against one carries that one's
+    /// account alone, and one of them refused leaves the other's untouched.
+    #[test]
+    fn accounts_pinning_different_certificates_at_one_address_are_asked_for_and_kept_apart() {
+        const ALICE_PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const BOB_PIN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let canonical = |pin: &str| {
+            pin.as_bytes()
+                .chunks(2)
+                .map(|pair| String::from_utf8_lossy(pair).to_uppercase())
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        let mut observed = Observed::default();
+        let mut identities = Identities::default();
+        let mut settings = config(keep_identities, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut identities).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let alice = pinned_on_tls(handle, "sip:alice@example.com", ALICE_PIN);
+        let bob = pinned_on_tls(handle, "sip:bob@example.com", BOB_PIN);
+        for account in [alice, bob] {
+            assert_eq!(
+                unsafe { sipral_account_register(handle, account, 1_000) },
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+        }
+        poll(handle, 1_000);
+        let alices = (REGISTRAR.to_owned(), String::new(), canonical(ALICE_PIN));
+        let bobs = (REGISTRAR.to_owned(), String::new(), canonical(BOB_PIN));
+        assert!(
+            identities.asked.contains(&alices) && identities.asked.contains(&bobs),
+            "each identity asked for: {:?}",
+            identities.asked
+        );
+        assert!(
+            identities
+                .asked
+                .iter()
+                .all(|asked| *asked == alices || *asked == bobs),
+            "{:?}",
+            identities.asked
+        );
+
+        let for_alice = opening(9, SipralTransport::Tls, REGISTRAR, "", &alices.2);
+        assert_eq!(
+            unsafe { sipral_stack_stream_opening(handle, &raw const for_alice) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        bind_tls(handle, 9, 1_100);
+        poll(handle, 1_100);
+        assert_eq!(
+            registers_by_transport(handle),
+            [(9, "alice".to_owned())],
+            "the connection checked against alice's pin carries alice alone"
+        );
+
+        let for_bob = opening(10, SipralTransport::Tls, REGISTRAR, "", &bobs.2);
+        assert_eq!(
+            unsafe { sipral_stack_stream_opening(handle, &raw const for_bob) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let said = "the certificate is not the pinned one";
+        let failure = refused(10, SipralTlsFailure::Untrusted, said);
+        assert_eq!(
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const failure, 1_200) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_200);
+        assert_eq!(
+            identities.lost,
+            [10],
+            "alice's connection was never touched"
+        );
+        assert!(
+            registers_by_transport(handle).is_empty(),
+            "bob's REGISTER did not take alice's connection"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A connection's identity is refused where it cannot hold: on a datagram transport, with a
+    /// name or a pin on a protocol without TLS, a pin that is not a SHA-256 fingerprint, a
+    /// name that is not text, or no destination.
+    #[test]
+    fn an_identity_a_connection_cannot_be_held_to_is_refused() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let pin = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cases = [
+            (
+                opening(9, SipralTransport::Udp, REGISTRAR, "", ""),
+                "datagram",
+            ),
+            (
+                opening(9, SipralTransport::Tcp, REGISTRAR, "pbx.example.com", ""),
+                "server_name",
+            ),
+            (
+                opening(9, SipralTransport::Ws, REGISTRAR, "", pin),
+                "tls_pin_sha256",
+            ),
+            (
+                opening(9, SipralTransport::Tls, REGISTRAR, "", "nonsense"),
+                "tls_pin_sha256",
+            ),
+            (
+                opening(9, SipralTransport::Tls, "", "pbx.example.com", ""),
+                "destination",
+            ),
+        ];
+        for (refused, named) in cases {
+            assert_eq!(
+                unsafe { sipral_stack_stream_opening(handle, &raw const refused) },
+                SipralStatus::InvalidArgument
+            );
+            assert!(
+                last_error_text().contains(named),
+                "{named}: {}",
+                last_error_text()
+            );
+        }
+        let short = SipralStreamOpening {
+            size: 4,
+            ..opening(9, SipralTransport::Tls, REGISTRAR, "", "")
+        };
+        assert_eq!(
+            unsafe { sipral_stack_stream_opening(handle, &raw const short) },
+            SipralStatus::UnsupportedVersion
+        );
+        for taken in [
+            opening(9, SipralTransport::Tls, REGISTRAR, "PBX.example.com", pin),
+            opening(10, SipralTransport::Tcp, REGISTRAR, "", ""),
+            opening(11, SipralTransport::Wss, REGISTRAR, "pbx.example.com", ""),
+        ] {
+            assert_eq!(
+                unsafe { sipral_stack_stream_opening(handle, &raw const taken) },
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+        }
+        assert_eq!(
+            unsafe { sipral_stack_stream_opening(SIPRAL_HANDLE_NONE, ptr::null()) },
+            SipralStatus::InvalidArgument
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

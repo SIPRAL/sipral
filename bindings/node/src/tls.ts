@@ -15,6 +15,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { Socket, connect as connectTcp, isIP } from 'node:net';
 import {
   type ConnectionOptions,
+  type DetailedPeerCertificate,
   type PeerCertificate,
   TLSSocket,
   checkServerIdentity,
@@ -346,7 +347,7 @@ export interface ConnectOptions {
   timeoutMs?: number;
   /**
    * Over TLS to a SIP server, the library that reads its certificate for the
-   * name once the chain is trusted (`sipral_certificate_check_domain`), by
+   * name once the chain is trusted (`sipral_certificate_check_domain_in_chain`), by
    * {@link domainRules}. Left out, as for a TURN server, the HTTPS rules
    * Node applies are the whole check.
    */
@@ -378,7 +379,8 @@ export function sipDomainOf(uri: string | null): string | null {
 /**
  * Whether a trusted `certificate` names `name`, the SIP domain: Node's own
  * check by the HTTPS rules, then RFC 5922's reading under `rules`, which
- * accepts a `sip:` URI naming the domain and, with
+ * accepts a `sip:` URI naming the domain where every authority above it may
+ * name it and, with
  * `SipralDomainRules.Rfc5922`, refuses a wildcard. The refusal Node raises,
  * or one that says why.
  */
@@ -389,7 +391,29 @@ function domainNamed(sipral: Sipral, name: string, certificate: PeerCertificate,
   }
   const [domain, length] = text(name);
   const raw = certificate.raw ?? Buffer.alloc(0);
-  const status = sipral.sipral_certificate_check_domain(raw, raw.length, domain, length, rules, https === undefined ? 1 : 0, null);
+  // every authority above the leaf in the chain Node verified, the anchor
+  // included, whose name constraints a sip: URI is held to; Node hands the
+  // chain over with the certificate, and an anchor is its own issuer
+  const issuers: Buffer[] = [];
+  let below = certificate as DetailedPeerCertificate;
+  let above: DetailedPeerCertificate | undefined = below.issuerCertificate;
+  while (above?.raw !== undefined && above.fingerprint256 !== below.fingerprint256) {
+    issuers.push(above.raw);
+    below = above;
+    above = above.issuerCertificate;
+  }
+  const chain = Buffer.concat(issuers);
+  const status = sipral.sipral_certificate_check_domain_in_chain(
+    raw,
+    raw.length,
+    chain,
+    chain.length,
+    domain,
+    length,
+    rules,
+    https === undefined ? 1 : 0,
+    null,
+  );
   if (status === SipralStatus.Ok) {
     return undefined;
   }

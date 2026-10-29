@@ -25,7 +25,7 @@ use sipral::{AmdReason, AmdVerdict, CallProgress, DigitSource, MediaEvent, Progr
 use sipral_core::msg::HeaderName;
 use sipral_ua::{
     CallEndReason, CallHandle, CallIdentity, CallState, LifecycleState, RecoveryFailure,
-    RegistrationFailure, RegistrationState, Rung, UaEvent, UserAgent,
+    RegistrationFailure, RegistrationState, Rung, StreamIdentity, UaEvent, UserAgent,
 };
 
 use crate::abi::{Number, alias, codes, record};
@@ -220,7 +220,10 @@ event_kinds! {
         /// `SIPRAL_STATUS_NOT_SENT`. `payload.transport_wanted` says where.
         /// Bind with
         /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
-        /// and ask again.
+        /// and ask again. Raised too for an account's own connection, and,
+        /// since ABI 1.11, once for each identity a connection there is to be
+        /// checked against, said before connecting with
+        /// [`sipral_stack_stream_opening`](crate::transport::sipral_stack_stream_opening).
         18 = TransportWanted, c"transport wanted";
         /// B5. No media has arrived for longer than the configured threshold.
         /// `payload.media.silent_for_ms` says how long. The call is left up.
@@ -1086,7 +1089,15 @@ record! {
 
 record! {
     /// What a [`SipralEventKind::TransportWanted`] carries: a request RFC
-    /// 3261 §18.1.1 kept off a datagram, with no stream open for it.
+    /// 3261 §18.1.1 kept off a datagram, with no stream open for it, or an
+    /// account's own connection, both sizes zero.
+    ///
+    /// A TLS or WSS connection is checked against one identity, the server's
+    /// name and pin below, and carries the accounts of that identity alone
+    /// once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
+    /// raised for each identity waiting for a connection there, the same one
+    /// possibly again, and one connection is opened for each that has none
+    /// open or opening.
     #[derive(Clone, Copy)]
     pub struct SipralTransportWantedEvent {
         /// What to open, as a [`SipralTransport`]; zero for an unknown one.
@@ -1100,6 +1111,21 @@ record! {
         /// The largest size that fits a datagram: path MTU less the §18.1.1
         /// headroom, or 1300 when the MTU is unknown.
         pub limit_bytes: u32,
+        /// The name the server's certificate must carry, lowercase: the host
+        /// of the account's `server_uri` when that is a name (RFC 5922 §7.3),
+        /// the SIP domain and not the host SRV turned it into. Empty checks
+        /// the address `destination` names, and is all a protocol without
+        /// TLS has. Not NUL-terminated (ABI 1.11).
+        pub server_name: *const c_char,
+        /// How many bytes of it.
+        pub server_name_len: usize,
+        /// The SHA-256 fingerprint of the one certificate trusted, as
+        /// `openssl x509 -fingerprint` writes it, upper case with colons;
+        /// empty for none, the platform's checks then apply. Not
+        /// NUL-terminated (ABI 1.11).
+        pub tls_pin_sha256: *const c_char,
+        /// How many bytes of it.
+        pub tls_pin_sha256_len: usize,
     }
 }
 
@@ -1646,9 +1672,6 @@ pub(crate) fn translate(
         return Some(out);
     }
     if let Some(out) = about_a_transfer(known, event) {
-        return Some(out);
-    }
-    if let Some(out) = about_a_transport(known, event, transport) {
         return Some(out);
     }
     if let Some(out) = about_a_subscription(known, event) {
@@ -2311,39 +2334,53 @@ fn about_a_mailbox(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
     }
 }
 
-/// A request RFC 3261 §18.1.1 kept off a datagram, with no stream open for
-/// it. `destination` is the text [`text_to_point_at`] built for the event.
-fn about_a_transport(
-    known: &Vocabulary<'_>,
+/// A request RFC 3261 §18.1.1 kept off a datagram, or an account's own
+/// connection, asked for with the identity it is checked against, and the
+/// text the event points into: the destination, the name, then the pin.
+/// `None` for any other kind.
+pub(crate) fn transport_wanted(
+    stack: SipralHandle,
     event: &UaEvent,
-    destination: Option<&str>,
-) -> Option<SipralEvent> {
-    match *event {
-        UaEvent::TransportWanted {
-            protocol,
-            request_bytes,
-            limit_bytes,
-            ..
-        } => {
-            let mut payload = SipralTransportWantedEvent {
-                protocol: crate::stack::SipralTransport::named(protocol),
-                destination: std::ptr::null(),
-                destination_len: 0,
-                request_bytes,
-                limit_bytes,
-            };
-            if let Some(text) = destination {
-                payload.destination = text.as_ptr().cast::<c_char>();
-                payload.destination_len = text.len();
-            }
-            Some(SipralEvent::of(
-                known.stack,
-                SipralEventKind::TransportWanted,
-                payload!(transport_wanted: payload),
-            ))
+    identity: &StreamIdentity,
+) -> Option<(SipralEvent, String)> {
+    let UaEvent::TransportWanted {
+        protocol,
+        destination,
+        request_bytes,
+        limit_bytes,
+    } = *event
+    else {
+        return None;
+    };
+    let destination = destination.to_string();
+    let name = identity.server_name().unwrap_or_default();
+    let pin = identity.pin().map(ToString::to_string).unwrap_or_default();
+    let text = format!("{destination}{name}{pin}");
+    // a String's bytes stay where they are when it moves
+    let at = |from: usize, len: usize| {
+        if len == 0 {
+            std::ptr::null()
+        } else {
+            text[from..].as_ptr().cast::<c_char>()
         }
-        _ => None,
-    }
+    };
+    let payload = SipralTransportWantedEvent {
+        protocol: crate::stack::SipralTransport::named(protocol),
+        destination: at(0, destination.len()),
+        destination_len: destination.len(),
+        request_bytes,
+        limit_bytes,
+        server_name: at(destination.len(), name.len()),
+        server_name_len: name.len(),
+        tls_pin_sha256: at(destination.len() + name.len(), pin.len()),
+        tls_pin_sha256_len: pin.len(),
+    };
+    let event = SipralEvent::of(
+        stack,
+        SipralEventKind::TransportWanted,
+        payload!(transport_wanted: payload),
+    );
+    Some((event, text))
 }
 
 /// A dialog whose next hop is a name to resolve. `host` is from
@@ -2391,7 +2428,6 @@ fn about_a_resolve(
 /// can point at it. `None` for kinds that need none.
 pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
     match *event {
-        UaEvent::TransportWanted { destination, .. } => Some(destination.to_string()),
         UaEvent::ResolveNeeded { ref host, .. } => Some(host.to_string()),
         UaEvent::Located { ref targets, .. } => Some(
             targets

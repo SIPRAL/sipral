@@ -25,7 +25,7 @@ sipral_consent_tone_t local 32 32 28 28 28 28
 sipral_counters_t requests_refused_at_limit 232 232 228 228 232 232
 sipral_event_t - - 384 - 248 - 264
 sipral_hooked_message_t - - 56 - 36 - 40
-sipral_isup_t calling_category 72 72 68 68 68 68
+sipral_isup_t calling_category 72 80 68 76 68 76
 sipral_local_conference_config_t reserved 24 24 20 20 20 20
 sipral_local_conference_info_t packets_dropped 56 56 48 48 48 48
 sipral_local_conference_member_t reserved 40 40 36 36 40 40
@@ -48,6 +48,7 @@ sipral_stack_config_t rtp_port_max 368 440 248 304 256 312
 sipral_stack_settings_t rtp_port_max 112 136 104 128 112 136
 sipral_stir_config_t reserved 56 56 44 44 48 48
 sipral_stream_encryption_t awaiting_keys 32 32 28 28 28 28
+sipral_stream_opening_t tls_pin_sha256_len 64 64 36 36 36 36
 sipral_stream_stats_t feedback_suppressed 328 328 312 312 328 328
 sipral_subscribe_config_t reserved 88 88 48 48 48 48
 sipral_suspending_t calls 32 32 16 16 16 16

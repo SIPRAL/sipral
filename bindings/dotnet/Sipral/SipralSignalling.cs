@@ -88,7 +88,9 @@ public sealed class SipralTlsTrust
 
     /// <summary>The checks for one handshake to <c>options.TargetHost</c>; a
     /// chain this trust vouches for has its name read by
-    /// <paramref name="rules"/> (<c>sipral_certificate_check_domain</c>).</summary>
+    /// <paramref name="rules"/>, a <c>sip:</c> URI held to the name
+    /// constraints of the authorities above it
+    /// (<c>sipral_certificate_check_domain_in_chain</c>).</summary>
     internal void Apply(
         SslClientAuthenticationOptions options, Verdict verdict, SipralDomainRules rules = SipralDomainRules.Platform)
     {
@@ -127,10 +129,15 @@ public sealed class SipralTlsTrust
             if (extra is { Count: > 0 } && errors.HasFlag(SslPolicyErrors.RemoteCertificateChainErrors)
                 && certificate is not null)
             {
-                // rebuild the refused chain with the private CA as a root;
-                // any other platform error still stands
+                // rebuild the refused chain with the private CA as a root,
+                // through the intermediates the server sent; any other
+                // platform error still stands
                 using var again = new X509Chain();
                 again.ChainPolicy.ExtraStore.AddRange(extra);
+                if (chain is not null)
+                {
+                    again.ChainPolicy.ExtraStore.AddRange(chain.ChainPolicy.ExtraStore);
+                }
                 again.ChainPolicy.CustomTrustStore.AddRange(extra);
                 again.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                 again.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
@@ -159,10 +166,14 @@ public sealed class SipralTlsTrust
                 verdict.Record(errors, chain);
                 return errors == SslPolicyErrors.None;
             }
+            // every authority of the chain built, whose name constraints a
+            // sip: URI is held to
+            var issuers = chain?.ChainElements.Skip(1).SelectMany(element => element.Certificate.RawData).ToArray()
+                ?? Array.Empty<byte>();
             try
             {
-                global::Sipral.Sipral.CertificateCheckDomain(
-                    certificate.GetRawCertData(), domain, (uint)rules, nameAlone ? 0u : 1u);
+                global::Sipral.Sipral.CertificateCheckDomainInChain(
+                    certificate.GetRawCertData(), issuers, domain, (uint)rules, nameAlone ? 0u : 1u);
                 verdict.Record(SslPolicyErrors.None, chain);
                 return true;
             }

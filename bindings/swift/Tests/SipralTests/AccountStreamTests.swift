@@ -145,12 +145,12 @@ final class AccountStreamTests: XCTestCase {
     /// A stack whose resolver sends `sips:registrar.sipral.test` through SRV
     /// to `pbx-7.sipral.test`, at `host`, the registrar's port.
     private func locating(
-        to registrar: FakeRegistrar, trust: TLSTrust = .platform
+        to registrar: FakeRegistrar, trust: TLSTrust = .platform, domains: [String] = [SignallingTests.serverName]
     ) throws -> SipralStack {
         let port = registrar.port
         let host = registrar.host
         return try SipralStack(audio: .application, tlsTrust: trust, resolver: { name, record in
-            if record == .srv, name == "_sips._tcp.\(SignallingTests.serverName)" {
+            if record == .srv, domains.contains(where: { name == "_sips._tcp.\($0)" }) {
                 return DnsLookupAnswer(answer: .records, records: ["300 10 60 \(port) pbx-7.sipral.test"])
             }
             if record == .a, name == "pbx-7.sipral.test" {
@@ -178,9 +178,53 @@ final class AccountStreamTests: XCTestCase {
         XCTAssertEqual(account.registrarAddress, registrar.address)
         let failed = events.elements.compactMap(\.transportFailedData)
         XCTAssertTrue(failed.isEmpty, failed.map { $0.detail ?? "" }.description)
-        XCTAssertEqual(SipralStack.serverName(of: "sips:alice@pbx.example.com:5061;transport=tls"), "pbx.example.com")
-        XCTAssertNil(SipralStack.serverName(of: "sips:198.51.100.7:5061"))
-        XCTAssertNil(SipralStack.serverName(of: "sip:[2001:db8::7]:5061"))
+        let wanted = events.elements.compactMap(\.transportWantedData)
+        XCTAssertEqual(wanted.map(\.serverName), [SignallingTests.serverName], "the stack names the SIP domain")
+    }
+
+    /// Two accounts whose SIP domains SRV places at one address, against a
+    /// server whose certificate names the first domain alone: each gets a
+    /// connection checked against its own domain, so the first registers,
+    /// the second is refused for the name rather than riding the first
+    /// one's connection, and the first goes on working.
+    func testAccountsOfTwoDomainsAtOneAddressAreEachHeldToTheirOwnDomain() async throws {
+        let tenant = "tenant.sipral.test"
+        let (identity, der) = try SignallingTests.certificate("tenants")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        let stack = try locating(
+            to: registrar, trust: .onlyAuthority(der), domains: [SignallingTests.serverName, tenant]
+        )
+        defer { stack.close() }
+        let events = Recorder(stack.events())
+        let first = try stack.addAccount(
+            aor: "sip:alice@\(SignallingTests.serverName)", serverUri: "sips:\(SignallingTests.serverName)",
+            streamProtocol: .tls, registrar: "sips:\(SignallingTests.serverName)"
+        )
+        try first.register()
+        try await registered(first)
+        let connection = try XCTUnwrap(registrar.registers.first?.connection)
+
+        let second = try stack.addAccount(
+            aor: "sip:bob@\(tenant)", serverUri: "sips:\(tenant)", streamProtocol: .tls, registrar: "sips:\(tenant)"
+        )
+        try second.register()
+        let refused = await arrived(10) { events.elements.contains { $0.transportFailedData != nil } }
+        XCTAssertTrue(refused, "the second tenant's connection was never refused")
+        let failed = events.elements.compactMap(\.transportFailedData)
+        XCTAssertEqual(failed.map(\.tls), [.nameMismatch], failed.map { $0.detail ?? "" }.description)
+        XCTAssertEqual(second.registrarAddress, registrar.address, "located at the same address")
+        XCTAssertNotEqual(try second.registrationState, .registered)
+        XCTAssertFalse(registrar.registers.contains { $0.message.contains("sip:bob@") })
+        let names = Set(events.elements.compactMap(\.transportWantedData).map(\.serverName))
+        XCTAssertEqual(names, [SignallingTests.serverName, tenant])
+
+        let call = try stack.placeCall(account: first, target: "sip:carol@\(SignallingTests.serverName)")
+        defer { call.close() }
+        let invited = await arrived(5) { registrar.requests.contains { $0.message.hasPrefix("INVITE sip:carol@") } }
+        XCTAssertTrue(invited, "the first tenant's call never reached its server")
+        let invite = try XCTUnwrap(registrar.requests.first { $0.message.hasPrefix("INVITE ") })
+        XCTAssertEqual(invite.connection, connection, "the call went over the first tenant's connection")
     }
 
     /// The first `Contact` is written before the server is known, so it moves

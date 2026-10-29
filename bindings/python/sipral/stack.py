@@ -20,7 +20,7 @@ import socket
 import ssl
 import threading
 import time
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from . import events as _events
 from ._sipral_cffi import ffi, lib
@@ -131,28 +131,6 @@ def parse_address(text: str) -> tuple[str, int]:
     return host, int(port)
 
 
-def sip_domain_of(uri: str | None) -> str | None:
-    """The domain a ``sip:`` or ``sips:`` URI names (``sips:example.com:5061``
-    and ``sip:example.com;transport=tls`` both give ``example.com``), the
-    name RFC 5922 Section 7.3 checks a server's certificate against; ``None``
-    for an IP address, which is then the destination itself, or for no such
-    URI."""
-    if uri is None:
-        return None
-    scheme, colon, rest = uri.partition(":")
-    if not colon or scheme.lower() not in ("sip", "sips"):
-        return None
-    host_port = rest.split(";", 1)[0].split("?", 1)[0].rpartition("@")[2]
-    if host_port.startswith("["):
-        return None
-    host = host_port.split(":", 1)[0].rstrip(".")
-    try:
-        ipaddress.ip_address(host)
-        return None
-    except ValueError:
-        return host or None
-
-
 def _is_address(text: str) -> bool:
     """Whether ``text`` is ``host:port`` with an IP address for its host."""
     try:
@@ -202,17 +180,32 @@ class _TurnStream:
         self.lock = threading.Lock()
 
 
+class _StreamTarget(NamedTuple):
+    """Where a connection the stack asked for goes and what it is checked
+    against, as `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named them: one is
+    opened for each, since a certificate valid for one tenant's domain says
+    nothing of another's at the same address."""
+
+    destination: str
+    #: Empty for the address.
+    server_name: str
+    #: Empty for none.
+    pin: str
+
+
 class _SipStream:
     """One TCP connection opened because a request was too large for a
-    datagram (RFC 3261 Section 18.1.1), bound at :attr:`transport`.
+    datagram (RFC 3261 Section 18.1.1), or for an account's own, bound at
+    :attr:`transport` and checked against :attr:`target`.
 
     :attr:`lock` is held for every operation: the opening thread hands it
     over while the poll thread may already be writing.
     """
 
-    def __init__(self, transport: int, destination: str, sock: socket.socket, presented: bool = False) -> None:
+    def __init__(self, transport: int, target: _StreamTarget, sock: socket.socket, presented: bool = False) -> None:
         self.transport = transport
-        self.destination = destination
+        self.target = target
+        self.destination = target.destination
         self.sock = sock
         #: Whether this end offered a client certificate on it.
         self.presented = presented
@@ -488,11 +481,11 @@ class Stack:
         #: unanswered, RFC 5626 Section 4.4.1): nothing goes on it until a
         #: new one is bound.
         self._main_let_go = False
-        #: Open stream connections by transport number, and destinations
-        #: being connected; both under :attr:`_stream_lock`.
+        #: Open stream connections by transport number, and those being
+        #: connected; both under :attr:`_stream_lock`.
         self._stream_lock = threading.Lock()
         self._sip_streams: dict[int, _SipStream] = {}
-        self._streams_opening: set[str] = set()
+        self._streams_opening: set[_StreamTarget] = set()
         self._next_stream = _FIRST_STREAM
 
         #: Media sockets named with `sipral_stack_nat_map`, by `host:port`,
@@ -2348,8 +2341,9 @@ class Stack:
         return parse_address(self.bind_address)[0]
 
     def _act_on_streams_wanted(self) -> None:
-        """Open a connection per newly wanted destination on its own thread,
-        or refuse when ``stream_fallback`` is off.
+        """Open a connection on its own thread per destination and identity
+        asked for with none open or being opened, or refuse when
+        ``stream_fallback`` is off.
 
         Retired connections (RFC 5626 Section 4.4.1) are closed first, or
         they would stand in for the new one the stack asks for."""
@@ -2357,12 +2351,13 @@ class Stack:
         for transport in let_go:
             self._lose_sip_stream(transport, tell=False)
         asked, self._streams_asked = self._streams_asked, []
-        seen: set[str] = set()
+        seen: set[_StreamTarget] = set()
         for wanted in asked:
             destination = wanted["destination"]
-            if destination in seen:
+            target = _StreamTarget(destination, wanted["server_name"], wanted["tls_pin_sha256"])
+            if target in seen:
                 continue
-            seen.add(destination)
+            seen.add(target)
             # An account's own connection (nothing outgrown) always opens.
             opens = self._stream_fallback or (wanted["request_bytes"] == 0 and wanted["limit_bytes"] == 0)
             # a WebSocket is a TCP or TLS connection bound as WS or WSS, whose
@@ -2374,14 +2369,14 @@ class Stack:
                 else lib.SIPRAL_TRANSPORT_TCP
             )
             with self._stream_lock:
-                if destination in self._streams_opening or any(
-                    stream.destination == destination for stream in self._sip_streams.values()
+                if target in self._streams_opening or any(
+                    stream.target == target for stream in self._sip_streams.values()
                 ):
                     continue
                 transport = self._next_stream
                 self._next_stream += 1
                 if opens:
-                    self._streams_opening.add(destination)
+                    self._streams_opening.add(target)
             if not opens:
                 self._say_no_stream(
                     transport,
@@ -2391,43 +2386,39 @@ class Stack:
                 continue
             threading.Thread(
                 target=self._open_sip_stream,
-                args=(transport, destination, over, bound),
+                args=(transport, target, over, bound),
                 name="sipral-stream",
                 daemon=True,
             ).start()
 
-    def _stream_trust(self, destination: str) -> TlsTrust:
-        """The pin of a TLS account on ``destination``, else the stack's trust."""
-        with self._lock:
-            accounts = list(self._accounts)
-        for account in accounts:
-            if (
-                account.stream_protocol in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
-                and account.registrar_address == destination
-                and account.tls_pin is not None
-            ):
-                return TlsTrust.pinned(account.tls_pin)
-        return self._tls_trust
+    def _stream_trust(self, target: _StreamTarget) -> TlsTrust:
+        """The pin the stack asked ``target``'s connection to be held to,
+        else the stack's trust."""
+        return TlsTrust.pinned(target.pin) if target.pin else self._tls_trust
 
-    def _stream_server_name(self, destination: str, host: str) -> str:
-        """The name a TLS connection to ``destination`` checks the
-        certificate against: ``tls_server_name`` when given; else the domain
-        of the ``server_uri`` of a TLS account on ``destination``, the SIP
+    def _stream_server_name(self, target: _StreamTarget, host: str) -> str:
+        """The name a TLS connection checks the certificate against:
+        ``tls_server_name`` when given; else the one the stack asked for,
+        the domain of the ``server_uri`` of the accounts it is for, the SIP
         domain the user configured rather than the host its SRV record named
         (RFC 5922 Section 7.3); else ``host``, the address connected to."""
         if self._given_tls_server_name is not None:
             return self._given_tls_server_name
-        with self._lock:
-            accounts = list(self._accounts)
-        for account in accounts:
-            if (
-                account.stream_protocol in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
-                and account.registrar_address == destination
-            ):
-                domain = sip_domain_of(account.server_uri)
-                if domain is not None:
-                    return domain
-        return host
+        return target.server_name or host
+
+    def _say_opening(self, transport: int, target: _StreamTarget, bound: int) -> None:
+        """`sipral_stack_stream_opening`: the connection about to be made at
+        ``transport`` is checked against ``target``, and once bound carries
+        the accounts of that identity alone."""
+        opening = ffi.new("sipral_stream_opening_t *")
+        opening.size = ffi.sizeof("sipral_stream_opening_t")
+        opening.transport = transport
+        opening.protocol = bound
+        texts = [text.encode("utf-8") for text in target]
+        buffers = [ffi.new("char[]", text) for text in texts]
+        opening.destination, opening.server_name, opening.tls_pin_sha256 = buffers
+        opening.destination_len, opening.server_name_len, opening.tls_pin_sha256_len = (len(text) for text in texts)
+        _retry(lambda: lib.sipral_stack_stream_opening(self.handle, opening), "sipral_stack_stream_opening")
 
     def _stream_client(self, destination: str) -> TlsClientCertificate | None:
         """The client certificate of a TLS account on ``destination``, else the stack's."""
@@ -2443,24 +2434,36 @@ class Stack:
         return self._tls_client
 
     def _open_sip_stream(
-        self, transport: int, destination: str, over: int = lib.SIPRAL_TRANSPORT_TCP, bound: int | None = None
+        self, transport: int, target: _StreamTarget, over: int = lib.SIPRAL_TRANSPORT_TCP, bound: int | None = None
     ) -> None:
-        """Connect to ``destination`` (or ``stream_server`` for TCP) and bind
-        it at ``transport`` as ``bound`` (WS/WSS for a WebSocket); a failure
-        is reported on that number, ending what waited for it."""
+        """Say so (:meth:`_say_opening`), connect to ``target``'s destination
+        (or ``stream_server`` for TCP), checked against it, and bind it at
+        ``transport`` as ``bound`` (WS/WSS for a WebSocket); a failure is
+        reported on that number, ending what waited for it: the accounts of
+        that identity alone."""
+        destination = target.destination
         tls = over == lib.SIPRAL_TRANSPORT_TLS
         client = self._stream_client(destination) if tls else None
         early = b""
         try:
+            self._say_opening(transport, target, over if bound is None else bound)
+        except SipralError as refused:
+            with self._stream_lock:
+                self._streams_opening.discard(target)
+            self._say_no_stream(
+                transport, lib.SIPRAL_TRANSPORT_ERROR_OTHER, f"to {destination} not tried: {refused}", over=over
+            )
+            return
+        try:
             host, port = parse_address(destination) if tls else self._stream_server or parse_address(destination)
             if tls:
-                trust = self._stream_trust(destination)
+                trust = self._stream_trust(target)
                 started = time.monotonic()
                 sock = connect(
                     (host, port),
                     bind_host=None,
                     context=trust.context(),
-                    server_name=self._stream_server_name(destination, host),
+                    server_name=self._stream_server_name(target, host),
                     timeout=_SIGNALLING_PATIENCE,
                     pin=trust.pin,
                     client=client,
@@ -2478,22 +2481,22 @@ class Stack:
             local = format_address(*sock.getsockname()[:2])
         except (OSError, ValueError, ssl.SSLError) as refused:
             with self._stream_lock:
-                self._streams_opening.discard(destination)
+                self._streams_opening.discard(target)
             error, tls_failure, said = classify(refused, client is not None)
             server = format_address(*self._stream_server) if self._stream_server and not tls else destination
-            target = destination if server == destination else f"{server} (for {destination})"
+            reached = destination if server == destination else f"{server} (for {destination})"
             why = f": {said}" if said else ""
             self._say_no_stream(
                 transport,
                 error,
-                f"to {target} {_verdict(error)}{why}",
+                f"to {reached} {_verdict(error)}{why}",
                 over=over,
                 tls=tls_failure if tls else lib.SIPRAL_TLS_FAILURE_NONE,
             )
             return
-        stream = _SipStream(transport, destination, sock, presented=client is not None)
+        stream = _SipStream(transport, target, sock, presented=client is not None)
         with self._stream_lock:
-            self._streams_opening.discard(destination)
+            self._streams_opening.discard(target)
             if self._closed.is_set():
                 sock.close()
                 return

@@ -1986,6 +1986,28 @@ fn signalling(
         });
         return;
     }
+    // one ask for each identity a connection there is to be checked against
+    if let UaEvent::TransportWanted {
+        protocol,
+        destination,
+        request_bytes,
+        limit_bytes,
+    } = said
+    {
+        let outgrown = request_bytes != 0 || limit_bytes != 0;
+        for identity in crate::transport::identities_asked(state, protocol, destination, outgrown) {
+            if let Some((event, text)) = crate::event::transport_wanted(stack, &said, &identity) {
+                raised.push(Delivery {
+                    event,
+                    _raised: None,
+                    _reason: Some(text),
+                    _record: None,
+                    _identity: None,
+                });
+            }
+        }
+        return;
+    }
     // a `SocketAddr` has no bytes to point at
     let destination = crate::event::text_to_point_at(&said);
     // shared so the bytes the translation points into never move

@@ -324,6 +324,70 @@ void main() {
   );
 
   test(
+    'accounts pinning different certificates at one address each get a connection of their own',
+    () async {
+      // dart:io trusts no private authority, so the identities told apart
+      // here are two pins rather than two domains: the second account's
+      // pin is not the server's, and it is refused rather than riding the
+      // first account's connection
+      final directory = await Directory.systemTemp.createTemp('sipral-dart');
+      addTearDown(() => directory.delete(recursive: true));
+      final made = await certificate(directory);
+      if (made == null) {
+        markTestSkipped('no openssl command to make the certificate with');
+        return;
+      }
+      final tls = await StreamRegistrar.open(made.$1);
+      addTearDown(tls.close);
+      final client = await stack();
+      final lost = <SipralStackEvent>[];
+      final watching = client.events.listen((event) {
+        if (event.kind == SipralEventKind.transportFailed) {
+          lost.add(event);
+        }
+      });
+      addTearDown(watching.cancel);
+      final first = client.addAccount(
+        'sip:alice@$serverName',
+        registrarAddress: tls.address,
+        registrar: 'sip:$serverName',
+        tlsPin: made.$2,
+        streamProtocol: SipralTransport.tls,
+      );
+      await first.registered();
+      final connection = tls.registers.single.$1;
+
+      final second = client.addAccount(
+        'sip:bob@$serverName',
+        registrarAddress: tls.address,
+        registrar: 'sip:$serverName',
+        tlsPin: 'SHA256=${'AB' * 32}',
+        streamProtocol: SipralTransport.tls,
+      );
+      second.register();
+      await reach.until(() => lost.isNotEmpty);
+      expect(lost, hasLength(1), reason: 'the second account\'s connection');
+      expect(lost.single.tlsFailure, SipralTlsFailure.untrusted);
+      expect(
+        second.registrationState,
+        isNot(SipralRegistrationState.registered),
+      );
+      expect(tls.registers.any((one) => one.$2.contains('sip:bob@')), isFalse);
+
+      final call = await client.placeCall(first, 'sip:carol@$serverName');
+      addTearDown(call.close);
+      await reach.until(
+        () => tls.requests.any((one) => one.$2.startsWith('INVITE sip:carol@')),
+      );
+      final invite = tls.requests.firstWhere(
+        (one) => one.$2.startsWith('INVITE '),
+      );
+      expect(invite.$1, connection, reason: 'over the first account\'s own');
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
+
+  test(
     'an account over TCP is opened again when its server drops it',
     () async {
       final registrar = await StreamRegistrar.open();

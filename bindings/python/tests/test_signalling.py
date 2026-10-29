@@ -39,7 +39,6 @@ from sipral.enums import (
     Transport,
     TransportError,
 )
-from sipral.stack import sip_domain_of
 
 _SERVER_NAME = "registrar.sipral.test"
 
@@ -72,6 +71,63 @@ def _certificate(
         capture_output=True,
     )
     return (certificate, key) if made.returncode == 0 else None
+
+
+def _constrained_chain(directory: str, name: str, names: str) -> tuple[tuple[str, str], str] | None:
+    """A root, an intermediate it signs that may name ``corp.test`` and the
+    names under it alone, and the registrar's certificate the intermediate
+    signs, ``names`` its ``subjectAltName``, via `openssl`; or `None`. The
+    registrar's certificate file holds the intermediate after it, so the
+    handshake sends both; the root is the file for the stack to trust."""
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+
+    def path(file: str) -> str:
+        return os.path.join(directory, f"{name}-{file}")
+
+    with open(path("extensions.cnf"), "w", encoding="ascii") as extensions:
+        # the key identifiers are what the ssl module's strict checks ask for
+        identified = "subjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\n"
+        extensions.write(
+            "[authority]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n"
+            f"{identified}"
+            "[constrained]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n"
+            f"nameConstraints = critical, permitted;DNS:corp.test\n{identified}"
+            "[server]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\n"
+            f"extendedKeyUsage = serverAuth\nsubjectAltName = {names}\n{identified}"
+        )
+
+    def signed(file: str, subject: str, section: str, by: str) -> bool:
+        requested = subprocess.run(
+            [
+                openssl, "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+                "-subj", subject, "-keyout", path(f"{file}.key"), "-out", path(f"{file}.csr"),
+            ],
+            capture_output=True,
+        )
+        signer = ["-signkey", path(f"{file}.key")] if file == by else ["-CA", path(f"{by}.pem"), "-CAkey", path(f"{by}.key")]
+        made = subprocess.run(
+            [
+                openssl, "x509", "-req", "-in", path(f"{file}.csr"), *signer,
+                "-set_serial", str(int.from_bytes(os.urandom(4), "big") | 1),
+                "-extfile", path("extensions.cnf"), "-extensions", section, "-days", "1", "-out", path(f"{file}.pem"),
+            ],
+            capture_output=True,
+        )
+        return requested.returncode == 0 and made.returncode == 0
+
+    if not (
+        signed("root", "/CN=Sipral Test Root", "authority", "root")
+        and signed("middle", "/CN=Sipral Test Corp", "constrained", "root")
+        and signed("server", "/CN=pbx.corp.test", "server", "middle")
+    ):
+        return None
+    with open(path("chain.pem"), "w", encoding="ascii") as chain:
+        for file in ("server", "middle"):
+            with open(path(f"{file}.pem"), encoding="ascii") as one:
+                chain.write(one.read())
+    return (path("chain.pem"), path("server.key")), path("root.pem")
 
 
 class _Registrar:
@@ -386,6 +442,35 @@ class ATlsRefusalSaysWhy(_OverAConnection):
             )
             self.assertTrue(stack.connected, f"rules {rules} refused a sip: URI naming the domain")
 
+    @unittest.skipUnless(
+        hasattr(ssl.SSLSocket, "get_verified_chain"), "the ssl module hands over no verified chain before 3.13"
+    )
+    async def test_a_sip_uri_the_intermediate_may_not_name_is_refused(self) -> None:
+        # held to the name constraints of the intermediate above it, which
+        # OpenSSL checks a DNS name against and skips for a URI
+        outside = _constrained_chain(self._directory, "outside", f"URI:sip:{_SERVER_NAME}")
+        inside = _constrained_chain(self._directory, "inside", "URI:sip:pbx.corp.test")
+        if outside is None or inside is None:
+            self.skipTest("no openssl command to make the registrar's chain with")
+        refusing = self.registrar(outside[0])
+        allowing = self.registrar(inside[0])
+        for rules in (lib.SIPRAL_DOMAIN_RULES_PLATFORM, lib.SIPRAL_DOMAIN_RULES_RFC5922):
+            stack = self.stack(
+                refusing.address,
+                tls_server_name=_SERVER_NAME,
+                tls_trust=TlsTrust.only_authority(outside[1]),
+                tls_domain_rules=rules,
+            )
+            event = await self.refused(stack)
+            self.assertEqual(event.fields["tls"], TlsFailure.NAME_MISMATCH, f"rules {rules}: {event.fields}")
+            stack = self.stack(
+                allowing.address,
+                tls_server_name="pbx.corp.test",
+                tls_trust=TlsTrust.only_authority(inside[1]),
+                tls_domain_rules=rules,
+            )
+            self.assertTrue(stack.connected, f"rules {rules} refused a sip: URI inside the intermediate's constraint")
+
     async def test_a_wildcard_is_trusted_unless_rfc_5922_alone_is_asked(self) -> None:
         wildcard = _certificate(self._directory, "wildcard", names="DNS:*.sipral.test")
         if wildcard is None:
@@ -435,9 +520,61 @@ class ATlsRefusalSaysWhy(_OverAConnection):
         account.register()
         await self.registered(stack)
         self.assertEqual(account.registrar_address, registrar.address)
-        self.assertEqual(sip_domain_of("sips:alice@pbx.example.com:5061;transport=tls"), "pbx.example.com")
-        self.assertIsNone(sip_domain_of("sips:198.51.100.7:5061"))
-        self.assertIsNone(sip_domain_of("sip:[2001:db8::7]:5061"))
+
+    async def test_accounts_of_two_domains_at_one_address_are_each_held_to_their_own_domain(self) -> None:
+        # the server's certificate names the first domain alone, and SRV puts
+        # both at its address: each account's connection is checked against
+        # its own domain, rather than the second riding the first's
+        tenant = "tenant.sipral.test"
+        certificate = self.good()
+        registrar = self.registrar(certificate)
+        port = registrar.address.rpartition(":")[2]
+
+        def resolver(name: str, record: int) -> tuple[int, list[str]]:
+            if record == DnsRecordType.SRV and name in (f"_sips._tcp.{_SERVER_NAME}", f"_sips._tcp.{tenant}"):
+                return DnsAnswer.RECORDS, [f"300 10 60 {port} host.sipral.test"]
+            if record == DnsRecordType.A and name == "host.sipral.test":
+                return DnsAnswer.RECORDS, ["300 127.0.0.1"]
+            return DnsAnswer.NOTHING, []
+
+        stack = Stack(
+            loop=asyncio.get_running_loop(),
+            audio=AudioMode.APPLICATION,
+            bind_host="127.0.0.1",
+            tls_trust=TlsTrust.only_authority(certificate[0]),
+            resolver=resolver,
+        )
+        self.addAsyncCleanup(asyncio.to_thread, stack.close)
+        first = stack.add_account(
+            f"sip:alice@{_SERVER_NAME}",
+            registrar=f"sips:{_SERVER_NAME}",
+            server_uri=f"sips:{_SERVER_NAME}",
+            stream_protocol=Transport.TLS,
+        )
+        first.register()
+        await self.registered(stack)
+        [(connection, _)] = registrar.registers()
+
+        second = stack.add_account(
+            f"sip:bob@{tenant}",
+            registrar=f"sips:{tenant}",
+            server_uri=f"sips:{tenant}",
+            stream_protocol=Transport.TLS,
+        )
+        second.register()
+        refused = await self.next_event(stack, EventKind.TRANSPORT_FAILED, seconds=10)
+        self.assertEqual(refused.fields["tls"], TlsFailure.NAME_MISMATCH, refused.fields)
+        self.assertEqual(second.registrar_address, registrar.address, "located at the same address")
+        self.assertNotEqual(second.registration_state, RegistrationState.REGISTERED)
+        self.assertFalse(any("sip:bob@" in message for _, message in registrar.registers()))
+        self.assertEqual(registrar.connections, 2, "a connection for each domain")
+
+        call = stack.place_call(first, f"sip:carol@{_SERVER_NAME}")
+        self.addAsyncCleanup(asyncio.to_thread, call.hangup)
+        await self.until(lambda: any(m.startswith("INVITE sip:carol@") for _, m in registrar.requests), 10)
+        invites = [(on, m) for on, m in registrar.requests if m.startswith("INVITE ")]
+        self.assertTrue(invites, "the first tenant's call never reached its server")
+        self.assertEqual(invites[0][0], connection, "the call went over the first tenant's connection")
 
     async def test_nobody_listening_is_a_refused_connection_and_no_tls_reason(self) -> None:
         nobody = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

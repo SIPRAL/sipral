@@ -35,16 +35,110 @@
 //! that protocol — whenever one is bound, so a connection the application
 //! opened before the account was added is used as it stands.
 //!
+//! **Whose it is.** One TLS connection is checked against one name and one
+//! pin, a [`StreamIdentity`], so accounts whose server is at one address
+//! share a connection only when their identities are the same: a
+//! multi-tenant PBX serves a SIP domain per tenant from one address, and a
+//! certificate valid for one tenant's domain says nothing of another's. A
+//! layer that opens connections asks which identities wait for one there
+//! ([`UserAgent::stream_identities_wanted`]), opens one for each, and says
+//! which it was checked against before binding it
+//! ([`UserAgent::stream_opening`]); that connection then carries the
+//! accounts of that identity alone, and an account of another asks for its
+//! own, even with that one open. A connection bound with nothing said of it
+//! is any account's, as the application checked it.
+//!
 //! [`Account::on_stream`]: crate::Account::on_stream
 
+use std::net::SocketAddr;
 use std::time::Instant;
 
-use sipral_core::endpoint::TransportId;
+use sipral_core::endpoint::{TransportId, TransportProtocol};
+use sipral_core::msg::HostRef;
+use sipral_core::pin::CertificatePin;
 
-use crate::account::{AccountId, NO_FLOW_YET};
+use crate::account::{Account, AccountId, NO_FLOW_YET};
 use crate::agent::UserAgent;
 use crate::event::{RegistrationState, UaEvent};
 use crate::oversize::STREAM_WAIT;
+
+/// What a TLS connection to an account's server is checked against: the
+/// name the server's certificate must carry, and the one certificate
+/// trusted in place of a chain.
+///
+/// An account's is the host of its [`Account::server`] when that is a name
+/// (RFC 5922 §7.3: the domain the user configured, not the host SRV turned
+/// it into), else none, which checks the address; and its
+/// [`Account::pinned_certificate`]. On a protocol without TLS every account
+/// has the same one, nothing.
+///
+/// [`Account::server`]: crate::Account::server
+/// [`Account::pinned_certificate`]: crate::Account::pinned_certificate
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct StreamIdentity {
+    server_name: Option<Box<str>>,
+    pin: Option<CertificatePin>,
+}
+
+impl StreamIdentity {
+    /// Checked against `server_name` (`None`: the address), pinned to `pin`
+    /// when there is one. Names compare without regard to case.
+    #[must_use]
+    pub fn new(server_name: Option<&str>, pin: Option<CertificatePin>) -> Self {
+        Self {
+            server_name: server_name.map(|name| name.to_ascii_lowercase().into_boxed_str()),
+            pin,
+        }
+    }
+
+    /// The name the server's certificate must carry, lowercase; `None`
+    /// checks the address.
+    #[must_use]
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name.as_deref()
+    }
+
+    /// The one certificate trusted, if any.
+    #[must_use]
+    pub const fn pin(&self) -> Option<&CertificatePin> {
+        self.pin.as_ref()
+    }
+
+    /// `account`'s, on its connection of `protocol`.
+    fn of(account: &Account, protocol: TransportProtocol) -> Self {
+        if !protocol.is_secure() {
+            return Self::default();
+        }
+        let name = account
+            .server
+            .as_ref()
+            .and_then(crate::Uri::sip)
+            .and_then(|sip| match sip.host {
+                HostRef::Name(name) => Some(name),
+                HostRef::Ipv4(_) | HostRef::Ipv6(_) => None,
+            });
+        Self::new(name, account.tls_pin)
+    }
+}
+
+/// A connection said to be checked against one identity
+/// ([`UserAgent::stream_opening`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Checked {
+    protocol: TransportProtocol,
+    destination: SocketAddr,
+    identity: StreamIdentity,
+}
+
+impl Checked {
+    /// Whether it is `account`'s kind of connection: of its protocol, to its
+    /// server, checked against its identity.
+    fn serves(&self, account: &Account) -> bool {
+        account.own_stream == Some(self.protocol)
+            && account.remote == self.destination
+            && StreamIdentity::of(account, self.protocol) == self.identity
+    }
+}
 
 /// Whether an account's requests can go now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,7 +169,7 @@ impl UserAgent {
             return Flow::Ready;
         }
         let server = config.remote;
-        if let Some(found) = self.endpoint.transport_to(protocol, server) {
+        if let Some(found) = self.flow_for(account, protocol, server) {
             if let Some(config) = self.accounts.get_mut(&account) {
                 config.transport = found;
             }
@@ -127,7 +221,7 @@ impl UserAgent {
     /// does an account that never registers, which asks again when its wait
     /// runs out.
     pub fn flow_unavailable(&mut self, now: Instant) {
-        let waiting: Vec<(AccountId, std::net::SocketAddr)> = self
+        let waiting: Vec<(AccountId, SocketAddr)> = self
             .flows_wanted
             .keys()
             .filter_map(|id| self.accounts.get(id).map(|config| (*id, config.remote)))
@@ -138,8 +232,132 @@ impl UserAgent {
         if waiting.iter().any(|(_, remote)| *remote != server) {
             return;
         }
+        self.give_up_flows(waiting.into_iter().map(|(account, _)| account), now);
+    }
+
+    /// The connection being opened under `transport` could not be opened.
+    ///
+    /// One said to be checked against an identity
+    /// ([`UserAgent::stream_opening`]) was the accounts' of that identity
+    /// waiting for a connection there, and only theirs go on as
+    /// [`UserAgent::flow_unavailable`] has them go on: an account of another
+    /// identity at the same server waits for its own. For a transport this
+    /// agent was told nothing of, it is [`UserAgent::flow_unavailable`].
+    pub fn flow_unavailable_on(&mut self, transport: TransportId, now: Instant) {
+        let Some(checked) = self.streams_checked.remove(&transport) else {
+            self.flow_unavailable(now);
+            return;
+        };
+        let theirs: Vec<AccountId> = self
+            .flows_wanted
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.accounts
+                    .get(id)
+                    .is_some_and(|config| checked.serves(config))
+            })
+            .collect();
+        self.give_up_flows(theirs.into_iter(), now);
+    }
+
+    /// The identities the accounts waiting for a connection of `protocol` to
+    /// `destination` are to be checked against, each once, in the order they
+    /// asked: one connection is opened for each, since one connection is
+    /// checked against one name and one pin. Whether one is already on its
+    /// way is the caller's to know.
+    #[must_use]
+    pub fn stream_identities_wanted(
+        &self,
+        protocol: TransportProtocol,
+        destination: SocketAddr,
+    ) -> Vec<StreamIdentity> {
+        let mut waiting: Vec<(Instant, AccountId, StreamIdentity)> = self
+            .flows_wanted
+            .iter()
+            .filter_map(|(id, asked)| {
+                let config = self.accounts.get(id)?;
+                (config.own_stream == Some(protocol) && config.remote == destination)
+                    .then(|| (*asked, *id, StreamIdentity::of(config, protocol)))
+            })
+            .collect();
+        waiting.sort_by_key(|(asked, id, _)| (*asked, *id));
+        let mut identities: Vec<StreamIdentity> = Vec::new();
+        for (_, _, identity) in waiting {
+            if !identities.contains(&identity) {
+                identities.push(identity);
+            }
+        }
+        identities
+    }
+
+    /// A connection of `protocol` to `destination` is being opened, to be
+    /// bound as `transport`, and checked against `identity`. Said before it
+    /// is bound: once bound it carries the accounts of that identity alone,
+    /// and an account of another asks for a connection of its own. A
+    /// connection bound with nothing said of it is any account's, as the
+    /// application checked it.
+    ///
+    /// Forgotten when it closes or fails, or when another is said to be
+    /// opened for the same identity there before this one was bound.
+    pub fn stream_opening(
+        &mut self,
+        transport: TransportId,
+        protocol: TransportProtocol,
+        destination: SocketAddr,
+        identity: StreamIdentity,
+    ) {
+        self.streams_checked.retain(|id, checked| {
+            self.endpoint.bound_transport(*id).is_some()
+                || checked.protocol != protocol
+                || checked.destination != destination
+                || checked.identity != identity
+        });
+        self.streams_checked.insert(
+            transport,
+            Checked {
+                protocol,
+                destination,
+                identity,
+            },
+        );
+    }
+
+    /// The bound transport `account`'s requests go on, to `server` over
+    /// `protocol`: one opened for its identity, else one bound with nothing
+    /// said of it, never one opened for another identity.
+    fn flow_for(
+        &self,
+        account: AccountId,
+        protocol: TransportProtocol,
+        server: SocketAddr,
+    ) -> Option<TransportId> {
+        let config = self.accounts.get(&account)?;
+        let opened = self
+            .streams_checked
+            .iter()
+            .filter(|(id, checked)| {
+                checked.serves(config)
+                    && self
+                        .endpoint
+                        .bound_transport(**id)
+                        .is_some_and(|(spoken, _)| spoken == protocol)
+            })
+            .map(|(id, _)| *id)
+            .min();
+        opened.or_else(|| {
+            self.endpoint
+                .transport_to(protocol, server)
+                .filter(|found| !self.streams_checked.contains_key(found))
+        })
+    }
+
+    /// Each of `accounts` whose REGISTER is held for its connection goes on
+    /// without it: to the next address its server's lookup gave, or failed
+    /// as unreachable.
+    fn give_up_flows(&mut self, accounts: impl Iterator<Item = AccountId>, now: Instant) {
         let error = crate::UaError::Send(sipral_core::endpoint::SendError::NeedsStreamTransport);
-        for (account, _) in waiting {
+        for account in accounts {
             let held = self.registrations.get(&account).is_some_and(|reg| {
                 reg.transaction.is_none()
                     && (reg.unregistering
@@ -231,7 +449,7 @@ impl UserAgent {
         transport: TransportId,
         moved: bool,
     ) {
-        let Some(config) = self.accounts.get_mut(&account) else {
+        let Some(config) = self.accounts.get(&account) else {
             return;
         };
         let Some(protocol) = config.own_stream else {
@@ -244,11 +462,13 @@ impl UserAgent {
         if given {
             return;
         }
-        config.transport = self
-            .endpoint
-            .transport_to(protocol, config.remote)
+        let kept = self
+            .flow_for(account, protocol, config.remote)
             .unwrap_or(NO_FLOW_YET);
-        let none = config.transport == NO_FLOW_YET;
+        if let Some(config) = self.accounts.get_mut(&account) {
+            config.transport = kept;
+        }
+        let none = kept == NO_FLOW_YET;
         let on_its_way = !moved && self.flows_wanted.contains_key(&account);
         if none && !on_its_way {
             self.flows_wanted.remove(&account);
@@ -260,6 +480,7 @@ impl UserAgent {
     /// for another — at once when it never registers, and with its next
     /// REGISTER otherwise.
     pub(crate) fn flow_lost(&mut self, transport: TransportId) {
+        self.streams_checked.remove(&transport);
         for (account, config) in &self.accounts {
             if config.own_stream.is_some() && config.transport == transport {
                 self.flows_wanted.remove(account);
@@ -327,6 +548,7 @@ mod tests {
 
     use sipral_core::endpoint::{Input, TransportErrorKind, TransportId, TransportProtocol};
     use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, parse};
+    use sipral_core::pin::CertificatePin;
 
     use crate::account::{Account, AccountId};
     use crate::agent::UserAgent;
@@ -925,6 +1147,109 @@ mod tests {
         agent.register(on_tls, t0).unwrap();
         let (_, events) = drain(&mut agent);
         assert_eq!(wanted(&events), [(TransportProtocol::Tls, elsewhere)]);
+    }
+
+    /// A line on TLS to the second PBX for `user`, pinned to `pin`.
+    fn pinned_line(user: &str, pin: u8) -> Account {
+        Account::new(
+            uri(&format!("sip:{user}@second.example.com")),
+            uri("sips:second.example.com"),
+            uri(&format!("sips:{user}@192.0.2.1:50123;transport=tls")),
+            UDP,
+            second(),
+        )
+        .on_stream(TransportProtocol::Tls)
+        .tls_pin(CertificatePin::of(&[pin; 16]))
+    }
+
+    /// Open, as a networking layer would, the connection each identity
+    /// waiting at the second PBX asks for, numbered from `first`.
+    fn open_asked(agent: &mut UserAgent, first: u32, now: Instant) -> usize {
+        let identities = agent.stream_identities_wanted(TransportProtocol::Tls, second());
+        for (at, identity) in (first..).zip(&identities) {
+            agent.stream_opening(
+                TransportId(at),
+                TransportProtocol::Tls,
+                second(),
+                identity.clone(),
+            );
+            agent
+                .receive(
+                    Input::TransportBound {
+                        transport: TransportId(at),
+                        protocol: TransportProtocol::Tls,
+                        local: tls_local(),
+                        remote: Some(second()),
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        identities.len()
+    }
+
+    fn registers_on(sent: &[Sent]) -> Vec<TransportId> {
+        sent.iter()
+            .filter(|one| one.bytes.starts_with(b"REGISTER "))
+            .map(|one| one.transport)
+            .collect()
+    }
+
+    #[test]
+    fn lines_pinning_different_certificates_at_one_address_each_ask_for_a_connection() {
+        let t0 = Instant::now();
+        let mut agent = bound_udp(47, t0);
+        let alice = agent.add_account(pinned_line("alice", 1));
+        let bob = agent.add_account(pinned_line("bob", 2));
+        agent.register(alice, t0).unwrap();
+        let (_, events) = drain(&mut agent);
+        assert_eq!(wanted(&events), [(TransportProtocol::Tls, second())]);
+        assert_eq!(open_asked(&mut agent, 20, t0), 1);
+        let (sent, _) = drain(&mut agent);
+        assert_eq!(registers_on(&sent), [TransportId(20)]);
+
+        agent.register(bob, t0).unwrap();
+        let (sent, events) = drain(&mut agent);
+        assert_eq!(
+            wanted(&events),
+            [(TransportProtocol::Tls, second())],
+            "a connection pinned to another certificate is not taken over"
+        );
+        assert!(registers_on(&sent).is_empty());
+        assert_eq!(open_asked(&mut agent, 21, t0), 1);
+        let (sent, _) = drain(&mut agent);
+        assert_eq!(registers_on(&sent), [TransportId(21)]);
+    }
+
+    #[test]
+    fn lines_pinning_the_same_certificate_share_a_connection() {
+        let t0 = Instant::now();
+        let mut agent = bound_udp(48, t0);
+        let alice = agent.add_account(pinned_line("alice", 1));
+        let bob = agent.add_account(pinned_line("bob", 1));
+        agent.register(alice, t0).unwrap();
+        let _ = drain(&mut agent);
+        assert_eq!(open_asked(&mut agent, 20, t0), 1);
+        let _ = drain(&mut agent);
+        agent.register(bob, t0).unwrap();
+        let (sent, events) = drain(&mut agent);
+        assert!(wanted(&events).is_empty(), "{events:?}");
+        assert_eq!(registers_on(&sent), [TransportId(20)]);
+    }
+
+    #[test]
+    fn a_connection_bound_with_nothing_said_of_it_is_any_accounts() {
+        // what the application checked it against is the application's
+        let t0 = Instant::now();
+        let mut agent = bound_udp(49, t0);
+        let alice = agent.add_account(pinned_line("alice", 1));
+        let bob = agent.add_account(pinned_line("bob", 2));
+        bind_stream(&mut agent, TransportProtocol::Tls, t0);
+        agent.register(alice, t0).unwrap();
+        agent.register(bob, t0).unwrap();
+        let (sent, events) = drain(&mut agent);
+        assert!(wanted(&events).is_empty(), "{events:?}");
+        assert_eq!(registers_on(&sent), [TLS, TLS]);
     }
 
     #[test]

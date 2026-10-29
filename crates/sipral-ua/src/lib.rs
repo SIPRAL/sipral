@@ -143,6 +143,7 @@ pub use dialoginfo::{
 pub use dtmf::{DtmfError, DtmfInfo, DtmfInfoForm, InfoRefusal};
 pub use error::UaError;
 pub use event::{ChallengeRefusal, RegistrationFailure, RegistrationState, UaEvent};
+pub use flow::StreamIdentity;
 pub use headers::{HeaderRefused, HeadersFor};
 pub use identity::{
     CallerIdentity, Diversion, HistoryEntry, Party, Privacy, RemoteParty, Retarget, Verstat,

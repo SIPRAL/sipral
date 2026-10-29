@@ -76,7 +76,7 @@ import {
   sipral_message_hook_callback_t,
   sipral_screen_callback_t,
 } from './sipral_abi.js';
-import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream, sipDomainOf } from './tls.js';
+import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream } from './tls.js';
 import type { EnginePacket } from './transmit-worker.js';
 
 /** How one connection attempt, the TLS handshake included, may take. */
@@ -491,9 +491,26 @@ const OWN_STREAMS: ReadonlyMap<number, string> = new Map([
   [SipralTransport.Wss, 'wss'],
 ]);
 
+/**
+ * Where a connection `TransportWanted` asked for goes and what it is checked
+ * against: the server's name and pin, each empty for none. One connection is
+ * opened for each, since a certificate valid for one tenant's domain says
+ * nothing of another's at the same address.
+ */
+interface StreamTarget {
+  readonly destination: string;
+  readonly serverName: string;
+  readonly pin: string;
+}
+
+/** The one key a {@link StreamTarget} is known by. */
+function keyOf(target: StreamTarget): string {
+  return JSON.stringify([target.destination, target.serverName, target.pin]);
+}
+
 /** A connection this class opened for `TransportWanted`, bound at its own transport number. */
 interface SipStream {
-  readonly destination: string;
+  readonly target: StreamTarget;
   readonly socket: StreamSocket;
 }
 
@@ -607,6 +624,7 @@ export class Stack extends EventEmitter<StackEvents> {
   private readonly streamFallback: boolean;
   private readonly streamServer: { host: string; port: number } | null;
   private readonly sipStreams = new Map<number, SipStream>();
+  /** Those being opened, by {@link keyOf}. */
   private readonly streamsOpening = new Set<string>();
   private nextStream = FIRST_STREAM;
   private readonly resolver: Resolver;
@@ -2542,16 +2560,26 @@ export class Stack extends EventEmitter<StackEvents> {
 
   // -- RFC 3261 §18.1.1: a request too large for a datagram -------------------
 
-  /** Answer `TransportWanted`: a connection to its destination, or the word that none is coming. */
+  /**
+   * Answer `TransportWanted`: a connection to its destination checked
+   * against the identity it names, unless one is open or being opened for
+   * that identity there, or the word that none is coming.
+   */
   private streamWanted(fields: Readonly<Record<string, unknown>>): void {
-    const destination = (fields.destination as string | null) ?? '';
+    const target: StreamTarget = {
+      destination: (fields.destination as string | null) ?? '',
+      serverName: (fields.serverName as string | null) ?? '',
+      pin: (fields.tlsPinSha256 as string | null) ?? '',
+    };
+    const destination = target.destination;
+    const key = keyOf(target);
     // an account on a connection of its own asks with nothing outgrown;
     // that one is opened whatever streamFallback says
     const opens = this.streamFallback || (fields.requestBytes === 0 && fields.limitBytes === 0);
     // a WebSocket goes over TCP or TLS, bound as WS or WSS so the stack runs it
     const bound = OWN_STREAMS.has(fields.protocol as number) ? (fields.protocol as number) : SipralTransport.Tcp;
     const over = bound === SipralTransport.Tls || bound === SipralTransport.Wss ? SipralTransport.Tls : SipralTransport.Tcp;
-    if (this.streamsOpening.has(destination) || [...this.sipStreams.values()].some((stream) => stream.destination === destination)) {
+    if (this.streamsOpening.has(key) || [...this.sipStreams.values()].some((stream) => keyOf(stream.target) === key)) {
       return;
     }
     const transport = this.nextStream++;
@@ -2559,38 +2587,46 @@ export class Stack extends EventEmitter<StackEvents> {
       this.sayNoStream(transport, SipralTransportError.ConnectionRefused, `to ${destination} not tried: streamFallback is off`, over);
       return;
     }
-    this.streamsOpening.add(destination);
-    void this.openSipStream(transport, destination, over, bound);
+    this.streamsOpening.add(key);
+    void this.openSipStream(transport, target, over, bound);
   }
 
   /**
-   * The name a TLS connection to `destination` checks the certificate
-   * against: `tlsServerName` when given; else the domain of the `serverUri`
-   * of an account on its own connection there, the SIP domain the user
+   * The name a TLS connection checks the certificate against:
+   * `tlsServerName` when given; else the one the stack asked for, the domain
+   * of the `serverUri` of the accounts it is for, the SIP domain the user
    * configured rather than the host its SRV record named (RFC 5922 §7.3);
    * else `host`, the address connected to.
    */
-  private streamServerName(destination: string, host: string): string {
-    if (this.givenServerName !== undefined) {
-      return this.givenServerName;
-    }
-    for (const account of this.accounts.values()) {
-      const domain = account.overTls && account.registrarAddress === destination ? sipDomainOf(account.serverUri) : null;
-      if (domain !== null) {
-        return domain;
-      }
-    }
-    return host;
+  private streamServerName(target: StreamTarget, host: string): string {
+    return this.givenServerName ?? (target.serverName !== '' ? target.serverName : host);
   }
 
-  /** What a TLS connection to `destination` trusts: the pin of an account on it, else the stack's trust. */
-  private streamTrust(destination: string): TlsTrust {
-    for (const account of this.accounts.values()) {
-      if (account.overTls && account.registrarAddress === destination && account.tlsPin !== null) {
-        return TlsTrust.pinned(account.tlsPin);
-      }
-    }
-    return this.tlsTrust;
+  /** What a TLS connection trusts: the pin the stack asked it to be held to, else the stack's trust. */
+  private streamTrust(target: StreamTarget): TlsTrust {
+    return target.pin !== '' ? TlsTrust.pinned(target.pin) : this.tlsTrust;
+  }
+
+  /**
+   * `sipral_stack_stream_opening`: the connection about to be made at
+   * `transport` is checked against `target`, and once bound carries the
+   * accounts of that identity alone.
+   */
+  private sayOpening(transport: number, target: StreamTarget, bound: number): void {
+    const [destination, destinationLength] = text(target.destination);
+    const [name, nameLength] = text(target.serverName);
+    const [pin, pinLength] = text(target.pin);
+    const opening = record('sipral_stream_opening_t', {
+      transport,
+      protocol: bound,
+      destination,
+      destination_len: destinationLength,
+      server_name: name,
+      server_name_len: nameLength,
+      tls_pin_sha256: pin,
+      tls_pin_sha256_len: pinLength,
+    });
+    checkNow(this.sipral, 'sipral_stack_stream_opening', () => this.sipral.sipral_stack_stream_opening(this.stackHandle, opening));
   }
 
   /** What a TLS connection to `destination` presents: the certificate of an account on it, else the stack's. */
@@ -2603,22 +2639,37 @@ export class Stack extends EventEmitter<StackEvents> {
     return this.clientCertificate;
   }
 
-  private async openSipStream(transport: number, destination: string, over: number, bound: number = over): Promise<void> {
+  /**
+   * Say so ({@link sayOpening}), connect to the destination of `asked` (or
+   * the stream server, for TCP), checked against it, bind it at `transport`
+   * as `bound` (WS/WSS for a WebSocket), and read it. A failure is reported
+   * on that number, which moves on the accounts of that identity alone.
+   */
+  private async openSipStream(transport: number, asked: StreamTarget, over: number, bound: number = over): Promise<void> {
+    const destination = asked.destination;
     const tls = over === SipralTransport.Tls;
     const target = tls || this.streamServer === null ? split(destination) : this.streamServer;
     const certificate = tls ? this.streamCertificate(destination) : null;
+    try {
+      this.sayOpening(transport, asked, bound);
+    } catch (error) {
+      this.streamsOpening.delete(keyOf(asked));
+      this.sayNoStream(transport, SipralTransportError.Other, `to ${destination} not tried: ${String(error)}`, over);
+      this.poll();
+      return;
+    }
     let socket: StreamSocket;
     try {
       socket = await openStream(target.host, target.port, {
-        trust: tls ? this.streamTrust(destination) : null,
-        serverName: this.streamServerName(destination, target.host),
+        trust: tls ? this.streamTrust(asked) : null,
+        serverName: this.streamServerName(asked, target.host),
         clientCertificate: certificate,
         timeoutMs: STREAM_PATIENCE_MS,
         sipral: this.sipral,
         domainRules: this.tlsDomainRules,
       });
     } catch (error) {
-      this.streamsOpening.delete(destination);
+      this.streamsOpening.delete(keyOf(asked));
       const refusal = classify(error, certificate !== null);
       const server = formatAddress(target.host, target.port);
       const named = server === destination ? destination : `${server} (for ${destination})`;
@@ -2636,12 +2687,12 @@ export class Stack extends EventEmitter<StackEvents> {
       this.poll();
       return;
     }
-    this.streamsOpening.delete(destination);
+    this.streamsOpening.delete(keyOf(asked));
     if (this.closed) {
       socket.destroy();
       return;
     }
-    this.sipStreams.set(transport, { destination, socket });
+    this.sipStreams.set(transport, { target: asked, socket });
     const [near, nearLength] = text(formatAddress(socket.localAddress ?? '127.0.0.1', socket.localPort ?? 0));
     const [far, farLength] = text(destination);
     try {

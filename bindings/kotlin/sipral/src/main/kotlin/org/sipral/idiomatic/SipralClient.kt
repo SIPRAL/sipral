@@ -58,6 +58,7 @@ import org.sipral.SipralSrtp
 import org.sipral.SipralStackConfig
 import org.sipral.SipralStirConfig
 import org.sipral.SipralStatus
+import org.sipral.SipralStreamOpening
 import org.sipral.SipralToggle
 import org.sipral.SipralTransport
 import org.sipral.SipralTransportFailure
@@ -1607,11 +1608,18 @@ class SipralClient private constructor(
      * ([open]'s `streamServer`). */
     private var streamServer: String? = null
 
-    /** TCP connections opened for oversized requests, by transport id, with
-     * their destination; destinations being connected; and what
-     * `TRANSPORT_WANTED` asked during the last poll, acted on after it. */
-    private val streamLinks = ConcurrentHashMap<Long, Pair<String, Socket>>()
-    private val streamsOpening: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** Where a connection goes and what it is checked against, as
+     * `TRANSPORT_WANTED` named them: the server's name (empty for the
+     * address) and pin (empty for none). One connection is opened for each,
+     * since a certificate valid for one tenant's domain says nothing of
+     * another's at the same address. */
+    private data class StreamIdentity(val destination: String, val serverName: String, val pin: String)
+
+    /** Connections opened for the stack, by transport id, with what they are
+     * checked against; those being connected; and what `TRANSPORT_WANTED`
+     * asked during the last poll, acted on after it. */
+    private val streamLinks = ConcurrentHashMap<Long, Pair<StreamIdentity, Socket>>()
+    private val streamsOpening: MutableSet<StreamIdentity> = ConcurrentHashMap.newKeySet()
     private val streamsAsked = java.util.concurrent.ConcurrentLinkedQueue<SipralTransportWantedEvent>()
 
     /** Trust and server name for an account's own TLS connection when the
@@ -1643,19 +1651,21 @@ class SipralClient private constructor(
     }
 
     /** Answer `TRANSPORT_WANTED` from the last poll: connect to each
-     * destination not already connected or connecting, on its own thread, or,
-     * with `streamFallback` off, say none is coming. Retired connections are
-     * closed first. */
+     * destination, once for each identity asked for there, unless a
+     * connection checked against it is open or being made, on its own
+     * thread, or, with `streamFallback` off, say none is coming. Retired
+     * connections are closed first. */
     private fun actOnStreamsWanted() {
         while (true) {
             val letGo = streamsLetGo.poll() ?: break
             loseStreamLink(letGo, tell = false)
         }
-        val seen = HashSet<String>()
+        val seen = HashSet<StreamIdentity>()
         while (true) {
             val wanted = streamsAsked.poll() ?: return
             val destination = wanted.destination ?: continue
-            if (!seen.add(destination) || streamLinks.values.any { it.first == destination }) {
+            val identity = StreamIdentity(destination, wanted.serverName.orEmpty(), wanted.tlsPinSha256.orEmpty())
+            if (!seen.add(identity) || streamLinks.values.any { it.first == identity }) {
                 continue
             }
             // an account on its own connection asks with nothing outgrown, and is
@@ -1678,11 +1688,11 @@ class SipralClient private constructor(
                 )
                 continue
             }
-            if (!streamsOpening.add(destination)) {
+            if (!streamsOpening.add(identity)) {
                 continue
             }
             val id = nextLink.getAndIncrement()
-            Thread({ openStreamLink(id, destination, over, bound) }, "sipral-stream-$id").apply {
+            Thread({ openStreamLink(id, identity, over, bound) }, "sipral-stream-$id").apply {
                 isDaemon = true
                 start()
             }
@@ -1698,12 +1708,10 @@ class SipralClient private constructor(
         }
     }
 
-    /** What a TLS connection to [destination] trusts: the pin of an account on
-     * its own connection there, else the client's `tlsTrust`. */
-    private fun streamTrust(destination: String): SipralTlsTrust {
-        val pinned = secureAccountsAt(destination).firstOrNull { it.tlsPin != null }
-        return pinned?.tlsPin?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
-    }
+    /** What a TLS connection checked against [identity] trusts: its pin,
+     * else the client's `tlsTrust`. */
+    private fun streamTrust(identity: StreamIdentity): SipralTlsTrust =
+        identity.pin.takeIf { it.isNotEmpty() }?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
 
     /** What a TLS connection to [destination] presents: the certificate of
      * an account on its own connection there, else the client's. */
@@ -1712,35 +1720,57 @@ class SipralClient private constructor(
         return named?.clientCertificate ?: streamClientCertificate
     }
 
-    /** The name a TLS connection to [destination] checks the certificate
-     * against: [open]'s `tlsServerName` when given; else the domain of the
-     * `serverUri` of an account located there, the SIP domain the user
-     * configured rather than the host its SRV record named (RFC 5922 §7.3),
-     * often an address; else the host of [destination]. */
-    private fun streamServerName(destination: String): String =
+    /** The name a TLS connection checked against [identity] checks the
+     * certificate against: [open]'s `tlsServerName` when given; else the
+     * name the stack asked for, the domain of the `serverUri` of the
+     * accounts it is for, the SIP domain the user configured rather than the
+     * host its SRV record named (RFC 5922 §7.3), often an address; else the
+     * host of its destination. */
+    private fun streamServerName(identity: StreamIdentity): String =
         givenTlsServerName
-            ?: secureAccountsAt(destination).firstNotNullOfOrNull { account -> account.serverUri?.let(::sipDomainOf) }
-            ?: destination.substringBeforeLast(':')
+            ?: identity.serverName.takeIf { it.isNotEmpty() }
+            ?: identity.destination.substringBeforeLast(':')
 
-    /** Connect over TCP or TLS to [destination] (or `streamServer` for TCP),
-     * bind it under [id] as [bound] (WS/WSS for a WebSocket) and read it
-     * until it closes. A failed connection is reported under the same id,
-     * which ends whatever waited for it. */
+    /** Connect over TCP or TLS to the destination of [identity] (or
+     * `streamServer` for TCP), checked against it, after saying so with
+     * `sipral_stack_stream_opening`, bind it under [id] as [bound] (WS/WSS
+     * for a WebSocket) and read it until it closes. A failed connection is
+     * reported under the same id, which ends whatever waited for it: the
+     * accounts of that identity alone. */
     private fun openStreamLink(
         id: Long,
-        destination: String,
+        identity: StreamIdentity,
         over: SipralTransport = SipralTransport.TCP,
         bound: SipralTransport = over,
     ) {
+        val destination = identity.destination
         val tls = over == SipralTransport.TLS
         val server = if (tls) destination else streamServer ?: destination
+        try {
+            retryBusy {
+                Sipral.stackStreamOpening(
+                    handle,
+                    SipralStreamOpening(
+                        transport = id,
+                        protocol = bound.value.toLong(),
+                        destination = destination,
+                        serverName = identity.serverName,
+                        tlsPinSha256 = identity.pin,
+                    ),
+                )
+            }
+        } catch (refused: SipralException) {
+            streamsOpening.remove(identity)
+            sayNoStream(id, SipralTransportError.OTHER, "to $destination not tried: ${refused.message}", over)
+            return
+        }
         val socket: Socket
         var secured: SignallingLink? = null
         try {
             socket = if (tls) {
                 SignallingLink(
                     SipralTransport.TLS, parseHostPort(destination),
-                    streamServerName(destination), streamTrust(destination),
+                    streamServerName(identity), streamTrust(identity),
                     streamCertificate(destination), streamDomainRules,
                 ).also { secured = it }.connect(currentHost).first
             } else {
@@ -1756,15 +1786,15 @@ class SipralClient private constructor(
                 }
             }
         } catch (refused: Exception) {
-            streamsOpening.remove(destination)
+            streamsOpening.remove(identity)
             val said = refused as? SignallingRefused ?: classify(refused, handshaking = false)
             val target = if (server == destination) destination else "$server (for $destination)"
             val why = if (said.detail.isEmpty()) "" else ": ${said.detail}"
             sayNoStream(id, said.error, "to $target ${verdict(said.error)}$why", over, if (tls) said.tls else null)
             return
         }
-        streamLinks[id] = destination to socket
-        streamsOpening.remove(destination)
+        streamLinks[id] = identity to socket
+        streamsOpening.remove(identity)
         if (closed.get()) {
             loseStreamLink(id, tell = false)
             return
@@ -1863,7 +1893,7 @@ class SipralClient private constructor(
             } catch (broken: Exception) {
                 val said = secured?.classifyHere(broken, handshaking = false)
                 if (said != null && said.tls in CLIENT_CERTIFICATE_REASONS) {
-                    val destination = streamLinks[id]?.first ?: "the server"
+                    val destination = streamLinks[id]?.first?.destination ?: "the server"
                     loseStreamLink(id, tell = false)
                     if (!closed.get()) {
                         sayNoStream(id, said.error, "to $destination ${verdict(said.error)}: ${said.detail}", SipralTransport.TLS, said.tls)

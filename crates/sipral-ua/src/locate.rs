@@ -607,7 +607,9 @@ mod tests {
     use crate::agent::UserAgent;
     use crate::call::OutgoingCall;
     use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
-    use crate::{EndpointConfig, Input, TransportId, TransportProtocol, UaError, Uri};
+    use crate::{
+        EndpointConfig, Input, StreamIdentity, TransportId, TransportProtocol, UaError, Uri,
+    };
     use sipral_core::endpoint::{Answer, LocateError, Query, Record, RecordType, Srv};
     use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, parse};
     use std::collections::HashMap;
@@ -1554,5 +1556,216 @@ mod tests {
         let seen = settle(&mut agent, id, &proxy(), t0);
         assert!(wanted(&seen).is_empty(), "{:?}", seen.events);
         assert!(!failed(&seen));
+    }
+
+    /// One PBX hosting two tenants, each with a SIP domain of its own, both
+    /// served at [`nova`].
+    fn tenants() -> Dns {
+        Dns::default()
+            .srv(
+                "_sips._tcp.pbx.example.com",
+                &[(5061, "nova.example.com")],
+                3_600,
+            )
+            .srv(
+                "_sips._tcp.tenant.example.net",
+                &[(5061, "nova.example.com")],
+                3_600,
+            )
+            .a("nova.example.com", "192.0.2.54", 3_600)
+    }
+
+    /// `user` at `domain`, on a TLS connection of its own.
+    fn tenant(user: &str, domain: &str) -> Account {
+        Account::located(
+            uri(&format!("sips:{user}@{domain}")),
+            uri(&format!("sips:{domain}")),
+            uri(&format!("sips:{user}@192.0.2.1;transport=tls")),
+            UDP,
+        )
+        .on_stream(TransportProtocol::Tls)
+    }
+
+    /// What went out, by transport, and the events, every lookup answered
+    /// from `dns` for the account that asked it.
+    fn settle_all(
+        agent: &mut UserAgent,
+        dns: &Dns,
+        now: Instant,
+    ) -> (Vec<(TransportId, Vec<u8>)>, Vec<UaEvent>) {
+        let mut sent = Vec::new();
+        let mut events = Vec::new();
+        loop {
+            let mut moved = false;
+            while let Some(transmit) = agent.poll_transmit() {
+                sent.push((transmit.transport, transmit.payload.to_vec()));
+                moved = true;
+            }
+            while let Some(event) = agent.poll_event() {
+                moved = true;
+                if let UaEvent::LookupWanted { account, query } = &event {
+                    // names are read without regard to case (RFC 4343)
+                    let name = query.name.to_string().to_ascii_lowercase();
+                    let answer = dns
+                        .0
+                        .get(&(name, query.record))
+                        .cloned()
+                        .unwrap_or(Answer::Nothing);
+                    agent.looked_up(*account, query, answer, now).unwrap();
+                }
+                events.push(event);
+            }
+            if !moved {
+                return (sent, events);
+            }
+        }
+    }
+
+    fn asks(events: &[UaEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, UaEvent::TransportWanted { .. }))
+            .count()
+    }
+
+    fn registers_on(sent: &[(TransportId, Vec<u8>)]) -> Vec<TransportId> {
+        sent.iter()
+            .filter(|(_, bytes)| bytes.starts_with(b"REGISTER "))
+            .map(|(transport, _)| *transport)
+            .collect()
+    }
+
+    /// What a networking layer does with an ask: a connection for each
+    /// identity waiting at `nova`, said to be checked against it and bound.
+    fn open_for_each(agent: &mut UserAgent, first: u32, now: Instant) -> Vec<StreamIdentity> {
+        let identities = agent.stream_identities_wanted(TransportProtocol::Tls, nova());
+        for (at, identity) in (first..).zip(&identities) {
+            agent.stream_opening(
+                TransportId(at),
+                TransportProtocol::Tls,
+                nova(),
+                identity.clone(),
+            );
+            agent
+                .receive(
+                    Input::TransportBound {
+                        transport: TransportId(at),
+                        protocol: TransportProtocol::Tls,
+                        local: addr("192.0.2.1:50123"),
+                        remote: Some(nova()),
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        identities
+    }
+
+    #[test]
+    fn tenants_of_two_domains_at_one_address_each_ask_for_a_connection_of_their_own() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let alice = agent.add_account(tenant("alice", "pbx.example.com"));
+        let bob = agent.add_account(tenant("bob", "tenant.example.net"));
+        agent.register(alice, t0).unwrap();
+        let (_, events) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(asks(&events), 1);
+        let opened = open_for_each(&mut agent, 7, t0);
+        assert_eq!(
+            opened
+                .iter()
+                .map(StreamIdentity::server_name)
+                .collect::<Vec<_>>(),
+            [Some("pbx.example.com")]
+        );
+        let (sent, _) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(registers_on(&sent), [TransportId(7)]);
+
+        // the connection to that address is held to the first tenant's name
+        agent.register(bob, t0).unwrap();
+        let (sent, events) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(asks(&events), 1, "the second tenant asks for its own");
+        assert!(registers_on(&sent).is_empty(), "and waits for it");
+        let opened = open_for_each(&mut agent, 8, t0);
+        assert_eq!(
+            opened
+                .iter()
+                .map(StreamIdentity::server_name)
+                .collect::<Vec<_>>(),
+            [Some("tenant.example.net")]
+        );
+        let (sent, _) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(registers_on(&sent), [TransportId(8)]);
+
+        // each refresh stays on its own
+        agent.register(alice, t0).unwrap();
+        agent.register(bob, t0).unwrap();
+        let (sent, events) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(asks(&events), 0);
+        let mut on = registers_on(&sent);
+        on.sort_unstable();
+        assert_eq!(on, [TransportId(7), TransportId(8)]);
+    }
+
+    #[test]
+    fn accounts_of_one_domain_at_one_address_share_one_connection() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let alice = agent.add_account(tenant("alice", "pbx.example.com"));
+        let bob = agent.add_account(tenant("bob", "PBX.example.com"));
+        agent.register(alice, t0).unwrap();
+        let _ = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(open_for_each(&mut agent, 7, t0).len(), 1);
+        let _ = settle_all(&mut agent, &tenants(), t0);
+        agent.register(bob, t0).unwrap();
+        let (sent, events) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(asks(&events), 0, "the same name, without regard to case");
+        assert_eq!(registers_on(&sent), [TransportId(7)]);
+    }
+
+    #[test]
+    fn a_connection_refused_for_one_tenant_moves_on_only_that_tenant() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let alice = agent.add_account(tenant("alice", "pbx.example.com"));
+        let bob = agent.add_account(tenant("bob", "tenant.example.net"));
+        agent.register(alice, t0).unwrap();
+        agent.register(bob, t0).unwrap();
+        let (_, events) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(asks(&events), 2);
+        let identities = agent.stream_identities_wanted(TransportProtocol::Tls, nova());
+        assert_eq!(identities.len(), 2, "one connection for each name");
+        for (at, identity) in [7, 8].into_iter().zip(identities) {
+            agent.stream_opening(TransportId(at), TransportProtocol::Tls, nova(), identity);
+        }
+
+        // the server's certificate does not name the second tenant
+        agent.flow_unavailable_on(TransportId(8), t0);
+        let (_, events) = settle_all(&mut agent, &tenants(), t0);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                UaEvent::RegistrationFailed { account, .. } if *account == bob
+            )),
+            "{events:?}"
+        );
+        assert_eq!(
+            agent.registration_state(alice),
+            Some(RegistrationState::Registering),
+            "the first tenant waits on for its own"
+        );
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TransportId(7),
+                    protocol: TransportProtocol::Tls,
+                    local: addr("192.0.2.1:50123"),
+                    remote: Some(nova()),
+                },
+                t0,
+            )
+            .unwrap();
+        let (sent, _) = settle_all(&mut agent, &tenants(), t0);
+        assert_eq!(registers_on(&sent), [TransportId(7)]);
     }
 }

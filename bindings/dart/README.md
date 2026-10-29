@@ -100,7 +100,11 @@ account's `serverUri` (RFC 5922 §7.3), else the server's address, by the
 HTTPS rules `dart:io` applies. A certificate that names the domain only as a
 `sip:` URI is refused here, and RFC 5922's stricter reading is not offered:
 `dart:io` refuses a name before this layer could tell it from a refused chain
-(`docs/22-tls.md`).
+(`docs/22-tls.md`). The stack names the domain and the pin with each ask, and
+this layer opens one connection for each pair and says which before binding
+it (`sipral_stack_stream_opening`, ABI 1.11): two tenants of one PBX at one
+address are each checked against their own domain and pin, and accounts of
+the same domain and pin share one connection.
 
 A server that requires a client certificate (mutual TLS) is given one as
 `clientCertificate`, on the account or, for every account that names none,
