@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -125,32 +125,7 @@ struct Serving {
 
 /// A TLS server on loopback that echoes what it reads, one connection at a time.
 fn tls_server(serving: Serving) -> SocketAddr {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let versions: &[&rustls::SupportedProtocolVersion] = if serving.tls12_only {
-        &[&rustls::version::TLS12]
-    } else {
-        &[&rustls::version::TLS13, &rustls::version::TLS12]
-    };
-    let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
-        .with_protocol_versions(versions)
-        .unwrap();
-    let builder = match serving.clients {
-        Some(authority) => {
-            let mut roots = RootCertStore::empty();
-            roots.add(authority).unwrap();
-            builder.with_client_cert_verifier(
-                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-                    .build()
-                    .unwrap(),
-            )
-        }
-        None => builder.with_no_client_auth(),
-    };
-    let config = Arc::new(
-        builder
-            .with_single_cert(serving.chain, private(&serving.key))
-            .unwrap(),
-    );
+    let config = server_config(serving);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     thread::spawn(move || {
@@ -176,6 +151,98 @@ fn tls_server(serving: Serving) -> SocketAddr {
         }
     });
     address
+}
+
+/// When a server that says `close_notify` goes on sending bytes after it, which RFC 8446 §6.1
+/// has the client ignore.
+#[derive(Clone, Copy, Debug)]
+enum Afterwards {
+    /// Right after the handshake, with a stray byte a moment later.
+    AtOnce,
+    /// On the client's first message, with 5000 stray bytes in the same write.
+    InOneWrite,
+    /// On the client's first message, after its echo in the same write, with a stray byte a
+    /// moment later.
+    AfterAnEcho,
+}
+
+/// A TLS server on loopback for one connection, which closes it as `afterwards` says and keeps
+/// the socket open after.
+fn closing_tls_server(serving: Serving, afterwards: Afterwards) -> SocketAddr {
+    let config = server_config(serving);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let Ok((mut tcp, _)) = listener.accept() else {
+            return;
+        };
+        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut server = ServerConnection::new(config).unwrap();
+        while server.is_handshaking() {
+            if server.complete_io(&mut tcp).is_err() {
+                return;
+            }
+        }
+        if !matches!(afterwards, Afterwards::AtOnce) {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = rustls::Stream::new(&mut server, &mut tcp).read(&mut buffer) else {
+                return;
+            };
+            if matches!(afterwards, Afterwards::AfterAnEcho) {
+                server.writer().write_all(&buffer[..read]).unwrap();
+            }
+        }
+        server.send_close_notify();
+        let mut wire = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut wire).unwrap();
+        }
+        if matches!(afterwards, Afterwards::InOneWrite) {
+            wire.extend_from_slice(&[0x17; 5000]);
+        }
+        if tcp.write_all(&wire).is_err() {
+            return;
+        }
+        if !matches!(afterwards, Afterwards::InOneWrite) {
+            thread::sleep(Duration::from_millis(300));
+            if tcp.write_all(b"x").is_err() {
+                return;
+            }
+        }
+        let mut rest = [0_u8; 64];
+        while matches!(tcp.read(&mut rest), Ok(read) if read > 0) {}
+    });
+    address
+}
+
+/// The rustls configuration a test server is made with.
+fn server_config(serving: Serving) -> Arc<ServerConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let versions: &[&rustls::SupportedProtocolVersion] = if serving.tls12_only {
+        &[&rustls::version::TLS12]
+    } else {
+        &[&rustls::version::TLS13, &rustls::version::TLS12]
+    };
+    let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(versions)
+        .unwrap();
+    let builder = match serving.clients {
+        Some(authority) => {
+            let mut roots = RootCertStore::empty();
+            roots.add(authority).unwrap();
+            builder.with_client_cert_verifier(
+                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                    .build()
+                    .unwrap(),
+            )
+        }
+        None => builder.with_no_client_auth(),
+    };
+    Arc::new(
+        builder
+            .with_single_cert(serving.chain, private(&serving.key))
+            .unwrap(),
+    )
 }
 
 /// A plain TCP server on loopback that echoes.
@@ -519,6 +586,55 @@ fn plain_tcp_carries_messages_and_nothing_listening_is_refused() {
 }
 
 #[test]
+fn a_plain_tcp_write_the_server_never_reads_gives_up_and_the_connection_ends() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = listener.local_addr().unwrap();
+    let (keep, kept) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        // accepted and never read, and held open until the test is done
+        let held = listener.accept();
+        let _ = kept.recv();
+        drop(held);
+    });
+    let mut config = NetworkConfig::default();
+    config.connect_timeout = Duration::from_secs(3);
+    let mut network = Network::new(config).unwrap();
+    dial(
+        &mut network,
+        TransportProtocol::Tcp,
+        server,
+        StreamTarget::default(),
+    )
+    .unwrap();
+    let sender = network.stream_sender(TransportId(7)).unwrap();
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        // an audio thread's writes, only faster: the buffers fill and a write stops returning
+        let chunk = vec![0_u8; 64 * 1024];
+        let refused = loop {
+            if let Err(error) = sender.send(&chunk) {
+                break error;
+            }
+        };
+        let _ = done.send(refused.kind());
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "a write to a server that never reads never gave up"
+    );
+    // half a message is on the wire: nothing after it can be read, so the connection ends
+    until(&mut network, |happening| match happening {
+        Happening::StreamClosed { transport } | Happening::StreamFailed { transport, .. }
+            if transport == TransportId(7) =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    drop(keep);
+}
+
+#[test]
 fn a_connection_closed_while_it_was_being_made_is_never_reported() {
     let pki = Pki::new("Sipral test authority");
     let (chain, key) = pki.leaf(&[NAME], false);
@@ -540,6 +656,74 @@ fn a_connection_closed_while_it_was_being_made_is_never_reported() {
         .send(TransportId(9), server, b"too late")
         .unwrap_err();
     assert_eq!(refused.error, TransportErrorKind::Closed);
+}
+
+#[test]
+fn bytes_after_a_close_notify_end_the_connection_and_never_hold_its_writer() {
+    let pki = Pki::new("Sipral test authority");
+    let message = b"OPTIONS sip:pbx.test SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+    for afterwards in [
+        Afterwards::AtOnce,
+        Afterwards::InOneWrite,
+        Afterwards::AfterAnEcho,
+    ] {
+        let (chain, key) = pki.leaf(&[NAME], false);
+        let server = closing_tls_server(
+            Serving {
+                chain,
+                key,
+                clients: None,
+                tls12_only: false,
+            },
+            afterwards,
+        );
+        let mut network = network(Trust::Only(vec![pki.der.clone()]), None);
+        network.connect(TransportId(7), TransportProtocol::Tls, server, named(NAME));
+        let mut heard = Vec::new();
+        let mut closed = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !closed && Instant::now() < deadline {
+            for happening in network.wait(Some(Duration::from_millis(100))) {
+                match happening {
+                    Happening::Connected { early, .. } => {
+                        heard.extend_from_slice(&early);
+                        // `None` when the close came in the same wait, and nothing can be
+                        // held any more
+                        if let Some(sender) = network.stream_sender(TransportId(7)) {
+                            if !matches!(afterwards, Afterwards::AtOnce) {
+                                sender.send(message).unwrap();
+                            }
+                            // the stray bytes are in by then
+                            thread::sleep(Duration::from_secs(1));
+                            let (done, finished) = mpsc::channel();
+                            thread::spawn(move || {
+                                let _ = sender.send(b"too late");
+                                let _ = done.send(());
+                            });
+                            assert!(
+                                finished.recv_timeout(Duration::from_secs(10)).is_ok(),
+                                "{afterwards:?}: a write waited on the reader"
+                            );
+                        }
+                    }
+                    Happening::ConnectFailed { failure, .. }
+                    | Happening::StreamFailed { failure, .. } => {
+                        panic!("{afterwards:?}: {failure:?}")
+                    }
+                    Happening::StreamData { data, .. } => heard.extend_from_slice(&data),
+                    Happening::StreamClosed { .. } => closed = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(closed, "{afterwards:?}: the close was never heard");
+        let echo: &[u8] = if matches!(afterwards, Afterwards::AfterAnEcho) {
+            message
+        } else {
+            b""
+        };
+        assert_eq!(heard, echo, "{afterwards:?}");
+    }
 }
 
 #[test]

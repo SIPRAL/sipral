@@ -501,18 +501,36 @@ fn seen(event: &SipralEvent) -> Option<Seen> {
     }
 }
 
+/// What a call into the stack answered, read for whether it is worth asking again.
+trait Answered {
+    /// Another thread was inside the stack, or its clock ran ahead of this one.
+    fn wait_and_ask_again(&self) -> bool;
+}
+
+impl Answered for SipralStatus {
+    fn wait_and_ask_again(&self) -> bool {
+        matches!(self, Self::Busy | Self::ClockBehind)
+    }
+}
+
+impl<T> Answered for Result<T, Fail> {
+    fn wait_and_ask_again(&self) -> bool {
+        self.as_ref()
+            .is_err_and(|failure| failure.status.wait_and_ask_again())
+    }
+}
+
 /// `call` until the stack takes it: another thread inside the stack answers
 /// `SIPRAL_STATUS_BUSY`, and one whose clock ran ahead `SIPRAL_STATUS_CLOCK_BEHIND`, for half a
 /// second at most. What a connection carried is handed in so, never dropped, since a stream
-/// with a hole in it cannot be read again.
-fn patiently(mut call: impl FnMut() -> SipralStatus) -> SipralStatus {
+/// with a hole in it cannot be read again; so is what the stack is told only once, such as a
+/// connection lost, and what a connection is checked against.
+fn patiently<T: Answered>(mut call: impl FnMut() -> T) -> T {
     let since = Instant::now();
     loop {
-        let status = call();
-        if !matches!(status, SipralStatus::Busy | SipralStatus::ClockBehind)
-            || since.elapsed() >= PATIENCE
-        {
-            return status;
+        let answer = call();
+        if !answer.wait_and_ask_again() || since.elapsed() >= PATIENCE {
+            return answer;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -572,7 +590,7 @@ fn bind(
         (remote.as_ptr().cast::<c_char>(), remote.len())
     });
     answered(
-        unsafe {
+        patiently(|| unsafe {
             sipral_stack_transport_bind(
                 stack,
                 transport,
@@ -584,7 +602,7 @@ fn bind(
                 now_ms,
                 ptr::null_mut(),
             )
-        },
+        }),
         "sipral_stack_transport_bind",
     )
 }
@@ -600,39 +618,59 @@ fn report(stack: SipralHandle, transport: u32, failure: &Failure, now_ms: u64) {
         detail_len: failure.detail.len(),
     };
     // a transport the stack has meanwhile forgotten has nothing waiting on it
-    let _ = unsafe { sipral_stack_transport_failed_with(stack, &raw const told, now_ms) };
+    let _ =
+        patiently(|| unsafe { sipral_stack_transport_failed_with(stack, &raw const told, now_ms) });
 }
 
 /// The name and the pin a TLS connection to `destination` is checked against: the configured
-/// name, else the host of the `server_uri` of the account located there (RFC 5922 §7.3); the
-/// pin of that account, or of the one whose registrar URI names that address.
+/// name, else the host of the `server_uri` of the first account located there (RFC 5922 §7.3);
+/// the pin of any account located there or whose registrar URI names that address, since the
+/// connection carries every one of them. Accounts there that pin different certificates are
+/// refused, since one connection cannot be held to two; another thread inside the stack for
+/// longer than the patience is `SIPRAL_STATUS_BUSY`, never a guess.
 fn target_for(
     stack: SipralHandle,
     destination: SocketAddr,
     configured: Option<&String>,
-) -> StreamTarget {
-    let found = with_stack(stack, |state| {
-        for id in state.agent.accounts() {
-            let Some(account) = state.agent.account(id) else {
-                continue;
-            };
-            let located = state.agent.located_targets(id).contains(&destination);
-            let named_here = account
-                .registrar()
-                .and_then(Uri::sip)
-                .is_some_and(|sip| literal(sip.host) == Some(destination.ip()));
-            if !located && !named_here {
-                continue;
+) -> Result<StreamTarget, Fail> {
+    let (name, pin) = patiently(|| {
+        with_stack(stack, |state| {
+            let mut name = None;
+            let mut pin: Option<CertificatePin> = None;
+            for id in state.agent.accounts() {
+                let Some(account) = state.agent.account(id) else {
+                    continue;
+                };
+                let located = state.agent.located_targets(id).contains(&destination);
+                let named_here = account
+                    .registrar()
+                    .and_then(Uri::sip)
+                    .is_some_and(|sip| literal(sip.host) == Some(destination.ip()));
+                if !located && !named_here {
+                    continue;
+                }
+                if located && name.is_none() {
+                    name = account.server().and_then(host_name);
+                }
+                match (pin, account.pinned_certificate()) {
+                    (Some(held), Some(own)) if held != *own => {
+                        return Err(fail(
+                            SipralStatus::WrongState,
+                            format!(
+                                "the accounts whose server is at {destination} pin different \
+                                 certificates, and one connection there carries them all: give \
+                                 them the same tls_pin_sha256"
+                            ),
+                        ));
+                    }
+                    (None, Some(own)) => pin = Some(*own),
+                    _ => {}
+                }
             }
-            let name = located
-                .then(|| account.server().and_then(host_name))
-                .flatten();
-            return Ok((name, account.pinned_certificate().copied()));
-        }
-        Ok((None, None))
-    });
-    let (name, pin) = found.unwrap_or((None, None));
-    StreamTarget::new(configured.cloned().or(name), pin)
+            Ok((name, pin))
+        })
+    })?;
+    Ok(StreamTarget::new(configured.cloned().or(name), pin))
 }
 
 /// A URI's host, when it is a name.
@@ -818,7 +856,7 @@ fn turn(shared: &Shared, clock: &Clock) -> Result<Duration, Fail> {
     stun(shared, &mut driver, clock);
     close_released(shared, &mut driver, &released);
     media(shared, &mut driver, clock);
-    act(shared, &mut driver);
+    act(shared, &mut driver, clock);
     flush(stack, &mut driver, clock);
     Ok(if polled.has_deadline == 0 {
         IDLE
@@ -866,7 +904,7 @@ fn close_released(shared: &Shared, driver: &mut Driver, released: &[SocketAddr])
         };
         driver.network.close_media(*local);
         if let Some(port) = media.reserved {
-            let _ = unsafe { sipral_stack_rtp_port_release(shared.stack, port) };
+            let _ = patiently(|| unsafe { sipral_stack_rtp_port_release(shared.stack, port) });
         }
     }
 }
@@ -926,47 +964,23 @@ fn transmit_into(
 }
 
 /// What the connections asked for meanwhile, opened, or closed after what was queued for them.
-fn act(shared: &Shared, driver: &mut Driver) {
+fn act(shared: &Shared, driver: &mut Driver, clock: &Clock) {
     let noted = std::mem::take(&mut *locked(&shared.notes));
+    let mut later = Vec::new();
     for note in noted {
         match note {
             Seen::Wanted {
                 protocol,
                 destination,
             } => {
-                if protocol == TransportProtocol::Udp {
-                    continue;
-                }
-                let same = driver
-                    .streams
-                    .iter()
-                    .find(|(_, stream)| {
-                        stream.protocol == protocol && stream.destination == destination
-                    })
-                    .map(|(id, stream)| (*id, stream.bound));
-                match same {
-                    // the one being made answers this ask too
-                    Some((_, false)) => continue,
-                    // the stack has given that one up: a new one in its place
-                    Some((id, true)) => {
-                        driver.streams.remove(&id);
-                        driver.network.close(TransportId(id));
-                    }
-                    None => {}
-                }
-                let id = next_transport(driver);
-                let target = target_for(shared.stack, destination, driver.server_name.as_ref());
-                driver
-                    .network
-                    .connect(TransportId(id), protocol, destination, target);
-                driver.streams.insert(
-                    id,
-                    Stream {
+                if !open_stream(shared, driver, protocol, destination, clock) {
+                    // asked again at the next turn: a connection checked against a guess would
+                    // refuse the right server, or accept the wrong one
+                    later.push(Seen::Wanted {
                         protocol,
                         destination,
-                        bound: false,
-                    },
-                );
+                    });
+                }
             }
             Seen::Lookup { account, query } => driver.network.look_up(account, query),
             Seen::Failed { transport } => {
@@ -1019,6 +1033,67 @@ fn act(shared: &Shared, driver: &mut Driver) {
             }
         }
     }
+    if !later.is_empty() {
+        // ahead of what a poll noted meanwhile, in the order they were asked
+        locked(&shared.notes).splice(0..0, later);
+    }
+}
+
+/// Open the connection the stack asked for, unless one being made answers it too; `false` when
+/// what it is checked against could not be read yet, with nothing done.
+fn open_stream(
+    shared: &Shared,
+    driver: &mut Driver,
+    protocol: TransportProtocol,
+    destination: SocketAddr,
+    clock: &Clock,
+) -> bool {
+    if protocol == TransportProtocol::Udp {
+        return true;
+    }
+    let same = driver
+        .streams
+        .iter()
+        .find(|(_, stream)| stream.protocol == protocol && stream.destination == destination)
+        .map(|(id, stream)| (*id, stream.bound));
+    // the one being made answers this ask too
+    if same.is_some_and(|(_, bound)| !bound) {
+        return true;
+    }
+    let target = target_for(shared.stack, destination, driver.server_name.as_ref());
+    if target.wait_and_ask_again() {
+        return false;
+    }
+    // the stack has given that one up: a new one in its place
+    if let Some((id, true)) = same {
+        driver.streams.remove(&id);
+        driver.network.close(TransportId(id));
+    }
+    let id = next_transport(driver);
+    match target {
+        Ok(target) => {
+            driver
+                .network
+                .connect(TransportId(id), protocol, destination, target);
+            driver.streams.insert(
+                id,
+                Stream {
+                    protocol,
+                    destination,
+                    bound: false,
+                },
+            );
+        }
+        Err(refused) => {
+            let failure = Failure::new(
+                TransportErrorKind::Other,
+                TlsFailure::None,
+                refused.message(),
+            );
+            report(shared.stack, id, &failure, clock.now());
+        }
+    }
+    true
 }
 
 /// The TURN connections of the media socket at `local`.
@@ -1054,6 +1129,12 @@ fn flush(stack: SipralHandle, driver: &mut Driver, clock: &Clock) {
     loop {
         let mut transmit = transmit_into(&mut driver.out, &mut destination, &mut source);
         let status = unsafe { sipral_stack_poll_transmit(stack, &raw mut transmit) };
+        if status == SipralStatus::BufferTooSmall && transmit.len > driver.out.len() {
+            // a WebSocket frame of a message near the limit is longer than any message, and the
+            // stack keeps it first in line until it is offered room for it
+            driver.out.resize(transmit.len, 0);
+            continue;
+        }
         if status != SipralStatus::Ok || transmit.len == 0 {
             return;
         }
@@ -1272,16 +1353,20 @@ fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
             }
             Happening::StreamClosed { transport } => {
                 locked(&shared.driver).streams.remove(&transport.0);
-                let _ = unsafe { sipral_stack_stream_closed(stack, transport.0, clock.now()) };
+                let _ = patiently(|| unsafe {
+                    sipral_stack_stream_closed(stack, transport.0, clock.now())
+                });
             }
             Happening::LookedUp { tag, query, answer } => {
                 // an account removed while its lookup ran has nothing to answer
-                let _ = with_stack_at(stack, clock.now(), |state, now| {
-                    let id = state.accounts.get(tag).map_err(handle_failed)?;
-                    state
-                        .agent
-                        .looked_up(id, &query, answer, now)
-                        .map_err(|error| crate::call::ua_failed(&error))
+                let _ = patiently(|| {
+                    with_stack_at(stack, clock.now(), |state, now| {
+                        let id = state.accounts.get(tag).map_err(handle_failed)?;
+                        state
+                            .agent
+                            .looked_up(id, &query, answer.clone(), now)
+                            .map_err(|error| crate::call::ua_failed(&error))
+                    })
                 });
             }
             Happening::Media {
@@ -1540,13 +1625,43 @@ pub(super) unsafe fn media_open(
             .and_then(|port| u16::try_from(port).ok())
             .unwrap_or(0),
     );
-    let opened = driver.network.open_media(at);
+    if at.port() != 0 {
+        // a port the stack hands out is one no call holds: a socket still open there is an
+        // ended call's whose end the loop has not acted on yet, as when this is called from
+        // that call's CALL_ENDED callback
+        let stale: Vec<SocketAddr> = driver
+            .media
+            .keys()
+            .filter(|local| local.port() == at.port())
+            .copied()
+            .collect();
+        for local in stale {
+            driver.media.remove(&local);
+            driver.network.close_media(local);
+            locked(&shared.senders).retain(|_, (to, _)| *to != local);
+        }
+    }
+    let since = Instant::now();
+    let opened = loop {
+        let opened = driver.network.open_media(at);
+        // a socket closed at that port a moment ago is let go by its reader within its read
+        // timeout, and by a sender an audio thread holds once its frame is out
+        let closing = opened
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse);
+        if !closing || at.port() == 0 || since.elapsed() >= PATIENCE {
+            break opened;
+        }
+        drop(driver);
+        std::thread::sleep(Duration::from_millis(5));
+        driver = locked(&shared.driver);
+    };
     let bound = match opened {
         Ok(bound) => bound,
         Err(error) => {
             drop(driver);
             if let Some(port) = reserved {
-                let _ = unsafe { sipral_stack_rtp_port_release(stack, port) };
+                let _ = patiently(|| unsafe { sipral_stack_rtp_port_release(stack, port) });
             }
             return Err(fail(
                 SipralStatus::TransportDown,
@@ -1634,10 +1749,15 @@ pub(super) unsafe fn media_capture(
     if as_datagram(captured.protocol) {
         // a refused datagram is one destination's; the media watchdog notices silence
         let _ = sender.send(to, payload);
-    } else if let Some(relay) = locked(&shared.relay_senders).get(&local).cloned() {
-        // a connection that will not take it is heard ending by its reader, which tells the
-        // stack
-        let _ = relay.send(payload);
+    } else {
+        // the map's lock let go before the write: a connection slow to take it holds up only
+        // this thread, never the loop that closes or replaces it
+        let relay = locked(&shared.relay_senders).get(&local).cloned();
+        if let Some(relay) = relay {
+            // a connection that will not take it is heard ending by its reader, which tells the
+            // stack
+            let _ = relay.send(payload);
+        }
     }
     Ok(())
 }
@@ -1660,7 +1780,7 @@ pub(super) fn media_close(stack: SipralHandle, local: SocketAddr) -> Result<(), 
     drop(driver);
     locked(&shared.senders).retain(|_, (at, _)| *at != local);
     if let Some(port) = socket.reserved {
-        let _ = unsafe { sipral_stack_rtp_port_release(stack, port) };
+        let _ = patiently(|| unsafe { sipral_stack_rtp_port_release(stack, port) });
     }
     Ok(())
 }

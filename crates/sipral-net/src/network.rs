@@ -14,7 +14,7 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -33,6 +33,18 @@ const DATAGRAM: usize = 65_535;
 
 /// How often a datagram socket's reader looks up from its socket, so a closed one ends.
 const DATAGRAM_PATIENCE: Duration = Duration::from_millis(250);
+
+/// How much of what the readers read may wait for [`Network::wait`] at once, in [`weight`]. Past
+/// it a datagram is dropped, as a full socket buffer would drop it, and a connection's reader
+/// waits, so that TCP's own flow control holds the far end back: a loop that falls behind costs
+/// this much memory and no more. Seconds of a busy stack's media at most.
+const BACKLOG: usize = 4 * 1024 * 1024;
+
+/// What `len` bytes read cost the [`BACKLOG`]: the bytes, and the arrival that carries them, so a
+/// flood of empty datagrams is bounded too.
+const fn weight(len: usize) -> usize {
+    len.saturating_add(size_of::<Arrival>())
+}
 
 /// How a [`Network`] connects and resolves.
 #[derive(Clone, Debug)]
@@ -210,6 +222,22 @@ enum Arrival {
     },
 }
 
+impl Arrival {
+    /// What it was counted in the [`Backlog`] at: what was read off a socket, and nothing else.
+    const fn weight(&self) -> usize {
+        match *self {
+            Self::Plain(
+                Happening::Datagram { ref data, .. } | Happening::Media { ref data, .. },
+            )
+            | Self::Stream {
+                happening: Happening::StreamData { ref data, .. },
+                ..
+            } => weight(data.len()),
+            _ => 0,
+        }
+    }
+}
+
 /// Sends from one media socket, from any thread ([`Network::media_sender`]).
 #[derive(Clone, Debug)]
 pub struct MediaSender(Arc<UdpSocket>);
@@ -238,10 +266,18 @@ impl StreamSender {
     /// Write one message whole, after anything another thread is writing.
     ///
     /// # Errors
-    /// The write's own error. The connection's reader then hears it end, and
-    /// [`Happening::StreamFailed`] or [`Happening::StreamClosed`] says so.
+    /// The write's own error, a timed-out one included. The connection is closed then, so its
+    /// reader hears it end, and [`Happening::StreamFailed`] or [`Happening::StreamClosed`] says
+    /// so.
     pub fn send(&self, payload: &[u8]) -> io::Result<()> {
-        locked(&self.0).send(payload)
+        let mut writer = locked(&self.0);
+        let sent = writer.send(payload);
+        if sent.is_err() {
+            // what was cut short leaves part of a message on the wire, which nothing after it
+            // can follow; and a timed-out write is no end the reader would hear by itself
+            writer.close();
+        }
+        sent
     }
 }
 
@@ -263,12 +299,68 @@ impl Drop for Datagram {
     }
 }
 
+/// What the readers have posted and [`Network::wait`] not yet taken, against the [`BACKLOG`].
+/// The channel itself stays unbounded: news of a connection or a lookup is never dropped, and
+/// never waits on a thread, the loop's own among them, that cannot wait.
+#[derive(Default)]
+struct Backlog {
+    queued: Mutex<Queued>,
+    room: Condvar,
+}
+
+#[derive(Default)]
+struct Queued {
+    weight: usize,
+    /// The network is gone, and nothing waits for it to take anything.
+    gone: bool,
+}
+
+impl Backlog {
+    /// Count `weight` in, unless the backlog has no room for it: a datagram's way.
+    fn admit(&self, weight: usize) -> bool {
+        let mut queued = locked(&self.queued);
+        let after = queued.weight.saturating_add(weight);
+        if after > BACKLOG {
+            return false;
+        }
+        queued.weight = after;
+        true
+    }
+
+    /// Wait for room, then count `weight` in: a connection's, whose far end waits meanwhile.
+    fn enter(&self, weight: usize) {
+        let mut queued = locked(&self.queued);
+        while queued.weight.saturating_add(weight) > BACKLOG && !queued.gone {
+            queued = self
+                .room
+                .wait(queued)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        queued.weight = queued.weight.saturating_add(weight);
+    }
+
+    /// `weight` taken by the loop.
+    fn leave(&self, weight: usize) {
+        let mut queued = locked(&self.queued);
+        queued.weight = queued.weight.saturating_sub(weight);
+        drop(queued);
+        self.room.notify_all();
+    }
+
+    /// The network is gone: no reader waits for room any more.
+    fn close(&self) {
+        locked(&self.queued).gone = true;
+        self.room.notify_all();
+    }
+}
+
 /// The sockets and connections under one stack.
 pub struct Network {
     config: NetworkConfig,
     resolver: Resolver,
     inbox: Receiver<Arrival>,
     postbox: Sender<Arrival>,
+    backlog: Arc<Backlog>,
     datagrams: HashMap<TransportId, Datagram>,
     streams: HashMap<TransportId, (u64, Arc<Mutex<Writer>>)>,
     /// Connections being made, by serial.
@@ -296,6 +388,7 @@ impl Drop for Network {
         for (_, (_, writer)) in self.streams.drain() {
             locked(&writer).close();
         }
+        self.backlog.close();
     }
 }
 
@@ -316,6 +409,7 @@ impl Network {
             resolver,
             inbox,
             postbox,
+            backlog: Arc::default(),
             datagrams: HashMap::new(),
             streams: HashMap::new(),
             connecting: HashMap::new(),
@@ -424,6 +518,7 @@ impl Network {
         let reading = Arc::clone(&socket);
         let still = Arc::clone(&open);
         let postbox = self.postbox.clone();
+        let backlog = Arc::clone(&self.backlog);
         thread::Builder::new()
             .name("sipral-net-udp".to_owned())
             .spawn(move || {
@@ -433,6 +528,9 @@ impl Network {
                     // unreachable a previous send left, which is one destination's and not the
                     // socket's
                     if let Ok((read, remote)) = reading.recv_from(&mut buffer) {
+                        if !backlog.admit(weight(read)) {
+                            continue;
+                        }
                         let data = buffer.get(..read).unwrap_or_default().to_vec();
                         if postbox
                             .send(Arrival::Plain(made(remote, bound, data)))
@@ -517,6 +615,7 @@ impl Network {
         let patience = self.config.connect_timeout;
         let platform = Arc::clone(&self.platform);
         let postbox = self.postbox.clone();
+        let backlog = Arc::clone(&self.backlog);
         let spawned = thread::Builder::new()
             .name("sipral-net-stream".to_owned())
             .spawn(move || {
@@ -575,7 +674,7 @@ impl Network {
                     },
                 };
                 if postbox.send(up).is_ok() {
-                    read_stream(reader, &what, transport, serial, &postbox);
+                    read_stream(reader, &what, transport, serial, &postbox, &backlog);
                 }
             });
         if let Err(error) = spawned {
@@ -678,12 +777,16 @@ impl Network {
             return out;
         };
         let mut next = Some(first);
+        let mut taken = 0_usize;
         while let Some(arrival) = next {
+            taken = taken.saturating_add(arrival.weight());
             if let Some(happening) = self.arrived(arrival) {
                 out.push(happening);
             }
             next = self.inbox.try_recv().ok();
         }
+        // after the whole batch, so that readers that keep reading cannot keep it growing
+        self.backlog.leave(taken);
         out
     }
 
@@ -758,10 +861,16 @@ fn read_stream(
     transport: TransportId,
     serial: u64,
     postbox: &Sender<Arrival>,
+    backlog: &Backlog,
 ) {
     loop {
         let happening = match reader.next(what) {
-            Ok(data) => Happening::StreamData { transport, data },
+            Ok(data) => {
+                // nothing more is read until the loop has room for it, and the server's
+                // writes wait on TCP's window meanwhile
+                backlog.enter(weight(data.len()));
+                Happening::StreamData { transport, data }
+            }
             Err(Ended::Closed) => Happening::StreamClosed { transport },
             Err(Ended::Failed(failure)) => Happening::StreamFailed { transport, failure },
         };
@@ -769,5 +878,107 @@ fn read_stream(
         if postbox.send(Arrival::Stream { serial, happening }).is_err() || last {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BACKLOG, Happening, Network, NetworkConfig, StreamTarget, weight};
+    use sipral_core::endpoint::{TransportId, TransportProtocol};
+    use std::io::Write;
+    use std::net::{TcpListener, UdpSocket};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_loop_that_falls_behind_keeps_no_more_datagrams_than_the_backlog() {
+        let mut network = Network::new(NetworkConfig::default()).unwrap();
+        let local = network
+            .bind_datagram(TransportId(1), "127.0.0.1:0".parse().unwrap())
+            .unwrap();
+        let flood = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let packet = [0_u8; 1200];
+        for sent in 0..2 * BACKLOG / packet.len() {
+            let _ = flood.send_to(&packet, local);
+            // paced, so the reader keeps up and the socket's own buffer drops nothing
+            if sent % 64 == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+        let kept: usize = network
+            .wait(Some(Duration::from_secs(10)))
+            .iter()
+            .map(|happening| match *happening {
+                Happening::Datagram { ref data, .. } => weight(data.len()),
+                _ => 0,
+            })
+            .sum();
+        assert!(kept <= BACKLOG, "{kept} bytes waited, past {BACKLOG}");
+        assert!(kept >= BACKLOG / 4, "only {kept} bytes were kept");
+    }
+
+    #[test]
+    fn a_loop_that_falls_behind_holds_a_connection_back_and_loses_none_of_it() {
+        const SENT: usize = 64 * 1024 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = listener.local_addr().unwrap();
+        let written = Arc::new(AtomicUsize::new(0));
+        let writing = Arc::clone(&written);
+        thread::spawn(move || {
+            let Ok((mut tcp, _)) = listener.accept() else {
+                return;
+            };
+            tcp.set_write_timeout(Some(Duration::from_secs(60)))
+                .unwrap();
+            let chunk = vec![0_u8; 64 * 1024];
+            while writing.load(Ordering::Acquire) < SENT {
+                if tcp.write_all(&chunk).is_err() {
+                    return;
+                }
+                writing.fetch_add(chunk.len(), Ordering::AcqRel);
+            }
+        });
+        let mut network = Network::new(NetworkConfig::default()).unwrap();
+        network.connect(
+            TransportId(2),
+            TransportProtocol::Tcp,
+            server,
+            StreamTarget::default(),
+        );
+        let mut heard = 0;
+        let mut up = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !up && Instant::now() < deadline {
+            for happening in network.wait(Some(Duration::from_millis(100))) {
+                match happening {
+                    Happening::Connected { .. } => up = true,
+                    Happening::StreamData { data, .. } => heard += data.len(),
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        assert!(up, "the connection was never made");
+        // the loop reads nothing meanwhile
+        thread::sleep(Duration::from_secs(3));
+        let before = written.load(Ordering::Acquire);
+        assert!(
+            before < SENT,
+            "the server wrote all {before} bytes to a loop that read none of them"
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while heard < SENT && Instant::now() < deadline {
+            for happening in network.wait(Some(Duration::from_millis(100))) {
+                match happening {
+                    Happening::StreamData { data, .. } => heard += data.len(),
+                    // the server's close, once it has written everything
+                    Happening::StreamClosed { .. } => {}
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        assert_eq!(heard, SENT);
     }
 }

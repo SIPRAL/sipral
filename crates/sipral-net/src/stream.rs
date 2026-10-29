@@ -64,6 +64,8 @@ pub(crate) struct Connection {
     learnt: Learnt,
     /// Plaintext the server sent while the connection settled.
     pub(crate) early: Vec<u8>,
+    /// Whether the server said `close_notify` while the connection settled.
+    closed: bool,
     pub(crate) local: SocketAddr,
     reader: TcpStream,
 }
@@ -99,7 +101,10 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
     let local = tcp
         .local_addr()
         .map_err(|error| Failure::of_io(&what, &error))?;
+    // a write a server does not take gives up after the patience, on plain TCP as on TLS: a
+    // stalled peer must not hold a writer for as long as the kernel keeps the connection
     tcp.set_nodelay(true)
+        .and_then(|()| tcp.set_write_timeout(Some(dial.patience)))
         .map_err(|error| Failure::of_io(&what, &error))?;
     let reader = tcp
         .try_clone()
@@ -113,6 +118,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
                 asked: false,
             },
             early: Vec::new(),
+            closed: false,
             local,
             reader,
         });
@@ -130,7 +136,6 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
         )
     })?;
     tcp.set_read_timeout(Some(dial.patience))
-        .and_then(|()| tcp.set_write_timeout(Some(dial.patience)))
         .map_err(|error| Failure::of_io(&what, &error))?;
     while session.is_handshaking() {
         if let Err(error) = session.complete_io(&mut tcp) {
@@ -145,7 +150,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
         presented,
         asked: asked.load(Ordering::Acquire),
     };
-    let early = if session.protocol_version() == Some(ProtocolVersion::TLSv1_3) {
+    let (early, closed) = if session.protocol_version() == Some(ProtocolVersion::TLSv1_3) {
         let waited = started.elapsed().saturating_mul(2);
         settle(
             &mut tcp,
@@ -155,7 +160,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
             learnt,
         )?
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
     tcp.set_read_timeout(None)
         .map_err(|error| Failure::of_io(&what, &error))?;
@@ -164,6 +169,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
         tls: Some(Arc::new(Mutex::new(session))),
         learnt,
         early,
+        closed,
         local,
         reader,
     })
@@ -204,14 +210,14 @@ fn handshake_failure(what: &str, error: &io::Error, learnt: Learnt) -> Failure {
 /// A server that takes the certificate sends its session tickets (§4.6.1), which end the wait. A
 /// refusal is an alert, read here rather than lost to a reset on the first write. A server that
 /// closes cleanly with nothing said refused too: Asterisk's way with a certificate its authority
-/// did not sign.
+/// did not sign. `true` beside the plaintext once the server has said `close_notify`.
 fn settle(
     tcp: &mut TcpStream,
     session: &mut ClientConnection,
     wait: Duration,
     what: &str,
     learnt: Learnt,
-) -> Result<Vec<u8>, Failure> {
+) -> Result<(Vec<u8>, bool), Failure> {
     tcp.set_read_timeout(Some(wait))
         .map_err(|error| Failure::of_io(what, &error))?;
     let read = session.read_tls(tcp);
@@ -238,7 +244,7 @@ fn settle(
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
             ) =>
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         Err(error) => return Err(Failure::of_io(what, &error)),
     }
@@ -246,11 +252,11 @@ fn settle(
         .process_new_packets()
         .map_err(|error| Failure::of_tls(what, &error, learnt.presented, learnt.asked))?;
     let mut early = Vec::new();
-    // a close_notify here is read again, and reported, by the connection's first read
-    plaintext(session, &mut early).map_err(|error| Failure::of_io(what, &error))?;
+    // a close_notify here is reported by the connection's first read, which reads no further
+    let closed = plaintext(session, &mut early).map_err(|error| Failure::of_io(what, &error))?;
     // whatever the session owes the server after reading, an alert or a key update
     flush_records(session, tcp).map_err(|error| Failure::of_io(what, &error))?;
-    Ok(early)
+    Ok((early, closed))
 }
 
 /// Move every decrypted byte the session holds into `into`; `true` once the server has said
@@ -288,6 +294,7 @@ impl Connection {
                 tls: self.tls,
                 learnt: self.learnt,
                 heard: !self.early.is_empty(),
+                closed: self.closed,
             },
         )
     }
@@ -330,6 +337,8 @@ pub(crate) struct Reader {
     learnt: Learnt,
     /// Whether the server has said anything yet.
     heard: bool,
+    /// Whether the server has said `close_notify`, after which nothing it sends is read.
+    closed: bool,
 }
 
 impl Reader {
@@ -337,6 +346,11 @@ impl Reader {
     pub(crate) fn next(&mut self, what: &str) -> Result<Vec<u8>, Ended> {
         let mut buffer = [0_u8; CHUNK];
         loop {
+            // the plaintext that came before a close_notify went out on the last call; the
+            // close itself is this one's, without waiting on a socket the server may keep open
+            if self.closed {
+                return Err(Ended::Closed);
+            }
             let read = match self.tcp.read(&mut buffer) {
                 Ok(0) => return Err(self.ended_quietly(what)),
                 Ok(read) => read,
@@ -351,8 +365,12 @@ impl Reader {
             let mut session = tls.lock().unwrap_or_else(PoisonError::into_inner);
             let mut records = got;
             while !records.is_empty() {
-                if let Err(error) = session.read_tls(&mut records) {
-                    return Err(Ended::Failed(Failure::of_io(what, &error)));
+                match session.read_tls(&mut records) {
+                    // a close_notify has been read: rustls takes nothing after it, and what
+                    // follows is to be ignored (RFC 8446 §6.1)
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) => return Err(Ended::Failed(Failure::of_io(what, &error))),
                 }
                 if let Err(error) = session.process_new_packets() {
                     let mut writer = &self.tcp;
@@ -383,12 +401,10 @@ impl Reader {
                 }
             }
             drop(session);
+            self.closed = closed;
             if !out.is_empty() {
                 self.heard = true;
                 return Ok(out);
-            }
-            if closed {
-                return Err(Ended::Closed);
             }
         }
     }

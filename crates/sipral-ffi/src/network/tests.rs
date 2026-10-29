@@ -7,7 +7,7 @@
 //! The test opens no socket of its own toward the stack: the component does all of it.
 
 use std::collections::HashMap;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
@@ -24,11 +24,12 @@ use hickory_proto::rr::{Name, RData, Record as DnsRecord, RecordType as DnsType}
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use sipral_core::pin::CertificatePin;
 
 use super::{
     SipralNetworkConfig, sipral_network_locate, sipral_network_media_attach,
-    sipral_network_media_capture, sipral_network_media_open, sipral_network_run,
-    sipral_network_start, sipral_network_stop,
+    sipral_network_media_capture, sipral_network_media_close, sipral_network_media_open,
+    sipral_network_run, sipral_network_start, sipral_network_stop,
 };
 use crate::account::tests::account_config;
 use crate::account::{
@@ -37,14 +38,15 @@ use crate::account::{
 use crate::call::tests::call_config;
 use crate::call::{sipral_call_hangup, sipral_call_hold, sipral_call_place, sipral_call_resume};
 use crate::error::last_error_text;
-use crate::event::{SipralEventKind, SipralRegistrationState};
+use crate::event::{SipralEvent, SipralEventKind, SipralRegistrationState};
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{
     SIPRAL_ADDRESS_BYTES, SipralMediaInfo, SipralPlayback, sipral_call_media, sipral_media_info,
     sipral_media_playback,
 };
+use crate::message::sipral_account_message;
 use crate::stack::tests::{Observed, config, create, record};
-use crate::stack::{SipralTransport, sipral_stack_destroy};
+use crate::stack::{SipralTransport, sipral_stack_destroy, with_stack};
 use crate::status::SipralStatus;
 
 /// The SIP domain, which has no address of its own: only an SRV record.
@@ -751,6 +753,506 @@ fn a_configuration_that_cannot_be_read_says_which_member() {
         last_error_text().contains("bind_address"),
         "{}",
         last_error_text()
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// What a test's callback does besides writing down what it was told: for the tests of what the
+/// component does while another thread is inside the stack, and of what an application does from
+/// inside the callback.
+#[derive(Default)]
+struct Hooked {
+    observed: Observed,
+    stack: SipralHandle,
+    /// Hold the stack from another thread for a fifth of a second the first time a connection is
+    /// asked for: an application thread inside the stack just as the component's turn reads it.
+    hold_when_wanted: bool,
+    /// Open a media socket from inside the callback once a call has ended, as an application
+    /// readying its next call does, and keep what that answered.
+    open_when_ended: bool,
+    opened: Option<(SipralStatus, String)>,
+}
+
+unsafe extern "C" fn hook(event: *const SipralEvent, user_data: *mut c_void) {
+    let hooked = unsafe { &mut *user_data.cast::<Hooked>() };
+    unsafe { record(event, ptr::from_mut(&mut hooked.observed).cast()) };
+    let kind = unsafe { (*event).kind };
+    if kind == SipralEventKind::TransportWanted && hooked.hold_when_wanted {
+        hooked.hold_when_wanted = false;
+        let stack = hooked.stack;
+        let (holding, held) = channel();
+        thread::spawn(move || {
+            with_stack(stack, |_| {
+                let _ = holding.send(());
+                thread::sleep(Duration::from_millis(200));
+                Ok(())
+            })
+        });
+        // back once the other thread is inside, so the turn this poll belongs to finds it there
+        let _ = held.recv();
+    }
+    if kind == SipralEventKind::CallEnded && hooked.open_when_ended {
+        hooked.open_when_ended = false;
+        let mut address = [0 as c_char; SIPRAL_ADDRESS_BYTES];
+        let mut needed = 0_usize;
+        let status = unsafe {
+            sipral_network_media_open(
+                hooked.stack,
+                address.as_mut_ptr(),
+                address.len(),
+                &raw mut needed,
+            )
+        };
+        hooked.opened = Some((status, last_error_text()));
+    }
+}
+
+/// A stack on loopback whose callback is [`hook`], its RTP range the one pair at `ports` when
+/// given, run by the component with the platform's trust.
+fn hooked_stack(hooked: &mut Hooked, origin: Instant, ports: Option<u32>) -> SipralHandle {
+    let mut settings = config(hook, &mut hooked.observed);
+    settings.event_user_data = ptr::from_mut(&mut *hooked).cast();
+    (settings.bind_address, settings.bind_address_len) = text("127.0.0.1:0");
+    if let Some(port) = ports {
+        settings.rtp_port_min = port;
+        settings.rtp_port_max = port + 1;
+    }
+    let (status, stack) = create(&settings);
+    assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    hooked.stack = stack;
+    let network = network_config();
+    assert_eq!(
+        unsafe { sipral_network_start(stack, &raw const network, now(origin)) },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    stack
+}
+
+/// An even port on loopback, below the system's ephemeral range, free with the odd one above it.
+fn free_pair() -> u32 {
+    let first = 20_000 + (std::process::id() % 5_000) * 2;
+    (first..40_000)
+        .step_by(2)
+        .find(|port| {
+            let port = u16::try_from(*port).unwrap();
+            UdpSocket::bind(("127.0.0.1", port)).is_ok()
+                && UdpSocket::bind(("127.0.0.1", port + 1)).is_ok()
+        })
+        .unwrap()
+}
+
+/// What `tls_pin_sha256` takes for the server certificate `pki` signs.
+fn pin_of(pki: &Pki) -> String {
+    CertificatePin::of(pki.chain[0].as_ref())
+        .sha256()
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// An account on `protocol` whose registrar is the server's own address, pinned to `pin` when
+/// given.
+fn line_at(
+    stack: SipralHandle,
+    user: &str,
+    server: SocketAddr,
+    protocol: SipralTransport,
+    pin: Option<&str>,
+) -> SipralHandle {
+    let aor = format!("sip:{user}@{DOMAIN}");
+    let registrar = format!("sip:{server}");
+    let address = server.to_string();
+    let transport = if protocol == SipralTransport::Ws {
+        "ws"
+    } else {
+        "tls"
+    };
+    let contact = format!("sip:{user}@127.0.0.1;transport={transport}");
+    let mut line = account_config();
+    (line.aor, line.aor_len) = text(&aor);
+    (line.registrar, line.registrar_len) = text(&registrar);
+    (line.contact, line.contact_len) = text(&contact);
+    (line.registrar_address, line.registrar_address_len) = text(&address);
+    line.stream_protocol = protocol as u32;
+    if let Some(pin) = pin {
+        (line.tls_pin_sha256, line.tls_pin_sha256_len) = text(pin);
+    }
+    let mut account = SIPRAL_HANDLE_NONE;
+    assert_eq!(
+        unsafe { sipral_account_add(stack, &raw const line, &raw mut account) },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    account
+}
+
+/// Register `account` and run until it is, with no connection lost on the way. A run that finds
+/// another thread inside the stack is run again, as an application's loop would.
+fn register_at(stack: SipralHandle, account: SipralHandle, origin: Instant, hooked: &Hooked) {
+    assert_eq!(
+        unsafe { sipral_account_register(stack, account, now(origin)) },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            hooked.observed.transports_lost.is_empty(),
+            "{:?}",
+            hooked.observed.transports_lost
+        );
+        let mut state = 0_u32;
+        let read = unsafe { sipral_account_registration_state(stack, account, &raw mut state) };
+        if read == SipralStatus::Ok && state == SipralRegistrationState::Registered as u32 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "registered: not in fifteen seconds"
+        );
+        let status = unsafe { sipral_network_run(stack, now(origin), 20) };
+        assert!(
+            matches!(status, SipralStatus::Ok | SipralStatus::Busy),
+            "{}",
+            last_error_text()
+        );
+    }
+}
+
+#[test]
+fn a_connection_to_an_address_two_accounts_share_is_checked_against_the_one_that_pins() {
+    let pki = pki();
+    let pin = pin_of(&pki);
+    let (rtp, offers, _) = far_end();
+    let (sip, heard) = sip_server(pki, rtp, offers);
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, None);
+    // the older account there pins nothing, and the platform's store has never heard of the
+    // test authority
+    let _older = line_at(stack, "bob", sip, SipralTransport::Tls, None);
+    let pinned = line_at(stack, "alice", sip, SipralTransport::Tls, Some(&pin));
+    register_at(stack, pinned, origin, &hooked);
+    assert_eq!(heard.lock().unwrap()[0].0, "REGISTER");
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+#[test]
+fn accounts_at_one_address_that_pin_different_certificates_are_refused_before_connecting() {
+    let pki = pki();
+    let pin = pin_of(&pki);
+    let (rtp, offers, _) = far_end();
+    let (sip, heard) = sip_server(pki, rtp, offers);
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, None);
+    let other = "00".repeat(32);
+    let _older = line_at(stack, "bob", sip, SipralTransport::Tls, Some(&other));
+    let pinned = line_at(stack, "alice", sip, SipralTransport::Tls, Some(&pin));
+    assert_eq!(
+        unsafe { sipral_account_register(stack, pinned, now(origin)) },
+        SipralStatus::Ok
+    );
+    run_until(stack, origin, "the refusal", || {
+        !hooked.observed.transports_lost.is_empty()
+    });
+    let (_, _, _, tls, detail) = hooked.observed.transports_lost[0].clone();
+    assert_eq!(tls, 0, "refused before any handshake: {detail}");
+    assert!(detail.contains("pin different certificates"), "{detail}");
+    assert!(
+        heard.lock().unwrap().is_empty(),
+        "nothing reached the server"
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+#[test]
+fn a_connection_asked_for_while_another_thread_is_inside_the_stack_still_carries_the_pin() {
+    let pki = pki();
+    let pin = pin_of(&pki);
+    let (rtp, offers, _) = far_end();
+    let (sip, _) = sip_server(pki, rtp, offers);
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked {
+        hold_when_wanted: true,
+        ..Hooked::default()
+    });
+    let stack = hooked_stack(&mut hooked, origin, None);
+    let pinned = line_at(stack, "alice", sip, SipralTransport::Tls, Some(&pin));
+    register_at(stack, pinned, origin, &hooked);
+    assert!(!hooked.hold_when_wanted, "the stack was held once");
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// Open a media socket, and its address.
+fn media_socket(stack: SipralHandle) -> Result<String, (SipralStatus, String)> {
+    let mut address = [0 as c_char; SIPRAL_ADDRESS_BYTES];
+    let mut needed = 0_usize;
+    let status = unsafe {
+        sipral_network_media_open(stack, address.as_mut_ptr(), address.len(), &raw mut needed)
+    };
+    if status == SipralStatus::Ok {
+        Ok(written(&address, needed))
+    } else {
+        Err((status, last_error_text()))
+    }
+}
+
+#[test]
+fn a_media_socket_closed_and_opened_again_at_once_gets_its_port_back() {
+    let port = free_pair();
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, Some(port));
+    for _ in 0..3 {
+        let local = media_socket(stack).unwrap();
+        assert_eq!(local, format!("127.0.0.1:{port}"), "the range's one pair");
+        assert_eq!(
+            unsafe { sipral_network_media_close(stack, local.as_ptr().cast(), local.len()) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+    }
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+#[test]
+fn a_media_socket_opened_from_the_callback_of_a_call_that_ended_gets_that_calls_port() {
+    let port = free_pair();
+    let pki = pki();
+    let pin = pin_of(&pki);
+    let (rtp, offers, _) = far_end();
+    let (sip, heard) = sip_server(pki, rtp, offers);
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked {
+        open_when_ended: true,
+        ..Hooked::default()
+    });
+    let stack = hooked_stack(&mut hooked, origin, Some(port));
+    let account = line_at(stack, "alice", sip, SipralTransport::Tls, Some(&pin));
+    register_at(stack, account, origin, &hooked);
+    let media_at = media_socket(stack).unwrap();
+    let target = format!("sip:echo@{DOMAIN}");
+    let mut placing = call_config();
+    (placing.target, placing.target_len) = text(&target);
+    (placing.sdp, placing.sdp_len) = (ptr::null(), 0);
+    (placing.media_address, placing.media_address_len) = text(&media_at);
+    let mut call = SIPRAL_HANDLE_NONE;
+    assert_eq!(
+        unsafe {
+            sipral_call_place(
+                stack,
+                account,
+                &raw const placing,
+                &raw mut call,
+                now(origin),
+            )
+        },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    run_until(stack, origin, "media started", || {
+        !hooked.observed.of(SipralEventKind::MediaStarted).is_empty()
+    });
+    let mut media = SIPRAL_HANDLE_NONE;
+    assert_eq!(
+        unsafe { sipral_call_media(stack, call, &raw mut media) },
+        SipralStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            sipral_network_media_attach(
+                stack,
+                media_at.as_ptr().cast(),
+                media_at.len(),
+                call,
+                media,
+            )
+        },
+        SipralStatus::Ok,
+        "{}",
+        last_error_text()
+    );
+    assert_eq!(
+        unsafe { sipral_call_hangup(stack, call, now(origin)) },
+        SipralStatus::Ok
+    );
+    // the call ends here at once, and on the wire once the server has read the BYE
+    run_until(stack, origin, "hung up", || {
+        hooked.opened.is_some()
+            && heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(method, _)| method == "BYE")
+    });
+    let (status, said) = hooked.opened.clone().unwrap();
+    assert_eq!(status, SipralStatus::Ok, "{said}");
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+/// What a WebSocket server heard: each SIP request's method and the length of the frame's
+/// payload that carried it.
+type Framed = Arc<Mutex<Vec<(String, usize)>>>;
+
+/// The payload of the first whole frame in `buffer`, unmasked, and how many bytes the frame took
+/// (RFC 6455 §5.2).
+fn unmasked(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let second = *buffer.get(1)?;
+    let (len, mut at) = match second & 0x7f {
+        126 => (
+            usize::from(u16::from_be_bytes([*buffer.get(2)?, *buffer.get(3)?])),
+            4,
+        ),
+        127 => (
+            usize::try_from(u64::from_be_bytes(buffer.get(2..10)?.try_into().ok()?)).ok()?,
+            10,
+        ),
+        short => (usize::from(short), 2),
+    };
+    let mut mask = [0_u8; 4];
+    if second & 0x80 != 0 {
+        mask.copy_from_slice(buffer.get(at..at + 4)?);
+        at += 4;
+    }
+    let payload = buffer.get(at..at + len)?;
+    let open = payload
+        .iter()
+        .zip(mask.iter().cycle())
+        .map(|(byte, key)| byte ^ key)
+        .collect();
+    Some((open, at + len))
+}
+
+/// A SIP server over WebSocket on loopback (RFC 7118): the handshake answered, and every request
+/// answered 200 in a frame of the server's.
+fn websocket_server() -> (SocketAddr, Framed) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let own = listener.local_addr().unwrap();
+    let framed_in: Framed = Arc::default();
+    let noted = Arc::clone(&framed_in);
+    thread::spawn(move || {
+        for tcp in listener.incoming() {
+            let Ok(mut tcp) = tcp else { continue };
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            let mut open = false;
+            while let Ok(read) = tcp.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+                if !open {
+                    let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let asked = String::from_utf8_lossy(&buffer[..end]).into_owned();
+                    buffer.drain(..end + 4);
+                    let key = asked
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                        .unwrap_or_default();
+                    let upgraded = format!(
+                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                         Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\
+                         Sec-WebSocket-Protocol: sip\r\n\r\n",
+                        sipral_ua::websocket::accept_for(key)
+                    );
+                    if tcp.write_all(upgraded.as_bytes()).is_err() {
+                        return;
+                    }
+                    open = true;
+                }
+                while let Some((payload, taken)) = unmasked(&buffer) {
+                    buffer.drain(..taken);
+                    let Some((head, body, _)) = framed(&payload) else {
+                        continue;
+                    };
+                    let method = head.split(' ').next().unwrap_or_default().to_owned();
+                    noted.lock().unwrap().push((method, payload.len()));
+                    let Some(response) = answer(&head, &body, own, own, 1) else {
+                        continue;
+                    };
+                    let len = u16::try_from(response.len()).unwrap();
+                    let mut frame = vec![0x81, 126];
+                    frame.extend_from_slice(&len.to_be_bytes());
+                    frame.extend_from_slice(response.as_bytes());
+                    if tcp.write_all(&frame).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    (own, framed_in)
+}
+
+#[test]
+fn a_websocket_frame_longer_than_any_message_is_written_and_what_follows_it_too() {
+    let (server, heard) = websocket_server();
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, None);
+    let account = line_at(stack, "alice", server, SipralTransport::Ws, None);
+    register_at(stack, account, origin, &hooked);
+    let kind = "text/plain";
+    // one target each, since a target has one MESSAGE outside a dialog at a time
+    let send = |user: &str, body: &[u8]| {
+        let target = format!("sip:{user}@{DOMAIN}");
+        let mut message = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_account_message(
+                stack,
+                account,
+                target.as_ptr().cast(),
+                target.len(),
+                kind.as_ptr().cast(),
+                kind.len(),
+                body.as_ptr(),
+                body.len(),
+                &raw mut message,
+                now(origin),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    };
+    let messages = |heard: &Framed| -> Vec<usize> {
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "MESSAGE")
+            .map(|(_, len)| *len)
+            .collect()
+    };
+    // a first message measures what a MESSAGE carries besides its body
+    send("bob", &[b'x'; 10_000]);
+    run_until(stack, origin, "the first message", || {
+        messages(&heard).len() == 1
+    });
+    let around = messages(&heard)[0] - 10_000;
+    // a message the stack takes whole, whose frame is 8 bytes longer than a message can be
+    send("bea", &vec![b'x'; 65_531 - around]);
+    send("cy", b"after");
+    run_until(
+        stack,
+        origin,
+        "the long message and the one after it",
+        || messages(&heard).len() == 3,
+    );
+    let long = messages(&heard)[1];
+    assert!(
+        (65_528..=65_535).contains(&long),
+        "a message of {long} bytes, whose frame does not fit a message's buffer"
     );
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }

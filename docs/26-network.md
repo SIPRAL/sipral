@@ -49,6 +49,12 @@ or asks only the name servers the application names
 (`sipral_network_config_t::name_servers`). A name the hosts file knows is
 answered from it.
 
+Every socket is read while the loop is busy elsewhere, but what waits for the
+loop is bounded at 4 MiB: past it a datagram is dropped, as a full socket buffer
+would drop it, and a connection is not read on until there is room, so that TCP
+holds its sender back. A TLS server's `close_notify` closes its connection at
+once; whatever the server sends after it is ignored (RFC 8446 §6.1).
+
 ## The C ABI
 
 ```c
@@ -111,7 +117,10 @@ connections with the platform's APIs.
 | `SIPRAL_NETWORK_TRUST_PINNED` (3) | the one certificate whose SHA-256 fingerprint is `pin_sha256`, read as `tls_pin_sha256` is (`22-tls.md`, "A PBX's own certificate, pinned") |
 
 An account's own `tls_pin_sha256` wins over the configured trust for the
-connections to its server. The name is checked by the rules HTTPS uses, as
+connections to its server. One connection to an address carries every account
+whose server is there, so the pin of any of them holds it; accounts there that
+pin different certificates are refused before anything is sent, with `tls`
+none and a `detail` that says so. The name is checked by the rules HTTPS uses, as
 every binding checks it: `tls_server_name` when the configuration gives one;
 else the host of the `server_uri` of the account whose located addresses
 include the one connected to — the SIP domain the user configured, not the
@@ -152,7 +161,8 @@ UnknownIssuer"):
 | any other handshake failure | `CONNECTION_RESET` | `HANDSHAKE_REFUSED` |
 
 A connection that was never bound reads `protocol` zero in the event, as it does
-from a binding.
+from a binding. A write a server does not take within `connect_timeout_ms`,
+on TCP as on TLS, closes the connection, and its failure is told the same way.
 
 ## Media
 
