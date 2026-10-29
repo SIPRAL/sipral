@@ -36,10 +36,13 @@
 //! opened before the account was added is used as it stands.
 //!
 //! **Whose it is.** One TLS connection is checked against one name and one
-//! pin, a [`StreamIdentity`], so accounts whose server is at one address
-//! share a connection only when their identities are the same: a
-//! multi-tenant PBX serves a SIP domain per tenant from one address, and a
-//! certificate valid for one tenant's domain says nothing of another's. A
+//! pin and presents one client certificate, a [`StreamIdentity`], so
+//! accounts whose server is at one address share a connection only when
+//! their identities are the same: a multi-tenant PBX serves a SIP domain per
+//! tenant from one address, and a certificate valid for one tenant's domain
+//! says nothing of another's; a server that admits clients by certificate
+//! takes what arrives on a connection as from the user its certificate
+//! names. A
 //! layer that opens connections asks which identities wait for one there
 //! ([`UserAgent::stream_identities_wanted`]), opens one for each, and says
 //! which it was checked against before binding it
@@ -62,33 +65,59 @@ use crate::agent::UserAgent;
 use crate::event::{RegistrationState, UaEvent};
 use crate::oversize::STREAM_WAIT;
 
-/// What a TLS connection to an account's server is checked against: the
-/// name the server's certificate must carry, and the one certificate
-/// trusted in place of a chain.
+/// What a TLS connection to an account's server is checked against, and
+/// what it presents: the name the server's certificate must carry, the one
+/// certificate trusted in place of a chain, and the tag of the client
+/// certificate shown to the server.
 ///
 /// An account's is the host of its [`Account::server`] when that is a name
 /// (RFC 5922 §7.3: the domain the user configured, not the host SRV turned
-/// it into), else none, which checks the address; and its
-/// [`Account::pinned_certificate`]. On a protocol without TLS every account
-/// has the same one, nothing.
+/// it into), else none, which checks the address; its
+/// [`Account::pinned_certificate`]; and its
+/// [`Account::client_certificate_tag`], since a server that admits clients
+/// by certificate (RFC 8446 §4.4.2) takes every request on a connection as
+/// from the one that connection presented. On a protocol without TLS every
+/// account has the same one, nothing.
 ///
 /// [`Account::server`]: crate::Account::server
 /// [`Account::pinned_certificate`]: crate::Account::pinned_certificate
+/// [`Account::client_certificate_tag`]: crate::Account::client_certificate_tag
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct StreamIdentity {
     server_name: Option<Box<str>>,
     pin: Option<CertificatePin>,
+    client_tag: Option<Box<str>>,
 }
 
 impl StreamIdentity {
     /// Checked against `server_name` (`None`: the address), pinned to `pin`
-    /// when there is one. Names compare without regard to case.
+    /// when there is one, presenting the default client certificate. Names
+    /// compare without regard to case.
     #[must_use]
     pub fn new(server_name: Option<&str>, pin: Option<CertificatePin>) -> Self {
         Self {
             server_name: server_name.map(|name| name.to_ascii_lowercase().into_boxed_str()),
             pin,
+            client_tag: None,
         }
+    }
+
+    /// The same, presenting the client certificate `tag` tells apart
+    /// ([`Account::tls_client_tag`]); `None` or empty for the default one.
+    /// Tags compare exactly.
+    ///
+    /// [`Account::tls_client_tag`]: crate::Account::tls_client_tag
+    #[must_use]
+    pub fn with_client_tag(mut self, tag: Option<&str>) -> Self {
+        self.client_tag = tag.filter(|tag| !tag.is_empty()).map(Box::from);
+        self
+    }
+
+    /// The tag of the client certificate presented; `None` for the default
+    /// one.
+    #[must_use]
+    pub fn client_tag(&self) -> Option<&str> {
+        self.client_tag.as_deref()
     }
 
     /// The name the server's certificate must carry, lowercase; `None`
@@ -117,7 +146,7 @@ impl StreamIdentity {
                 HostRef::Name(name) => Some(name),
                 HostRef::Ipv4(_) | HostRef::Ipv6(_) => None,
             });
-        Self::new(name, account.tls_pin)
+        Self::new(name, account.tls_pin).with_client_tag(account.tls_client_tag.as_deref())
     }
 }
 
@@ -264,7 +293,8 @@ impl UserAgent {
     /// The identities the accounts waiting for a connection of `protocol` to
     /// `destination` are to be checked against, each once, in the order they
     /// asked: one connection is opened for each, since one connection is
-    /// checked against one name and one pin. Whether one is already on its
+    /// checked against one name and one pin and presents one client
+    /// certificate. Whether one is already on its
     /// way is the caller's to know.
     #[must_use]
     pub fn stream_identities_wanted(
@@ -554,7 +584,7 @@ mod tests {
     use crate::agent::UserAgent;
     use crate::call::OutgoingCall;
     use crate::event::{RegistrationState, UaEvent};
-    use crate::{EndpointConfig, Uri};
+    use crate::{EndpointConfig, StreamIdentity, Uri};
 
     const UDP: TransportId = TransportId(1);
     const TLS: TransportId = TransportId(7);
@@ -1235,6 +1265,110 @@ mod tests {
         let (sent, events) = drain(&mut agent);
         assert!(wanted(&events).is_empty(), "{events:?}");
         assert_eq!(registers_on(&sent), [TransportId(20)]);
+    }
+
+    /// Two accounts at one server, one name and one pin, presenting client
+    /// certificates of their own: a connection presents one, so each gets
+    /// its own, and a connection opened for one carries that one alone.
+    #[test]
+    fn lines_presenting_different_client_certificates_each_get_a_connection() {
+        let t0 = Instant::now();
+        let mut agent = bound_udp(50, t0);
+        let alice = agent.add_account(pinned_line("alice", 1).tls_client_tag("alice-certificate"));
+        let bob = agent.add_account(pinned_line("bob", 1).tls_client_tag("bob-certificate"));
+        agent.register(alice, t0).unwrap();
+        agent.register(bob, t0).unwrap();
+        let _ = drain(&mut agent);
+        let identities = agent.stream_identities_wanted(TransportProtocol::Tls, second());
+        assert_eq!(
+            identities
+                .iter()
+                .map(StreamIdentity::client_tag)
+                .collect::<Vec<_>>(),
+            [Some("alice-certificate"), Some("bob-certificate")],
+            "one connection for each certificate"
+        );
+
+        let (for_alice, for_bob) = (identities[0].clone(), identities[1].clone());
+        agent.stream_opening(TransportId(20), TransportProtocol::Tls, second(), for_alice);
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TransportId(20),
+                    protocol: TransportProtocol::Tls,
+                    local: tls_local(),
+                    remote: Some(second()),
+                },
+                t0,
+            )
+            .unwrap();
+        let (sent, _) = drain(&mut agent);
+        assert_eq!(registers_on(&sent), [TransportId(20)], "alice's alone");
+        assert!(
+            sent.iter()
+                .filter(|one| one.bytes.starts_with(b"REGISTER "))
+                .all(|one| String::from_utf8_lossy(&one.bytes).contains("sip:alice@")),
+            "bob's REGISTER waits for a connection of its own"
+        );
+        assert_eq!(
+            agent.stream_identities_wanted(TransportProtocol::Tls, second()),
+            std::slice::from_ref(&for_bob),
+            "bob still waits"
+        );
+
+        // bob's connection failing is bob's alone
+        agent.stream_opening(TransportId(21), TransportProtocol::Tls, second(), for_bob);
+        agent.flow_unavailable_on(TransportId(21), t0);
+        assert_eq!(
+            agent.registration_state(alice),
+            Some(RegistrationState::Registering),
+            "alice's REGISTER is still out"
+        );
+        assert_ne!(
+            agent.registration_state(bob),
+            Some(RegistrationState::Registering),
+            "bob's gave up"
+        );
+    }
+
+    #[test]
+    fn lines_presenting_the_same_client_certificate_share_a_connection() {
+        let t0 = Instant::now();
+        let mut agent = bound_udp(51, t0);
+        let alice = agent.add_account(pinned_line("alice", 1).tls_client_tag("shared"));
+        let bob = agent.add_account(pinned_line("bob", 1).tls_client_tag("shared"));
+        agent.register(alice, t0).unwrap();
+        agent.register(bob, t0).unwrap();
+        let _ = drain(&mut agent);
+        assert_eq!(open_asked(&mut agent, 20, t0), 1);
+        let (sent, _) = drain(&mut agent);
+        assert_eq!(registers_on(&sent), [TransportId(20), TransportId(20)]);
+    }
+
+    #[test]
+    fn a_connection_without_tls_presents_no_certificate_and_is_shared() {
+        let t0 = Instant::now();
+        let mut agent = bound_udp(52, t0);
+        let line = |user: &str, tag: &str| {
+            Account::new(
+                uri(&format!("sip:{user}@second.example.com")),
+                uri("sip:second.example.com"),
+                uri(&format!("sip:{user}@192.0.2.1:50123;transport=tcp")),
+                UDP,
+                second(),
+            )
+            .on_stream(TransportProtocol::Tcp)
+            .tls_client_tag(tag)
+        };
+        let alice = agent.add_account(line("alice", "alice-certificate"));
+        let bob = agent.add_account(line("bob", "bob-certificate"));
+        agent.register(alice, t0).unwrap();
+        agent.register(bob, t0).unwrap();
+        let _ = drain(&mut agent);
+        assert_eq!(
+            agent.stream_identities_wanted(TransportProtocol::Tcp, second()),
+            [StreamIdentity::default()]
+        );
     }
 
     #[test]

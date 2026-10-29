@@ -5,12 +5,15 @@
 
 part of 'idiomatic.dart';
 
-/// Where an account's own connection goes and what it is checked against,
-/// as `SipralEventKind.transportWanted` named them: the server's name and
-/// pin, each empty for none. One connection is opened for each, since a
-/// certificate valid for one tenant's domain says nothing of another's at
-/// the same address.
-typedef _StreamTarget = ({String destination, String serverName, String pin});
+/// Where an account's own connection goes, what it is checked against and
+/// what it presents, as `SipralEventKind.transportWanted` named them: the
+/// server's name and pin, each empty for none, and the tag of the client
+/// certificate, empty for the stack's. One connection is opened for each,
+/// since a certificate valid for one tenant's domain says nothing of
+/// another's at the same address, and a server that admits clients by
+/// certificate takes all a connection carries as from the user it presented.
+typedef _StreamTarget =
+    ({String destination, String serverName, String pin, String clientTag});
 
 /// A SIP stack on one UDP socket: the class an application opens first.
 ///
@@ -387,8 +390,10 @@ final class SipralStack {
   /// off it is answered 481 and nothing is raised.
   ///
   /// [clientCertificate] is what its TLS or WSS connection presents when the
-  /// server asks for one; the stack's `clientCertificate` when null. A
-  /// refusal is `SipralEventKind.transportFailed` with
+  /// server asks for one; the stack's `clientCertificate` when null.
+  /// Accounts given different [SipralClientCertificate] objects never share
+  /// a connection, even to one server; give one object to accounts that are
+  /// to share one. A refusal is `SipralEventKind.transportFailed` with
   /// [SipralStackEvent.tlsFailure] saying why.
   ///
   /// [instanceId] is the RFC 5626 §4.1 `+sip.instance` URN (`urn:uuid:...`)
@@ -471,6 +476,9 @@ final class SipralStack {
       final websocketHostText = _text(arena, websocketHost);
       final websocketResourceText = _text(arena, websocketResource);
       final instanceText = _text(arena, instanceId);
+      // a connection presents one certificate, so the stack keeps accounts
+      // whose certificates differ on connections apart
+      final tagText = _text(arena, clientCertificate?._tag);
       final fields = arena<SipralHeader>(headers.isEmpty ? 1 : headers.length);
       for (var index = 0; index < headers.length; index++) {
         final (name, value) = headers[index];
@@ -504,6 +512,8 @@ final class SipralStack {
         ..keepaliveMs = keepaliveMs
         ..tlsPinSha256 = pinText.$1
         ..tlsPinSha256Len = pinText.$2
+        ..tlsClientTag = tagText.$1
+        ..tlsClientTagLen = tagText.$2
         ..streamProtocol = streamProtocol ?? 0
         ..realms = realmsText.$1
         ..realmsLen = realmsText.$2
@@ -822,13 +832,15 @@ final class SipralStack {
   }
 
   /// Say that the connection about to be made under [id] is checked
-  /// against [target] (`sipral_stack_stream_opening`), so that once bound
-  /// it carries the accounts of that identity alone.
+  /// against [target] and presents its certificate
+  /// (`sipral_stack_stream_opening`), so that once bound it carries the
+  /// accounts of that identity alone.
   void _sayOpening(int id, _StreamTarget target, int protocol) {
     using((arena) {
       final destination = _text(arena, target.destination);
       final name = _text(arena, target.serverName);
       final pin = _text(arena, target.pin);
+      final tag = _text(arena, target.clientTag);
       final opening = arena<SipralStreamOpening>();
       opening.ref
         ..size = ffi.sizeOf<SipralStreamOpening>()
@@ -839,7 +851,9 @@ final class SipralStack {
         ..serverName = name.$1
         ..serverNameLen = name.$2
         ..tlsPinSha256 = pin.$1
-        ..tlsPinSha256Len = pin.$2;
+        ..tlsPinSha256Len = pin.$2
+        ..tlsClientTag = tag.$1
+        ..tlsClientTagLen = tag.$2;
       _checkNow(
         _sipral,
         'sipral_stack_stream_opening',
@@ -869,7 +883,8 @@ final class SipralStack {
     final tls =
         protocol == SipralTransport.tls || protocol == SipralTransport.wss;
     // one of the accounts the connection is for, whose pin is the one asked
-    // for and whose certificate it presents
+    // for and whose certificate, the one the stack named by its tag, it
+    // presents
     final account =
         _accounts.values
             .where(
@@ -878,7 +893,8 @@ final class SipralStack {
                   one.registrarAddress == destination &&
                   (sipDomainOf(one.serverUri)?.toLowerCase() ?? '') ==
                       target.serverName &&
-                  _pinDigits(one._tlsPin) == _pinDigits(target.pin),
+                  _pinDigits(one._tlsPin) == _pinDigits(target.pin) &&
+                  (one.clientCertificate?._tag ?? '') == target.clientTag,
             )
             .firstOrNull;
     final certificate =
@@ -1496,6 +1512,10 @@ final class SipralStack {
             destination: destination,
             serverName: _decode(wanted.serverName.cast(), wanted.serverNameLen),
             pin: _decode(wanted.tlsPinSha256.cast(), wanted.tlsPinSha256Len),
+            clientTag: _decode(
+              wanted.tlsClientTag.cast(),
+              wanted.tlsClientTagLen,
+            ),
           );
           Timer.run(() => unawaited(_openStream(target, protocol)));
         }

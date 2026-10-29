@@ -231,6 +231,17 @@ class TlsClientCertificate:
     def __repr__(self) -> str:
         return f"TlsClientCertificate({self.certfile!r}, {self.keyfile!r})"
 
+    @property
+    def tag(self) -> str:
+        """What tells this certificate apart for the stack, the same each
+        time (`sipral_account_config_t::tls_client_tag`): the SHA-256 of the
+        two files' absolute paths, since the files are read only when a
+        connection is made. Accounts whose tags match share a TLS
+        connection; the others never do, since a connection presents one
+        certificate."""
+        named = "\0".join((os.path.abspath(self.certfile), os.path.abspath(self.keyfile or self.certfile)))
+        return "files " + hashlib.sha256(named.encode("utf-8", "surrogateescape")).hexdigest()
+
     def present_with(self, context: ssl.SSLContext, now: datetime.datetime | None = None) -> None:
         """Load the certificate and its key into ``context``, after checking
         both; raises :class:`ClientCertificateUnusable` when they cannot be

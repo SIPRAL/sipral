@@ -189,6 +189,9 @@ class SipralAccount internal constructor(
                 websocketResource = location.websocketResource,
                 webrtc = if (security.webrtc) SipralToggle.ON.value.toLong() else 0,
                 unsolicitedMwi = if (unsolicitedMwi) SipralToggle.ON.value.toLong() else 0,
+                // a connection presents one certificate, so the stack keeps
+                // accounts whose certificates differ on connections apart
+                tlsClientTag = location.clientCertificate?.tag,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using Sipral;
 using Xunit;
@@ -94,6 +95,66 @@ public sealed class AccountStreamTests
         {
             first.Close();
             second.Close();
+        }
+    }
+
+    // A self-signed client certificate naming `user`, with its key.
+    private static X509Certificate2 ClientCertificate(string user)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest($"CN={user}", key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") }, critical: false));
+        using var made = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        return X509CertificateLoader.LoadPkcs12(made.Export(X509ContentType.Pfx), null);
+    }
+
+    /// <summary>Two accounts at one server, one name and one pin, each with a
+    /// client certificate of its own: a connection presents one, and the
+    /// server takes all it carries as from the user it names, so each account
+    /// registers over a connection that presented its own.</summary>
+    [Fact]
+    public async Task AccountsWithCertificatesOfTheirOwnAtOneServerEachPresentTheirOwn()
+    {
+        using var certificate = SignallingTests.Good();
+        using var registrar = new SignallingTests.Registrar(certificate, clientCertificateRequired: true);
+        var pin = Convert.ToHexString(SHA256.HashData(certificate.RawData));
+        using var theStacks = ClientCertificate("the-stacks");
+        using var stack = new SipralStack(audio: SipralAudio.Application, bindHost: "127.0.0.1",
+            tlsClientCertificate: new SipralClientCertificate(theStacks));
+        var users = new[] { "alice", "bob" };
+        var certificates = users.Select(ClientCertificate).ToArray();
+        try
+        {
+            var accounts = users.Zip(certificates, (user, mine) => stack.AddAccount($"sip:{user}@{ServerName}",
+                registrar.Address, registrar: $"sip:{ServerName}", tlsPin: pin, streamProtocol: SipralTransport.Tls,
+                tlsClientCertificate: new SipralClientCertificate(mine))).ToArray();
+            foreach (var account in accounts)
+            {
+                account.Register();
+            }
+            foreach (var account in accounts)
+            {
+                Assert.True(await Registered(account), $"{account.Aor} never registered");
+            }
+            foreach (var user in users)
+            {
+                var theirs = registrar.Registers()
+                    .Where(one => SignallingTests.Header("From", one.Message)?.Contains($"sip:{user}@") == true)
+                    .Select(one => registrar.PresentedOn(one.Connection))
+                    .ToList();
+                Assert.NotEmpty(theirs);
+                Assert.True(theirs.All(one => one == $"CN={user}"),
+                    $"{user}'s REGISTER came on a connection that presented {string.Join(", ", theirs)}");
+            }
+            Assert.Equal(2, registrar.Registers().Select(one => one.Connection).Distinct().Count());
+        }
+        finally
+        {
+            foreach (var one in certificates)
+            {
+                one.Dispose();
+            }
         }
     }
 

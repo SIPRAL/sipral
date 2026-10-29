@@ -1004,11 +1004,13 @@ static sipral_status_t transport_failure_at(struct fixture *fixture, size_t decl
 }
 
 /* A TLS connection to a tenant's server being opened, checked against the
- * tenant's domain, as one SIPRAL_EVENT_KIND_TRANSPORT_WANTED named it. */
+ * tenant's domain and presenting one user's client certificate, as one
+ * SIPRAL_EVENT_KIND_TRANSPORT_WANTED named them. */
 static sipral_status_t stream_opening_at(struct fixture *fixture, size_t declared)
 {
     static const char remote[] = "203.0.113.10:5061";
     static const char name[] = "tenant.example.com";
+    static const char tag[] = "alice-at-tenant";
     sipral_stream_opening_t opening = { 0 };
     opening.size = declared;
     opening.transport = 3;
@@ -1017,6 +1019,8 @@ static sipral_status_t stream_opening_at(struct fixture *fixture, size_t declare
     opening.destination_len = strlen(remote);
     opening.server_name = name;
     opening.server_name_len = strlen(name);
+    opening.tls_client_tag = tag;
+    opening.tls_client_tag_len = strlen(tag);
     return sipral_stack_stream_opening(fixture->stack, &opening);
 }
 

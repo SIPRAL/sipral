@@ -1560,6 +1560,11 @@ the pinned certificate's dates or a `PinMismatch`, in constant time
   reads it back (`keepalive_ms`).
 - `.tls_pin(pin)` — the one certificate the account's TLS server is trusted
   by; `pinned_certificate()` reads it back (`tls_pin_sha256`).
+- `.tls_client_tag(tag)` — the tag of the client certificate the
+  application presents for the account, text it derives from the
+  certificate; accounts whose tags differ never share a connection
+  (`StreamIdentity`); `client_certificate_tag()` reads it back
+  (`tls_client_tag`).
 - `.on_stream(protocol)` — the account's requests go over a TCP or TLS
   connection of its own to its server, which the agent asks the
   application to open (`Event::TransportWanted`, nothing outgrown) and

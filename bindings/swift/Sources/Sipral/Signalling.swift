@@ -126,6 +126,9 @@ public struct TransportWantedEventData: Sendable {
     /// The fingerprint of the one certificate trusted, upper case with
     /// colons; empty for none.
     public let tlsPinSha256: String
+    /// The tag of the client certificate to present, as the account's
+    /// `tlsClientIdentity` gave it; empty for the stack's own, or none.
+    public let tlsClientTag: String
 }
 
 /// A connection that could not be made, and what the stack is to call it.

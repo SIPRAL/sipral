@@ -196,7 +196,7 @@ _Static_assert(offsetof(sipral_header_t, name_len) == SIPRAL_LAYOUT(8, 4, 4), "s
 _Static_assert(offsetof(sipral_header_t, value) == SIPRAL_LAYOUT(16, 8, 8), "sipral_header_t::value");
 _Static_assert(offsetof(sipral_header_t, value_len) == SIPRAL_LAYOUT(24, 12, 12), "sipral_header_t::value_len");
 
-_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(512, 288, 296), "sipral_account_config_t");
+_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(528, 296, 304), "sipral_account_config_t");
 _Static_assert(offsetof(sipral_account_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_account_config_t::size");
 _Static_assert(offsetof(sipral_account_config_t, aor) == SIPRAL_LAYOUT(8, 4, 4), "sipral_account_config_t::aor");
 _Static_assert(offsetof(sipral_account_config_t, aor_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_account_config_t::aor_len");
@@ -265,6 +265,8 @@ _Static_assert(offsetof(sipral_account_config_t, webrtc) == SIPRAL_LAYOUT(496, 2
 _Static_assert(offsetof(sipral_account_config_t, reserved_1_4) == SIPRAL_LAYOUT(500, 276, 284), "sipral_account_config_t::reserved_1_4");
 _Static_assert(offsetof(sipral_account_config_t, unsolicited_mwi) == SIPRAL_LAYOUT(504, 280, 288), "sipral_account_config_t::unsolicited_mwi");
 _Static_assert(offsetof(sipral_account_config_t, reserved_1_10) == SIPRAL_LAYOUT(508, 284, 292), "sipral_account_config_t::reserved_1_10");
+_Static_assert(offsetof(sipral_account_config_t, tls_client_tag) == SIPRAL_LAYOUT(512, 288, 296), "sipral_account_config_t::tls_client_tag");
+_Static_assert(offsetof(sipral_account_config_t, tls_client_tag_len) == SIPRAL_LAYOUT(520, 292, 300), "sipral_account_config_t::tls_client_tag_len");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
 _Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(168, 100, 100), "sipral_call_config_t");
@@ -453,7 +455,7 @@ _Static_assert(offsetof(sipral_transport_failure_t, detail) == SIPRAL_LAYOUT(24,
 _Static_assert(offsetof(sipral_transport_failure_t, detail_len) == SIPRAL_LAYOUT(32, 20, 20), "sipral_transport_failure_t::detail_len");
 _Static_assert(offsetof(sipral_transport_failure_t, detail_len) + sizeof(((sipral_transport_failure_t *)0)->detail_len) == SIPRAL_LAYOUT(40, 24, 24), "sipral_transport_failure_t is pinned through detail_len");
 
-_Static_assert(sizeof(sipral_stream_opening_t) == SIPRAL_LAYOUT(64, 36, 36), "sipral_stream_opening_t");
+_Static_assert(sizeof(sipral_stream_opening_t) == SIPRAL_LAYOUT(80, 44, 44), "sipral_stream_opening_t");
 _Static_assert(offsetof(sipral_stream_opening_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_stream_opening_t::size");
 _Static_assert(offsetof(sipral_stream_opening_t, transport) == SIPRAL_LAYOUT(8, 4, 4), "sipral_stream_opening_t::transport");
 _Static_assert(offsetof(sipral_stream_opening_t, protocol) == SIPRAL_LAYOUT(12, 8, 8), "sipral_stream_opening_t::protocol");
@@ -463,6 +465,8 @@ _Static_assert(offsetof(sipral_stream_opening_t, server_name) == SIPRAL_LAYOUT(3
 _Static_assert(offsetof(sipral_stream_opening_t, server_name_len) == SIPRAL_LAYOUT(40, 24, 24), "sipral_stream_opening_t::server_name_len");
 _Static_assert(offsetof(sipral_stream_opening_t, tls_pin_sha256) == SIPRAL_LAYOUT(48, 28, 28), "sipral_stream_opening_t::tls_pin_sha256");
 _Static_assert(offsetof(sipral_stream_opening_t, tls_pin_sha256_len) == SIPRAL_LAYOUT(56, 32, 32), "sipral_stream_opening_t::tls_pin_sha256_len");
+_Static_assert(offsetof(sipral_stream_opening_t, tls_client_tag) == SIPRAL_LAYOUT(64, 36, 36), "sipral_stream_opening_t::tls_client_tag");
+_Static_assert(offsetof(sipral_stream_opening_t, tls_client_tag_len) == SIPRAL_LAYOUT(72, 40, 40), "sipral_stream_opening_t::tls_client_tag_len");
 _Static_assert(offsetof(sipral_stream_opening_t, tls_pin_sha256_len) + sizeof(((sipral_stream_opening_t *)0)->tls_pin_sha256_len) == SIPRAL_LAYOUT(64, 36, 36), "sipral_stream_opening_t is pinned through tls_pin_sha256_len");
 
 _Static_assert(sizeof(sipral_registration_event_t) == SIPRAL_LAYOUT(40, 36, 40), "sipral_registration_event_t");
@@ -555,7 +559,7 @@ _Static_assert(offsetof(sipral_recovery_event_t, rung) == SIPRAL_LAYOUT(4, 4, 4)
 _Static_assert(offsetof(sipral_recovery_event_t, reason) == SIPRAL_LAYOUT(8, 8, 8), "sipral_recovery_event_t::reason");
 _Static_assert(offsetof(sipral_recovery_event_t, unverified) == SIPRAL_LAYOUT(12, 12, 12), "sipral_recovery_event_t::unverified");
 
-_Static_assert(sizeof(sipral_transport_wanted_event_t) == SIPRAL_LAYOUT(72, 36, 36), "sipral_transport_wanted_event_t");
+_Static_assert(sizeof(sipral_transport_wanted_event_t) == SIPRAL_LAYOUT(88, 44, 44), "sipral_transport_wanted_event_t");
 _Static_assert(offsetof(sipral_transport_wanted_event_t, protocol) == SIPRAL_LAYOUT(0, 0, 0), "sipral_transport_wanted_event_t::protocol");
 _Static_assert(offsetof(sipral_transport_wanted_event_t, destination) == SIPRAL_LAYOUT(8, 4, 4), "sipral_transport_wanted_event_t::destination");
 _Static_assert(offsetof(sipral_transport_wanted_event_t, destination_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_transport_wanted_event_t::destination_len");
@@ -565,6 +569,8 @@ _Static_assert(offsetof(sipral_transport_wanted_event_t, server_name) == SIPRAL_
 _Static_assert(offsetof(sipral_transport_wanted_event_t, server_name_len) == SIPRAL_LAYOUT(48, 24, 24), "sipral_transport_wanted_event_t::server_name_len");
 _Static_assert(offsetof(sipral_transport_wanted_event_t, tls_pin_sha256) == SIPRAL_LAYOUT(56, 28, 28), "sipral_transport_wanted_event_t::tls_pin_sha256");
 _Static_assert(offsetof(sipral_transport_wanted_event_t, tls_pin_sha256_len) == SIPRAL_LAYOUT(64, 32, 32), "sipral_transport_wanted_event_t::tls_pin_sha256_len");
+_Static_assert(offsetof(sipral_transport_wanted_event_t, tls_client_tag) == SIPRAL_LAYOUT(72, 36, 36), "sipral_transport_wanted_event_t::tls_client_tag");
+_Static_assert(offsetof(sipral_transport_wanted_event_t, tls_client_tag_len) == SIPRAL_LAYOUT(80, 40, 40), "sipral_transport_wanted_event_t::tls_client_tag_len");
 
 _Static_assert(sizeof(sipral_subscription_event_t) == SIPRAL_LAYOUT(56, 56, 56), "sipral_subscription_event_t");
 _Static_assert(offsetof(sipral_subscription_event_t, subscription) == SIPRAL_LAYOUT(0, 0, 0), "sipral_subscription_event_t::subscription");

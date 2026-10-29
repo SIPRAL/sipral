@@ -591,7 +591,12 @@ stack names the domain and the pin with each ask (`fields["server_name"]`,
 `fields["tls_pin_sha256"]`), and this package opens one connection for each
 pair and says which before binding it (`sipral_stack_stream_opening`, ABI
 1.11): two tenants of one PBX at one address are each checked against their
-own domain, and accounts of the same domain and pin share one connection. The
+own domain, and accounts of the same domain and pin share one connection.
+From ABI 1.12 the ask names the client certificate as well
+(`fields["tls_client_tag"]`): two accounts with `tls_client_certificate`s of
+their own each present their own on a connection of their own, a
+`TlsClientCertificate` told apart by its files' paths, which are read only
+when a connection is made. The
 account's REGISTER and every request of its calls go over it, its `Contact`
 names the protocol, and a connection that closes is opened again and the
 account registered again. Until it is open a call the account places

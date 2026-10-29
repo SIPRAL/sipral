@@ -1093,7 +1093,8 @@ record! {
     /// account's own connection, both sizes zero.
     ///
     /// A TLS or WSS connection is checked against one identity, the server's
-    /// name and pin below, and carries the accounts of that identity alone
+    /// name and pin below and, from ABI 1.12, the client certificate it
+    /// presents, and carries the accounts of that identity alone
     /// once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
     /// raised for each identity waiting for a connection there, the same one
     /// possibly again, and one connection is opened for each that has none
@@ -1126,6 +1127,14 @@ record! {
         pub tls_pin_sha256: *const c_char,
         /// How many bytes of it.
         pub tls_pin_sha256_len: usize,
+        /// The tag of the client certificate to present, as
+        /// `sipral_account_config_t::tls_client_tag` gave it for the
+        /// accounts the connection is for; empty for the application's
+        /// default certificate, or none, and on a protocol without TLS. Not
+        /// NUL-terminated (ABI 1.12).
+        pub tls_client_tag: *const c_char,
+        /// How many bytes of it.
+        pub tls_client_tag_len: usize,
     }
 }
 
@@ -2336,8 +2345,8 @@ fn about_a_mailbox(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
 
 /// A request RFC 3261 §18.1.1 kept off a datagram, or an account's own
 /// connection, asked for with the identity it is checked against, and the
-/// text the event points into: the destination, the name, then the pin.
-/// `None` for any other kind.
+/// text the event points into: the destination, the name, the pin, then the
+/// client certificate's tag. `None` for any other kind.
 pub(crate) fn transport_wanted(
     stack: SipralHandle,
     event: &UaEvent,
@@ -2355,7 +2364,8 @@ pub(crate) fn transport_wanted(
     let destination = destination.to_string();
     let name = identity.server_name().unwrap_or_default();
     let pin = identity.pin().map(ToString::to_string).unwrap_or_default();
-    let text = format!("{destination}{name}{pin}");
+    let tag = identity.client_tag().unwrap_or_default();
+    let text = format!("{destination}{name}{pin}{tag}");
     // a String's bytes stay where they are when it moves
     let at = |from: usize, len: usize| {
         if len == 0 {
@@ -2374,6 +2384,8 @@ pub(crate) fn transport_wanted(
         server_name_len: name.len(),
         tls_pin_sha256: at(destination.len() + name.len(), pin.len()),
         tls_pin_sha256_len: pin.len(),
+        tls_client_tag: at(destination.len() + name.len() + pin.len(), tag.len()),
+        tls_client_tag_len: tag.len(),
     };
     let event = SipralEvent::of(
         stack,

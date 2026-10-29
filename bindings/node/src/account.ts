@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 
 import type { StackEvent } from './events.js';
 import { SipralError, check, checkNow, config, plain, record, text, within } from './internal.js';
-import { SIPRAL_TRANSPORT_MAIN, SipralActivity, SipralRegistrationState, SipralStatus, SipralTransport } from './sipral_abi.js';
+import { SIPRAL_TRANSPORT_MAIN, SipralActivity, SipralRegistrationState, SipralStatus } from './sipral_abi.js';
 import type { Stack } from './stack.js';
 import { Subscription } from './subscription.js';
 import type { ClientCertificate } from './tls.js';
@@ -449,11 +449,6 @@ export class Account extends EventEmitter<AccountEvents> {
     check(this.stack.sipral, 'sipral_account_remove', this.stack.sipral.sipral_account_remove(this.stack.handle, this.handle));
     this.stack.forgetAccount(this);
     this.removeAllListeners();
-  }
-
-  /** @internal Whether its connection of its own speaks TLS. */
-  get overTls(): boolean {
-    return this.streamProtocol === SipralTransport.Tls || this.streamProtocol === SipralTransport.Wss;
   }
 
   /** @internal What the stack hands each event about this account to. */

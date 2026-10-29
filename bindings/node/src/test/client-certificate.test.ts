@@ -23,7 +23,7 @@ import {
   TlsTrust,
   classify,
 } from '../index.js';
-import { CLIENT_NAME, OpenSslServer, SERVER_NAME, SlowPath, StreamServer, certificates, clientCertificates, header, kind, until } from './helpers.js';
+import { CLIENT_NAME, OTHER_CLIENT_NAME, OpenSslServer, SERVER_NAME, SlowPath, StreamServer, certificates, clientCertificates, header, kind, until } from './helpers.js';
 
 const served = certificates();
 const clients = clientCertificates();
@@ -176,6 +176,40 @@ describe('a client certificate on SIP over TLS', { skip }, () => {
     });
     await account.registered();
     assert.equal(registrar.peers[0], CLIENT_NAME);
+  });
+
+  test('accounts with certificates of their own at one server each present their own', async () => {
+    // a connection presents one certificate, and the server takes all it
+    // carries as from the user that one names
+    const registrar = await requiring();
+    const stack = await Stack.open({
+      bindHost: '127.0.0.1',
+      tlsServerName: SERVER_NAME,
+      tlsTrust: TlsTrust.onlyAuthority(certificate.cert),
+      clientCertificate: made.stranger,
+    });
+    opened.push(stack);
+    const users = [
+      ['alice', made.good, CLIENT_NAME],
+      ['bob', made.other, OTHER_CLIENT_NAME],
+    ] as const;
+    const accounts = users.map(([user, mine]) =>
+      stack.addAccount(`sip:${user}@sipral.test`, {
+        registrarAddress: registrar.address,
+        registrar: 'sip:sipral.test',
+        streamProtocol: SipralTransport.Tls,
+        clientCertificate: mine,
+      }),
+    );
+    await Promise.all(accounts.map((account) => account.registered()));
+    for (const [user, , name] of users) {
+      const theirs = registrar
+        .registers()
+        .filter(([, message]) => (header('From', message) ?? '').includes(`sip:${user}@`))
+        .map(([connection]) => registrar.peerOn.get(connection));
+      assert.ok(theirs.length > 0, `${user} never registered`);
+      assert.deepEqual(new Set(theirs), new Set([name]), `${user}'s REGISTER came on a connection that presented ${theirs.join(', ')}`);
+    }
   });
 
   test('an account on a TLS connection of its own with no certificate is said to need one', async () => {

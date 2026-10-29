@@ -118,16 +118,21 @@ public final class SipralStack: @unchecked Sendable {
     /// Where such a connection goes, when not to the address asked for
     /// (`streamServer`).
     private let streamServer: String?
-    /// Where a connection the stack asked for goes and what it is checked
-    /// against, as `transportWanted` named them: one is opened for each,
-    /// since a certificate valid for one tenant's domain says nothing of
-    /// another's at the same address.
+    /// Where a connection the stack asked for goes, what it is checked
+    /// against and what it presents, as `transportWanted` named them: one is
+    /// opened for each, since a certificate valid for one tenant's domain
+    /// says nothing of another's at the same address, and a server that
+    /// admits clients by certificate takes all a connection carries as from
+    /// the user it presented.
     private struct StreamTarget: Hashable {
         let destination: String
         /// Empty for the address.
         let serverName: String
         /// Empty for none.
         let pin: String
+        /// The `ClientIdentity.tag` of the certificate presented; empty for
+        /// the stack's `tlsClientIdentity`.
+        let clientTag: String
     }
     /// Connections the stack asked for, those being opened, and those asked
     /// for during the current poll. All guarded by `signallingQueue`.
@@ -834,7 +839,8 @@ public final class SipralStack: @unchecked Sendable {
         var seen: Set<StreamTarget> = []
         for wanted in asked {
             let target = StreamTarget(
-                destination: wanted.destination, serverName: wanted.serverName, pin: wanted.tlsPinSha256
+                destination: wanted.destination, serverName: wanted.serverName, pin: wanted.tlsPinSha256,
+                clientTag: wanted.tlsClientTag
             )
             guard seen.insert(target).inserted else { continue }
             let destination = wanted.destination
@@ -885,37 +891,36 @@ public final class SipralStack: @unchecked Sendable {
         return target.serverName.isEmpty ? UDPSocket.parse(target.destination).host : target.serverName
     }
 
-    /// The certificate the account with its own TLS connection to that
-    /// server presents: its own if it has one, else the stack's.
-    private func streamIdentity(to destination: String) -> ClientIdentity? {
-        let own = movingQueue.sync {
-            accounts.values.first {
-                ($0.streamProtocol == .tls || $0.streamProtocol == .wss) && $0.registrarAddress == destination
-                    && $0.tlsClientIdentity != nil
-            }
+    /// The certificate a connection the stack asked for presents: that of
+    /// the accounts it is for, which the stack named by its tag, or the
+    /// stack's for an empty tag. None when no account has that one any more.
+    private func streamIdentity(for target: StreamTarget) -> ClientIdentity? {
+        if target.clientTag.isEmpty {
+            return tlsClientIdentity
         }
-        return own?.tlsClientIdentity ?? tlsClientIdentity
+        return movingQueue.sync {
+            accounts.values.lazy.compactMap(\.tlsClientIdentity).first { $0.tag == target.clientTag }
+        }
     }
 
     /// Say that a connection to the destination of `target` is being opened
-    /// under `id` and checked against it (`sipral_stack_stream_opening`), so
-    /// that once bound it carries the accounts of that identity alone.
+    /// under `id`, checked against it and presenting its certificate
+    /// (`sipral_stack_stream_opening`), so that once bound it carries the
+    /// accounts of that identity alone.
     private func sayOpening(_ id: UInt32, _ target: StreamTarget, boundAs: SipralTransport) throws {
-        try target.destination.withCString { destination in
-            try target.serverName.withCString { name in
-                try target.pin.withCString { pin in
-                    var opening = sipral_stream_opening_t.sized()
-                    opening.transport = id
-                    opening.protocol = boundAs.rawValue
-                    opening.destination = destination
-                    opening.destination_len = target.destination.utf8.count
-                    opening.server_name = name
-                    opening.server_name_len = target.serverName.utf8.count
-                    opening.tls_pin_sha256 = pin
-                    opening.tls_pin_sha256_len = target.pin.utf8.count
-                    _ = try retryingBusy { try Sipral.stackStreamOpening(stack: handle, opening: opening) }
-                }
-            }
+        try CStrings.with([target.destination, target.serverName, target.pin, target.clientTag]) { parts in
+            var opening = sipral_stream_opening_t.sized()
+            opening.transport = id
+            opening.protocol = boundAs.rawValue
+            opening.destination = parts[0].pointer
+            opening.destination_len = parts[0].count
+            opening.server_name = parts[1].pointer
+            opening.server_name_len = parts[1].count
+            opening.tls_pin_sha256 = parts[2].pointer
+            opening.tls_pin_sha256_len = parts[2].count
+            opening.tls_client_tag = parts[3].pointer
+            opening.tls_client_tag_len = parts[3].count
+            _ = try retryingBusy { try Sipral.stackStreamOpening(stack: handle, opening: opening) }
         }
     }
 
@@ -942,7 +947,7 @@ public final class SipralStack: @unchecked Sendable {
                 server: server, bindHost: signallingQueue.sync { linkHost }, transport: over,
                 serverName: over == .tls ? streamServerName(for: target) : UDPSocket.parse(server).host,
                 trust: over == .tls ? streamTrust(for: target) : .platform, domainRules: tlsDomainRules,
-                identity: over == .tls ? streamIdentity(to: destination) : nil, patienceMs: Self.patienceMs
+                identity: over == .tls ? streamIdentity(for: target) : nil, patienceMs: Self.patienceMs
             )
         } catch {
             signallingQueue.sync { _ = streamsOpening.remove(target) }
@@ -1320,7 +1325,9 @@ public final class SipralStack: @unchecked Sendable {
     /// stack's `tlsTrust` for the stack's `tlsServerName`, else the host of
     /// `serverUri` (RFC 5922 §7.3: the SIP domain, not the address SRV led
     /// to), else the address connected to, and presents `tlsClientIdentity`
-    /// if set, else the stack's, when the server asks for a client certificate. A closed
+    /// if set, else the stack's, when the server asks for a client certificate; accounts
+    /// presenting different certificates never share a connection, even to one server
+    /// (`ClientIdentity`'s leaf, or Keychain label, tells them apart). A closed
     /// connection is reopened; until open, a call throws `.transportDown`. Only on a UDP stack; other values throw
     /// `.invalidArgument`. `.ws`/`.wss` run a WebSocket (RFC 7118) asking for
     /// `websocketResource` (`/ws`) with `websocketHost` as `Host` (the

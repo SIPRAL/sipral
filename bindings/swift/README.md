@@ -793,7 +793,11 @@ connected to. The stack names that domain and the pin with each ask
 opens one connection for each pair and says which before binding it
 (`sipral_stack_stream_opening`, ABI 1.11): two tenants of one PBX at one
 address are each checked against their own domain, and accounts of the
-same domain and pin share one connection. Once located, the account's `Contact` moves to the route
+same domain and pin share one connection. From ABI 1.12 the ask names the
+client certificate as well (`.tlsClientTag`): two accounts with
+`tlsClientIdentity`s of their own each present their own on a connection of
+their own, told apart by the SHA-256 of the leaf, or of the Keychain label.
+Once located, the account's `Contact` moves to the route
 toward its server while the connection is being opened; the REGISTER goes
 the moment the connection is up, and the connection is asked for once. The account's REGISTER
 and every request of its calls go over it, its `Contact` names the protocol,

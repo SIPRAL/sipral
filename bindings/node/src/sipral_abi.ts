@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 11;
+export const SIPRAL_ABI_VERSION_MINOR = 12;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5058,6 +5058,23 @@ export interface SipralAccountConfig {
    * Zero.
    */
   reserved_1_10: number;
+  /**
+   * What tells apart the TLS client certificate the application
+   * presents for this account, or null for its default one, or none:
+   * text the application derives from the certificate the same way
+   * each time (a digest of its DER, a key store's alias), never the
+   * certificate. One line of UTF-8, compared exactly; the stack reads
+   * nothing else in it. A TLS connection presents one certificate,
+   * so accounts whose tags differ never share one: each tag is asked
+   * for apart in `sipral_transport_wanted_event_t::tls_client_tag`,
+   * and said back in `sipral_stream_opening_t`. Read only on TLS and
+   * WSS. ABI 1.12.
+   */
+  tls_client_tag: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  tls_client_tag_len: number;
 }
 koffi.struct('sipral_account_config_t', {
   size: 'size_t',
@@ -5128,6 +5145,8 @@ koffi.struct('sipral_account_config_t', {
   reserved_1_4: 'uint32_t',
   unsolicited_mwi: 'sipral_toggle_t',
   reserved_1_10: 'uint32_t',
+  tls_client_tag: 'void *',
+  tls_client_tag_len: 'size_t',
 });
 
 /**
@@ -6141,9 +6160,9 @@ koffi.struct('sipral_transport_failure_t', {
  * sipral_stack_stream_opening (ABI 1.11). All caller-filled; the texts are read during
  * the call.
  *
- * `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
- * for it, as it named them; the name a connection is checked against in their place, a
- * binding's own setting, does not go here.
+ * `server_name`, `tls_pin_sha256` and `tls_client_tag` are those a
+ * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named for it, as it named them; the name a connection
+ * is checked against in their place, a binding's own setting, does not go here.
  */
 export interface SipralStreamOpening {
   /**
@@ -6185,6 +6204,18 @@ export interface SipralStreamOpening {
    * How many bytes of it.
    */
   tls_pin_sha256_len: number;
+  /**
+   * The tag of the client certificate it presents, as
+   * `sipral_account_config_t::tls_client_tag` gave it; length zero for the default
+   * certificate, or none, and on a protocol without TLS; a caller whose struct ends
+   * before it, as one printed at 1.11 does, presents the default one. Not
+   * NUL-terminated (ABI 1.12).
+   */
+  tls_client_tag: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  tls_client_tag_len: number;
 }
 koffi.struct('sipral_stream_opening_t', {
   size: 'size_t',
@@ -6196,6 +6227,8 @@ koffi.struct('sipral_stream_opening_t', {
   server_name_len: 'size_t',
   tls_pin_sha256: 'void *',
   tls_pin_sha256_len: 'size_t',
+  tls_client_tag: 'void *',
+  tls_client_tag_len: 'size_t',
 });
 
 /**
@@ -6682,7 +6715,8 @@ koffi.struct('sipral_recovery_event_t', {
  * account's own connection, both sizes zero.
  *
  * A TLS or WSS connection is checked against one identity, the server's
- * name and pin below, and carries the accounts of that identity alone
+ * name and pin below and, from ABI 1.12, the client certificate it
+ * presents, and carries the accounts of that identity alone
  * once `sipral_stack_stream_opening` says so (ABI 1.11): one event is
  * raised for each identity waiting for a connection there, the same one
  * possibly again, and one connection is opened for each that has none
@@ -6733,6 +6767,18 @@ export interface SipralTransportWantedEvent {
    * How many bytes of it.
    */
   tls_pin_sha256_len: number;
+  /**
+   * The tag of the client certificate to present, as
+   * `sipral_account_config_t::tls_client_tag` gave it for the
+   * accounts the connection is for; empty for the application's
+   * default certificate, or none, and on a protocol without TLS. Not
+   * NUL-terminated (ABI 1.12).
+   */
+  tls_client_tag: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  tls_client_tag_len: number;
 }
 koffi.struct('sipral_transport_wanted_event_t', {
   protocol: 'sipral_transport_t',
@@ -6744,6 +6790,8 @@ koffi.struct('sipral_transport_wanted_event_t', {
   server_name_len: 'size_t',
   tls_pin_sha256: 'void *',
   tls_pin_sha256_len: 'size_t',
+  tls_client_tag: 'void *',
+  tls_client_tag_len: 'size_t',
 });
 
 /**
@@ -11423,22 +11471,23 @@ export class Sipral {
 
   /**
    * Say that a connection is being opened, to be bound as `opening->transport`, and what it
-   * is checked against (ABI 1.11).
+   * is checked against (ABI 1.11) and, from ABI 1.12, what client certificate it presents.
    *
    * Said before connecting, or at the latest before sipral_stack_transport_bind: once
    * bound it carries the accounts on a connection of their own whose identity is this one
    * alone, and an account of another asks for its own with
    * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
    * serves a SIP domain per tenant from one address, and a certificate valid for one
-   * tenant's domain says nothing of another's. If it cannot be opened,
+   * tenant's domain says nothing of another's; a server that admits clients by certificate
+   * takes every request on a connection as from the user it presented. If it cannot be opened,
    * sipral_stack_transport_failed_with on the same number moves on the accounts of this
    * identity alone. A connection bound with nothing said of it is any account's, as the
    * application checked it. Forgotten when it fails or closes, or when another is said to be
    * opened for the same identity there before this one was bound.
    *
    * `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
-   * destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
-   * a name that is not UTF-8.
+   * destination, a name, a pin or a client certificate's tag on TCP or WS, a pin that is not
+   * a SHA-256 fingerprint, or a name or a tag that is not one line of UTF-8.
    *
    * Safety
    *
@@ -13325,7 +13374,7 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_poll_result_t: [48, 28, 32],
   sipral_stack_settings_t: [136, 128, 136],
   sipral_header_t: [32, 16, 16],
-  sipral_account_config_t: [512, 288, 296],
+  sipral_account_config_t: [528, 296, 304],
   sipral_call_config_t: [168, 100, 100],
   sipral_codec_info_t: [32, 28, 28],
   sipral_codec_candidate_t: [24, 20, 20],
@@ -13336,13 +13385,13 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_processor_frame_t: [64, 32, 32],
   sipral_transmit_t: [88, 48, 48],
   sipral_transport_failure_t: [40, 24, 24],
-  sipral_stream_opening_t: [64, 36, 36],
+  sipral_stream_opening_t: [80, 44, 44],
   sipral_registration_event_t: [40, 36, 40],
   sipral_call_event_t: [328, 208, 216],
   sipral_transfer_event_t: [24, 16, 16],
   sipral_media_event_t: [96, 80, 80],
   sipral_recovery_event_t: [16, 16, 16],
-  sipral_transport_wanted_event_t: [72, 36, 36],
+  sipral_transport_wanted_event_t: [88, 44, 44],
   sipral_subscription_event_t: [56, 56, 56],
   sipral_announce_event_t: [16, 16, 16],
   sipral_resolve_event_t: [32, 24, 24],

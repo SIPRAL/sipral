@@ -102,7 +102,10 @@ domain and the pin with each ask (`fields.serverName`, `fields.tlsPinSha256`),
 and this package opens one connection for each pair and says which before
 binding it (`sipral_stack_stream_opening`, ABI 1.11), so two tenants of one
 PBX at one address are each checked against their own domain, and accounts of
-the same domain and pin share one connection. A request too
+the same domain and pin share one connection. From ABI 1.12 the ask names the
+client certificate as well (`fields.tlsClientTag`): two accounts with
+`clientCertificate`s of their own each present their own on a connection of
+their own, told apart by the SHA-256 of `cert` or `pfx`. A request too
 large for a datagram goes on a TCP connection the stack opens, to
 `streamServer` when the server takes TCP on another port.
 

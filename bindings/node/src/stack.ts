@@ -76,7 +76,7 @@ import {
   sipral_message_hook_callback_t,
   sipral_screen_callback_t,
 } from './sipral_abi.js';
-import { type ClientCertificate, type Refusal, TlsTrust, classify, oneLine, openStream } from './tls.js';
+import { type ClientCertificate, type Refusal, TlsTrust, classify, clientTag, oneLine, openStream } from './tls.js';
 import type { EnginePacket } from './transmit-worker.js';
 
 /** How one connection attempt, the TLS handshake included, may take. */
@@ -330,7 +330,12 @@ export interface AccountOptions {
   tlsPin?: string;
   /** `SipralTransport.Tcp`, `Tls`, `Ws` or `Wss`: a connection of its own to its server, on a stack signalling over UDP; WS/WSS run a WebSocket on TCP/TLS (RFC 7118). */
   streamProtocol?: number;
-  /** The certificate its TLS or WSS connection presents when the server asks for one; the stack's `clientCertificate` when left out. */
+  /**
+   * The certificate its TLS or WSS connection presents when the server asks
+   * for one; the stack's `clientCertificate` when left out. Accounts
+   * presenting different certificates never share a connection, even to one
+   * server.
+   */
   clientCertificate?: ClientCertificate;
   /** The `Host` of a WS/WSS account's handshake; the server's address when left out. */
   websocketHost?: string;
@@ -492,20 +497,24 @@ const OWN_STREAMS: ReadonlyMap<number, string> = new Map([
 ]);
 
 /**
- * Where a connection `TransportWanted` asked for goes and what it is checked
- * against: the server's name and pin, each empty for none. One connection is
- * opened for each, since a certificate valid for one tenant's domain says
- * nothing of another's at the same address.
+ * Where a connection `TransportWanted` asked for goes, what it is checked
+ * against and what it presents: the server's name and pin, each empty for
+ * none, and the tag of the client certificate ({@link clientTag}), empty for
+ * the stack's. One connection is opened for each, since a certificate valid
+ * for one tenant's domain says nothing of another's at the same address, and
+ * a server that admits clients by certificate takes all a connection carries
+ * as from the user it presented.
  */
 interface StreamTarget {
   readonly destination: string;
   readonly serverName: string;
   readonly pin: string;
+  readonly clientTag: string;
 }
 
 /** The one key a {@link StreamTarget} is known by. */
 function keyOf(target: StreamTarget): string {
-  return JSON.stringify([target.destination, target.serverName, target.pin]);
+  return JSON.stringify([target.destination, target.serverName, target.pin, target.clientTag]);
 }
 
 /** A connection this class opened for `TransportWanted`, bound at its own transport number. */
@@ -839,6 +848,9 @@ export class Stack extends EventEmitter<StackEvents> {
     const { headers, tlsPin, clientCertificate, ...rest } = options;
     const fields = headers === undefined ? { array: null, count: 0 } : headerArray(headers);
     const [pin, pinLength] = text(tlsPin);
+    // a connection presents one certificate, so the stack keeps accounts
+    // whose certificates differ on connections apart
+    const [tag, tagLength] = text(clientCertificate === undefined ? undefined : clientTag(clientCertificate));
     const made = config(
       'sipral_account_config_t',
       { ...rest, aor, contact },
@@ -847,6 +859,8 @@ export class Stack extends EventEmitter<StackEvents> {
         headers_len: fields.count,
         tls_pin_sha256: pin,
         tls_pin_sha256_len: pinLength,
+        tls_client_tag: tag,
+        tls_client_tag_len: tagLength,
       },
       { realms: '\n', trusted_peers: ', ' },
     );
@@ -2570,6 +2584,7 @@ export class Stack extends EventEmitter<StackEvents> {
       destination: (fields.destination as string | null) ?? '',
       serverName: (fields.serverName as string | null) ?? '',
       pin: (fields.tlsPinSha256 as string | null) ?? '',
+      clientTag: (fields.tlsClientTag as string | null) ?? '',
     };
     const destination = target.destination;
     const key = keyOf(target);
@@ -2609,13 +2624,14 @@ export class Stack extends EventEmitter<StackEvents> {
 
   /**
    * `sipral_stack_stream_opening`: the connection about to be made at
-   * `transport` is checked against `target`, and once bound carries the
-   * accounts of that identity alone.
+   * `transport` is checked against `target` and presents its certificate,
+   * and once bound carries the accounts of that identity alone.
    */
   private sayOpening(transport: number, target: StreamTarget, bound: number): void {
     const [destination, destinationLength] = text(target.destination);
     const [name, nameLength] = text(target.serverName);
     const [pin, pinLength] = text(target.pin);
+    const [tag, tagLength] = text(target.clientTag);
     const opening = record('sipral_stream_opening_t', {
       transport,
       protocol: bound,
@@ -2625,18 +2641,27 @@ export class Stack extends EventEmitter<StackEvents> {
       server_name_len: nameLength,
       tls_pin_sha256: pin,
       tls_pin_sha256_len: pinLength,
+      tls_client_tag: tag,
+      tls_client_tag_len: tagLength,
     });
     checkNow(this.sipral, 'sipral_stack_stream_opening', () => this.sipral.sipral_stack_stream_opening(this.stackHandle, opening));
   }
 
-  /** What a TLS connection to `destination` presents: the certificate of an account on it, else the stack's. */
-  private streamCertificate(destination: string): ClientCertificate | null {
+  /**
+   * What a TLS connection presents: the certificate of the accounts it is
+   * for, which the stack named by its tag, or the stack's for an empty tag;
+   * none when no account has that one any more.
+   */
+  private streamCertificate(target: StreamTarget): ClientCertificate | null {
+    if (target.clientTag === '') {
+      return this.clientCertificate;
+    }
     for (const account of this.accounts.values()) {
-      if (account.overTls && account.registrarAddress === destination && account.clientCertificate !== null) {
+      if (account.clientCertificate !== null && clientTag(account.clientCertificate) === target.clientTag) {
         return account.clientCertificate;
       }
     }
-    return this.clientCertificate;
+    return null;
   }
 
   /**
@@ -2649,7 +2674,7 @@ export class Stack extends EventEmitter<StackEvents> {
     const destination = asked.destination;
     const tls = over === SipralTransport.Tls;
     const target = tls || this.streamServer === null ? split(destination) : this.streamServer;
-    const certificate = tls ? this.streamCertificate(destination) : null;
+    const certificate = tls ? this.streamCertificate(asked) : null;
     try {
       this.sayOpening(transport, asked, bound);
     } catch (error) {

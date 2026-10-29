@@ -210,6 +210,8 @@ export class StreamServer {
   readonly connections: Socket[] = [];
   /** The subject CN of the certificate each TLS client presented, in order; empty for none. */
   readonly peers: string[] = [];
+  /** The same, by the number of the connection that presented it. */
+  readonly peerOn = new Map<number, string>();
   address = '';
   /** How many connections it took, the dropped ones counted. */
   accepted = 0;
@@ -258,7 +260,9 @@ export class StreamServer {
     const connection = this.accepted;
     if (socket instanceof TLSSocket) {
       const presented = socket.getPeerCertificate(false);
-      this.peers.push(typeof presented?.subject?.CN === 'string' ? presented.subject.CN : '');
+      const name = typeof presented?.subject?.CN === 'string' ? presented.subject.CN : '';
+      this.peers.push(name);
+      this.peerOn.set(connection, name);
     }
     socket.on('error', () => undefined);
     socket.on(
@@ -407,6 +411,8 @@ export interface ClientCertificates {
   authority: Buffer;
   /** A certificate it signed for `CLIENT_NAME`, with `clientAuth`, and its key. */
   good: { cert: Buffer; key: Buffer };
+  /** One it signed for `OTHER_CLIENT_NAME`. */
+  other: { cert: Buffer; key: Buffer };
   /** The same certificate and key in one PKCS#12, and its password. */
   pfx: { pfx: Buffer; passphrase: string };
   /** One another authority signed. */
@@ -417,8 +423,11 @@ export interface ClientCertificates {
   mismatched: { cert: Buffer; key: Buffer };
 }
 
-/** The subject CN of every client certificate made here. */
+/** The subject CN of every client certificate made here but one. */
 export const CLIENT_NAME = 'alice-phone.sipral.test';
+
+/** The subject CN of {@link ClientCertificates.other}. */
+export const OTHER_CLIENT_NAME = 'bob-phone.sipral.test';
 
 /** Client certificates made with the `openssl` command, or null without one. */
 export function clientCertificates(): ClientCertificates | null {
@@ -438,9 +447,9 @@ export function clientCertificates(): ClientCertificates | null {
     authority('ca', 'Sipral test client authority');
     authority('other', 'Another authority');
     writeFileSync(at('client.ext'), 'extendedKeyUsage=clientAuth\n');
-    const signed = (name: string, by: string, dates: string[]): void => {
+    const signed = (name: string, by: string, dates: string[], cn = CLIENT_NAME): void => {
       run(
-        'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-subj', `/CN=${CLIENT_NAME}`,
+        'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-subj', `/CN=${cn}`,
         '-keyout', at(`${name}.key`), '-out', at(`${name}.csr`),
       );
       run(
@@ -449,6 +458,7 @@ export function clientCertificates(): ClientCertificates | null {
       );
     };
     signed('good', 'ca', ['-days', '1']);
+    signed('bobs', 'ca', ['-days', '1'], OTHER_CLIENT_NAME);
     signed('stranger', 'other', ['-days', '1']);
     signed('expired', 'ca', ['-not_before', '20200101000000Z', '-not_after', '20200102000000Z']);
     const passphrase = randomBytes(12).toString('hex');
@@ -457,6 +467,7 @@ export function clientCertificates(): ClientCertificates | null {
     return {
       authority: readFileSync(at('ca.pem')),
       good: pair('good'),
+      other: pair('bobs'),
       pfx: { pfx: readFileSync(at('good.p12')), passphrase },
       stranger: pair('stranger'),
       expired: pair('expired'),

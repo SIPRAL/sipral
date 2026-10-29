@@ -172,8 +172,10 @@ public sealed class Account
         var authUserBytes = authUser is null ? null : Encoding.UTF8.GetBytes(authUser);
         var authPasswordBytes = authPassword is null ? null : Encoding.UTF8.GetBytes(authPassword);
         var instanceBytes = location.InstanceId is null ? null : Encoding.UTF8.GetBytes(location.InstanceId);
+        var tagBytes = location.ClientCertificate is null ? null : Encoding.UTF8.GetBytes(location.ClientCertificate.Tag);
 
         ulong accountHandle = 0;
+        using (var tagPin = Pin(tagBytes))
         using (var instancePin = Pin(instanceBytes))
         using (var headers = new SipralHeaderArray(location.Headers))
         using (var aorPin = Pin(aorBytes))
@@ -212,6 +214,13 @@ public sealed class Account
             config.StreamProtocol = (uint)location.StreamProtocol;
             config.TlsPinSha256 = pinPin.Pointer;
             config.TlsPinSha256Len = (nuint)(pinBytes?.Length ?? 0);
+            // a connection presents one certificate, so the stack keeps
+            // accounts whose certificates differ on connections apart
+            if (tagBytes is not null)
+            {
+                config.TlsClientTag = tagPin.Pointer;
+                config.TlsClientTagLen = (nuint)tagBytes.Length;
+            }
             if (realmsBytes is { Length: > 0 })
             {
                 config.Realms = realmsPin.Pointer;

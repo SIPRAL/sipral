@@ -28,7 +28,10 @@ final class StreamRegistrar {
       _open.add(socket);
       if (socket is SecureSocket) {
         final presented = socket.peerCertificate?.subject ?? '';
-        peers.add(RegExp(r'CN=([^,/]+)').firstMatch(presented)?.group(1) ?? '');
+        final name =
+            RegExp(r'CN=([^,/]+)').firstMatch(presented)?.group(1) ?? '';
+        peers.add(name);
+        peerOn[number] = name;
       }
       var held = '';
       socket.listen(
@@ -83,6 +86,9 @@ final class StreamRegistrar {
 
   /// The subject CN of the certificate each TLS client presented, in order.
   final List<String> peers = [];
+
+  /// The same, by the number of the connection that presented it.
+  final Map<int, String> peerOn = {};
 
   int get port => switch (_listener) {
     ServerSocket plain => plain.port,

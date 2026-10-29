@@ -49,6 +49,14 @@ public sealed class SipralClientCertificate
     /// <summary>The certificates sent after it.</summary>
     public X509Certificate2Collection Intermediates { get; }
 
+    // What tells this certificate apart for the stack, the same each time
+    // (sipral_account_config_t::tls_client_tag): the SHA-256 of the leaf's
+    // DER. Accounts whose tags match share a TLS connection; the others never
+    // do, since a connection presents one certificate.
+    internal string Tag => _tag ??= "leaf " + Convert.ToHexString(SHA256.HashData(Certificate.RawData)).ToLowerInvariant();
+
+    private string? _tag;
+
     /// <summary>A certificate and its key from PEM files: the first
     /// certificate in <paramref name="certificatePath"/> is presented and the
     /// others follow it as intermediates; <paramref name="keyPath"/> holds its

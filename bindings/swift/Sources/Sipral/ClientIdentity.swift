@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Sytek
 
 #if canImport(Network)
+import CryptoKit
 import Foundation
 import Security
 #endif
@@ -236,6 +237,33 @@ public final class ClientIdentity: @unchecked Sendable {
         }
         return nil
     }
+
+    /// What tells this certificate apart for the stack, the same each time
+    /// (`sipral_account_config_t::tls_client_tag`): the SHA-256 of the
+    /// leaf's DER for an identity held, of the label for one the Keychain is
+    /// asked for at each connection. Accounts whose tags match share a TLS
+    /// connection; the others never do, since a connection presents one.
+    var tag: String {
+        switch source {
+        case .identity(let held):
+            var certificate: SecCertificate?
+            if SecIdentityCopyCertificate(held, &certificate) == errSecSuccess, let certificate {
+                return "leaf " + Self.hex(SHA256.hash(data: SecCertificateCopyData(certificate) as Data))
+            }
+            // no certificate to read: this identity alone, which
+            // `presentable(at:)` then refuses
+            return "identity \(UInt(bitPattern: ObjectIdentifier(self).hashValue))"
+        case .keychain(let label):
+            return "keychain " + Self.hex(SHA256.hash(data: Data(label.utf8)))
+        }
+    }
+
+    private static func hex(_ digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
+    }
+    #else
+    /// No certificate can be had where TLS cannot.
+    var tag: String { "" }
     #endif
 }
 

@@ -856,7 +856,9 @@ public sealed partial class SipralStack : IDisposable
     /// against <paramref name="tlsPin"/> if set, else the stack's
     /// <c>tlsTrust</c>, and presents <paramref name="tlsClientCertificate"/>
     /// to a server that asks for one, else the stack's
-    /// <c>tlsClientCertificate</c>. Until open, placing a call throws with
+    /// <c>tlsClientCertificate</c>; accounts presenting different
+    /// certificates never share a connection, even to one server. Until open,
+    /// placing a call throws with
     /// <see cref="SipralStatus.TransportDown"/>. UDP stacks only. WS/WSS run a
     /// WebSocket (RFC 7118) asking for <paramref name="websocketResource"/>
     /// (<c>/ws</c>) with <paramref name="websocketHost"/> as <c>Host</c> (the

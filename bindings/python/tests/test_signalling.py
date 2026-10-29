@@ -136,7 +136,8 @@ class _Registrar:
     ``client_authority`` (a PEM file) makes it require a client certificate
     that authority signed; ``tls_version`` holds it to one version.
     :attr:`requests` holds ``(connection, message)``, connections from one;
-    :attr:`client_subjects` the subject of each client certificate taken.
+    :attr:`client_subjects` the subject of each client certificate taken,
+    and :attr:`client_subject_on` the same by connection.
     """
 
     def __init__(
@@ -149,6 +150,7 @@ class _Registrar:
     ) -> None:
         self._context = None
         self.client_subjects: list[tuple] = []
+        self.client_subject_on: dict[int, tuple] = {}
         if certificate is not None:
             self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             self._context.load_cert_chain(*certificate)
@@ -199,6 +201,7 @@ class _Registrar:
             peer = conn.getpeercert()
             if peer:
                 self.client_subjects.append(peer.get("subject", ()))
+                self.client_subject_on[number] = peer.get("subject", ())
         conn.settimeout(0.05)
         self._open.append(conn)
         held = b""

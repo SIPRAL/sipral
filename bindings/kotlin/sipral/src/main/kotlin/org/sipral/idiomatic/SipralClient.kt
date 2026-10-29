@@ -1087,7 +1087,8 @@ class SipralClient private constructor(
      * WebSocket (RFC 7118) asking for [websocketResource] (`/ws`) with
      * [websocketHost] as `Host` (the server's address). [clientCertificate]
      * is what a TLS or WSS connection of its own presents when the server
-     * asks, in place of [open]'s.
+     * asks, in place of [open]'s; accounts presenting different certificates
+     * never share a connection, even to one server.
      *
      * [instanceId] is the device's `+sip.instance` URN (RFC 5626 §4.1),
      * `urn:uuid:` and a UUID the application keeps for the installation; it
@@ -1608,12 +1609,20 @@ class SipralClient private constructor(
      * ([open]'s `streamServer`). */
     private var streamServer: String? = null
 
-    /** Where a connection goes and what it is checked against, as
-     * `TRANSPORT_WANTED` named them: the server's name (empty for the
-     * address) and pin (empty for none). One connection is opened for each,
+    /** Where a connection goes, what it is checked against and what it
+     * presents, as `TRANSPORT_WANTED` named them: the server's name (empty
+     * for the address), pin (empty for none) and the tag of the client
+     * certificate (empty for [open]'s). One connection is opened for each,
      * since a certificate valid for one tenant's domain says nothing of
-     * another's at the same address. */
-    private data class StreamIdentity(val destination: String, val serverName: String, val pin: String)
+     * another's at the same address, and a server that admits clients by
+     * certificate takes all a connection carries as from the user it
+     * presented. */
+    private data class StreamIdentity(
+        val destination: String,
+        val serverName: String,
+        val pin: String,
+        val clientTag: String,
+    )
 
     /** Connections opened for the stack, by transport id, with what they are
      * checked against; those being connected; and what `TRANSPORT_WANTED`
@@ -1664,7 +1673,9 @@ class SipralClient private constructor(
         while (true) {
             val wanted = streamsAsked.poll() ?: return
             val destination = wanted.destination ?: continue
-            val identity = StreamIdentity(destination, wanted.serverName.orEmpty(), wanted.tlsPinSha256.orEmpty())
+            val identity = StreamIdentity(
+                destination, wanted.serverName.orEmpty(), wanted.tlsPinSha256.orEmpty(), wanted.tlsClientTag.orEmpty(),
+            )
             if (!seen.add(identity) || streamLinks.values.any { it.first == identity }) {
                 continue
             }
@@ -1713,11 +1724,17 @@ class SipralClient private constructor(
     private fun streamTrust(identity: StreamIdentity): SipralTlsTrust =
         identity.pin.takeIf { it.isNotEmpty() }?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
 
-    /** What a TLS connection to [destination] presents: the certificate of
-     * an account on its own connection there, else the client's. */
-    private fun streamCertificate(destination: String): SipralClientCertificate? {
-        val named = secureAccountsAt(destination).firstOrNull { it.clientCertificate != null }
-        return named?.clientCertificate ?: streamClientCertificate
+    /** What a TLS connection checked against [identity] presents: the
+     * certificate of the accounts it is for, which the stack named by its
+     * tag, or the client's for an empty tag; none when no account at its
+     * destination has that one any more. */
+    private fun streamCertificate(identity: StreamIdentity): SipralClientCertificate? {
+        if (identity.clientTag.isEmpty()) {
+            return streamClientCertificate
+        }
+        return secureAccountsAt(identity.destination).firstNotNullOfOrNull { account ->
+            account.clientCertificate?.takeIf { it.tag == identity.clientTag }
+        }
     }
 
     /** The name a TLS connection checked against [identity] checks the
@@ -1756,6 +1773,7 @@ class SipralClient private constructor(
                         destination = destination,
                         serverName = identity.serverName,
                         tlsPinSha256 = identity.pin,
+                        tlsClientTag = identity.clientTag,
                     ),
                 )
             }
@@ -1771,7 +1789,7 @@ class SipralClient private constructor(
                 SignallingLink(
                     SipralTransport.TLS, parseHostPort(destination),
                     streamServerName(identity), streamTrust(identity),
-                    streamCertificate(destination), streamDomainRules,
+                    streamCertificate(identity), streamDomainRules,
                 ).also { secured = it }.connect(currentHost).first
             } else {
                 Socket().also { plain ->

@@ -54,9 +54,11 @@
 //!
 //! # One connection per identity
 //!
-//! A TLS connection is checked against one name and one pin, so the event names them
-//! (`server_name`, `tls_pin_sha256`), once for each identity waiting for a connection there:
-//! accounts of two SIP domains served from one address each get their own. The application
+//! A TLS connection is checked against one name and one pin and presents one client
+//! certificate, so the event names them (`server_name`, `tls_pin_sha256`, and from ABI 1.12
+//! the tag the account gave its certificate, `tls_client_tag`), once for each identity waiting for a
+//! connection there: accounts of two SIP domains served from one address, or presenting two
+//! certificates, each get their own. The application
 //! opens one per identity it has none open or opening for, says which before connecting
 //! ([`sipral_stack_stream_opening`]), checks the certificate against it, and binds it; it then
 //! carries the accounts of that identity alone.
@@ -263,9 +265,9 @@ record! {
     /// [`sipral_stack_stream_opening`] (ABI 1.11). All caller-filled; the texts are read during
     /// the call.
     ///
-    /// `server_name` and `tls_pin_sha256` are those a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named
-    /// for it, as it named them; the name a connection is checked against in their place, a
-    /// binding's own setting, does not go here.
+    /// `server_name`, `tls_pin_sha256` and `tls_client_tag` are those a
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named for it, as it named them; the name a connection
+    /// is checked against in their place, a binding's own setting, does not go here.
     #[derive(Clone, Copy)]
     pub struct SipralStreamOpening {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -289,6 +291,14 @@ record! {
         pub tls_pin_sha256: *const c_char,
         /// How many bytes of it.
         pub tls_pin_sha256_len: usize,
+        /// The tag of the client certificate it presents, as
+        /// `sipral_account_config_t::tls_client_tag` gave it; length zero for the default
+        /// certificate, or none, and on a protocol without TLS; a caller whose struct ends
+        /// before it, as one printed at 1.11 does, presents the default one. Not
+        /// NUL-terminated (ABI 1.12).
+        pub tls_client_tag: *const c_char,
+        /// How many bytes of it.
+        pub tls_client_tag_len: usize,
     }
 }
 
@@ -835,22 +845,23 @@ entry! {
 
 entry! {
     /// Say that a connection is being opened, to be bound as `opening->transport`, and what it
-    /// is checked against (ABI 1.11).
+    /// is checked against (ABI 1.11) and, from ABI 1.12, what client certificate it presents.
     ///
     /// Said before connecting, or at the latest before [`sipral_stack_transport_bind`]: once
     /// bound it carries the accounts on a connection of their own whose identity is this one
     /// alone, and an account of another asks for its own with
     /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
     /// serves a SIP domain per tenant from one address, and a certificate valid for one
-    /// tenant's domain says nothing of another's. If it cannot be opened,
+    /// tenant's domain says nothing of another's; a server that admits clients by certificate
+    /// takes every request on a connection as from the user it presented. If it cannot be opened,
     /// [`sipral_stack_transport_failed_with`] on the same number moves on the accounts of this
     /// identity alone. A connection bound with nothing said of it is any account's, as the
     /// application checked it. Forgotten when it fails or closes, or when another is said to be
     /// opened for the same identity there before this one was bound.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
-    /// destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
-    /// a name that is not UTF-8.
+    /// destination, a name, a pin or a client certificate's tag on TCP or WS, a pin that is not
+    /// a SHA-256 fingerprint, or a name or a tag that is not one line of UTF-8.
     ///
     /// # Safety
     ///
@@ -882,8 +893,20 @@ entry! {
             )
         }?
         .filter(|pin| !pin.is_empty());
+        let tag = unsafe {
+            crate::text::text(
+                opening.tls_client_tag,
+                opening.tls_client_tag_len,
+                "tls_client_tag",
+            )
+        }?
+        .filter(|tag| !tag.is_empty());
         if !protocol.is_secure() {
-            let given = [("server_name", name.is_some()), ("tls_pin_sha256", pin.is_some())];
+            let given = [
+                ("server_name", name.is_some()),
+                ("tls_pin_sha256", pin.is_some()),
+                ("tls_client_tag", tag.is_some()),
+            ];
             if let Some((member, _)) = given.into_iter().find(|(_, given)| *given) {
                 return Err(fail(
                     SipralStatus::InvalidArgument,
@@ -909,7 +932,7 @@ entry! {
                 TransportId(opening.transport),
                 protocol,
                 destination,
-                StreamIdentity::new(name, pin),
+                StreamIdentity::new(name, pin).with_client_tag(tag),
             );
             Ok(())
         })
@@ -934,8 +957,9 @@ pub(crate) fn identities_asked(
 
 /// What a TLS connection to `destination` for a request that outgrew a datagram is checked
 /// against: that of the first account there — located there, with the host of its
-/// `server_uri` as the name (RFC 5922 §7.3), or whose registrar URI names that address — and
-/// its pin. An account's own connection is checked against its own identity.
+/// `server_uri` as the name (RFC 5922 §7.3), or whose registrar URI names that address — its
+/// pin, and the tag of its client certificate. An account's own connection is checked against
+/// its own identity.
 fn identity_at(
     state: &StackState,
     protocol: TransportProtocol,
@@ -959,7 +983,8 @@ fn identity_at(
         let name = located
             .then(|| account.server().and_then(host_name))
             .flatten();
-        return StreamIdentity::new(name, account.pinned_certificate().copied());
+        return StreamIdentity::new(name, account.pinned_certificate().copied())
+            .with_client_tag(account.client_certificate_tag());
     }
     StreamIdentity::default()
 }
@@ -1465,6 +1490,8 @@ pub(crate) mod tests {
             reserved_1_4: 0,
             unsolicited_mwi: 0,
             reserved_1_10: 0,
+            tls_client_tag: ptr::null(),
+            tls_client_tag_len: 0,
         }
     }
 
@@ -2494,11 +2521,11 @@ pub(crate) mod tests {
     }
 
     /// What each [`SipralEventKind::TransportWanted`] said a connection is checked against:
-    /// where to, the server's name and the pin, and the transports said to have failed, copied
-    /// out during the callback.
+    /// where to, the server's name, the pin and the client certificate's tag, and the
+    /// transports said to have failed, copied out during the callback.
     #[derive(Default)]
     struct Identities {
-        asked: Vec<(String, String, String)>,
+        asked: Vec<(String, String, String, String)>,
         lost: Vec<u32>,
     }
 
@@ -2531,6 +2558,7 @@ pub(crate) mod tests {
             text(payload.destination, payload.destination_len),
             text(payload.server_name, payload.server_name_len),
             text(payload.tls_pin_sha256, payload.tls_pin_sha256_len),
+            text(payload.tls_client_tag, payload.tls_client_tag_len),
         ));
     }
 
@@ -2573,7 +2601,44 @@ pub(crate) mod tests {
             server_name_len: server_name.len(),
             tls_pin_sha256: pin.as_ptr().cast::<c_char>(),
             tls_pin_sha256_len: pin.len(),
+            tls_client_tag: ptr::null(),
+            tls_client_tag_len: 0,
         }
+    }
+
+    /// [`opening`], presenting the client certificate `tag` names.
+    fn opening_tagged(
+        transport: u32,
+        protocol: SipralTransport,
+        destination: &str,
+        tag: &str,
+    ) -> SipralStreamOpening {
+        SipralStreamOpening {
+            tls_client_tag: tag.as_ptr().cast::<c_char>(),
+            tls_client_tag_len: tag.len(),
+            ..opening(transport, protocol, destination, "", "")
+        }
+    }
+
+    /// An account of `aor` on a TLS connection of its own to [`REGISTRAR`], presenting the
+    /// client certificate `tag` names.
+    fn tagged_on_tls(handle: SipralHandle, aor: &'static str, tag: &'static str) -> SipralHandle {
+        let on_tls = SipralAccountConfig {
+            aor: aor.as_ptr().cast::<c_char>(),
+            aor_len: aor.len(),
+            stream_protocol: SipralTransport::Tls as u32,
+            tls_client_tag: tag.as_ptr().cast::<c_char>(),
+            tls_client_tag_len: tag.len(),
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tls), &raw mut account) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        account
     }
 
     fn bind_tls(handle: SipralHandle, transport: u32, now_ms: u64) {
@@ -2650,8 +2715,18 @@ pub(crate) mod tests {
             );
         }
         poll(handle, 1_000);
-        let alices = (REGISTRAR.to_owned(), String::new(), canonical(ALICE_PIN));
-        let bobs = (REGISTRAR.to_owned(), String::new(), canonical(BOB_PIN));
+        let alices = (
+            REGISTRAR.to_owned(),
+            String::new(),
+            canonical(ALICE_PIN),
+            String::new(),
+        );
+        let bobs = (
+            REGISTRAR.to_owned(),
+            String::new(),
+            canonical(BOB_PIN),
+            String::new(),
+        );
         assert!(
             identities.asked.contains(&alices) && identities.asked.contains(&bobs),
             "each identity asked for: {:?}",
@@ -2709,9 +2784,108 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// Two accounts at one address, one name and no pin, presenting client certificates of
+    /// their own: each tag is asked for, a connection said to present one carries that one's
+    /// account alone, and the other's waits for its own and gets it.
+    #[test]
+    fn accounts_presenting_different_client_certificates_are_asked_for_and_kept_apart() {
+        let mut observed = Observed::default();
+        let mut identities = Identities::default();
+        let mut settings = config(keep_identities, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut identities).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let alice = tagged_on_tls(handle, "sip:alice@example.com", "alice-certificate");
+        let bob = tagged_on_tls(handle, "sip:bob@example.com", "bob-certificate");
+        for account in [alice, bob] {
+            assert_eq!(
+                unsafe { sipral_account_register(handle, account, 1_000) },
+                SipralStatus::Ok,
+                "{}",
+                last_error_text()
+            );
+        }
+        poll(handle, 1_000);
+        let tags: Vec<&str> = identities
+            .asked
+            .iter()
+            .map(|(_, _, _, tag)| tag.as_str())
+            .collect();
+        assert!(
+            tags.contains(&"alice-certificate") && tags.contains(&"bob-certificate"),
+            "each certificate asked for: {:?}",
+            identities.asked
+        );
+        assert!(
+            identities
+                .asked
+                .iter()
+                .all(|(to, name, pin, _)| to == REGISTRAR && name.is_empty() && pin.is_empty()),
+            "{:?}",
+            identities.asked
+        );
+
+        let for_alice = opening_tagged(9, SipralTransport::Tls, REGISTRAR, "alice-certificate");
+        assert_eq!(
+            unsafe { sipral_stack_stream_opening(handle, &raw const for_alice) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        bind_tls(handle, 9, 1_100);
+        poll(handle, 1_100);
+        assert_eq!(
+            registers_by_transport(handle),
+            [(9, "alice".to_owned())],
+            "the connection presenting alice's certificate carries alice alone"
+        );
+
+        let for_bob = opening_tagged(10, SipralTransport::Tls, REGISTRAR, "bob-certificate");
+        assert_eq!(
+            unsafe { sipral_stack_stream_opening(handle, &raw const for_bob) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        bind_tls(handle, 10, 1_200);
+        poll(handle, 1_200);
+        assert_eq!(
+            registers_by_transport(handle),
+            [(10, "bob".to_owned())],
+            "bob's goes on the connection presenting bob's"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn an_account_whose_client_certificate_tag_is_not_one_line_of_text_is_refused() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        for tag in [&b"two\nlines"[..], &[0xff, 0xfe][..]] {
+            let config = SipralAccountConfig {
+                stream_protocol: SipralTransport::Tls as u32,
+                tls_client_tag: tag.as_ptr().cast::<c_char>(),
+                tls_client_tag_len: tag.len(),
+                ..account_config()
+            };
+            let mut account = SIPRAL_HANDLE_NONE;
+            assert_eq!(
+                unsafe { sipral_account_add(handle, ptr::from_ref(&config), &raw mut account) },
+                SipralStatus::InvalidArgument
+            );
+            assert!(
+                last_error_text().contains("tls_client_tag"),
+                "{}",
+                last_error_text()
+            );
+            assert_eq!(account, SIPRAL_HANDLE_NONE);
+        }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     /// A connection's identity is refused where it cannot hold: on a datagram transport, with a
-    /// name or a pin on a protocol without TLS, a pin that is not a SHA-256 fingerprint, a
-    /// name that is not text, or no destination.
+    /// name, a pin or a client certificate's tag on a protocol without TLS, a pin that is not a
+    /// SHA-256 fingerprint, a name or a tag that is not text, or no destination.
     #[test]
     fn an_identity_a_connection_cannot_be_held_to_is_refused() {
         let mut observed = Observed::default();
@@ -2738,6 +2912,22 @@ pub(crate) mod tests {
                 opening(9, SipralTransport::Tls, "", "pbx.example.com", ""),
                 "destination",
             ),
+            (
+                opening_tagged(9, SipralTransport::Tcp, REGISTRAR, "alice-certificate"),
+                "tls_client_tag",
+            ),
+            (
+                opening_tagged(9, SipralTransport::Ws, REGISTRAR, "alice-certificate"),
+                "tls_client_tag",
+            ),
+            (
+                opening_tagged(9, SipralTransport::Tls, REGISTRAR, "two\r\nlines"),
+                "tls_client_tag",
+            ),
+            (
+                opening_tagged(9, SipralTransport::Tls, REGISTRAR, "\u{0}"),
+                "tls_client_tag",
+            ),
         ];
         for (refused, named) in cases {
             assert_eq!(
@@ -2762,6 +2952,8 @@ pub(crate) mod tests {
             opening(9, SipralTransport::Tls, REGISTRAR, "PBX.example.com", pin),
             opening(10, SipralTransport::Tcp, REGISTRAR, "", ""),
             opening(11, SipralTransport::Wss, REGISTRAR, "pbx.example.com", ""),
+            opening_tagged(12, SipralTransport::Tls, REGISTRAR, "alice-certificate"),
+            opening_tagged(13, SipralTransport::Wss, REGISTRAR, "sha256:0123"),
         ] {
             assert_eq!(
                 unsafe { sipral_stack_stream_opening(handle, &raw const taken) },

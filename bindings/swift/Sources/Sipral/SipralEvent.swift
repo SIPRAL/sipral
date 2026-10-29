@@ -780,7 +780,8 @@ enum SipralEventDecoder {
                 requestBytes: wanted.request_bytes,
                 limitBytes: wanted.limit_bytes,
                 serverName: textC(wanted.server_name, wanted.server_name_len) ?? "",
-                tlsPinSha256: textC(wanted.tls_pin_sha256, wanted.tls_pin_sha256_len) ?? ""
+                tlsPinSha256: textC(wanted.tls_pin_sha256, wanted.tls_pin_sha256_len) ?? "",
+                tlsClientTag: textC(wanted.tls_client_tag, wanted.tls_client_tag_len) ?? ""
             )
         }
         if kindRaw == SipralEventKind.transportFailed.rawValue {

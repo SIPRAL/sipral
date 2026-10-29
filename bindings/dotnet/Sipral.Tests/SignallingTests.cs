@@ -63,18 +63,34 @@ public sealed class SignallingTests
         private readonly object _lock = new();
         private readonly List<(int Connection, string Message)> _requests = new();
         private readonly List<TcpClient> _open = new();
+        private readonly bool _clientCertificateRequired;
+        private readonly Dictionary<int, string> _presented = new();
         private int _connections;
 
         /// <summary><paramref name="intermediates"/>, when given, are sent
-        /// after the certificate in the handshake.</summary>
+        /// after the certificate in the handshake. With
+        /// <paramref name="clientCertificateRequired"/> a TLS client must
+        /// present a certificate, any one, whose subject is kept by
+        /// connection (<see cref="PresentedOn"/>).</summary>
         public Registrar(X509Certificate2? certificate = null, bool plainToTls = false,
-            X509Certificate2Collection? intermediates = null)
+            X509Certificate2Collection? intermediates = null, bool clientCertificateRequired = false)
         {
             _certificate = certificate;
             _intermediates = intermediates;
             _plainToTls = plainToTls;
+            _clientCertificateRequired = clientCertificateRequired;
             _listener.Start();
             new Thread(Accept) { IsBackground = true }.Start();
+        }
+
+        /// <summary>The subject of the client certificate connection
+        /// <paramref name="connection"/> presented, or null.</summary>
+        public string? PresentedOn(int connection)
+        {
+            lock (_lock)
+            {
+                return _presented.GetValueOrDefault(connection);
+            }
         }
 
         public string Address => $"127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
@@ -143,7 +159,20 @@ public sealed class SignallingTests
                 if (_certificate is not null)
                 {
                     var tls = new SslStream(stream);
-                    if (_intermediates is null)
+                    if (_clientCertificateRequired)
+                    {
+                        tls.AuthenticateAsServer(new SslServerAuthenticationOptions
+                        {
+                            ServerCertificate = _certificate,
+                            ClientCertificateRequired = true,
+                            RemoteCertificateValidationCallback = (_, presented, _, _) => presented is not null,
+                        });
+                        lock (_lock)
+                        {
+                            _presented[number] = tls.RemoteCertificate!.Subject;
+                        }
+                    }
+                    else if (_intermediates is null)
                     {
                         tls.AuthenticateAsServer(_certificate);
                     }

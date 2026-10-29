@@ -28,7 +28,7 @@ from sipral import Stack, TlsClientCertificate, TlsTrust
 from sipral.enums import AudioMode, EventKind, RegistrationState, TlsFailure, Transport, TransportError
 from sipral.signalling import ClientCertificateUnusable, ClosedAfterHandshake, certificate_validity, classify
 
-from .test_signalling import _SERVER_NAME, _certificate, _Registrar
+from .test_signalling import _SERVER_NAME, _certificate, _header, _Registrar
 
 _CLIENT_NAME = "alice.sipral.test"
 
@@ -50,17 +50,19 @@ def _authority(directory: str, name: str) -> str | None:
     return certificate if made else None
 
 
-def _client(directory: str, name: str, authority: str, *dates: str) -> tuple[str, str] | None:
-    """A client certificate ``authority`` signed, and its key."""
+def _client(
+    directory: str, name: str, authority: str, *dates: str, common_name: str = _CLIENT_NAME
+) -> tuple[str, str] | None:
+    """A client certificate ``authority`` signed for ``common_name``, and its key."""
     key = os.path.join(directory, f"{name}.key")
     request = os.path.join(directory, f"{name}.csr")
     extensions = os.path.join(directory, f"{name}.ext")
     certificate = os.path.join(directory, f"{name}.pem")
     with open(extensions, "w", encoding="ascii") as out:
-        out.write(f"subjectAltName=DNS:{_CLIENT_NAME}\nextendedKeyUsage=clientAuth\n")
+        out.write(f"subjectAltName=DNS:{common_name}\nextendedKeyUsage=clientAuth\n")
     made = _openssl(
         "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-        "-subj", f"/CN={_CLIENT_NAME}", "-keyout", key, "-out", request,
+        "-subj", f"/CN={common_name}", "-keyout", key, "-out", request,
     ) and _openssl(
         "x509", "-req", "-in", request, "-CA", authority, "-CAkey", authority[: -len(".pem")] + ".key",
         "-CAcreateserial", "-extfile", extensions, *(dates or ("-days", "1")), "-out", certificate,
@@ -77,6 +79,7 @@ class _Case(unittest.IsolatedAsyncioTestCase):
         cls._authority = _authority(d, "clients")
         cls._other_authority = _authority(d, "strangers")
         cls._good = _client(d, "good", cls._authority) if cls._authority else None
+        cls._bobs = _client(d, "bob", cls._authority, common_name="bob.sipral.test") if cls._authority else None
         cls._stranger = _client(d, "stranger", cls._other_authority) if cls._other_authority else None
         cls._expired = (
             _client(d, "expired", cls._authority, "-not_before", "20200101000000Z", "-not_after", "20200102000000Z")
@@ -89,7 +92,7 @@ class _Case(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(cls._directory, ignore_errors=True)
 
     def setUp(self) -> None:
-        if None in (self._server, self._good, self._stranger, self._expired):
+        if None in (self._server, self._good, self._bobs, self._stranger, self._expired):
             self.skipTest("no openssl command to make the certificates with")
 
     def registrar(self, version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_3) -> _Registrar:
@@ -169,6 +172,43 @@ class TheCertificateIsPresented(_Case):
         account.register()
         self.assertTrue(await self.registered(account), "never registered")
         self.assertEqual(registrar.client_subjects, [((("commonName", _CLIENT_NAME),),)])
+
+    async def test_accounts_with_their_own_at_one_server_each_present_their_own(self) -> None:
+        """Two accounts at one server, one name and one trust, each with a
+        client certificate of its own: a connection presents one, and the
+        server takes all it carries as from the user it names, so each
+        account registers over a connection that presented its own."""
+        registrar = self.registrar()
+        stack = Stack(loop=asyncio.get_running_loop(), bind_host="127.0.0.1", audio=AudioMode.APPLICATION,
+                      tls_trust=TlsTrust.only_authority(self._server[0]), tls_server_name=_SERVER_NAME,
+                      tls_client_certificate=TlsClientCertificate(*self._stranger))
+        self.addAsyncCleanup(asyncio.to_thread, stack.close)
+        users = {"alice": (self._good, _CLIENT_NAME), "bob": (self._bobs, "bob.sipral.test")}
+        accounts = [
+            stack.add_account(
+                f"sip:{user}@{_SERVER_NAME}",
+                registrar=f"sip:{_SERVER_NAME}",
+                registrar_address=registrar.address,
+                stream_protocol=Transport.TLS,
+                tls_client_certificate=TlsClientCertificate(*files),
+            )
+            for user, (files, _) in users.items()
+        ]
+        for account in accounts:
+            account.register()
+        for account in accounts:
+            self.assertTrue(await self.registered(account), f"{account.aor} never registered")
+        for user, (_, name) in users.items():
+            theirs = [
+                registrar.client_subject_on.get(number)
+                for number, message in registrar.registers()
+                if f"sip:{user}@" in (_header("From", message) or "")
+            ]
+            self.assertTrue(theirs, f"{user} never registered")
+            self.assertEqual(
+                set(theirs), {((("commonName", name),),)}, f"{user}'s REGISTER came on a connection that presented {theirs}"
+            )
+        self.assertEqual(registrar.connections, 2, "one connection for each certificate")
 
     async def test_an_account_of_its_own_without_one_is_told_the_server_requires_one(self) -> None:
         registrar = self.registrar()

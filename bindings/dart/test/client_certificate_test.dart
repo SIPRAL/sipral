@@ -20,6 +20,7 @@ import 'package:test/test.dart';
 import 'account_stream_test.dart' show StreamRegistrar, certificate, serverName;
 
 const clientName = 'alice-phone.sipral.test';
+const otherClientName = 'bob-phone.sipral.test';
 
 /// What the `openssl` command made in one directory.
 final class Made {
@@ -41,8 +42,9 @@ Future<bool> openssl(List<String> arguments) async {
 }
 
 /// A client authority, another one, a certificate each signed for
-/// [clientName] with `clientAuth`, and one the first signed that expired in
-/// 2020; false where there is no `openssl` command.
+/// [clientName] with `clientAuth`, one the first signed for
+/// [otherClientName], and one the first signed that expired in 2020; false
+/// where there is no `openssl` command.
 Future<bool> clientCertificates(Made made) async {
   Future<bool> authority(String name, String cn) => openssl([
     'req', '-x509', '-newkey', 'ec', '-pkeyopt', //
@@ -52,10 +54,15 @@ Future<bool> clientCertificates(Made made) async {
     '-addext', 'keyUsage=critical,keyCertSign',
     '-keyout', made.at('$name.key'), '-out', made.at('$name.pem'),
   ]);
-  Future<bool> signed(String name, String by, List<String> dates) async =>
+  Future<bool> signed(
+    String name,
+    String by,
+    List<String> dates, {
+    String cn = clientName,
+  }) async =>
       await openssl([
         'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', //
-        '-nodes', '-subj', '/CN=$clientName',
+        '-nodes', '-subj', '/CN=$cn',
         '-keyout', made.at('$name.key'), '-out', made.at('$name.csr'),
       ]) &&
       await openssl([
@@ -70,6 +77,7 @@ Future<bool> clientCertificates(Made made) async {
   return await authority('ca', 'Sipral test client authority') &&
       await authority('other', 'Another authority') &&
       await signed('good', 'ca', ['-days', '1']) &&
+      await signed('bobs', 'ca', ['-days', '1'], cn: otherClientName) &&
       await signed('stranger', 'other', ['-days', '1']) &&
       await signed('expired', 'ca', [
         '-not_before', '20200101000000Z', //
@@ -267,6 +275,59 @@ void main() {
       );
       await line.registered();
       expect(registrar.peers.first, clientName);
+    },
+  );
+
+  test(
+    'accounts with certificates of their own at one server each present their own',
+    () async {
+      if (!ready) {
+        markTestSkipped('no openssl command to make the certificates with');
+        return;
+      }
+      // a connection presents one certificate, and the server takes all it
+      // carries as from the user that one names
+      final registrar = await requiring();
+      final stack = await SipralStack.open(
+        bindHost: '127.0.0.1',
+        clientCertificate: made.files('stranger'),
+      );
+      opened.add(stack);
+      final users = {
+        'alice': ('good', clientName),
+        'bob': ('bobs', otherClientName),
+      };
+      final lines = [
+        for (final MapEntry(key: user, value: (file, _)) in users.entries)
+          stack.addAccount(
+            'sip:$user@$serverName',
+            registrarAddress: registrar.address,
+            registrar: 'sip:$serverName',
+            tlsPin: pin,
+            streamProtocol: SipralTransport.tls,
+            clientCertificate: made.files(file),
+          ),
+      ];
+      await Future.wait([for (final line in lines) line.registered()]);
+      for (final MapEntry(key: user, value: (_, name)) in users.entries) {
+        final theirs = {
+          for (final (connection, message) in registrar.registers)
+            if (message
+                .split('\r\n')
+                .any(
+                  (line) =>
+                      line.toLowerCase().startsWith('from:') &&
+                      line.contains('sip:$user@'),
+                ))
+              registrar.peerOn[connection],
+        };
+        expect(
+          theirs,
+          {name},
+          reason:
+              "$user's REGISTER came on a connection that presented $theirs",
+        );
+      }
     },
   );
 

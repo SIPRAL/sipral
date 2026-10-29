@@ -47,19 +47,39 @@ class SipralClientCertificate private constructor(
     /** The alias the key and its chain are under. */
     val alias: String,
     private val password: CharArray?,
+    /** What tells this certificate apart for the stack, the same for as
+     * long as this object lives (`sipral_account_config_t::tls_client_tag`):
+     * accounts whose tags match share a TLS connection, and the others never
+     * do, since a connection presents one certificate. */
+    internal val tag: String,
 ) {
     companion object {
+        /** Numbers the entries whose certificate could not be read when they
+         * were named, each a tag of its own. */
+        private val unread = java.util.concurrent.atomic.AtomicLong()
+
+        private fun digest(bytes: ByteArray): String =
+            java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
         /** The Android Keystore's entry [alias]: a key made there with
          * `KeyPairGenerator.getInstance("EC", "AndroidKeyStore")`, its chain
-         * set with `setKeyEntry` once the authority signed it. */
+         * set with `setKeyEntry` once the authority signed it. Told apart by
+         * its alias, the one Keystore having one entry under each. */
         fun androidKeystore(alias: String): SipralClientCertificate =
-            SipralClientCertificate({ KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }, alias, null)
+            SipralClientCertificate(
+                { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }, alias, null,
+                "android-keystore " + digest(alias.toByteArray(Charsets.UTF_8)),
+            )
 
         /** The entry [alias] of [store], already loaded, its key protected
          * by [password] (null for a store that keeps keys unprotected or
-         * protects them itself). */
-        fun keyStore(store: KeyStore, alias: String, password: CharArray? = null): SipralClientCertificate =
-            SipralClientCertificate({ store }, alias, password)
+         * protects them itself). Told apart by its leaf certificate as the
+         * store holds it now. */
+        fun keyStore(store: KeyStore, alias: String, password: CharArray? = null): SipralClientCertificate {
+            val leaf = runCatching { store.getCertificate(alias)?.encoded }.getOrNull()
+            val tag = leaf?.let { "leaf " + digest(it) } ?: "entry ${unread.incrementAndGet()}"
+            return SipralClientCertificate({ store }, alias, password, tag)
+        }
     }
 
     /** The key and its chain, leaf first, or why they cannot be presented. */

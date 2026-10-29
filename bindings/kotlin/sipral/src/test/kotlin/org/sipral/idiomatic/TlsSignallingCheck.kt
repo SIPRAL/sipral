@@ -151,7 +151,8 @@ private fun constrained(directory: File, name: String, names: String): Pair<Cred
  * credential, answering every REGISTER 200; or, [plainToTls], one that
  * answers a TLS client in plain text. With [clients] it requires a client
  * certificate that authority signed, over [protocol] alone, and keeps the
- * subject of each one it accepted in [presented]. */
+ * subject of each one it accepted in [presented], and by the connection's
+ * number in [presentedOn]. */
 private class Registrar(
     credential: Credential? = null,
     private val plainToTls: Boolean = false,
@@ -176,6 +177,7 @@ private class Registrar(
     private val open: MutableList<Socket> = Collections.synchronizedList(ArrayList())
     val requests: MutableList<Pair<Int, String>> = Collections.synchronizedList(ArrayList())
     val presented: MutableList<String> = Collections.synchronizedList(ArrayList())
+    val presentedOn: MutableMap<Int, String> = Collections.synchronizedMap(HashMap())
 
     /** How many connections reached it, refused handshakes included. */
     val accepted: Int
@@ -231,7 +233,9 @@ private class Registrar(
                 // this end's handshake ends with the client's Finished, after
                 // its certificate was checked; a refusal throws here
                 socket.startHandshake()
-                presented += (socket.session.peerCertificates[0] as X509Certificate).subjectX500Principal.name
+                val subject = (socket.session.peerCertificates[0] as X509Certificate).subjectX500Principal.name
+                presentedOn[number] = subject
+                presented += subject
             }
             open.add(socket)
             var held = ""
@@ -896,6 +900,7 @@ private fun keytool(directory: File, vararg arguments: String) {
 private class ClientIdentities(private val directory: File) {
     val authority: X509Certificate = authority("clients")
     val signed: KeyStore = certified("alice", "clients")
+    val another: KeyStore = certified("bob", "clients")
     val stranger: KeyStore = run {
         authority("strangers")
         certified("mallory", "strangers")
@@ -1033,6 +1038,40 @@ private suspend fun anAccountOnItsOwnConnectionPresentsItsCertificate(good: Cred
     return "an account on its own TLS connection presents its own certificate, and one with none hears it was wanted"
 }
 
+/** Two accounts at one registrar, one name and one pin, each with a client
+ * certificate of its own: a connection presents one, and the server takes
+ * all it carries as from the user it names, so each account registers over
+ * a connection that presented its own. */
+private suspend fun accountsWithCertificatesOfTheirOwnAtOneServerEachPresentTheirOwn(
+    good: Credential,
+    ids: ClientIdentities,
+): String {
+    val pin = java.security.MessageDigest.getInstance("SHA-256").digest(good.certificate.encoded).joinToString("") { "%02x".format(it) }
+    Registrar(good, clients = ids.authority, protocol = "TLSv1.3").use { registrar ->
+        SipralClient.open(
+            audio = SipralAudioMode.Application, bindHost = "127.0.0.1", clientCertificate = ids.of(ids.stranger),
+        ).use { client ->
+            val users = listOf("alice" to ids.signed, "bob" to ids.another)
+            val accounts = users.map { (user, store) ->
+                client.addAccount(
+                    aor = "sip:$user@$SERVER_NAME", registrarAddress = registrar.address, registrar = "sip:$SERVER_NAME",
+                    tlsPin = pin, streamProtocol = SipralTransport.TLS, clientCertificate = ids.of(store),
+                ).also { it.register() }
+            }
+            accounts.forEach { registered(client, it) }
+            for ((user, _) in users) {
+                val theirs = registrar.registers()
+                    .filter { header("From", it.second)?.contains("sip:$user@") == true }
+                    .map { registrar.presentedOn[it.first] }
+                assertTrue(theirs.isNotEmpty(), "$user never registered")
+                assertEquals(setOf("CN=$user client"), theirs.toSet(), "$user's REGISTER came on a connection that presented $theirs")
+            }
+            assertEquals(2, registrar.accepted, "a connection for each certificate")
+        }
+    }
+    return "accounts with client certificates of their own at one server each present their own"
+}
+
 /** The alerts as each platform words them, and a key that could not sign,
  * read without a server: Conscrypt on Android is not on this JVM. */
 private fun thePlatformsWordsForAnAlertAreRead(): String {
@@ -1087,6 +1126,7 @@ internal suspend fun tlsSignallingChecks(): String {
         return listOf(
             eachClientCertificateRefusalSaysWhy(good, clients),
             anAccountOnItsOwnConnectionPresentsItsCertificate(good, clients),
+            accountsWithCertificatesOfTheirOwnAtOneServerEachPresentTheirOwn(good, clients),
             thePlatformsWordsForAnAlertAreRead(),
             aRegistrarWhoseAuthorityIsPinnedRegistersOverTls(good),
             aPrivateAuthorityIsTrustedBesideThePlatforms(good),

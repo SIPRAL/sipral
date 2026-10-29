@@ -119,14 +119,18 @@ connections with the platform's APIs.
 An account's own `tls_pin_sha256` wins over the configured trust for the
 connections to its server. Each connection is opened for the accounts that
 asked for it and is checked against their name and pin: accounts whose server
-is at one address share a connection only when both are the same, and an
-account whose name or pin differs gets a connection of its own, even while
-another to that address is open. A PBX that serves a SIP domain for each
-tenant from one address is reached over one connection per domain, and a
-certificate that names one tenant's domain is refused for another's. Every
-language layer that opens the stack's connections itself does the same from
-ABI 1.11, with the name and pin `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` names and
-`sipral_stack_stream_opening` (`08-ffi.md`, "What ABI 1.11 added"). The name
+is at one address share a connection only when both are the same, and their
+`tls_client_tag` too, and an account whose name, pin or tag differs gets a
+connection of its own, even while another to that address is open. A PBX that
+serves a SIP domain for each tenant from one address is reached over one
+connection per domain, and a certificate that names one tenant's domain is
+refused for another's. Every connection here presents the configuration's one
+client certificate, whatever the tag. Every language layer that opens the
+stack's connections itself does the same from ABI 1.11, with the name and
+pin `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` names and
+`sipral_stack_stream_opening` (`08-ffi.md`, "What ABI 1.11 added"), and from
+ABI 1.12 with the client certificate tag too, presenting each account's own
+certificate (`08-ffi.md`, "What ABI 1.12 added"). The name
 is checked by the rules HTTPS uses, as every binding checks it:
 `tls_server_name` when the configuration gives one; else the host of the
 account's `server_uri` — the SIP domain the user configured, not the host its

@@ -2564,7 +2564,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 11
+    public static let abiVersionMinor: UInt32 = 12
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2903,7 +2903,7 @@ public enum Sipral {
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 512, 288, 296),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 528, 296, 304),
         ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 168, 100, 100),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
@@ -2914,13 +2914,13 @@ public enum Sipral {
         ("sipral_processor_frame_t", MemoryLayout<sipral_processor_frame_t>.size, 64, 32, 32),
         ("sipral_transmit_t", MemoryLayout<sipral_transmit_t>.size, 88, 48, 48),
         ("sipral_transport_failure_t", MemoryLayout<sipral_transport_failure_t>.size, 40, 24, 24),
-        ("sipral_stream_opening_t", MemoryLayout<sipral_stream_opening_t>.size, 64, 36, 36),
+        ("sipral_stream_opening_t", MemoryLayout<sipral_stream_opening_t>.size, 80, 44, 44),
         ("sipral_registration_event_t", MemoryLayout<sipral_registration_event_t>.size, 40, 36, 40),
         ("sipral_call_event_t", MemoryLayout<sipral_call_event_t>.size, 328, 208, 216),
         ("sipral_transfer_event_t", MemoryLayout<sipral_transfer_event_t>.size, 24, 16, 16),
         ("sipral_media_event_t", MemoryLayout<sipral_media_event_t>.size, 96, 80, 80),
         ("sipral_recovery_event_t", MemoryLayout<sipral_recovery_event_t>.size, 16, 16, 16),
-        ("sipral_transport_wanted_event_t", MemoryLayout<sipral_transport_wanted_event_t>.size, 72, 36, 36),
+        ("sipral_transport_wanted_event_t", MemoryLayout<sipral_transport_wanted_event_t>.size, 88, 44, 44),
         ("sipral_subscription_event_t", MemoryLayout<sipral_subscription_event_t>.size, 56, 56, 56),
         ("sipral_announce_event_t", MemoryLayout<sipral_announce_event_t>.size, 16, 16, 16),
         ("sipral_resolve_event_t", MemoryLayout<sipral_resolve_event_t>.size, 32, 24, 24),
@@ -5078,22 +5078,23 @@ public enum Sipral {
     }
 
     /// Say that a connection is being opened, to be bound as `opening->transport`, and what it
-    /// is checked against (ABI 1.11).
+    /// is checked against (ABI 1.11) and, from ABI 1.12, what client certificate it presents.
     ///
     /// Said before connecting, or at the latest before sipral_stack_transport_bind: once
     /// bound it carries the accounts on a connection of their own whose identity is this one
     /// alone, and an account of another asks for its own with
     /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, even with this one open. A multi-tenant PBX
     /// serves a SIP domain per tenant from one address, and a certificate valid for one
-    /// tenant's domain says nothing of another's. If it cannot be opened,
+    /// tenant's domain says nothing of another's; a server that admits clients by certificate
+    /// takes every request on a connection as from the user it presented. If it cannot be opened,
     /// sipral_stack_transport_failed_with on the same number moves on the accounts of this
     /// identity alone. A connection bound with nothing said of it is any account's, as the
     /// application checked it. Forgotten when it fails or closes, or when another is said to be
     /// opened for the same identity there before this one was bound.
     ///
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a protocol that is not a stream, a missing
-    /// destination, a name or a pin on TCP or WS, a pin that is not a SHA-256 fingerprint, or
-    /// a name that is not UTF-8.
+    /// destination, a name, a pin or a client certificate's tag on TCP or WS, a pin that is not
+    /// a SHA-256 fingerprint, or a name or a tag that is not one line of UTF-8.
     ///
     /// Safety
     ///

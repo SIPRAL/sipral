@@ -197,6 +197,8 @@ pub struct Account {
     /// `remote` is a real address: always, or after the first lookup.
     pub(crate) located: bool,
     pub(crate) tls_pin: Option<CertificatePin>,
+    /// What tells the client certificate it presents apart, where set.
+    pub(crate) tls_client_tag: Option<Box<str>>,
     pub(crate) own_stream: Option<TransportProtocol>,
     /// The `Host` and resource of its own WebSocket, where set.
     pub(crate) websocket_host: Option<Box<str>>,
@@ -276,6 +278,7 @@ impl Account {
             naptr: false,
             located: true,
             tls_pin: None,
+            tls_client_tag: None,
             own_stream: None,
             websocket_host: None,
             websocket_resource: None,
@@ -561,6 +564,28 @@ impl Account {
         self.tls_pin.as_ref()
     }
 
+    /// Present a client certificate of this account's own on its TLS
+    /// connection, told apart from others by `tag`.
+    ///
+    /// The certificate is the application's to present (`docs/22-tls.md`);
+    /// this agent never sees it, only the tag, text the application derives
+    /// from the certificate the same way every time, a digest of it for
+    /// instance. A TLS connection presents one certificate, so accounts whose
+    /// tags differ never share one ([`StreamIdentity`](crate::StreamIdentity)),
+    /// even to one server with one name and pin. Empty, or unset: the
+    /// application's default certificate, or none.
+    #[must_use]
+    pub fn tls_client_tag(mut self, tag: &str) -> Self {
+        self.tls_client_tag = (!tag.is_empty()).then(|| Box::from(tag));
+        self
+    }
+
+    /// The tag [`Account::tls_client_tag`] set, if any.
+    #[must_use]
+    pub fn client_certificate_tag(&self) -> Option<&str> {
+        self.tls_client_tag.as_deref()
+    }
+
     /// Whether a peer at `address` is one this account trusts.
     #[must_use]
     pub fn trusts(&self, address: IpAddr) -> bool {
@@ -633,7 +658,8 @@ impl Account {
     /// (for WebSocket, the TCP/TLS connection bound as `Ws`/`Wss`; the
     /// handshake is [`crate::websocket`]'s). The first transport of
     /// `protocol` bound to the server's address is adopted, unless it was
-    /// said to be checked against another account's name or pin
+    /// said to be checked against another account's name or pin, or to
+    /// present another client certificate
     /// ([`StreamIdentity`](crate::StreamIdentity)); until then a
     /// REGISTER waits and a call fails for an unknown transport. Each account
     /// keeps its own flow, and its calls keep it. Implies

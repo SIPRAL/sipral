@@ -104,7 +104,12 @@ HTTPS rules `dart:io` applies. A certificate that names the domain only as a
 this layer opens one connection for each pair and says which before binding
 it (`sipral_stack_stream_opening`, ABI 1.11): two tenants of one PBX at one
 address are each checked against their own domain and pin, and accounts of
-the same domain and pin share one connection.
+the same domain and pin share one connection. From ABI 1.12 the ask names
+the client certificate as well: two accounts given different
+`SipralClientCertificate` objects each present their own on a connection of
+their own. A certificate is told apart by the object, not its contents:
+`dart:io` has no SHA-256 to digest it with, so give accounts that are to
+share a connection the same `SipralClientCertificate`.
 
 A server that requires a client certificate (mutual TLS) is given one as
 `clientCertificate`, on the account or, for every account that names none,

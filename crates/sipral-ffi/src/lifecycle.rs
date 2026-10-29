@@ -674,6 +674,8 @@ mod tests {
             reserved_1_4: 0,
             unsolicited_mwi: 0,
             reserved_1_10: 0,
+            tls_client_tag: ptr::null(),
+            tls_client_tag_len: 0,
         }
     }
 

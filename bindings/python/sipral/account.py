@@ -123,6 +123,7 @@ class Account:
         server_naptr: bool = False,
         keepalive_ms: int = 0,
         tls_pin: str | None = None,
+        tls_client_tag: str | None = None,
         stream_protocol: int = 0,
         websocket_host: str | None = None,
         websocket_resource: str | None = None,
@@ -200,6 +201,13 @@ class Account:
         if pin_buf is not None:
             config.tls_pin_sha256 = pin_buf
             config.tls_pin_sha256_len = len(pin_bytes)
+        # a connection presents one certificate, so the stack keeps accounts
+        # whose certificates differ on connections apart
+        tag_bytes = _optional(tls_client_tag)
+        tag_buf = ffi.new("char[]", tag_bytes) if tag_bytes else None
+        if tag_buf is not None:
+            config.tls_client_tag = tag_buf
+            config.tls_client_tag_len = len(tag_bytes)
         config.contact = contact_buf
         config.contact_len = len(contact_bytes)
         if display_name_buf is not None:

@@ -314,6 +314,19 @@ record! {
         pub unsolicited_mwi: Number<SipralToggle>,
         /// Zero.
         pub reserved_1_10: u32,
+        /// What tells apart the TLS client certificate the application
+        /// presents for this account, or null for its default one, or none:
+        /// text the application derives from the certificate the same way
+        /// each time (a digest of its DER, a key store's alias), never the
+        /// certificate. One line of UTF-8, compared exactly; the stack reads
+        /// nothing else in it. A TLS connection presents one certificate,
+        /// so accounts whose tags differ never share one: each tag is asked
+        /// for apart in `sipral_transport_wanted_event_t::tls_client_tag`,
+        /// and said back in `sipral_stream_opening_t`. Read only on TLS and
+        /// WSS. ABI 1.12.
+        pub tls_client_tag: *const c_char,
+        /// How many bytes of it.
+        pub tls_client_tag_len: usize,
     }
 }
 
@@ -620,11 +633,13 @@ unsafe fn destination_of(
 }
 
 /// How an account reaches its server: RFC 3263 location (NAPTR when asked),
-/// its own keep-alive, and a pinned TLS certificate.
+/// its own keep-alive, a pinned TLS certificate, and the tag of the client
+/// certificate it presents.
 ///
 /// # Safety
 ///
-/// `config.tls_pin_sha256` must be readable for the length beside it.
+/// `config.tls_pin_sha256` and `config.tls_client_tag` must be readable for
+/// the lengths beside them.
 unsafe fn with_reach(
     mut account: Account,
     config: &SipralAccountConfig,
@@ -671,6 +686,16 @@ unsafe fn with_reach(
             )
         })?;
         account = account.tls_pin(pin);
+    }
+    let tag = unsafe {
+        text(
+            config.tls_client_tag,
+            config.tls_client_tag_len,
+            "tls_client_tag",
+        )
+    }?;
+    if let Some(tag) = tag {
+        account = account.tls_client_tag(tag);
     }
     Ok(account)
 }
@@ -1110,6 +1135,8 @@ pub(crate) mod tests {
             reserved_1_4: 0,
             unsolicited_mwi: 0,
             reserved_1_10: 0,
+            tls_client_tag: ptr::null(),
+            tls_client_tag_len: 0,
         }
     }
 

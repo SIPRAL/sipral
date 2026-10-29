@@ -209,7 +209,8 @@ public final class Account: @unchecked Sendable {
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
              suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin,
-             named, websocketHost, websocketResource, push?.provider, push?.prid, push?.param, instanceId]
+             named, websocketHost, websocketResource, push?.provider, push?.prid, push?.param, instanceId,
+             tlsClientIdentity?.tag]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -231,6 +232,12 @@ public final class Account: @unchecked Sendable {
             if let pinPointer = parts[13].pointer {
                 config.tls_pin_sha256 = pinPointer
                 config.tls_pin_sha256_len = parts[13].count
+            }
+            // a connection presents one certificate, so the stack keeps
+            // accounts whose certificates differ on connections apart
+            if let tagPointer = parts[21].pointer {
+                config.tls_client_tag = tagPointer
+                config.tls_client_tag_len = parts[21].count
             }
             config.server_naptr = serverNaptr ? SipralToggle.on.rawValue : 0
             config.keepalive_ms = keepaliveMs

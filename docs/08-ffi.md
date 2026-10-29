@@ -4499,3 +4499,92 @@ refused again through the intermediates the server sent, so a private authority
 that signs through an intermediate is trusted beside the platform's anchors
 as it already was alone. `cause_coding` reaches each generated binding with
 the struct; `bindings/c/smoke.c` reads a national cause.
+
+## What ABI 1.12 added
+
+### One TLS connection per client certificate
+
+Two members appended to each of `sipral_account_config_t`,
+`sipral_transport_wanted_event_t` and `sipral_stream_opening_t`, no entry
+point, no event kind and no status code. Every pin stays where it was:
+`sipral_account_config_t`'s where 1.0 put it, at `recording_in_clear`, and
+`sipral_stream_opening_t`'s where 1.11 put it, at `tls_pin_sha256_len`.
+
+| Struct | Member | Offset: 64-bit, i386, ARM and Windows x86 | Length: 64-bit, i386, ARM and Windows x86 |
+|---|---|---|---|
+| `sipral_account_config_t` | `tls_client_tag` | 512, 288, 296 | 528, 296, 304 (512, 288, 296 at 1.11) |
+| | `tls_client_tag_len` | 520, 292, 300 | |
+| `sipral_transport_wanted_event_t` | `tls_client_tag` | 72, 36, 36 | 88, 44, 44 (72, 36, 36 at 1.11) |
+| | `tls_client_tag_len` | 80, 40, 40 | |
+| `sipral_stream_opening_t` | `tls_client_tag` | 64, 36, 36 | 80, 44, 44 (64, 36, 36 at 1.11) |
+| | `tls_client_tag_len` | 72, 40, 40 | |
+
+The event's arm grows inside the payload union, whose length did not move. A
+binding printed at 1.11 loads against a 1.12 library and works as it did:
+its shorter structs are filled as far as it declared them, read with no tag,
+and the event's new members go unread. One printed at 1.12 is refused by a
+1.11 library, with both versions named.
+
+A TLS connection presents one client certificate, and a server that admits
+clients by certificate (RFC 8446 §4.4.2) takes every request on a connection
+as from the user that certificate names. At 1.11 the identity a connection
+was held to was its name and pin alone, so two accounts at one server with
+one name and one pin and client certificates of their own both went over the
+connection that presented the first one's, and the server took the second
+account's REGISTER as from the first user. `sipral-ua` now keeps accounts of
+different identities — name, pin and client certificate — apart on
+connections said to be checked against one before they are bound
+(`04-ua.md`):
+
+- `sipral_account_config_t::tls_client_tag` and `tls_client_tag_len`: text
+  the application derives from the client certificate it presents for the
+  account, the same way every time (a digest of the leaf's DER, a key
+  store's alias), never the certificate itself; one line of UTF-8, compared
+  exactly, else `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for the application's
+  default certificate, or none. The stack reads nothing in it: it only keeps
+  accounts whose tags differ off each other's connections. The certificate
+  and its key still never cross the boundary, as 1.4 had it ("A client
+  certificate"); what SIP does not carry, the choice of connection does.
+- `sipral_transport_wanted_event_t::tls_client_tag` and
+  `tls_client_tag_len`: the tag of the client certificate to present, as the
+  accounts' `tls_client_tag` gave it, empty for the default one, and on TCP
+  and WS. One event is raised for each identity waiting for a connection
+  there, as at 1.11, the tag now part of it; a request that outgrew a
+  datagram carries the tag of the first account at that address.
+- `sipral_stream_opening_t::tls_client_tag` and `tls_client_tag_len`: the
+  tag the event named, said back with the name and the pin before
+  connecting. A tag on TCP or WS, or one that is not one line of UTF-8, is
+  `SIPRAL_STATUS_INVALID_ARGUMENT`; a struct that ends before it, as one
+  printed at 1.11 does, presents the default certificate.
+
+The networking component has one client certificate for the whole stack
+(`sipral_network_config_t::client_certificate_pem`), presented on every
+connection it opens; it passes an account's `tls_client_tag` through as the
+stack names it, so accounts that give different tags still get connections
+of their own there, each presenting that one certificate.
+
+**In the layers.** Swift, Kotlin and the JVM jar on the same sources, .NET,
+Python, Dart and Node now key the connections they open by the client
+certificate tag beside the destination, name and pin, present the certificate
+of the accounts whose tag it is (the stack's own for an empty tag) rather
+than the first account's at that destination, and say the tag with
+`sipral_stack_stream_opening`. Each gives an account with a client
+certificate of its own a tag derived from it: Swift the SHA-256 of the
+leaf's DER, or of the Keychain label for `ClientIdentity.keychain(label:)`;
+Kotlin the SHA-256 of the leaf for `SipralClientCertificate.keyStore`, or of
+the alias for `.androidKeystore`; .NET the SHA-256 of the leaf; Python the
+SHA-256 of the two files' absolute paths; Node the SHA-256 of `cert`, or of
+`pfx`; Dart, whose `dart:io` has no SHA-256, a number each
+`SipralClientCertificate` object is given, so accounts share a connection
+when given the same object. Each layer's event carries the new member
+(Swift `TransportWantedEventData.tlsClientTag`, .NET
+`SipralTransportWantedEventInfo.TlsClientTag`, Python
+`fields["tls_client_tag"]`, Node `fields.tlsClientTag`, Kotlin's generated
+event). Each layer's tests run a TLS server on loopback that requires a
+client certificate and records which one each connection presented, and two
+accounts at its address, one name and one pin, with certificates of their
+own, the stack given a third: each account's REGISTER arrives on a
+connection that presented its own. React Native rides on the Swift and
+Kotlin layers. C++'s `AccountOptions` does not take the tag: its connections
+are the networking component's. `bindings/c/smoke.c` hands
+`sipral_stream_opening_t` over at both lengths, with a tag.

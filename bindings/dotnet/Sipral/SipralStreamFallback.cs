@@ -26,15 +26,18 @@ namespace Sipral;
 /// checked against: <paramref name="ServerName"/>, the SIP domain of the
 /// accounts it is for, lowercase (RFC 5922 §7.3), empty for the address; and
 /// <paramref name="TlsPinSha256"/>, the one certificate trusted, empty for
-/// none. One connection is opened for each such identity at an
-/// address.</summary>
+/// none; and what it presents, <paramref name="TlsClientTag"/>, the tag of
+/// the accounts' client certificate, empty for the stack's
+/// <c>tlsClientCertificate</c>. One connection is opened for each such
+/// identity at an address.</summary>
 public sealed record SipralTransportWantedEventInfo(
     SipralTransport Protocol,
     string? Destination,
     ulong RequestBytes,
     uint LimitBytes,
     string ServerName = "",
-    string TlsPinSha256 = "");
+    string TlsPinSha256 = "",
+    string TlsClientTag = "");
 
 public sealed partial class SipralStack
 {
@@ -60,11 +63,13 @@ public sealed partial class SipralStack
     private readonly HashSet<StreamTarget> _streamsOpening = new();
     private uint _nextStream = FirstStream;
 
-    // Where a connection the stack asked for goes and what it is checked
-    // against, as TransportWanted named them: one is opened for each, since a
-    // certificate valid for one tenant's domain says nothing of another's at
-    // the same address. Empty: the address, and no pin.
-    private sealed record StreamTarget(string Destination, string ServerName, string Pin);
+    // Where a connection the stack asked for goes, what it is checked against
+    // and what it presents, as TransportWanted named them: one is opened for
+    // each, since a certificate valid for one tenant's domain says nothing of
+    // another's at the same address, and a server that admits clients by
+    // certificate takes all a connection carries as from the user it
+    // presented. Empty: the address, no pin, and tlsClientCertificate.
+    private sealed record StreamTarget(string Destination, string ServerName, string Pin, string ClientTag);
 
     // A TCP connection for an oversized request, or an account's own
     // TCP/TLS connection.
@@ -120,7 +125,7 @@ public sealed partial class SipralStack
         while (_streamsAsked.TryDequeue(out var wanted))
         {
             var destination = wanted.Destination!;
-            var target = new StreamTarget(destination, wanted.ServerName, wanted.TlsPinSha256);
+            var target = new StreamTarget(destination, wanted.ServerName, wanted.TlsPinSha256, wanted.TlsClientTag);
             if (!seen.Add(target))
             {
                 continue;
@@ -167,18 +172,20 @@ public sealed partial class SipralStack
     private SipralTlsTrust StreamTrust(StreamTarget target) =>
         target.Pin.Length > 0 ? SipralTlsTrust.Pinned(target.Pin) : _tlsTrust;
 
-    // The client certificate of an account on that server if it has one,
-    // else tlsClientCertificate.
-    private SipralClientCertificate? StreamCertificate(string destination)
+    // The client certificate of the accounts the connection is for, which
+    // the stack named by its tag, or tlsClientCertificate for an empty tag;
+    // none when no account has that one any more.
+    private SipralClientCertificate? StreamCertificate(StreamTarget target)
     {
-        Account? own;
+        if (target.ClientTag.Length == 0)
+        {
+            return _tlsClientCertificate;
+        }
         lock (_accounts)
         {
-            own = _accounts.FirstOrDefault(account
-                => account.StreamProtocol is SipralTransport.Tls or SipralTransport.Wss
-                && account.RegistrarAddress == destination && account.ClientCertificate is not null);
+            return _accounts.Select(account => account.ClientCertificate)
+                .FirstOrDefault(certificate => certificate?.Tag == target.ClientTag);
         }
-        return own?.ClientCertificate ?? _tlsClientCertificate;
     }
 
     // The name a TLS connection checks the certificate against:
@@ -190,11 +197,12 @@ public sealed partial class SipralStack
         _givenTlsServerName ?? (target.ServerName.Length > 0 ? target.ServerName : host);
 
     // sipral_stack_stream_opening: the connection about to be made under
-    // transport is checked against target, and once bound carries the
-    // accounts of that identity alone.
+    // transport is checked against target and presents its certificate, and
+    // once bound carries the accounts of that identity alone.
     private void SayOpening(uint transport, StreamTarget target, SipralTransport bound)
     {
-        var texts = new[] { target.Destination, target.ServerName, target.Pin }.Select(Encoding.UTF8.GetBytes).ToArray();
+        var texts = new[] { target.Destination, target.ServerName, target.Pin, target.ClientTag }
+            .Select(Encoding.UTF8.GetBytes).ToArray();
         var pinned = texts.Select(text => GCHandle.Alloc(text, GCHandleType.Pinned)).ToArray();
         try
         {
@@ -207,6 +215,8 @@ public sealed partial class SipralStack
             opening.ServerNameLen = (nuint)texts[1].Length;
             opening.TlsPinSha256 = pinned[2].AddrOfPinnedObject();
             opening.TlsPinSha256Len = (nuint)texts[2].Length;
+            opening.TlsClientTag = pinned[3].AddrOfPinnedObject();
+            opening.TlsClientTagLen = (nuint)texts[3].Length;
             SipralErrors.Call(() => NativeMethods.sipral_stack_stream_opening(Handle, in opening),
                 "sipral_stack_stream_opening");
         }
@@ -247,7 +257,7 @@ public sealed partial class SipralStack
         {
             // a client certificate that cannot be presented is reported
             // before any connection is made
-            var use = over == SipralTransport.Tls ? ClientCertificateUse.Prepare(StreamCertificate(destination)) : null;
+            var use = over == SipralTransport.Tls ? ClientCertificateUse.Prepare(StreamCertificate(target)) : null;
             var (host, port) = ParseAddress(server);
             var address = IPAddress.Parse(host);
             var client = new TcpClient(address.AddressFamily) { NoDelay = true };

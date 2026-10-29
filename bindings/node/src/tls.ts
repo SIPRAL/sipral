@@ -159,6 +159,20 @@ export interface ClientCertificate {
   readonly passphrase?: string;
 }
 
+/**
+ * What tells `certificate` apart for the stack, the same each time
+ * (`sipral_account_config_t::tls_client_tag`): the SHA-256 of its `cert`, or
+ * of its `pfx`. Accounts whose tags match share a TLS connection; the others
+ * never do, since a connection presents one certificate.
+ */
+export function clientTag(certificate: ClientCertificate): string {
+  const { cert, pfx } = certificate;
+  if (cert !== undefined) {
+    return `chain ${createHash('sha256').update(cert).digest('hex')}`;
+  }
+  return `pkcs12 ${createHash('sha256').update(pfx ?? Buffer.alloc(0)).digest('hex')}`;
+}
+
 /** A client certificate that cannot be used, found before connecting. */
 class ClientCertificateUnusable extends Error {
   readonly code: 'CLIENT_KEY_UNAVAILABLE' | 'CLIENT_CERTIFICATE_EXPIRED';

@@ -128,7 +128,8 @@ enum TestPki {
 /// A registrar on loopback that takes TLS only from a client whose
 /// certificate `authority` signed, at the TLS versions given. It records
 /// each connection it accepted, the common name of each client certificate
-/// it was shown, and every REGISTER, answering each 200.
+/// it was shown, and every REGISTER with the common name its connection
+/// presented, answering each 200.
 final class CertificateRegistrar: @unchecked Sendable {
     static let serverName = "registrar.sipral.test"
 
@@ -138,6 +139,7 @@ final class CertificateRegistrar: @unchecked Sendable {
     private var _connections = 0
     private let seen = Seen()
     private var _registers: [String] = []
+    private var _presentedBy: [(presented: String, register: String)] = []
 
     /// The common names the trust check was shown, written on its queue.
     private final class Seen: @unchecked Sendable {
@@ -196,6 +198,9 @@ final class CertificateRegistrar: @unchecked Sendable {
     var connections: Int { lock.withLock { _connections } }
     var shown: [String] { seen.all }
     var registers: [String] { lock.withLock { _registers } }
+    /// Each REGISTER, beside the common name of the client certificate the
+    /// connection it came on presented, empty for none.
+    var presentedBy: [(presented: String, register: String)] { lock.withLock { _presentedBy } }
 
     func stop() {
         let all = lock.withLock { () -> [NWConnection] in
@@ -226,7 +231,11 @@ final class CertificateRegistrar: @unchecked Sendable {
                 guard body.utf8.count >= length else { break }
                 held = String(body.dropFirst(length))
                 if head.hasPrefix("REGISTER ") {
-                    self.lock.withLock { self._registers.append(head) }
+                    let presented = Self.presented(on: connection) ?? ""
+                    self.lock.withLock {
+                        self._registers.append(head)
+                        self._presentedBy.append((presented, head))
+                    }
                     connection.send(content: Data(Self.ok(head).utf8), completion: .idempotent)
                 }
             }
@@ -242,6 +251,25 @@ final class CertificateRegistrar: @unchecked Sendable {
         message.components(separatedBy: "\r\n")
             .first { $0.lowercased().hasPrefix(name.lowercased() + ":") }
             .map { String($0.drop(while: { $0 != ":" }).dropFirst()).trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The common name of the client certificate `connection` presented,
+    /// read once its handshake is over.
+    private static func presented(on connection: NWConnection) -> String? {
+        guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
+            return nil
+        }
+        var leaf: SecCertificate?
+        _ = sec_protocol_metadata_access_peer_certificate_chain(tls.securityProtocolMetadata) { certificate in
+            if leaf == nil {
+                leaf = sec_certificate_copy_ref(certificate).takeRetainedValue()
+            }
+        }
+        var name: CFString?
+        guard let leaf, SecCertificateCopyCommonName(leaf, &name) == errSecSuccess, let name else {
+            return nil
+        }
+        return name as String
     }
 
     private static func ok(_ request: String) -> String {
@@ -345,6 +373,46 @@ final class ClientCertificateTests: XCTestCase {
         }
         XCTAssertEqual(try account.registrationState, .registered)
         XCTAssertEqual(registrar.shown, ["alice-own"])
+    }
+
+    /// Two accounts at one server, one name and one trust, each with a
+    /// client certificate of its own: a connection presents one, and the
+    /// server takes every request on it as from the user it names, so each
+    /// account registers over a connection that presented its own.
+    func testAccountsWithCertificatesOfTheirOwnAtOneServerEachPresentTheirOwn() async throws {
+        let registrar = try registrar()
+        defer { registrar.stop() }
+        let stack = try SipralStack(
+            audio: .application, bindHost: "127.0.0.1", tlsServerName: CertificateRegistrar.serverName,
+            tlsTrust: .onlyAuthority(serverAuthority.der), tlsClientIdentity: try identity("the-stacks")
+        )
+        defer { stack.close() }
+        let users = ["alice", "bob"]
+        var accounts: [Account] = []
+        for user in users {
+            let account = try stack.addAccount(
+                aor: "sip:\(user)@\(CertificateRegistrar.serverName)", registrarAddress: registrar.address,
+                tlsClientIdentity: try identity("\(user)-own"), streamProtocol: .tls,
+                registrar: "sip:\(CertificateRegistrar.serverName)"
+            )
+            try account.register()
+            accounts.append(account)
+        }
+        for account in accounts {
+            for _ in 0..<200 where try account.registrationState != .registered {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            XCTAssertEqual(try account.registrationState, .registered, account.aor)
+        }
+        let seen = registrar.presentedBy
+        for user in users {
+            let theirs = seen.filter { $0.register.contains("sip:\(user)@") }.map(\.presented)
+            XCTAssertFalse(theirs.isEmpty, "\(user) never registered")
+            XCTAssertEqual(
+                Set(theirs), ["\(user)-own"], "\(user)'s REGISTER came on a connection that presented \(theirs)"
+            )
+        }
+        XCTAssertEqual(registrar.connections, 2, "one connection for each certificate")
     }
 
     func testTheCertificateIsAcceptedOverTls12Too() async throws {

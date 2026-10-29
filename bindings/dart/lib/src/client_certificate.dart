@@ -27,7 +27,8 @@ final class SipralClientCertificate {
     : _chain = Uint8List.fromList(chain),
       _key = Uint8List.fromList(key),
       _chainPath = null,
-      _keyPath = null;
+      _keyPath = null,
+      _tag = _nextTag();
 
   /// The chain and key in PEM files at [chainPath] and [keyPath].
   SipralClientCertificate.files(
@@ -37,12 +38,24 @@ final class SipralClientCertificate {
   }) : _chain = null,
        _key = null,
        _chainPath = chainPath,
-       _keyPath = keyPath;
+       _keyPath = keyPath,
+       _tag = _nextTag();
 
   final Uint8List? _chain;
   final Uint8List? _key;
   final String? _chainPath;
   final String? _keyPath;
+
+  /// What tells this certificate apart for the stack
+  /// (`sipral_account_config_t::tls_client_tag`), the same for as long as
+  /// this object lives: accounts given this one share a TLS connection, and
+  /// accounts given another never do, since a connection presents one
+  /// certificate. A number rather than a digest of the leaf: `dart:io`
+  /// offers no SHA-256, and files are read only when a connection is made.
+  final String _tag;
+
+  static int _made = 0;
+  static String _nextTag() => 'certificate ${++_made}';
 
   /// The password of an encrypted key, or null for none.
   final String? password;

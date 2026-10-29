@@ -181,16 +181,21 @@ class _TurnStream:
 
 
 class _StreamTarget(NamedTuple):
-    """Where a connection the stack asked for goes and what it is checked
-    against, as `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` named them: one is
-    opened for each, since a certificate valid for one tenant's domain says
-    nothing of another's at the same address."""
+    """Where a connection the stack asked for goes, what it is checked
+    against and what it presents, as `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
+    named them: one is opened for each, since a certificate valid for one
+    tenant's domain says nothing of another's at the same address, and a
+    server that admits clients by certificate takes all a connection carries
+    as from the user it presented."""
 
     destination: str
     #: Empty for the address.
     server_name: str
     #: Empty for none.
     pin: str
+    #: The :attr:`TlsClientCertificate.tag` presented; empty for the
+    #: stack's ``tls_client_certificate``.
+    client_tag: str
 
 
 class _SipStream:
@@ -926,7 +931,9 @@ class Stack:
         and reopens it when it closes; TLS is checked against ``tls_pin`` or
         the stack's ``tls_trust``, and presents ``tls_client_certificate``
         (:class:`sipral.signalling.TlsClientCertificate`), else the stack's,
-        when the server asks for one; with a ``tls_trust`` from
+        when the server asks for one, and accounts presenting different
+        certificates never share a connection, even to one server; with a
+        ``tls_trust`` from
         :meth:`TlsTrust.from_context`, whose one context every connection
         shares, an account's own certificate needs ``tls_pin`` or raises
         ``ValueError``. Until open, a call raises
@@ -958,6 +965,7 @@ class Stack:
             server_naptr=server_naptr,
             keepalive_ms=keepalive_ms,
             tls_pin=tls_pin,
+            tls_client_tag=tls_client_certificate.tag if tls_client_certificate is not None else None,
             stream_protocol=stream_protocol,
             websocket_host=websocket_host,
             websocket_resource=websocket_resource,
@@ -2354,7 +2362,9 @@ class Stack:
         seen: set[_StreamTarget] = set()
         for wanted in asked:
             destination = wanted["destination"]
-            target = _StreamTarget(destination, wanted["server_name"], wanted["tls_pin_sha256"])
+            target = _StreamTarget(
+                destination, wanted["server_name"], wanted["tls_pin_sha256"], wanted["tls_client_tag"]
+            )
             if target in seen:
                 continue
             seen.add(target)
@@ -2408,30 +2418,37 @@ class Stack:
 
     def _say_opening(self, transport: int, target: _StreamTarget, bound: int) -> None:
         """`sipral_stack_stream_opening`: the connection about to be made at
-        ``transport`` is checked against ``target``, and once bound carries
-        the accounts of that identity alone."""
+        ``transport`` is checked against ``target`` and presents its
+        certificate, and once bound carries the accounts of that identity
+        alone."""
         opening = ffi.new("sipral_stream_opening_t *")
         opening.size = ffi.sizeof("sipral_stream_opening_t")
         opening.transport = transport
         opening.protocol = bound
         texts = [text.encode("utf-8") for text in target]
         buffers = [ffi.new("char[]", text) for text in texts]
-        opening.destination, opening.server_name, opening.tls_pin_sha256 = buffers
-        opening.destination_len, opening.server_name_len, opening.tls_pin_sha256_len = (len(text) for text in texts)
+        opening.destination, opening.server_name, opening.tls_pin_sha256, opening.tls_client_tag = buffers
+        (
+            opening.destination_len,
+            opening.server_name_len,
+            opening.tls_pin_sha256_len,
+            opening.tls_client_tag_len,
+        ) = (len(text) for text in texts)
         _retry(lambda: lib.sipral_stack_stream_opening(self.handle, opening), "sipral_stack_stream_opening")
 
-    def _stream_client(self, destination: str) -> TlsClientCertificate | None:
-        """The client certificate of a TLS account on ``destination``, else the stack's."""
+    def _stream_client(self, target: _StreamTarget) -> TlsClientCertificate | None:
+        """The client certificate of the accounts ``target``'s connection is
+        for, which the stack named by its tag, or the stack's for an empty
+        tag; ``None`` when no account has that one any more."""
+        if not target.client_tag:
+            return self._tls_client
         with self._lock:
             accounts = list(self._accounts)
         for account in accounts:
-            if (
-                account.stream_protocol in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
-                and account.registrar_address == destination
-                and account.tls_client_certificate is not None
-            ):
-                return account.tls_client_certificate
-        return self._tls_client
+            mine = account.tls_client_certificate
+            if mine is not None and mine.tag == target.client_tag:
+                return mine
+        return None
 
     def _open_sip_stream(
         self, transport: int, target: _StreamTarget, over: int = lib.SIPRAL_TRANSPORT_TCP, bound: int | None = None
@@ -2443,7 +2460,7 @@ class Stack:
         that identity alone."""
         destination = target.destination
         tls = over == lib.SIPRAL_TRANSPORT_TLS
-        client = self._stream_client(destination) if tls else None
+        client = self._stream_client(target) if tls else None
         early = b""
         try:
             self._say_opening(transport, target, over if bound is None else bound)

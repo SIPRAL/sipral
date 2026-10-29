@@ -1236,6 +1236,30 @@ nothing else; their READMEs say so. Every layer presents the certificate
 when the server asks for one and only then, sends the intermediates after
 the leaf, and never turns the server's own check off for it.
 
+**One certificate, one connection.** A connection presents one certificate,
+and a server that admits clients by certificate takes every request on it as
+from the user that certificate names. So two accounts at one server, even
+with one name and one pin, share a connection only when they present the
+same certificate: an account given one of its own gets a connection of its
+own, and one given none shares the connection presenting the stack's. Each
+layer tells certificates apart by a tag it derives the same way every time
+and gives the stack with the account
+(`sipral_account_config_t::tls_client_tag`, `08-ffi.md`, "What ABI 1.12
+added"); the stack asks for a connection per tag, and the layer presents the
+certificate whose tag it is:
+
+| Layer | The tag |
+|---|---|
+| Swift | the SHA-256 of the leaf's DER; for `ClientIdentity.keychain(label:)`, of the label |
+| Kotlin | the SHA-256 of the leaf for `.keyStore(...)`; of the alias for `.androidKeystore(alias)` |
+| .NET | the SHA-256 of the leaf's DER |
+| Python | the SHA-256 of the absolute paths of `certfile` and `keyfile` |
+| Dart | a number given to each `SipralClientCertificate` object: accounts share a connection when given the same object |
+| Node.js | the SHA-256 of `cert`, or of `pfx` |
+
+The networking component presents its one certificate on every connection
+it opens and takes no certificate per account.
+
 **What can go wrong, and how it is told.** Each binding checks the
 certificate before every attempt and reads what the server says about it
 after; each outcome reaches the stack through
