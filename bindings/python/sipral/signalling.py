@@ -66,6 +66,7 @@ class TlsTrust:
         description: str,
         pin: bytes | None = None,
         names_here: bool = True,
+        shared: bool = False,
     ) -> None:
         self._build = build
         self.description = description
@@ -75,6 +76,10 @@ class TlsTrust:
         #: OpenSSL during the handshake: for every context this class builds,
         #: so that a ``sip:`` URI can name the domain (RFC 5922 Section 7.1).
         self._names_here = names_here
+        #: Whether :meth:`context` hands every connection the same object,
+        #: the application's: ``ssl`` holds a client certificate per
+        #: context, so one loaded into it is presented on all of them.
+        self.shared = shared
 
     @classmethod
     def pinned(cls, fingerprint: str) -> "TlsTrust":
@@ -123,10 +128,13 @@ class TlsTrust:
         """A context the application built. It must verify the server
         (``CERT_REQUIRED`` and ``check_hostname``), or this refuses it. Its
         own check reads the name; the stack's domain rules can only refuse
-        more after it, never accept a ``sip:`` URI it refused."""
+        more after it, never accept a ``sip:`` URI it refused. Every
+        connection shares it, so it carries one client certificate at most:
+        the stack's ``tls_client_certificate``, or one the application
+        loaded; an account's own is refused unless the account pins."""
         if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
             raise ValueError("a TLS context for SIP must verify the server's certificate and name")
-        return cls(lambda: context, "the application's own context", names_here=False)
+        return cls(lambda: context, "the application's own context", names_here=False, shared=True)
 
     def context(self) -> ssl.SSLContext:
         """The context a connection is made with; at least TLS 1.2. One this

@@ -184,9 +184,18 @@ class TelecomBridge(
         }
         if (existing != null) {
             existing.announced = true
-            // announced anyway, so the library's pairing record is complete; it
-            // answers Arrived with this same call
-            quietly { sip.announce(account, caller, callId) }
+            // announced anyway, so the library's pairing record is complete. It
+            // answers Arrived only while the call is within the announce window;
+            // past it the answer is an announcement no screen waits for, which
+            // would catch a redial or run out as some other push's "missing"
+            val answer = try {
+                sip.announce(account, caller, callId)
+            } catch (_: SipralException) {
+                null
+            }
+            if (answer is SipralAnnounced.Waiting) {
+                quietly { sip.forgetAnnouncement(answer.announcement) }
+            }
             return@settle existing.id
         }
 
@@ -429,7 +438,7 @@ class TelecomBridge(
                 announcedCalls[event.call] = event.payload.announce.announcement
             }
             SipralEventKind.INCOMING_CALL.value.toLong() -> incoming(event)
-            SipralEventKind.ANNOUNCED_CALL_MISSING.value.toLong() -> missing()
+            SipralEventKind.ANNOUNCED_CALL_MISSING.value.toLong() -> missing(event.payload.announce.announcement)
             SipralEventKind.CALL_CONFIRMED.value.toLong() -> confirmed(event.call)
             SipralEventKind.SESSION_CHANGED.value.toLong(),
             SipralEventKind.SESSION_CHANGE_FAILED.value.toLong(),
@@ -455,9 +464,15 @@ class TelecomBridge(
             val waiting = entries.values
                 .filter { it.announcement != 0L && it.account == event.account }
                 .sortedBy { it.announcedAt }
-            val entry = waiting.firstOrNull { it.announcement == announcement }
-                ?: waiting.firstOrNull { it.caller.isNotEmpty() && sameCaller(it.caller, caller) }
-                ?: waiting.firstOrNull()
+            // an announcement the event names is the library's pairing, and one no
+            // screen holds was not this bridge's: its call is shown as a call of its
+            // own. Only an event that names none falls back to the bridge's rule
+            val entry = if (announcement != 0L) {
+                waiting.firstOrNull { it.announcement == announcement }
+            } else {
+                waiting.firstOrNull { it.caller.isNotEmpty() && sameCaller(it.caller, caller) }
+                    ?: waiting.firstOrNull()
+            }
             if (entry != null) {
                 entry.announcement = 0L
                 learn(entry, caller, who.displayName)
@@ -485,10 +500,18 @@ class TelecomBridge(
         }
     }
 
-    /** Announcements expire in creation order (one window for the whole
-     * stack), so the oldest still waiting is the one that ran out. */
-    private fun missing() {
-        val entry = entries.values.filter { it.announcement != 0L }.minByOrNull { it.announcedAt } ?: return
+    /** The screen waiting for the [announcement] that ran out, if one still
+     * is; one no screen holds ends nothing. An event that names none takes
+     * the oldest still waiting: announcements expire in creation order (one
+     * window for the whole stack). */
+    private fun missing(announcement: Long) {
+        val waiting = entries.values.filter { it.announcement != 0L }
+        val ranOut = if (announcement != 0L) {
+            waiting.firstOrNull { it.announcement == announcement }
+        } else {
+            waiting.minByOrNull { it.announcedAt }
+        }
+        val entry = ranOut ?: return
         entry.announcement = 0L
         end(entry, TelecomDisconnect.MISSED)
     }

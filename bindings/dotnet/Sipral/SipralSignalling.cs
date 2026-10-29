@@ -134,6 +134,9 @@ public sealed class SipralTlsTrust
                 again.ChainPolicy.CustomTrustStore.AddRange(extra);
                 again.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                 again.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                // SslStream's own chain asks for serverAuth; an empty
+                // policy would take a certificate the CA issued to clients
+                again.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
                 var rest = errors & ~SslPolicyErrors.RemoteCertificateChainErrors;
                 if (again.Build(new X509Certificate2(certificate)))
                 {

@@ -11,6 +11,7 @@ import android.telecom.TelecomManager
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import org.sipral.telecom.AudioPause
 import org.sipral.telecom.CallAudio
 import org.sipral.telecom.TelecomBridge
@@ -51,7 +52,6 @@ object SipralTelecom {
     private val connectionsFlow = MutableStateFlow<Map<String, SipralConnection>>(emptyMap())
     private val live = ConcurrentHashMap<String, SipralConnection>()
     private val routesFlow = MutableStateFlow<Map<String, SipralCallRoutes>>(emptyMap())
-    private val routed = ConcurrentHashMap<String, SipralCallRoutes>()
 
     /** Every connection the framework has created and not yet destroyed,
      * by call id, under the `ConnectionService` adapter. */
@@ -159,14 +159,15 @@ object SipralTelecom {
         routesDestroyed(id)
     }
 
+    // Updated in place rather than copied from a map: Core-Telecom adds and
+    // ends calls on whatever threads its scope runs, and a snapshot taken on
+    // one thread and published after another's would drop a live call's routes.
     internal fun routesCreated(id: String, routes: SipralCallRoutes) {
-        routed[id] = routes
-        routesFlow.value = routed.toMap()
+        routesFlow.update { it + (id to routes) }
     }
 
     internal fun routesDestroyed(id: String) {
-        routed.remove(id)
-        routesFlow.value = routed.toMap()
+        routesFlow.update { it - id }
     }
 }
 

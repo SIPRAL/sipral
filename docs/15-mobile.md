@@ -206,7 +206,11 @@ account alone ("The matching rule"), and one the decoder could not read, or
 that arrives before there is an account, is shown and ended at once. A shown
 call that no INVITE fills is
 ended too, as failed when the announcement was refused and as unanswered
-when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing. The push's
+when `ANNOUNCED_CALL_MISSING` arrives, rather than left ringing; so is the
+screen of a push whose INVITE came first and was handed to the application
+by `matchIncomingCall`, whose own screen is that call's. Only the stack's
+pairing gives an INVITE a push's screen: one matched to no announcement is
+the application's to show, however alike its caller looks. The push's
 payload carries the caller under `caller`, its name under `name` and the
 held INVITE's `Call-ID` under `call-id`; that, and what sends the push, is
 the push gateway's side (below). A push whose payload is sealed is opened by

@@ -439,6 +439,41 @@ public sealed class SignallingTests
         }
     }
 
+    /// <summary>A certificate the private CA issued for client
+    /// authentication only (a phone's, from the PBX's own CA) is no server
+    /// certificate, under either trust that names the CA.</summary>
+    [Fact]
+    public async Task ACertificateAPrivateAuthorityIssuedForClientsOnlyIsRefusedAsAServers()
+    {
+        using var authorityKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var authorityRequest = new CertificateRequest("CN=Sipral test authority", authorityKey, HashAlgorithmName.SHA256);
+        authorityRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        authorityRequest.CertificateExtensions.Add(
+            new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+        var now = DateTimeOffset.UtcNow;
+        using var authority = authorityRequest.CreateSelfSigned(now.AddMinutes(-5), now.AddDays(1));
+        using var leafKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var leafRequest = new CertificateRequest($"CN={ServerName}", leafKey, HashAlgorithmName.SHA256);
+        var names = new SubjectAlternativeNameBuilder();
+        names.AddDnsName(ServerName);
+        leafRequest.CertificateExtensions.Add(names.Build());
+        leafRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") }, critical: false));
+        using var signed = leafRequest.Create(authority, now.AddMinutes(-5), now.AddDays(1),
+            new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 });
+        using var withKey = signed.CopyWithPrivateKey(leafKey);
+        using var leaf = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
+        using var trusted = X509CertificateLoader.LoadCertificate(authority.Export(X509ContentType.Cert));
+        foreach (var trust in new[] { SipralTlsTrust.PrivateAuthority(trusted), SipralTlsTrust.OnlyAuthority(trusted) })
+        {
+            using var registrar = new Registrar(leaf);
+            using var stack = Over(registrar.Address, trust: trust);
+            var failed = await Refused(stack);
+            Assert.Equal(SipralTlsFailure.Untrusted, failed.Tls);
+            Assert.Empty(registrar.Registers());
+        }
+    }
+
     [Fact]
     public async Task AnExpiredCertificateIsExpired()
     {

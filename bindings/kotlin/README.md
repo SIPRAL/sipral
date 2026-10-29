@@ -879,11 +879,14 @@ all of it against a fake device on a plain JVM, and `docs/15-mobile.md`
 
 `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement an INVITE answered
 in `event.payload.announce.announcement`, and `TelecomBridge` gives the
-INVITE the screen raised for that announcement; only an event that names
-none falls back to its own rule (same account, same user and host in `From`,
-oldest first on a tie). An `ANNOUNCED_CALL_MISSING` is the oldest
-announcement still waiting, because every announcement waits the same
-window.
+INVITE the screen raised for that announcement; an announcement no screen
+holds takes no other push's screen, and its call is shown as its own. Only an
+event that names none falls back to the bridge's rule (same account, same
+user and host in `From`, oldest first on a tie). An `ANNOUNCED_CALL_MISSING`
+ends the screen of the announcement it names, or, naming none, the oldest
+still waiting, because every announcement waits the same window. A push for
+a call already ringing unannounced past that window is answered by the
+library with a fresh announcement, which `pushArrived` forgets at once.
 
 A push that named nobody is `pushArrived(account, caller = null)` (or
 `wakeForPush(..., caller = null)`): the framework is shown a call with no

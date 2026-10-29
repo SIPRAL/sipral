@@ -358,6 +358,36 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(given.first?.displayName, "Alice Liddell")
     }
 
+    // MARK: - the INVITE before the push
+
+    /// The INVITE came first and was handed back to the application, which
+    /// is still raising its own screen when the push for that same call is
+    /// announced: the push's screen is taken down rather than left ringing
+    /// beside the application's with nothing to fill it.
+    func testAPushForAnInviteHandedToTheApplicationEndsItsOwnScreen() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        let bobAccount = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let provider = RecordingProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let bobEvents = Recorder(bob.events())
+
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        defer { aliceCall.close() }
+        let arrived = await bobEvents.first(within: 10) { $0.kind == .incomingCall }
+        let incoming = try XCTUnwrap(arrived, "no INVITE reached the phone")
+        XCTAssertNil(pushKit.matchIncomingCall(incoming, on: bob), "an INVITE no push announced took a screen")
+
+        let pending = try await pushKit.handle(push: VoipPush(callerId: "sip:alice@sipral.invalid"), account: bobAccount)
+        XCTAssertEqual(pending.matchedCallHandle, incoming.call)
+        let ended = await eventually(within: 10) { await provider.ended.contains { $0.uuid == pending.uuid } }
+        XCTAssertTrue(ended, "the push's screen was left ringing beside the application's")
+        let reason = await provider.ended.first { $0.uuid == pending.uuid }?.reason
+        XCTAssertEqual(reason, .failed)
+    }
+
     // MARK: - the application ends a screen
 
     /// For a push the application will not ring: the screen ends as

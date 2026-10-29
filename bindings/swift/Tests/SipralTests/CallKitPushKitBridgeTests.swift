@@ -313,34 +313,21 @@ final class PushKitBridgeTests: XCTestCase {
         XCTAssertEqual(pending.uuid, reported.first?.uuid)
     }
 
-    func testMatchIncomingCallResolvesPendingByCallerId() async throws {
-        let stack = try SipralStack(audio: .application)
-        defer { stack.close() }
-        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
-
-        let provider = RecordingProvider()
-        let callKit = CallKitBridge(provider: provider)
-        let pushKit = PushKitBridge(callKit: callKit)
-
-        let pending = try await pushKit.handle(
-            push: VoipPush(callerId: "sip:alice@sipral.invalid"), account: account
-        )
-        XCTAssertNil(pending.matchedCallHandle)
-
-        // A synthetic `IncomingCall` from "alice".
-        let event = SipralEvent(
+    /// A synthetic `IncomingCall` for `call`, from `fromUri`.
+    private func incomingCall(_ call: SipralHandle, from fromUri: String, on stack: SipralStack, account: Account) -> SipralEvent {
+        SipralEvent(
             kindRaw: SipralEventKind.incomingCall.rawValue,
             kind: .incomingCall,
             kindName: "incoming call",
             stack: stack.handle,
             account: account.handle,
-            call: 424242,
+            call: call,
             message: nil,
             callData: CallEventData(
                 stateRaw: SipralCallState.incoming.rawValue, state: .incoming,
                 endReasonRaw: 0, endReason: nil, statusCode: 0, other: Sipral.handleNone,
                 heldHere: false, heldThere: false, localSdp: nil, remoteSdp: nil, retryInMs: 0,
-                fromUri: "sip:alice@sipral.invalid", fromDisplay: nil, toUri: nil, callId: nil, digit: 0,
+                fromUri: fromUri, fromDisplay: nil, toUri: nil, callId: nil, digit: 0,
                 endCause: nil, identityTrusted: false, assertedUri: nil, assertedDisplay: nil, verstat: nil,
                 privacy: [], divertedFrom: nil, diversionReason: nil, diversionCount: 0, historyCount: 0,
                 answerMode: nil, answerModeRequired: false, privAnswerMode: nil, privAnswerModeRequired: false,
@@ -351,9 +338,42 @@ final class PushKitBridgeTests: XCTestCase {
             referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil,
             verificationData: nil
         )
+    }
 
-        pushKit.matchIncomingCall(event, on: stack)
-        XCTAssertEqual(pending.matchedCallHandle, 424242)
+    /// The stack decides which INVITE a push announced: one it matched to no
+    /// announcement takes no screen, however alike the callers' user parts
+    /// (extension 100 on two PBXs), and the one it matched takes the push's.
+    func testOnlyTheInviteTheStackMatchedTakesThePushsScreen() async throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+
+        let provider = RecordingProvider()
+        let callKit = CallKitBridge(provider: provider)
+        let pushKit = PushKitBridge(callKit: callKit)
+
+        let pending = try await pushKit.handle(
+            push: VoipPush(callerId: "sip:100@pbx-a.invalid"), account: account
+        )
+        XCTAssertNil(pending.matchedCallHandle)
+        let announcement = try XCTUnwrap(pending.announcement)
+
+        let other = incomingCall(424242, from: "sip:100@pbx-b.invalid", on: stack, account: account)
+        XCTAssertNil(pushKit.matchIncomingCall(other, on: stack), "a call the stack did not match took the push's screen")
+        XCTAssertNil(pending.matchedCallHandle)
+
+        let announced = SipralEvent(
+            kindRaw: SipralEventKind.callAnnounced.rawValue, kind: .callAnnounced, kindName: "call announced",
+            stack: stack.handle, account: account.handle, call: 424243, message: nil, callData: nil,
+            mediaData: nil, registrationData: nil,
+            announceData: AnnounceEventData(announcement: announcement, waitedMs: 0), natData: nil,
+            relayData: nil, referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil,
+            verificationData: nil
+        )
+        XCTAssertNil(pushKit.matchIncomingCall(announced, on: stack))
+        let matched = incomingCall(424243, from: "sip:100@pbx-a.invalid", on: stack, account: account)
+        XCTAssertEqual(pushKit.matchIncomingCall(matched, on: stack)?.uuid, pending.uuid)
+        XCTAssertEqual(pending.matchedCallHandle, 424243)
     }
 
     // MARK: - a push's payload, and the system's word on it

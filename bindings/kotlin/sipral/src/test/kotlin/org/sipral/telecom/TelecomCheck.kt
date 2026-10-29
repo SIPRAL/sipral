@@ -210,9 +210,10 @@ internal fun invite(from: String) =
         "Call-ID: a@192.0.2.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
 
 /** The INVITE for [call], as the library queues it when it matched an
- * announcement: CALL_ANNOUNCED first, INCOMING_CALL straight after. */
-private fun announcedInvite(bridge: TelecomBridge, call: Long, from: String) {
-    bridge.onEvent(event(SipralEventKind.CALL_ANNOUNCED, call = call))
+ * announcement: CALL_ANNOUNCED first, INCOMING_CALL straight after. With no
+ * [announcement] the event names none, and the bridge's own rule decides. */
+private fun announcedInvite(bridge: TelecomBridge, call: Long, from: String, announcement: Long = 0) {
+    bridge.onEvent(event(SipralEventKind.CALL_ANNOUNCED, call = call, announcement = announcement))
     bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = call, account = ACCOUNT, message = invite(from)))
 }
 
@@ -388,6 +389,51 @@ private fun fakeSequences(): String {
         assertEquals(904, bridge.callHandleOf(id))
         announcedInvite(bridge, 904, "<sip:alice@example.invalid>")
         assertEquals(1, log.count("report"))
+        ran++
+    }
+
+    // A push arrives late for an INVITE that has rung unannounced past the
+    // announce window: the library no longer counts that call as ringing
+    // and answers with an announcement of its own, which no screen waits
+    // for. It is forgotten at once rather than left to catch a redial or
+    // to run out.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 920, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val ringing = bridge.calls.value.single().id
+        assertEquals(ringing, bridge.pushArrived(ACCOUNT, "sip:alice@example.invalid"))
+        assertEquals(1, log.count("report"), log.snapshot().toString())
+        assertEquals(1, log.count("forget 100"), "an announcement no screen waits for was kept: ${log.snapshot()}")
+        ran++
+    }
+
+    // The announcement that ran out is the one the event names: Bob's push,
+    // announced after Alice's, is missing first, and Alice's screen keeps
+    // waiting for its INVITE.
+    Rig().run {
+        val alice = bridge.pushArrived(ACCOUNT, "sip:alice@example.invalid")
+        val bob = bridge.pushArrived(ACCOUNT, "sip:bob@example.invalid")
+        val aliceConn = platform.create(alice)
+        val bobConn = platform.create(bob)
+        bridge.onEvent(event(SipralEventKind.ANNOUNCED_CALL_MISSING, announcement = 101))
+        assertEquals(null, aliceConn.cause, "a screen whose announcement had not run out was ended")
+        assertEquals(TelecomDisconnect.MISSED, bobConn.cause)
+        announcedInvite(bridge, 921, "<sip:alice@example.invalid>", announcement = 100)
+        assertEquals(921, bridge.callHandleOf(alice))
+        ran++
+    }
+
+    // A call the library matched to an announcement no screen holds takes
+    // no other push's screen: it is shown as a call of its own, and the
+    // screen waiting for its own INVITE keeps waiting.
+    Rig().run {
+        val bob = bridge.pushArrived(ACCOUNT, "sip:bob@example.invalid")
+        platform.create(bob)
+        announcedInvite(bridge, 922, "<sip:alice@example.invalid>", announcement = 300)
+        assertEquals(0, bridge.callHandleOf(bob), "Alice's call took the screen of Bob's push")
+        assertEquals(2, log.count("report"), log.snapshot().toString())
+        announcedInvite(bridge, 923, "<sip:bob@example.invalid>", announcement = 100)
+        assertEquals(923, bridge.callHandleOf(bob))
+        assertEquals(2, log.count("report"), log.snapshot().toString())
         ran++
     }
 
@@ -574,7 +620,8 @@ private fun fakeSequences(): String {
 
     return "$ran sequences against fake telecom and SIP sides (push before INVITE, the platform's hold " +
         "kept through a refused re-INVITE, answer before INVITE, " +
-        "two callers out of order, INVITE before push both ways, decline crossing a match, busy, refused, missed, " +
+        "two callers out of order, INVITE before push both ways, a push past the window, the missing announcement " +
+        "by name, a match no screen holds, decline crossing a match, busy, refused, missed, " +
         "a framework that will not take the call, a late confirmation after a hang-up, a call over before its " +
         "connection existed, every call ended at once)"
 }

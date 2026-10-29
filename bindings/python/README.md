@@ -616,7 +616,11 @@ stack = Stack(
 The stack presents it on its connection and on every account's own TLS
 connection that names none of its own (`add_account(...,
 tls_client_certificate=...)`); `turn_tls_client_certificate` presents one to
-a TURN server over TLS. The files are read again before every connection,
+a TURN server over TLS. A `TlsTrust.from_context` context is one object
+every connection shares, and `ssl` holds one certificate per context, so on
+such a stack an account's own certificate raises `ValueError` unless the
+account has a `tls_pin` (which gets a context of its own); the stack's
+`tls_client_certificate` is the one it carries. The files are read again before every connection,
 so a certificate renewed on disk is the one the next connection presents.
 Python's `ssl` takes keys from files only: the key sits in a file this
 process can read, and a key that has to stay in a platform key store (the

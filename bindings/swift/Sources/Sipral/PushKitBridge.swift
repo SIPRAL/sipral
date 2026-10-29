@@ -106,6 +106,15 @@ public final class PushKitBridge: @unchecked Sendable {
     /// The announcement each call was matched to by the stack
     /// (`callAnnounced`), until that call's `incomingCall`.
     private var announcedCalls: [SipralHandle: SipralHandle] = [:]
+    /// The calls `matchIncomingCall` found no push for, which the
+    /// application shows itself, by when each arrived: a push the stack
+    /// later pairs with one of them is for a call already on screen. Kept
+    /// for the announce window only, the stack pairing no older call.
+    private var handedToApplication: [SipralHandle: DispatchTime] = [:]
+
+    /// How long the stack pairs a push with an INVITE that came before it
+    /// (`docs/15-mobile.md`: fixed at twenty seconds through `sipral.h`).
+    private static let announceWindow = 20.0
 
     public init(callKit: CallKitBridge) {
         self.callKit = callKit
@@ -120,8 +129,9 @@ public final class PushKitBridge: @unchecked Sendable {
     ///
     /// An announcement the stack refuses ends the call just shown, as
     /// failed, before the error is rethrown. A push for a call that is
-    /// already on screen, because its INVITE came first and was shown, ends
-    /// the second screen at once.
+    /// already on screen, because its INVITE came first and was shown, or
+    /// was handed back by `matchIncomingCall` for the application to show,
+    /// ends the second screen at once.
     ///
     /// The screen shows the push's `displayName` for the caller; a push
     /// that carried none has the INVITE's name shown once it is matched
@@ -138,29 +148,39 @@ public final class PushKitBridge: @unchecked Sendable {
             callerId: push.namesCaller ? push.callerId : Self.unknownCaller, displayName: push.displayName
         )
 
-        let announced: (announcement: SipralHandle?, call: SipralHandle?)
+        // Announced and recorded under the queue `matchIncomingCall` takes,
+        // in one step: an INVITE the stack matches to this announcement
+        // must find it pending, and one already handed back to the
+        // application must be known when the answer names it.
+        let recorded: (pendingCall: PendingCall, shownAlready: Bool)
         do {
-            announced = try account.announce(caller: push.namesCaller ? push.callerId : nil, callId: push.callId)
+            recorded = try stateQueue.sync { () throws -> (pendingCall: PendingCall, shownAlready: Bool) in
+                let announced = try account.announce(caller: push.namesCaller ? push.callerId : nil, callId: push.callId)
+                let pendingCall = PendingCall(
+                    uuid: uuid, callerId: push.callerId, displayName: push.displayName,
+                    announcement: announced.announcement, callKit: callKit
+                )
+                if let arrivedHandle = announced.call {
+                    // The INVITE beat the push.
+                    pendingCall.resolveLater(callHandle: arrivedHandle)
+                    let handedBack = handedToApplication.removeValue(forKey: arrivedHandle) != nil
+                    if handedBack || callKit.uuid(forCallHandle: arrivedHandle) != nil {
+                        return (pendingCall, true)
+                    }
+                }
+                pending.append(pendingCall)
+                return (pendingCall, false)
+            }
         } catch {
             callKit.takeDown(uuid: uuid, reason: .failed)
             throw error
         }
         try? account.refreshBinding()
 
-        let pendingCall = PendingCall(
-            uuid: uuid, callerId: push.callerId, displayName: push.displayName,
-            announcement: announced.announcement, callKit: callKit
-        )
-        if let arrivedHandle = announced.call {
-            // The INVITE beat the push.
-            pendingCall.resolveLater(callHandle: arrivedHandle)
-            if callKit.uuid(forCallHandle: arrivedHandle) != nil {
-                callKit.takeDown(uuid: uuid, reason: .failed)
-                return pendingCall
-            }
+        if recorded.shownAlready {
+            callKit.takeDown(uuid: uuid, reason: .failed)
         }
-        stateQueue.sync { pending.append(pendingCall) }
-        return pendingCall
+        return recorded.pendingCall
     }
 
     /// What a screen shows for a caller nothing named.
@@ -206,8 +226,10 @@ public final class PushKitBridge: @unchecked Sendable {
     /// to. `incomingCall` takes the push shown for it and returns it, to be
     /// `resolve(with:)`d with the `Call` from `SipralStack.takeIncomingCall`;
     /// `nil` means no push announced this call, so the application shows
-    /// it itself. A call the stack matched is found by its announcement,
-    /// any other by the caller's user part, oldest push first. A screen the
+    /// it itself. Only the stack's pairing counts: a call is found by the
+    /// announcement it was matched to, or by the call a push's announce
+    /// found already ringing, and never by a caller that merely looks
+    /// alike. A screen the
     /// push gave no name is given the INVITE's (`CallEventData.callerName`),
     /// and one whose push named nobody the INVITE's `From` URI as well.
     /// `announcedCallMissing` ends the screen that was waiting for it, as
@@ -221,15 +243,20 @@ public final class PushKitBridge: @unchecked Sendable {
             }
             return nil
         case .incomingCall?:
-            let caller = event.callData?.fromUri.map(Self.userPart(of:))
             let found = stateQueue.sync { () -> PendingCall? in
                 let announcement = announcedCalls.removeValue(forKey: event.call)
+                // The stack's pairing alone decides: a call it matched to no
+                // waiting announcement is not a push's, however alike the
+                // callers look (extension 100 on two PBXs).
                 let index = pending.firstIndex { $0.matchedCallHandle == event.call }
                     ?? announcement.flatMap { named in pending.firstIndex { $0.announcement == named } }
-                    ?? caller.flatMap { user in
-                        pending.firstIndex { !$0.callerId.isEmpty && Self.userPart(of: $0.callerId) == user }
-                    }
-                return index.map { pending.remove(at: $0) }
+                guard let index else {
+                    let now = DispatchTime.now()
+                    handedToApplication = handedToApplication.filter { now < $0.value + Self.announceWindow }
+                    handedToApplication[event.call] = now
+                    return nil
+                }
+                return pending.remove(at: index)
             }
             found?.resolveLater(callHandle: event.call)
             if let found {
@@ -253,13 +280,6 @@ public final class PushKitBridge: @unchecked Sendable {
         default:
             return nil
         }
-    }
-
-    private static func userPart(of uri: String) -> String {
-        guard let colon = uri.firstIndex(of: ":") else { return uri }
-        let rest = uri[uri.index(after: colon)...]
-        guard let at = rest.firstIndex(of: "@") else { return String(rest) }
-        return String(rest[rest.startIndex..<at])
     }
 }
 

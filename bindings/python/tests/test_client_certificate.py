@@ -16,6 +16,7 @@ any connection is made.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import ssl
@@ -183,6 +184,57 @@ class TheCertificateIsPresented(_Case):
         account.register()
         event = await self.next_event(stack, EventKind.TRANSPORT_FAILED)
         self.assertEqual(event.fields["tls"], TlsFailure.CLIENT_CERTIFICATE_REQUIRED, event.fields)
+
+
+class TheApplicationsContextHoldsOneIdentity(_Case):
+    # `TlsTrust.from_context` hands every connection the application's one
+    # context, and Python's `ssl` holds a certificate per context: one an
+    # account loaded there would be presented on every other connection.
+    def stack_on(self, context: ssl.SSLContext) -> Stack:
+        stack = Stack(loop=asyncio.get_running_loop(), bind_host="127.0.0.1", audio=AudioMode.APPLICATION,
+                      tls_trust=TlsTrust.from_context(context), tls_server_name=_SERVER_NAME)
+        self.addAsyncCleanup(asyncio.to_thread, stack.close)
+        return stack
+
+    async def test_an_accounts_own_is_refused_and_another_account_presents_none(self) -> None:
+        first, second = self.registrar(), self.registrar()
+        stack = self.stack_on(ssl.create_default_context(cafile=self._server[0]))
+        with self.assertRaisesRegex(ValueError, "application's TLS context"):
+            stack.add_account(
+                f"sip:alice@{_SERVER_NAME}",
+                registrar=f"sip:{_SERVER_NAME}",
+                registrar_address=first.address,
+                stream_protocol=Transport.TLS,
+                tls_client_certificate=TlsClientCertificate(*self._good),
+            )
+        account = stack.add_account(
+            f"sip:bob@{_SERVER_NAME}",
+            registrar=f"sip:{_SERVER_NAME}",
+            registrar_address=second.address,
+            stream_protocol=Transport.TLS,
+        )
+        account.register()
+        event = await self.next_event(stack, EventKind.TRANSPORT_FAILED)
+        self.assertEqual(event.fields["tls"], TlsFailure.CLIENT_CERTIFICATE_REQUIRED, event.fields)
+        self.assertEqual(second.client_subjects, [], "an account without a certificate presented one")
+        self.assertEqual(first.connections, 0)
+
+    async def test_a_pinned_account_presents_its_own_on_a_context_of_its_own(self) -> None:
+        registrar = self.registrar()
+        stack = self.stack_on(ssl.create_default_context(cafile=self._server[0]))
+        with open(self._server[0], encoding="ascii") as pem:
+            leaf = ssl.PEM_cert_to_DER_cert(pem.read())
+        account = stack.add_account(
+            f"sip:alice@{_SERVER_NAME}",
+            registrar=f"sip:{_SERVER_NAME}",
+            registrar_address=registrar.address,
+            stream_protocol=Transport.TLS,
+            tls_pin=hashlib.sha256(leaf).hexdigest(),
+            tls_client_certificate=TlsClientCertificate(*self._good),
+        )
+        account.register()
+        self.assertTrue(await self.registered(account), "never registered")
+        self.assertEqual(registrar.client_subjects, [((("commonName", _CLIENT_NAME),),)])
 
 
 class WhyItWasNotTaken(_Case):

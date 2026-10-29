@@ -933,7 +933,10 @@ class Stack:
         and reopens it when it closes; TLS is checked against ``tls_pin`` or
         the stack's ``tls_trust``, and presents ``tls_client_certificate``
         (:class:`sipral.signalling.TlsClientCertificate`), else the stack's,
-        when the server asks for one. Until open, a call raises
+        when the server asks for one; with a ``tls_trust`` from
+        :meth:`TlsTrust.from_context`, whose one context every connection
+        shares, an account's own certificate needs ``tls_pin`` or raises
+        ``ValueError``. Until open, a call raises
         ``SIPRAL_STATUS_TRANSPORT_DOWN``. ``WS``/``WSS`` run a WebSocket (RFC
         7118) asking for ``websocket_resource`` (``/ws``) with
         ``websocket_host`` as ``Host`` (the server's address).
@@ -944,6 +947,13 @@ class Stack:
             stream_protocol not in _OWN_STREAMS or self._streamed
         ):
             raise ValueError("stream_protocol is Transport.TCP, TLS, WS or WSS, on a stack that signals over UDP")
+        if tls_client_certificate is not None and tls_pin is None and self._tls_trust.shared:
+            # Loaded into the one context every connection shares, it would
+            # be presented to every other account's server as well.
+            raise ValueError(
+                "an account's own client certificate cannot go into the application's TLS context, "
+                "which every connection shares: give the stack tls_client_certificate, or pin the account's server"
+            )
         advertised = None
         if self._routes and contact is None and registrar_address is not None and not self._streamed:
             advertised = self._advertise_toward(registrar_address)
