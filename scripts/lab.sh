@@ -4541,8 +4541,9 @@ robust_link_flow() {
     fi
     printf '%s\n' "$said" | found '^udp 1300 INVITE ' \
         || { printf '  the 1300-byte INVITE never arrived as a datagram\n'; status=1; }
-    # the INVITE placed again on the stream comes to within a byte or two of
-    # the one refused, so what is counted is two over the line, whole
+    # the INVITE placed again on the stream carries two bytes more padding
+    # than the one refused, give or take its own numbers' width, so what is
+    # counted is two over the line, whole
     if [ "$(printf '%s\n' "$said" \
         | awk '$1 == "tcp" && $2 > 1300 && $3 == "INVITE" && $NF == "complete"' | wc -l)" -lt 2 ]; then
         printf '  the INVITEs over the line never arrived whole over TCP\n'

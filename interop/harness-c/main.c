@@ -6172,8 +6172,11 @@ static int robust_one_size(const struct sockaddr_in *peer, size_t want, size_t p
         return -1;
     }
     /* the stream the event asked for is open: placing the call again puts
-     * the INVITE on it */
-    if (robust_place(&end, peer, padding, 0u) != SIPRAL_STATUS_OK) {
+     * the INVITE on it. Its own numbers are a byte or two wider or narrower
+     * than the first call's, so it carries two bytes more padding: what this
+     * placing proves is that an INVITE over the line goes whole on the
+     * stream, and the first one already proved the line to the byte */
+    if (robust_place(&end, peer, padding + 2u, 0u) != SIPRAL_STATUS_OK) {
         wrong_text("placing the call again on the stream was refused");
         robust_close(&end);
         return -1;
@@ -6185,10 +6188,10 @@ static int robust_one_size(const struct sockaddr_in *peer, size_t want, size_t p
     }
     if (end.invite_len != 0u && end.invite_len <= 1300u
         && end.invite_transport == SIPRAL_TRANSPORT_MAIN && want - end.invite_len <= 2u) {
-        /* the second call's INVITE is not the first's: its own numbers are
-         * a byte or two wider or narrower, and this one came to the line or
-         * under it, so it went as a datagram, as it should. Not the size this
-         * attempt is about: the same padding is tried again on a fresh stack */
+        /* the second call's numbers came out narrower than even the two
+         * bytes added for them, so it came to the line or under it and went
+         * as a datagram, as it should. Not the size this attempt is about:
+         * the same padding is tried again on a fresh stack */
         *came_to = want;
         robust_close(&end);
         return 0;
