@@ -226,10 +226,11 @@ pub(crate) fn run_folded(constant: [u8; 32]) -> [u8; 32] {
 /// ACK reaches it, and through a proxy that Record-Routes, the ACK takes the
 /// long way while the digit goes straight there: baresip enables its RTP
 /// receiver only on the ACK, and a digit that arrives before it is never
-/// heard. Its first audio is the sign the call has got that far, but not
-/// proof the receiver is on: on 27 and 28 October two runs in six still lost
-/// the digit sent the moment that audio came, so the digit goes
-/// `AFTER_AUDIO` later.
+/// heard. Its first audio is the sign the call has got that far, and the
+/// digit goes `AFTER_AUDIO` after it, as a key pressed by a person would.
+/// (The digits baresip heard but never sent back on 27 to 29 October were
+/// the lab's echo not yet reading baresip's events; `scripts/lab.sh` now
+/// waits for it before the harness starts.)
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// How long after the far end's first audio (or `SETTLE`) the test digit

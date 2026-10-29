@@ -1921,13 +1921,25 @@ flows_baresip() {
 # ctrl_tcp port, sends back each digit baresip hears, by RFC 4733 for
 # baresip-dtmf and by SIP INFO for baresip-dtmfinfo
 # (interop/baresip/config-dtmf). SIPRAL_PEER=baresip-dtmf is what points
-# the harness's two digit flows at those two accounts.
+# the harness's two digit flows at those two accounts. The harness starts
+# only once the echo says it is connected: the RFC 4733 flow runs first, and
+# a digit baresip hears before the echo reads its events is never sent back.
 flows_baresip_dtmf() {
-    local status
+    local status tries=0
     docker rm -f sipral-lab-dtmf-echo >/dev/null 2>&1
     docker run -d --name sipral-lab-dtmf-echo --network "$LAB_NETWORK" \
         -v "$ROOT/interop/baresip/dtmf_echo.py:/dtmf_echo.py:ro" \
         python:3.13-slim python3 -u /dtmf_echo.py baresip-dtmf 4444 >/dev/null
+    until docker logs sipral-lab-dtmf-echo 2>&1 | found 'dtmf_echo: connected'; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 60 ]; then
+            fail "the digit echo never reached baresip's control port"
+            docker logs sipral-lab-dtmf-echo 2>&1 | sed 's/^/    /'
+            docker rm -f sipral-lab-dtmf-echo >/dev/null 2>&1
+            return 1
+        fi
+        sleep 1
+    done
     lab_run "the harness's digits to baresip" $((LAB_START_S + 2 * LAB_CALL_S)) \
         --network "$LAB_NETWORK" \
         -e SIPRAL_PEER=baresip-dtmf -e SIPRAL_FLOWS=dtmf,dtmfinfo \
