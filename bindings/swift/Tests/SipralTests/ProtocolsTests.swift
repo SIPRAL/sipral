@@ -249,7 +249,7 @@ final class ProtocolsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(granted).account, account.handle)
 
         try account.unpublishPresence()
-        let removing = await FakePeer.request(on: compositor, "PUBLISH", within: 5)
+        let removing = await FakePeer.request(on: compositor, "PUBLISH", after: publish.message, within: 5)
         let removal = try XCTUnwrap(removing)
         XCTAssertEqual(FakePeer.header("Expires", in: removal.message), "0")
         XCTAssertEqual(FakePeer.header("SIP-If-Match", in: removal.message), "tag-one")
@@ -272,6 +272,9 @@ final class ProtocolsTests: XCTestCase {
         let subscribed = await FakePeer.request(on: notifier, "SUBSCRIBE", within: 5)
         let subscribe = try XCTUnwrap(subscribed)
         XCTAssertEqual(FakePeer.header("Accept", in: subscribe.message), "application/pidf+xml")
+        // answered past T1, as a loaded machine may: the SUBSCRIBE has gone
+        // again by then (RFC 3261 §17.1.2.2), and its copy waits in the socket
+        try await Task.sleep(nanoseconds: 1_000_000_000)
         notifier.send(FakePeer.answer(subscribe.message, "200 OK", more: "Expires: 3600\r\n"), to: subscribe.from)
         notifier.send(
             FakePeer.notify(subscribe.message, to: alice.bindAddress, from: notifier.localAddress,
@@ -286,7 +289,7 @@ final class ProtocolsTests: XCTestCase {
         XCTAssertEqual(told.entity, "sip:bob@sipral.invalid")
         XCTAssertEqual(told.note, "Back at four")
         try watched.end()
-        let unsubscribing = await FakePeer.request(on: notifier, "SUBSCRIBE", within: 5)
+        let unsubscribing = await FakePeer.request(on: notifier, "SUBSCRIBE", after: subscribe.message, within: 5)
         let unsubscribe = try XCTUnwrap(unsubscribing)
         XCTAssertEqual(FakePeer.header("Expires", in: unsubscribe.message), "0")
     }
@@ -371,13 +374,19 @@ final class ProtocolsTests: XCTestCase {
 /// compositor, the recording server.
 enum FakePeer {
     /// The next request of `method` that arrives on `socket` within
-    /// `seconds`, and where it came from; anything else is let go.
-    static func request(on socket: UDPSocket, _ method: String, within seconds: Double) async -> (message: String, from: String)? {
+    /// `seconds`, and where it came from; anything else is let go, and so is
+    /// a copy of `earlier`: over UDP a request goes again until its answer
+    /// lands (RFC 3261 §17.1.2.2), and copies sent before it did still wait
+    /// in the socket. A copy keeps its branch; a new request never does.
+    static func request(
+        on socket: UDPSocket, _ method: String, after earlier: String? = nil, within seconds: Double
+    ) async -> (message: String, from: String)? {
+        let resent = earlier.flatMap { header("Via", in: $0) }
         let deadline = DispatchTime.now() + seconds
         while DispatchTime.now() < deadline {
             while let (data, from) = socket.receive() {
                 let text = String(decoding: data, as: UTF8.self)
-                if text.hasPrefix("\(method) ") {
+                if text.hasPrefix("\(method) "), resent == nil || header("Via", in: text) != resent {
                     return (text, from)
                 }
             }

@@ -69,6 +69,15 @@ public struct VoipPushFields: Sendable, Equatable {
 /// the call is expected on the account alone.
 public typealias VoipPushDecoder = @Sendable (_ payload: [AnyHashable: Any]) throws -> VoipPushFields
 
+/// What `PushKitBridge` asks of the account a push woke: the announcement
+/// and the binding refresh `Account` makes.
+protocol PushAnnouncing {
+    func announce(caller: String?, callId: String?) throws -> (announcement: SipralHandle?, call: SipralHandle?)
+    func refreshBinding() throws
+}
+
+extension Account: PushAnnouncing {}
+
 /// What became of one push handed to `PushKitBridge.receive(_:mustReport:account:)`.
 public enum PushOutcome: Sendable {
     /// Shown, announced and waiting for its INVITE.
@@ -144,6 +153,12 @@ public final class PushKitBridge: @unchecked Sendable {
     /// that handler's completion, in place of `PushKitAdapter`.
     @discardableResult
     public func handle(push: VoipPush, account: Account) async throws -> PendingCall {
+        try await handle(push: push, announcer: account)
+    }
+
+    /// `handle(push:account:)`, on whatever announces for the account.
+    @discardableResult
+    func handle(push: VoipPush, announcer account: some PushAnnouncing) async throws -> PendingCall {
         let uuid = try await callKit.reportIncomingCall(
             callerId: push.namesCaller ? push.callerId : Self.unknownCaller, displayName: push.displayName
         )

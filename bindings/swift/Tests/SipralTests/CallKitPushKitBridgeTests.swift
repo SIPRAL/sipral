@@ -376,6 +376,42 @@ final class PushKitBridgeTests: XCTestCase {
         XCTAssertEqual(pending.matchedCallHandle, 424243)
     }
 
+    /// The stack's events run on their own thread and may pair the INVITE
+    /// with the announcement before `announce` has even returned. That
+    /// INVITE must still find the push pending, not be handed to the
+    /// application while the push's screen rings on with nothing to fill it.
+    func testAnInviteMatchedWhileThePushIsAnnouncedTakesItsScreen() async throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = RecordingProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+
+        let call: SipralHandle = 424244
+        let announcement: SipralHandle = 717171
+        let announced = SipralEvent(
+            kindRaw: SipralEventKind.callAnnounced.rawValue, kind: .callAnnounced, kindName: "call announced",
+            stack: stack.handle, account: account.handle, call: call, message: nil, callData: nil,
+            mediaData: nil, registrationData: nil,
+            announceData: AnnounceEventData(announcement: announcement, waitedMs: 0), natData: nil,
+            relayData: nil, referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil,
+            verificationData: nil
+        )
+        let invite = incomingCall(call, from: "sip:alice@sipral.invalid", on: stack, account: account)
+        let announcer = RacingAnnouncer(announcement: announcement) {
+            pushKit.matchIncomingCall(announced, on: stack)
+            return pushKit.matchIncomingCall(invite, on: stack)
+        }
+
+        let pending = try await pushKit.handle(push: VoipPush(callerId: "sip:alice@sipral.invalid"), announcer: announcer)
+        let taken = await eventually(within: 10) { announcer.matched != nil }
+        XCTAssertTrue(taken, "the INVITE was never matched")
+        XCTAssertEqual(announcer.matched??.uuid, pending.uuid, "the INVITE went to the application, not the push's screen")
+        XCTAssertEqual(pending.matchedCallHandle, call)
+        let ended = await provider.ended
+        XCTAssertTrue(ended.isEmpty, "the push's screen was ended")
+    }
+
     // MARK: - a push's payload, and the system's word on it
 
     func testTheClearPayloadIsReadAndAnythingElseIsNothing() {
@@ -447,6 +483,48 @@ final class PushKitBridgeTests: XCTestCase {
         let ended = await provider.ended
         XCTAssertTrue(ended.isEmpty, "a call the account still expects was ended")
     }
+}
+
+/// Announces for `PushKitBridge` the way the stack's event thread can race
+/// it: `announce` runs `deliver`, the events that pair an INVITE with the
+/// announcement, on another thread, and gives them a second to finish
+/// before it returns. A bridge that recorded the push only after announcing
+/// would have the INVITE matched within that second, to nothing; one that
+/// holds its state across both steps keeps the events waiting until the
+/// push is recorded.
+final class RacingAnnouncer: PushAnnouncing, @unchecked Sendable {
+    private let announcement: SipralHandle
+    private let deliver: @Sendable () -> PendingCall?
+    private let lock = NSLock()
+    private var delivered: PendingCall??
+
+    init(announcement: SipralHandle, deliver: @escaping @Sendable () -> PendingCall?) {
+        self.announcement = announcement
+        self.deliver = deliver
+    }
+
+    /// What `deliver` returned for the INVITE: `nil` until it has run, and
+    /// `.some(nil)` when the INVITE was handed to the application.
+    var matched: PendingCall?? {
+        lock.lock()
+        defer { lock.unlock() }
+        return delivered
+    }
+
+    func announce(caller: String?, callId: String?) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let found = self.deliver()
+            self.lock.lock()
+            self.delivered = .some(found)
+            self.lock.unlock()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 1)
+        return (announcement, nil)
+    }
+
+    func refreshBinding() throws {}
 }
 
 /// A `CallAudioSessionEngine` that records what it was told, in order.
