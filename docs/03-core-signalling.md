@@ -503,7 +503,8 @@ accepted on receive because old equipment sends it, and never sent. On a
 stream that carries ICE it is not a hold: `0.0.0.0` with port 9 is a
 description with no candidate in it yet (RFC 8840 §4.1.1), which a browser
 writes whenever it trickles, and the path is the pair ICE checks
-(`SessionDescription::holds_by_address`).
+(`SessionDescription::holds_by_address`). With any other port it is still a
+hold, ICE attributes or not: that port is the default candidate's.
 
 ## Authentication
 

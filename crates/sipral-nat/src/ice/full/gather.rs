@@ -454,15 +454,14 @@ impl IceAgent {
     }
 
     /// Tell the caller gathering found something to trickle for the stream
-    /// `base` belongs to.
+    /// `base` belongs to, unless that stream may no longer trickle: a
+    /// response that arrives after a nomination or after the end of
+    /// candidates is not one the peer may be sent (RFC 8838 §13).
     fn trickled(&mut self, base: usize) {
-        if !self.config.trickle {
-            return;
-        }
-        if let Some(stream) = self.bases.get(base).map(|entry| entry.stream) {
-            self.events.push_back(IceEvent::NewCandidates {
-                stream: StreamId(stream),
-            });
+        if let Some(stream) = self.bases.get(base).map(|entry| StreamId(entry.stream))
+            && self.may_trickle(stream)
+        {
+            self.events.push_back(IceEvent::NewCandidates { stream });
         }
     }
 

@@ -785,7 +785,8 @@ entry! {
 ///
 /// The failure names no server, so it ends the requests waiting for a stream only when it can
 /// answer nothing else: one server asked a stream of, and no account waiting for a connection
-/// of its own. Otherwise one server's failure would end requests waiting for another's
+/// of its own. Likewise it moves an account's REGISTER on only while nothing waits for a
+/// stream. Otherwise one server's failure would end requests waiting for another's
 /// connection, and each request's own wait decides instead.
 fn lose(
     state: &mut StackState,
@@ -799,6 +800,7 @@ fn lose(
     let flowing = state.agent.wants_a_flow();
     let waiting = streaming || flowing;
     let answers_the_ask = streaming && !flowing && state.agent.endpoint_ref().streams_wanted() <= 1;
+    let answers_the_flow = flowing && !streaming;
     let Some(id) = state.transports.resolve(transport) else {
         if !waiting {
             return named(state, transport).map(|_| ());
@@ -808,7 +810,7 @@ fn lose(
         }
         // an account's own connection that could not be opened: on to the
         // next address its server's lookup gave, when it is clear whose
-        if flowing {
+        if answers_the_flow {
             state.agent.flow_unavailable(now);
         }
         state.lost.push(Lost {
@@ -835,7 +837,7 @@ fn lose(
     if answers_the_ask && !was_up {
         state.agent.stream_unavailable(now);
     }
-    if flowing && !was_up {
+    if answers_the_flow && !was_up {
         state.agent.flow_unavailable(now);
     }
     state.lost.push(Lost {
@@ -3640,6 +3642,81 @@ pub(crate) mod tests {
             crate::event::SipralCallEndReason::Unreachable as u32
         );
         assert_eq!(status, 513);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The same failure seen from the account: it may be the call's stream that could not be
+    /// opened, so the account's held REGISTER is neither failed over nor backed off, and goes
+    /// on its own connection once that is bound.
+    #[test]
+    fn a_failure_that_may_be_a_calls_stream_leaves_an_account_waiting_for_its_own() {
+        let mut seen = Outgrown::default();
+        let handle = challenged_past_the_line(&mut seen);
+        let bob = "sip:bob@example.com";
+        let on_tls = SipralAccountConfig {
+            aor: bob.as_ptr().cast::<c_char>(),
+            aor_len: bob.len(),
+            stream_protocol: SipralTransport::Tls as u32,
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tls), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_020) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_020);
+        assert_eq!(
+            unsafe {
+                sipral_stack_transport_failed(
+                    handle,
+                    2,
+                    SipralTransportError::ConnectionRefused as u32,
+                    1_060,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_060);
+        assert!(drain(handle).is_empty(), "nothing went meanwhile");
+
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                9,
+                SipralTransport::Tls as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                1_070,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        poll(handle, 1_070);
+        let mut registered = false;
+        let mut buffers = Buffers::new();
+        loop {
+            let mut transmit = buffers.transmit();
+            let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                break;
+            }
+            let (message, _, _) = buffers.taken(&transmit);
+            registered |= transmit.transport == 9 && message.starts_with(b"REGISTER ");
+        }
+        assert!(
+            registered,
+            "the REGISTER went on the account's own connection"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

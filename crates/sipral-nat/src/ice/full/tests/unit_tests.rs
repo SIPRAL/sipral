@@ -2253,6 +2253,40 @@ fn a_candidate_the_caller_learns_late_is_taken_only_while_the_session_trickles()
     );
 }
 
+/// A trickling agent asking the STUN server, answered with `mapped` once
+/// `ended` has or has not said this end's last candidate; the events that
+/// answer raised.
+fn reflexive_answered(ended: bool, mapped: &str) -> Vec<IceEvent> {
+    let (mut agent, _, _, now) = trickling(Role::Controlling, config(true, false));
+    agent.handle_timeout(now);
+    let sent = drain(&mut agent);
+    let (server, id) = requests(&sent)[0];
+    if ended {
+        agent.end_of_candidates();
+    }
+    events(&mut agent);
+    let mut builder = MessageBuilder::new(Class::Success, Method::BINDING, id);
+    builder
+        .add_xor_address(AttributeType::XOR_MAPPED_ADDRESS, address(mapped))
+        .expect("mapped");
+    agent.handle_datagram(address(LOCAL), server, &builder.finish(), now);
+    events(&mut agent)
+}
+
+#[test]
+fn a_candidate_gathered_after_the_end_of_candidates_is_not_offered_for_trickling() {
+    let trickled = |events: &[IceEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, IceEvent::NewCandidates { .. }))
+    };
+    assert!(trickled(&reflexive_answered(false, "192.0.2.1:40000")));
+    assert!(
+        !trickled(&reflexive_answered(true, "192.0.2.1:40000")),
+        "nothing is trickled after the end of candidates (RFC 8838 §13)"
+    );
+}
+
 #[test]
 fn pairs_formed_late_start_waiting_or_frozen_by_their_foundation() {
     let (mut agent, stream, mut ids, mut now) = trickling(Role::Controlled, config(false, false));

@@ -12,6 +12,10 @@ use super::media::{Direction, MediaDescription};
 /// only one this stack uses.
 const VOIP_METRICS_XR_FORMAT: &str = "voip-metrics";
 
+/// The port a description with no candidate yet writes, the discard port
+/// (RFC 8840 §4.1.1).
+const TRICKLE_PLACEHOLDER_PORT: u16 = 9;
+
 /// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
 /// (§5.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -363,16 +367,19 @@ impl SessionDescription {
 
     /// Whether one stream is held the old way, by `0.0.0.0` (RFC 3264 §8.4).
     ///
-    /// Not on a stream ICE carries: there the path is the pair ICE checks, and
-    /// `0.0.0.0` with port 9 is a description that holds no candidate yet (RFC
-    /// 8840 §4.1.1, RFC 8839 §4.2.1.3), which a browser writes in every
-    /// description it trickles.
+    /// Not the placeholder of a stream ICE carries: there the path is the pair
+    /// ICE checks, and `0.0.0.0` with port 9 is a description that holds no
+    /// candidate yet (RFC 8840 §4.1.1, RFC 8839 §4.2.1.3), which a browser
+    /// writes in every description it trickles. Any other port is the default
+    /// candidate's, so `0.0.0.0` with it is a hold even beside ICE attributes.
     #[must_use]
     pub fn holds_by_address(&self, media: &MediaDescription) -> bool {
         let ice = media.attribute("ice-ufrag").is_some() || self.attribute("ice-ufrag").is_some();
-        !ice && self
-            .connection_of(media)
-            .is_some_and(Connection::is_black_hole)
+        let placeholder = ice && media.port == TRICKLE_PLACEHOLDER_PORT;
+        !placeholder
+            && self
+                .connection_of(media)
+                .is_some_and(Connection::is_black_hole)
     }
 
     /// Whether one stream asks for the RFC 3611 `voip-metrics` XR block. A
@@ -493,5 +500,28 @@ mod tests {
     fn an_ordinary_attribute_is_printed_as_it_was_read() {
         let printed = format!("{:?}", Attribute::with_value("rtpmap", "0 PCMU/8000"));
         assert!(printed.contains("0 PCMU/8000"), "{printed}");
+    }
+
+    fn with_ice(port: u16) -> super::SessionDescription {
+        crate::sdp::parse(
+            format!(
+                "v=0\r\no=- 2 2 IN IP4 192.0.2.9\r\ns=-\r\nt=0 0\r\n\
+m=audio {port} RTP/AVP 0\r\nc=IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:P18v\r\na=ice-pwd:{PWD}\r\na=sendrecv\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("a session description")
+    }
+
+    /// Only the placeholder of RFC 8840 §4.1.1 is a trickling description; a
+    /// peer that writes ICE attributes and holds the RFC 2543 way, with its
+    /// real port, still holds.
+    #[test]
+    fn an_old_style_hold_with_ice_attributes_and_a_real_port_is_a_hold() {
+        let held = with_ice(49_170);
+        assert!(held.holds_by_address(&held.media[0]));
+        let trickling = with_ice(9);
+        assert!(!trickling.holds_by_address(&trickling.media[0]));
     }
 }

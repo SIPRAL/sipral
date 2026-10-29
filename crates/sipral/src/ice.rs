@@ -741,7 +741,8 @@ impl RelayRefusal {
 /// it came, the generation they were sent under, and whether it has finished.
 ///
 /// Kept for the whole call: the agent takes them when it exists, and each INFO repeats the ones
-/// before it, so only what this does not hold yet is new.
+/// before it, so only what this does not hold yet is new. Holds at most as many as an agent keeps
+/// ([`IceConfig::max_remote_candidates`]); a candidate past that is dropped.
 #[cfg(feature = "ice")]
 #[derive(Clone, Default)]
 pub(crate) struct Heard {
@@ -790,7 +791,13 @@ impl Heard {
         }
         let mut known = described.to_vec();
         known.extend(self.candidates.iter().cloned());
-        let fresh = frag.new_candidates(mid, &known);
+        let mut fresh = frag.new_candidates(mid, &known);
+        // no agent keeps more than this, and a far end that never ends would otherwise grow the
+        // list, and the cost of every later body, for as long as the call lasts
+        let room = IceConfig::default()
+            .max_remote_candidates
+            .saturating_sub(self.candidates.len());
+        fresh.truncate(room);
         self.candidates.extend(fresh.iter().cloned());
         self.ended = frag.ended(mid);
         Some(fresh)
@@ -1732,13 +1739,14 @@ impl core::fmt::Debug for Ice {
 
 #[cfg(all(test, feature = "ice"))]
 mod tests {
+    use std::fmt::Write as _;
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
     use sipral_core::auth::KeySource;
-    use sipral_nat::ice::CandidateType;
+    use sipral_nat::ice::{CandidateType, SdpFrag};
 
-    use super::{ICE_CHARS, IcePolicy, LocalIce, PWD_CHARS, UFRAG_CHARS};
+    use super::{Heard, ICE_CHARS, IcePolicy, LocalIce, PWD_CHARS, UFRAG_CHARS};
 
     fn address() -> SocketAddr {
         "192.0.2.7:40000".parse().expect("a literal address")
@@ -1922,6 +1930,32 @@ mod tests {
         agent.handle_timeout(now + Duration::from_secs(1));
         assert!(agent.take_probe().is_none());
         assert!(agent.route().is_none(), "and nowhere to send it if it had");
+    }
+
+    #[test]
+    fn a_far_end_that_never_stops_trickling_is_kept_to_what_an_agent_holds() {
+        let cap = sipral_nat::ice::IceConfig::default().max_remote_candidates;
+        let mut heard = Heard::default();
+        let mut taken = 0;
+        for body in 0..40_u16 {
+            let mut text = String::from(
+                "a=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg\r\nm=audio 9 RTP/AVP 0\r\n",
+            );
+            for line in 0..64_u16 {
+                let _ = write!(
+                    text,
+                    "a=candidate:1 1 UDP 2130706431 192.0.2.1 {} typ host\r\n",
+                    1024 + body * 64 + line
+                );
+            }
+            let frag = SdpFrag::parse(text.as_bytes()).expect("a fragment");
+            let fresh = heard
+                .take(&frag, None, &[])
+                .expect("the same generation, not ended");
+            taken += fresh.len();
+        }
+        assert_eq!(heard.candidates.len(), cap);
+        assert_eq!(taken, cap, "nothing past the cap reaches an agent either");
     }
 
     #[test]

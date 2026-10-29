@@ -853,8 +853,7 @@ impl Nat {
                 let relay = active.relays.as_mut().and_then(|relays| relays.take(local));
                 (public, relay, !Self::waiting(active, local))
             };
-            // each refusal is a call that no longer takes candidates; a relay it refused comes
-            // back through `take_back`
+            // each refusal is a call that no longer takes candidates
             if let Some(public) = public {
                 let _trickled =
                     state
@@ -865,6 +864,9 @@ impl Nat {
                 let _trickled = state
                     .engine
                     .trickle_relay(&mut state.agent, call, relay, now);
+                // a relay the call refused is back on its socket before the socket is spent,
+                // which releases it; put back after, it would be kept for a call never coming
+                Self::take_back(state, now);
             }
             if done {
                 let _ended = state.engine.end_of_candidates(&mut state.agent, call, now);
@@ -874,7 +876,6 @@ impl Nat {
                 Self::spent(state, local, now);
             }
         }
-        Self::take_back(state, now);
     }
 
     /// What the relays and their connections came to since the last poll.
@@ -5840,6 +5841,71 @@ Content-Type: application/sdp\r\n"
                 .last()
                 .is_some_and(|info| info.contains("a=end-of-candidates")),
             "and the end of candidates last: {trickled:?}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    /// A call that trickles is placed while its socket's relay is still on its way, and the far
+    /// end answers without trickle: the relay that comes after is refused by the call, and goes
+    /// back to the server once the socket is spent rather than being kept alive for nobody.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_relay_a_trickling_call_refused_goes_back_when_its_socket_is_spent() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let asked = stun_out(stack);
+        assert_eq!(asked.len(), 2, "a Binding request and an Allocate");
+        assert_eq!(
+            on_media_socket(stack, &answer(&asked[0].0, MEDIA_PUBLIC), SERVER, 15),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 15);
+
+        let mut offering = managed_config();
+        offering.ice = crate::media::SipralIce::Offered as u32;
+        offering.ice_trickle = crate::media::SipralIceTrickle::Full as u32;
+        let (status, _) = place(stack, account, &offering, 20);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = signalling_out(stack)
+            .into_iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE")
+            .0;
+        crate::call::tests::deliver(
+            stack,
+            &crate::call::tests::accepted(&invite, &ice_answer(), true),
+            30,
+        );
+        let _ = poll(stack, 30);
+        let _ = signalling_out(stack);
+
+        assert_eq!(
+            on_media_socket(
+                stack,
+                &turn_answer(&asked[1].0, RELAYED_AT, MEDIA_PUBLIC),
+                SERVER,
+                40
+            ),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, 40);
+        let out = stun_out(stack);
+        assert!(
+            out.iter().any(|(request, destination, source)| {
+                refresh_lifetime(request) == Some(0) && destination == SERVER && source == MEDIA
+            }),
+            "the relay the call refused was kept: {:?}",
+            out.iter()
+                .map(|(request, ..)| refresh_lifetime(request))
+                .collect::<Vec<_>>()
         );
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }

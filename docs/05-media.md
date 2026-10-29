@@ -1535,9 +1535,10 @@ Two things in the stack did not hold against it, and both are fixed:
   trickles writes `c=IN IP4 0.0.0.0` and port 9 into a description with no
   candidate in it yet (RFC 8840 §4.1.1), and the stack read that as RFC 3264
   §8.4's old hold: the call came up, ICE chose a pair, DTLS keyed it, and
-  this end sent nothing. On a stream with `a=ice-ufrag` the address now says
-  nothing about direction (`SessionDescription::holds_by_address`, used by
-  the media plan and by the user agent's hold state).
+  this end sent nothing. On a stream with `a=ice-ufrag` and port 9 the
+  address now says nothing about direction; `0.0.0.0` with a real port is
+  still a hold (`SessionDescription::holds_by_address`, used by the media
+  plan and by the user agent's hold state).
 
 What else the browser sends is taken as it was. Its host candidates are
 random `.local` names (mDNS) unless the page is told otherwise; a candidate

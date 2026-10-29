@@ -13,9 +13,9 @@ use sipral_core::msg::{HeaderName, MultipartBuilder, Part};
 use crate::call::{CallHandle, CallState};
 use crate::event::UaEvent;
 use crate::isup::{
-    BackwardCall, CallEvent, CalledStatus, Cause, EventKind, ForwardCall, GenericNumber,
-    IsupBuilder, Location, Nature, NatureOfConnection, Number, NumberQualifier, Presentation,
-    RedirectReason, Redirection, Screening,
+    BackwardCall, CallEvent, CalledStatus, Cause, CodingStandard, EventKind, ForwardCall,
+    GenericNumber, IsupBuilder, Location, Nature, NatureOfConnection, Number, NumberQualifier,
+    Presentation, RedirectReason, Redirection, Screening,
 };
 use crate::tests::{
     ACCEPTED, ANSWER, OFFER, account, agent, answered, call_up, deliver, events, header, in_dialog,
@@ -304,12 +304,17 @@ fn a_number_only_asserted_when_the_network_vouches_and_may_say_it() {
     // Q.1912.5 Table 7-4: P-Asserted-Identity comes from a calling party
     // number screened "user provided, verified and passed" or "network
     // provided", presentation allowed or restricted; restricted by the
-    // network, it is not included
-    for (presentation, screening, asserted) in [
-        (Presentation::Allowed, Screening::UserVerified, true),
-        (Presentation::Allowed, Screening::UserNotVerified, false),
-        (Presentation::Reserved, Screening::Network, false),
-        (Presentation::NotAvailable, Screening::Network, false),
+    // network, it is not included, and it is still kept from the called user
+    for (presentation, screening, asserted, withheld) in [
+        (Presentation::Allowed, Screening::UserVerified, true, false),
+        (
+            Presentation::Allowed,
+            Screening::UserNotVerified,
+            false,
+            false,
+        ),
+        (Presentation::Reserved, Screening::Network, false, true),
+        (Presentation::NotAvailable, Screening::Network, false, false),
     ] {
         let t0 = Instant::now();
         let mut agent = agent(t0);
@@ -340,9 +345,9 @@ fn a_number_only_asserted_when_the_network_vouches_and_may_say_it() {
             asserted,
             "{presentation:?} {screening:?}"
         );
-        assert!(
-            !caller.privacy.id,
-            "{presentation:?}: only restricted asks for id"
+        assert_eq!(
+            caller.privacy.id, withheld,
+            "{presentation:?}: a withheld number asks for id"
         );
     }
 }
@@ -469,6 +474,26 @@ fn a_reason_header_comes_before_the_rel_beside_it() {
     assert_eq!(
         causes_of_end(&mut agent),
         [(ReasonProtocol::Q850, Some(16), None)]
+    );
+}
+
+#[test]
+fn a_rel_cause_of_a_national_coding_standard_is_no_q850_cause() {
+    // Q.850 §2.2.2: a value of another coding standard than ITU-T's is not
+    // from Q.850's list, so national 17 is not "user busy"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+    let mut national = Cause::new(17, Location::PublicRemote);
+    national.coding = CodingStandard::National;
+    let release = IsupBuilder::release(national).build().expect("a REL");
+    deliver(&mut agent, &bye_carrying(&ack, ITU, "", &release), t0);
+    sent(&mut agent);
+    assert!(
+        !causes_of_end(&mut agent)
+            .iter()
+            .any(|(protocol, ..)| *protocol == ReasonProtocol::Q850)
     );
 }
 

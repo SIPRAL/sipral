@@ -23,8 +23,8 @@
 //! - **The caller, from the IAM, where SIP says less** (RFC 3398 §8.2.1,
 //!   ITU-T Q.1912.5 Table 7-4): [`CallerIdentity::isup`] holds what the
 //!   IAM says about the call; a calling party number whose presentation is
-//!   restricted asks for `Privacy: id` whatever `From` says, so a withheld
-//!   number stays withheld; from a trusted peer, with no
+//!   restricted, by the caller or by the network, asks for `Privacy: id`
+//!   whatever `From` says, so a withheld number stays withheld; from a trusted peer, with no
 //!   `P-Asserted-Identity` and no `Remote-Party-ID`, a calling party number
 //!   the network provided or verified, its presentation allowed or
 //!   restricted, is the asserted identity — one restricted by the network,
@@ -34,7 +34,8 @@
 //!   information gives.
 //! - **The release cause, from the REL**, into the Q.850 cause the call's end
 //!   is reported with, when no `Reason` header gave one: RFC 3398 §7.2.3
-//!   prefers the header when both are there.
+//!   prefers the header when both are there. A cause of a national or
+//!   location-specific coding standard is not a Q.850 one and adds none.
 //!
 //! A number becomes a URI only when it is international, as `tel:+` and its
 //! digits: a national or subscriber number is a global one only with the
@@ -161,9 +162,10 @@ pub(crate) fn read_caller(identity: &mut CallerIdentity, request: &RawMessage<'_
     if let Some(calling) = &caller.calling {
         // Q.1912.5 Table 7-4: allowed or restricted, the number is asserted
         // and a restricted one asks for `id`; restricted by the network, or
-        // not available, it is not asserted at all
+        // not available, it is not asserted at all. Restricted by the network
+        // it is still to be kept from the called user, as the diversions are
         let presentation = calling.presentation;
-        if presentation == Some(Presentation::Restricted) {
+        if presentation.is_some_and(Presentation::withheld) {
             identity.privacy.id = true;
         }
         let presentable = matches!(
@@ -263,13 +265,17 @@ fn diversions_of(caller: &IsupCaller) -> Box<[Diversion]> {
 }
 
 /// The Q.850 cause an ISUP REL in this message carries, as the `Reason` it
-/// stands for, named as Q.850 names it.
+/// stands for, named as Q.850 names it. A cause of another coding standard
+/// is none: its value is from a national or local list, not Q.850's (Q.850
+/// §2.2.2), and stays in the REL for whoever reads that list.
 pub(crate) fn release_reason(message: &RawMessage<'_>) -> Option<Reason> {
     let release = readable(message)?;
     if release.message_type() != MessageType::Release {
         return None;
     }
-    let cause = release.cause()?;
+    let cause = release
+        .cause()
+        .filter(|cause| cause.coding == CodingStandard::Itu)?;
     Some(Reason::q850(
         u16::from(cause.value),
         cause.name().unwrap_or(""),
