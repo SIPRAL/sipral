@@ -19,8 +19,8 @@ use crate::call::{CallHandle, OutgoingCall};
 use crate::event::UaEvent;
 use crate::signalling_tests::with_field;
 use crate::tests::{
-    account, agent, answered, call_arriving, deliver, events, in_dialog, incoming_invite, reply,
-    sent, text, transmits, uri, with,
+    OFFER, account, agent, answered, call_arriving, call_up, deliver, events, in_dialog,
+    incoming_invite, reply, reversed, sent, text, transmits, uri, with,
 };
 use crate::trickle::{INFO_PACKAGE, MEDIA_TYPE, RECV_INFO};
 
@@ -424,6 +424,92 @@ fn options_lists_the_option_tag_once_the_agent_takes_the_package() {
     agent.accept_trickle_ice(true);
     deliver(&mut agent, &options("tr7"), t0);
     assert!(text(&sent(&mut agent), HeaderName::Supported).contains("trickle-ice"));
+}
+
+/// A far end's trickling description that holds no candidate yet: RFC 8840
+/// §4.1.1's `0.0.0.0` and port 9, as a browser writes every one.
+fn placeholder(version: u8) -> Vec<u8> {
+    format!(
+        "v=0\r\no=- 2 {version} IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n\
+m=audio 9 RTP/AVP 0\r\na=mid:0\r\na=ice-ufrag:9uB6\r\na=ice-pwd:YH75Fviy6338Vbrhrlp8Yh\r\n\
+a=ice-options:trickle ice2\r\n"
+    )
+    .into_bytes()
+}
+
+fn placeholder_invite(branch: &str) -> Vec<u8> {
+    with_field(
+        &incoming_invite(branch, Some(&placeholder(2))),
+        "Supported: trickle-ice",
+    )
+}
+
+fn held_there(agent: &UserAgent, call: CallHandle) -> Option<bool> {
+    agent.hold_state(call).map(|hold| hold.remote)
+}
+
+#[test]
+fn the_placeholder_holds_nobody_on_a_call_answered_with_ice() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.accept_trickle_ice(true);
+    let call = call_arriving(&mut agent, &placeholder_invite("ph1"), t0);
+    assert_eq!(held_there(&agent, call), Some(false), "before the answer");
+
+    agent
+        .answer(call, Some(Arc::from(TRICKLING)), t0)
+        .expect("200 goes");
+    assert_eq!(held_there(&agent, call), Some(false), "ICE finds the path");
+}
+
+#[test]
+fn the_placeholder_holds_a_call_answered_without_ice() {
+    // no check runs at this end, so 0.0.0.0 is where the media would go
+    // (RFC 3264 §8.4), as the media plan reads it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.accept_trickle_ice(true);
+    let call = call_arriving(&mut agent, &placeholder_invite("ph2"), t0);
+
+    agent
+        .answer(call, Some(Arc::from(OFFER)), t0)
+        .expect("200 goes");
+    assert_eq!(held_there(&agent, call), Some(true));
+}
+
+#[test]
+fn before_any_answer_the_placeholder_holds_an_agent_that_takes_no_trickled_candidates() {
+    // the far end's candidates would be refused 469, so none comes to check
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &placeholder_invite("ph3"), t0);
+    assert_eq!(held_there(&agent, call), Some(true));
+}
+
+#[test]
+fn a_re_offer_of_the_placeholder_holds_a_call_that_answers_it_without_ice() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let line = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, line, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "phreoffer", 1, Some(&placeholder(3))),
+        t0,
+    );
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Reoffer { .. })),
+        "ICE credentials that appear are the application's"
+    );
+    agent.accept_reoffer(call, OFFER, t0).expect("the 200 goes");
+    assert_eq!(held_there(&agent, call), Some(true));
 }
 
 #[test]

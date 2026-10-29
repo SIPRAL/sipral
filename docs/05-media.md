@@ -1538,7 +1538,9 @@ Two things in the stack did not hold against it, and both are fixed:
   this end sent nothing. On a stream with `a=ice-ufrag` and port 9 the
   address now says nothing about direction; `0.0.0.0` with a real port is
   still a hold (`SessionDescription::holds_by_address`, used by the media
-  plan and by the user agent's hold state).
+  plan and by the user agent's hold state). A media plan or a hold state
+  whose own end runs no ICE reads the placeholder as a hold as well
+  (`SessionDescription::carries_ice` on this end's stream).
 
 What else the browser sends is taken as it was. Its host candidates are
 random `.local` names (mDNS) unless the page is told otherwise; a candidate

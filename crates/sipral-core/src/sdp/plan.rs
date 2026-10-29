@@ -478,9 +478,14 @@ impl SessionDescription {
             agreed_codec(ours, theirs, &payloads).ok_or(SdpError::NoCodec { stream })?;
         let dtmf = agreed_dtmf(ours, theirs, &payloads, codec.clock_rate());
 
-        // RFC 3264 §8.4: 0.0.0.0 means send nothing (old-style hold), on a stream ICE does not
-        // carry (`SessionDescription::holds_by_address`)
-        let black_hole = remote.holds_by_address(theirs);
+        // RFC 3264 §8.4: 0.0.0.0 means send nothing (old-style hold), except RFC 8840's
+        // placeholder on a stream ICE carries (`SessionDescription::holds_by_address`); that
+        // takes ICE at this end too, since without it no check finds another path
+        let black_hole = if self.carries_ice(ours) {
+            remote.holds_by_address(theirs)
+        } else {
+            peer_connection.is_some_and(Connection::is_black_hole)
+        };
         let theirs_says = remote.direction_of(theirs);
         let theirs_says = if black_hole {
             not_receiving(theirs_says)
@@ -1278,12 +1283,10 @@ m=audio 49170 RTP/AVP 0\r\n");
         assert_eq!(plan.remote, addr("0.0.0.0:49170"));
     }
 
-    #[test]
-    fn a_trickling_answer_with_no_candidate_yet_is_not_a_hold() {
-        // RFC 8840 §4.1.1: a description holding no candidate writes 0.0.0.0 and port 9, as
-        // Chromium does in every description it trickles; ICE finds the path, so both ways stay
-        let local = ours(5004, "0", "a=rtcp-mux\r\n");
-        let trickling = sdp("v=0\r\n\
+    /// RFC 8840 §4.1.1: a description holding no candidate writes 0.0.0.0 and port 9, as
+    /// Chromium does in every description it trickles.
+    fn trickling() -> SessionDescription {
+        sdp("v=0\r\n\
 o=- 2 2 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
 t=0 0\r\n\
@@ -1294,13 +1297,36 @@ a=ice-ufrag:P18v\r\n\
 a=ice-pwd:VHdx75N2HQdyDdLVVH2YQWMG\r\n\
 a=ice-options:trickle\r\n\
 a=sendrecv\r\n\
-a=rtcp-mux\r\n");
+a=rtcp-mux\r\n")
+    }
+
+    #[test]
+    fn a_trickling_answer_with_no_candidate_yet_is_not_a_hold() {
+        // ICE finds the path, so both ways stay
+        let local = ours(
+            5004,
+            "0",
+            "a=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg\r\na=rtcp-mux\r\n",
+        );
         let plan = local
-            .media_plan(&trickling, 0)
+            .media_plan(&trickling(), 0)
             .expect("a plan")
             .expect("not rejected");
         assert_eq!(plan.direction, Direction::SendRecv);
         assert_eq!(plan.rtcp, RtcpPlan::Muxed);
+    }
+
+    #[test]
+    fn the_placeholder_is_a_hold_to_an_end_without_ice() {
+        // no ICE here, so no check will find a path: 0.0.0.0 is where the media would go,
+        // and RFC 3264 §8.4 reads it as a hold whatever the port and the attributes beside it
+        let local = ours(5004, "0", "a=rtcp-mux\r\n");
+        let plan = local
+            .media_plan(&trickling(), 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert_eq!(plan.direction, Direction::RecvOnly);
+        assert_eq!(plan.rtcp, RtcpPlan::Off);
     }
 
     #[test]

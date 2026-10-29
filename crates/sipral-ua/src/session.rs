@@ -9,7 +9,8 @@
 //! started `recvonly` resumes as `recvonly`, not `sendrecv`.
 
 use sipral_core::sdp::{
-    AcceptedStream, Attribute, Direction, MediaDescription, SessionDescription, StreamAnswer,
+    AcceptedStream, Attribute, Connection, Direction, MediaDescription, SessionDescription,
+    StreamAnswer,
 };
 
 /// Which way a call is held (RFC 3264 §8.4).
@@ -68,6 +69,9 @@ pub(crate) struct Session {
     /// This end offered and awaits the answer; after a 2xx it comes in the
     /// ACK (§13.2.2.4).
     pub(crate) answer_owed: bool,
+    /// Whether this end will answer with ICE, for a far end's offer read
+    /// before this end has described anything ([`holds_us`]).
+    pub(crate) answers_with_ice: bool,
 }
 
 impl Session {
@@ -96,12 +100,30 @@ impl Session {
         }
         self.version = self.version.max(description.origin.version);
         self.local = Some(description);
+        self.judge_remote_hold();
     }
 
     /// Also reads whether the far end is holding us.
     pub(crate) fn set_remote(&mut self, description: SessionDescription) {
-        self.hold.remote = holds_us(&description);
         self.remote = Some(description);
+        self.judge_remote_hold();
+    }
+
+    /// From both ends: whether `0.0.0.0` holds a stream depends on whether
+    /// this end runs ICE on it, as [`SessionDescription::media_plan`] reads it.
+    fn judge_remote_hold(&mut self) {
+        let Some(remote) = self.remote.as_ref() else {
+            return;
+        };
+        let local = self.local.as_ref();
+        let unanswered = self.answers_with_ice;
+        self.hold.remote = holds_us(remote, |index| {
+            local.map_or(unanswered, |ours| {
+                ours.media
+                    .get(index)
+                    .is_some_and(|media| ours.carries_ice(media))
+            })
+        });
     }
 
     /// Bump the `o=` version of an offer (RFC 3264 §8), unless the caller
@@ -354,22 +376,32 @@ const fn receives(direction: Direction) -> bool {
 /// Whether a description the far end wrote refuses what this end sends.
 ///
 /// `sendonly`, `inactive`, or the old RFC 2543 `0.0.0.0` address, which
-/// §8.4 still requires us to accept -- but not on a stream ICE carries, where
-/// `0.0.0.0` is a trickling description with no candidate yet
-/// (`SessionDescription::holds_by_address`). Every live stream must say it:
+/// §8.4 still requires us to accept -- but not on a stream ICE carries at
+/// both ends, where `0.0.0.0` is a trickling description with no candidate
+/// yet (`SessionDescription::holds_by_address`). `ice_here` says, by stream
+/// index, whether this end runs ICE on it. Every live stream must say it:
 /// that is §8.4's "held SDP". Per-stream hold waits for video.
-fn holds_us(description: &SessionDescription) -> bool {
+fn holds_us(description: &SessionDescription, ice_here: impl Fn(usize) -> bool) -> bool {
     let mut any = false;
-    for media in description
+    for (index, media) in description
         .media
         .iter()
-        .filter(|media| !media.is_rejected())
+        .enumerate()
+        .filter(|(_, media)| !media.is_rejected())
     {
         any = true;
-        let refused = matches!(
-            description.direction_of(media),
-            Direction::SendOnly | Direction::Inactive
-        ) || description.holds_by_address(media);
+        let black_hole = if ice_here(index) {
+            description.holds_by_address(media)
+        } else {
+            description
+                .connection_of(media)
+                .is_some_and(Connection::is_black_hole)
+        };
+        let refused = black_hole
+            || matches!(
+                description.direction_of(media),
+                Direction::SendOnly | Direction::Inactive
+            );
         if !refused {
             return false;
         }
@@ -413,13 +445,15 @@ mod tests {
 
     /// RFC 3264 §8.4's old hold is `0.0.0.0` on a stream without ICE; the
     /// same address on a stream with ICE is a browser's trickling description
-    /// that has no candidate in it yet (RFC 8840 §4.1.1), and holds nobody.
+    /// that has no candidate in it yet (RFC 8840 §4.1.1), and holds nobody
+    /// that runs ICE too. To an end that does not, it is the old hold.
     #[test]
-    fn zero_address_holds_only_without_ice() {
+    fn zero_address_holds_unless_ice_runs_at_both_ends() {
         let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         let mut old = description(9, Vec::new());
         old.connection = Some(Connection::new(unspecified));
-        assert!(super::holds_us(&old));
+        assert!(super::holds_us(&old, |_| true));
+        assert!(super::holds_us(&old, |_| false));
         let mut trickling = description(
             9,
             vec![
@@ -429,7 +463,40 @@ mod tests {
             ],
         );
         trickling.connection = Some(Connection::new(unspecified));
-        assert!(!super::holds_us(&trickling));
+        assert!(!super::holds_us(&trickling, |_| true));
+        assert!(super::holds_us(&trickling, |_| false));
+    }
+
+    /// Judged again once this end describes its own side.
+    #[test]
+    fn the_answer_this_end_writes_settles_whether_the_placeholder_holds() {
+        let mut placeholder = description(
+            9,
+            vec![
+                Attribute::with_value("ice-ufrag", "P18v"),
+                Attribute::with_value("ice-pwd", "VHdx75N2HQdyDdLVVH2YQWMG"),
+            ],
+        );
+        placeholder.connection = Some(Connection::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        let ice = vec![
+            Attribute::with_value("ice-ufrag", "8hhY"),
+            Attribute::with_value("ice-pwd", "asd88fgpdd777uzjYhagZg"),
+        ];
+
+        let mut session = Session {
+            answers_with_ice: true,
+            ..Session::default()
+        };
+        session.set_remote(placeholder.clone());
+        assert!(!session.hold.remote, "this end is to answer with ICE");
+        session.set_local(description(40_000, Vec::new()));
+        assert!(session.hold.remote, "it answered without");
+
+        let mut session = Session::default();
+        session.set_remote(placeholder);
+        assert!(session.hold.remote, "this end is to answer without ICE");
+        session.set_local(description(40_000, ice));
+        assert!(!session.hold.remote, "it answered with");
     }
 
     fn crypto() -> Vec<Attribute> {

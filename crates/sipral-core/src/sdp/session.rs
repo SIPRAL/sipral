@@ -365,6 +365,13 @@ impl SessionDescription {
         media.connection.as_ref().or(self.connection.as_ref())
     }
 
+    /// Whether one stream is written for ICE: `a=ice-ufrag` on it, or at
+    /// session level (RFC 8839 §5.4).
+    #[must_use]
+    pub fn carries_ice(&self, media: &MediaDescription) -> bool {
+        media.attribute("ice-ufrag").is_some() || self.attribute("ice-ufrag").is_some()
+    }
+
     /// Whether one stream is held the old way, by `0.0.0.0` (RFC 3264 §8.4).
     ///
     /// Not the placeholder of a stream ICE carries: there the path is the pair
@@ -372,10 +379,14 @@ impl SessionDescription {
     /// candidate yet (RFC 8840 §4.1.1, RFC 8839 §4.2.1.3), which a browser
     /// writes in every description it trickles. Any other port is the default
     /// candidate's, so `0.0.0.0` with it is a hold even beside ICE attributes.
+    ///
+    /// This reads the far end's description alone. ICE carries a stream only
+    /// when both ends run it, so an end that does not reads the address as it
+    /// is ([`Connection::is_black_hole`]), placeholder or not, as
+    /// [`SessionDescription::media_plan`] does.
     #[must_use]
     pub fn holds_by_address(&self, media: &MediaDescription) -> bool {
-        let ice = media.attribute("ice-ufrag").is_some() || self.attribute("ice-ufrag").is_some();
-        let placeholder = ice && media.port == TRICKLE_PLACEHOLDER_PORT;
+        let placeholder = self.carries_ice(media) && media.port == TRICKLE_PLACEHOLDER_PORT;
         !placeholder
             && self
                 .connection_of(media)

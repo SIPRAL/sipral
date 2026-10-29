@@ -870,7 +870,11 @@ impl UserAgent {
 }
 
 impl UserAgent {
-    fn keep(&mut self, call: Call) -> CallHandle {
+    fn keep(&mut self, mut call: Call) -> CallHandle {
+        // the only ICE this layer is told of: RFC 8840's placeholder comes
+        // from a far end that trickles, and an agent that refuses the
+        // package never gets the candidates a check would need
+        call.session.answers_with_ice = self.trickle_ice;
         let handle = CallHandle(self.next_call);
         self.next_call = self.next_call.wrapping_add(1);
         self.calls.insert(handle, call);
