@@ -56,11 +56,12 @@ rustls-native-certs = "0.8.5"
 
 # iOS lets no application read its store: the Security framework evaluates
 # the chain itself, the crate rustls-native-certs reads the macOS keychain
-# with. On macOS it is in the tests alone, which run the same evaluation.
+# with. On macOS it is in the tests alone, which run the same evaluation;
+# there the evaluated chain is read only from macOS 12 on, iOS has it always.
 [target.'cfg(target_os = "ios")'.dependencies]
 security-framework = "3.7.0"
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
-security-framework = "3.7.0"
+security-framework = { version = "3.7.0", features = ["macos-12"] }
 
 [dev-dependencies]
 # a throwaway authority and server certificate per test run, never committed

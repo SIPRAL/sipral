@@ -25,7 +25,7 @@ use rustls::sign::CertifiedKey;
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
-use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity};
+use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity_in_chain};
 use sipral_core::endpoint::TransportErrorKind;
 use sipral_core::pin::CertificatePin;
 
@@ -367,7 +367,7 @@ impl ResolvesClientCert for Presenter {
 ///
 /// rustls checks the chain, the dates and revocation before the name, so a refusal for the name
 /// alone means everything else held: that is when a `sip:` URI naming the domain is still
-/// accepted. Under [`DomainRules::Rfc5922`] a name the HTTPS rules matched is refused unless RFC
+/// accepted, if every name constraint of the authorities the server sent allows it. Under [`DomainRules::Rfc5922`] a name the HTTPS rules matched is refused unless RFC
 /// 5922 reads it too, a wildcard above all.
 #[derive(Debug)]
 struct SipDomainServer {
@@ -403,8 +403,10 @@ impl ServerCertVerifier for SipDomainServer {
             ServerName::IpAddress(address) => IpAddr::from(address).to_string(),
             _ => return platform,
         };
-        let identity =
-            domain_identity(end_entity.as_ref(), &domain).unwrap_or(DomainIdentity::Unnamed);
+        // every certificate the server sent above its own, and the path webpki built is among
+        // them: one more constrained authority can only refuse a sip: URI, never accept one
+        let identity = domain_identity_in_chain(end_entity.as_ref(), intermediates, &domain)
+            .unwrap_or(DomainIdentity::Unnamed);
         if identity.accepted(self.rules, matched) {
             Ok(ServerCertVerified::assertion())
         } else if matched {
@@ -589,5 +591,116 @@ mod tests {
             .err()
             .expect("an expired certificate is refused");
         assert_eq!(refused.tls, TlsFailure::ClientCertificateExpired);
+    }
+
+    /// A root, an intermediate it signs that may name `permitted` alone, and a leaf the
+    /// intermediate signs naming `names`, for server authentication.
+    fn constrained_chain(
+        permitted: rcgen::GeneralSubtree,
+        names: Vec<rcgen::SanType>,
+    ) -> [rustls::pki_types::CertificateDer<'static>; 3] {
+        use rcgen::{
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose, NameConstraints,
+        };
+        let authority = |constraints: Option<NameConstraints>| {
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            params.name_constraints = constraints;
+            params
+        };
+        let root_key = KeyPair::generate().unwrap();
+        let root_params = authority(None);
+        let root = root_params.self_signed(&root_key).unwrap();
+        let middle_key = KeyPair::generate().unwrap();
+        let middle_params = authority(Some(NameConstraints {
+            permitted_subtrees: vec![permitted],
+            excluded_subtrees: Vec::new(),
+        }));
+        let middle = middle_params
+            .signed_by(&middle_key, &Issuer::from_params(&root_params, &root_key))
+            .unwrap();
+        let mut leaf = CertificateParams::new(Vec::<String>::new()).unwrap();
+        leaf.subject_alt_names = names;
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf = leaf
+            .signed_by(
+                &KeyPair::generate().unwrap(),
+                &Issuer::from_params(&middle_params, &middle_key),
+            )
+            .unwrap();
+        [root.der().clone(), middle.der().clone(), leaf.der().clone()]
+    }
+
+    #[test]
+    fn a_sip_uri_an_intermediate_may_not_name_is_refused_under_either_rules() {
+        use rcgen::{GeneralSubtree, SanType};
+        use rustls::pki_types::{ServerName, UnixTime};
+        use rustls::{CertificateError, Error};
+
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let checked = |chain: &[rustls::pki_types::CertificateDer<'static>; 3],
+                       rules: DomainRules,
+                       name: &str| {
+            let [root, middle, leaf] = chain;
+            let trust = Trust::Only(vec![root.clone()]);
+            super::chain_verifier(&trust, &PlatformRoots::default(), &provider, Some(rules))
+                .unwrap()
+                .verify_server_cert(
+                    leaf,
+                    core::slice::from_ref(middle),
+                    &ServerName::try_from(name.to_owned()).unwrap(),
+                    &[],
+                    UnixTime::now(),
+                )
+                .map(|_| ())
+        };
+        let sip = |uri: &str| SanType::URI(uri.try_into().unwrap());
+        let dns = |name: &str| SanType::DnsName(name.try_into().unwrap());
+        let corp = || GeneralSubtree::DnsName("corp.test".to_owned());
+        // the chain held, so the refusal is for the name alone
+        let refused_for_the_name = |result: &Result<(), Error>| {
+            matches!(
+                *result,
+                Err(Error::InvalidCertificate(
+                    CertificateError::NotValidForName
+                        | CertificateError::NotValidForNameContext { .. }
+                ))
+            )
+        };
+
+        // the intermediate may name corp.test and the names under it, and nothing else
+        let outside = constrained_chain(corp(), vec![sip("sip:victim.test"), dns("pbx.corp.test")]);
+        for rules in [DomainRules::Platform, DomainRules::Rfc5922] {
+            let refused = checked(&outside, rules, "victim.test");
+            assert!(
+                refused_for_the_name(&refused),
+                "{rules:?}: a sip: URI got past the dNSName constraint of the authority above it: \
+                 {refused:?}"
+            );
+        }
+
+        let inside = constrained_chain(corp(), vec![sip("sip:corp.test")]);
+        for rules in [DomainRules::Platform, DomainRules::Rfc5922] {
+            assert_eq!(
+                checked(&inside, rules, "corp.test"),
+                Ok(()),
+                "{rules:?}: a sip: URI inside the constraint names the domain"
+            );
+        }
+
+        let addressed = constrained_chain(
+            GeneralSubtree::IpAddress(rcgen::CidrSubnet::from_v4_prefix([10, 0, 0, 0], 8)),
+            vec![
+                sip("sip:192.0.2.10"),
+                SanType::IpAddress([10, 0, 0, 1].into()),
+            ],
+        );
+        let refused = checked(&addressed, DomainRules::Platform, "192.0.2.10");
+        assert!(
+            refused_for_the_name(&refused),
+            "an address outside the iPAddress constraint: {refused:?}"
+        );
     }
 }

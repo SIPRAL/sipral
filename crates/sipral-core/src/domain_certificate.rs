@@ -18,14 +18,17 @@
 //! RFC 5922 alone when the application asks for that
 //! ([`DomainRules::Rfc5922`]), else by the name the platform matched, with a
 //! `sip:` URI accepted besides, which no platform reads
-//! ([`DomainRules::Platform`]). Refusing wildcards is not the default because
+//! ([`DomainRules::Platform`]). Since no platform reads it, no platform holds
+//! it to the name constraints of the authorities above it either:
+//! [`domain_identity_in_chain`] does, reading its host as the `dNSName` or
+//! address it stands for. Refusing wildcards is not the default because
 //! a hosted PBX on a provider's subdomain often has one, and every other SIP
 //! client accepts it. The `commonName` is never read: RFC 5922 only allows it, and a
 //! name an intermediate's name constraints do not cover is the reason the
 //! platforms stopped reading it. Nothing here checks a chain or a date.
 
 use core::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::msg::{HostRef, UriRef, UriScheme};
 use crate::pin::element;
@@ -98,7 +101,15 @@ impl core::error::Error for NotACertificate {}
 
 /// How `certificate`, a DER-encoded X.509 certificate, names `domain`, a SIP
 /// domain: the host of the URI the user configured (RFC 5922 §7.3), not the
-/// host its SRV record led to. A trailing dot on either side is ignored.
+/// host its SRV record led to. A trailing dot on either side is ignored, and
+/// an address (`192.0.2.10`, `2001:db8::1` with or without brackets) is
+/// named by a `sip:` URI alone, as the HTTPS rules never match one to a
+/// `dNSName`.
+///
+/// The certificate is read alone: a `sip:` URI here is vouched for by no name
+/// constraint of the authorities above it, which the platforms apply to
+/// `dNSName`s and addresses and skip for a URI. Where those authorities are
+/// at hand, [`domain_identity_in_chain`] reads it.
 ///
 /// # Errors
 /// [`NotACertificate`] when the bytes cannot be read as one.
@@ -107,6 +118,11 @@ pub fn domain_identity(
     domain: &str,
 ) -> Result<DomainIdentity, NotACertificate> {
     let names = subject_alt_names(certificate).ok_or(NotACertificate)?;
+    let address = domain
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok();
     let mut sip_uris = false;
     let mut by_dns = DomainIdentity::Unnamed;
     for (tag, value) in names {
@@ -119,7 +135,7 @@ pub fn domain_identity(
                     sip_uris = true;
                 }
             }
-            DNS_NAME => {
+            DNS_NAME if !address => {
                 let Ok(name) = core::str::from_utf8(value) else {
                     continue;
                 };
@@ -139,6 +155,54 @@ pub fn domain_identity(
     })
 }
 
+/// How `certificate` names `domain`, as [`domain_identity`] reads it, with
+/// `issuers` the DER certificates above it in its chain, in any order: a
+/// `sip:` URI names the domain only while every `nameConstraints` extension
+/// among them allows the host of each of the certificate's `sip:` URIs, read
+/// as the `dNSName` or `iPAddress` that would stand in its place. An
+/// authority constrained to `corp.example` thereby certifies
+/// `sip:pbx.corp.example` and never `sip:example.com`. A constraint on URIs
+/// is not read and allows none, as `webpki` reads it; an issuer whose
+/// constraints cannot be read allows none either.
+///
+/// # Errors
+/// [`NotACertificate`] when `certificate` cannot be read as one.
+pub fn domain_identity_in_chain<I>(
+    certificate: &[u8],
+    issuers: I,
+    domain: &str,
+) -> Result<DomainIdentity, NotACertificate>
+where
+    I: IntoIterator,
+    I::Item: AsRef<[u8]>,
+{
+    let identity = domain_identity(certificate, domain)?;
+    // only a sip: URI can make a certificate name a domain its issuers'
+    // constraints were never checked against
+    if identity != DomainIdentity::SipUri {
+        return Ok(identity);
+    }
+    let names = subject_alt_names(certificate).ok_or(NotACertificate)?;
+    let hosts: Vec<HostRef<'_>> = names
+        .into_iter()
+        .filter(|&(tag, _)| tag == URI)
+        .filter_map(|(_, value)| sip_domain(value))
+        .collect();
+    for issuer in issuers {
+        let Some(constraints) = extensions(issuer.as_ref(), NAME_CONSTRAINTS) else {
+            return Ok(DomainIdentity::Unnamed);
+        };
+        for constraint in constraints {
+            for &host in &hosts {
+                if constraint_allows(constraint, host) != Some(true) {
+                    return Ok(DomainIdentity::Unnamed);
+                }
+            }
+        }
+    }
+    Ok(identity)
+}
+
 const SEQUENCE: u8 = 0x30;
 const OID: u8 = 0x06;
 const BOOLEAN: u8 = 0x01;
@@ -147,21 +211,47 @@ const OCTET_STRING: u8 = 0x04;
 const EXTENSIONS: u8 = 0xa3;
 /// `id-ce-subjectAltName`, 2.5.29.17 (RFC 5280 §4.2.1.6).
 const SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];
+/// `id-ce-nameConstraints`, 2.5.29.30 (RFC 5280 §4.2.1.10).
+const NAME_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x1e];
+/// `NameConstraints`' `permittedSubtrees [0] GeneralSubtrees`.
+const PERMITTED_SUBTREES: u8 = 0xa0;
+/// `NameConstraints`' `excludedSubtrees [1] GeneralSubtrees`.
+const EXCLUDED_SUBTREES: u8 = 0xa1;
 /// `GeneralName`'s `[2] IMPLICIT IA5String`.
 const DNS_NAME: u8 = 0x82;
 /// `GeneralName`'s `[6] IMPLICIT IA5String`.
 const URI: u8 = 0x86;
+/// `GeneralName`'s `[7] IMPLICIT OCTET STRING`.
+const IP_ADDRESS: u8 = 0x87;
 
 /// Every `GeneralName` of the certificate's `subjectAltName`, tag and value;
 /// none when it has no such extension. `None` when the DER cannot be read.
 fn subject_alt_names(certificate: &[u8]) -> Option<Vec<(u8, &[u8])>> {
+    let mut names = Vec::new();
+    for value in extensions(certificate, SUBJECT_ALT_NAME)? {
+        let (SEQUENCE, mut general, _) = element(value)? else {
+            return None;
+        };
+        while !general.is_empty() {
+            let (tag, value, after) = element(general)?;
+            general = after;
+            names.push((tag, value));
+        }
+    }
+    Some(names)
+}
+
+/// The value of every extension `id` of the certificate, the DER its
+/// `extnValue` holds; none when it has no such extension. `None` when the
+/// DER cannot be read.
+fn extensions<'a>(certificate: &'a [u8], id: &[u8]) -> Option<Vec<&'a [u8]>> {
     let (SEQUENCE, certificate, _) = element(certificate)? else {
         return None;
     };
     let (SEQUENCE, mut tbs, _) = element(certificate)? else {
         return None;
     };
-    let mut names = Vec::new();
+    let mut values = Vec::new();
     while !tbs.is_empty() {
         let (tag, contents, after) = element(tbs)?;
         tbs = after;
@@ -176,10 +266,10 @@ fn subject_alt_names(certificate: &[u8]) -> Option<Vec<(u8, &[u8])>> {
                 return None;
             };
             extensions = after;
-            let (OID, id, rest) = element(extension)? else {
+            let (OID, extension_id, rest) = element(extension)? else {
                 return None;
             };
-            if id != SUBJECT_ALT_NAME {
+            if extension_id != id {
                 continue;
             }
             // `critical BOOLEAN DEFAULT FALSE` comes first when it is written
@@ -190,17 +280,101 @@ fn subject_alt_names(certificate: &[u8]) -> Option<Vec<(u8, &[u8])>> {
             if tag != OCTET_STRING {
                 return None;
             }
-            let (SEQUENCE, mut general, _) = element(value)? else {
+            values.push(value);
+        }
+    }
+    Some(values)
+}
+
+/// Whether `constraints`, the value of an authority's `nameConstraints`
+/// extension, lets it vouch for `host`, the host of a `sip:` URI below it,
+/// read as the `dNSName` or `iPAddress` that would stand in its place (RFC
+/// 5280 §4.2.1.10): inside no excluded subtree of that form, and inside one
+/// of the permitted ones where there are any. `None` when the DER cannot be
+/// read.
+fn constraint_allows(constraints: &[u8], host: HostRef<'_>) -> Option<bool> {
+    let (SEQUENCE, mut lists, _) = element(constraints)? else {
+        return None;
+    };
+    let mut permitted = false;
+    let mut inside_permitted = false;
+    while !lists.is_empty() {
+        let (tag, mut list, after) = element(lists)?;
+        lists = after;
+        let excluded = match tag {
+            PERMITTED_SUBTREES => false,
+            EXCLUDED_SUBTREES => true,
+            _ => return None,
+        };
+        while !list.is_empty() {
+            let (SEQUENCE, subtree, after) = element(list)? else {
                 return None;
             };
-            while !general.is_empty() {
-                let (tag, value, after) = element(general)?;
-                general = after;
-                names.push((tag, value));
+            list = after;
+            // `minimum` and `maximum` after the base are never written (§4.2.1.10)
+            let (form, base, _) = element(subtree)?;
+            let inside = match (form, host) {
+                // a constraint on URIs is not read, so it allows no URI
+                (URI, _) => return Some(false),
+                (DNS_NAME, _) if !base.is_ascii() => return None,
+                (IP_ADDRESS, _) if base.len() != 8 && base.len() != 32 => return None,
+                (DNS_NAME, HostRef::Name(name)) => {
+                    dns_name_inside(core::str::from_utf8(base).ok()?, name)
+                }
+                (IP_ADDRESS, HostRef::Ipv4(address)) => address_inside(base, &address.octets()),
+                (IP_ADDRESS, HostRef::Ipv6(address)) => address_inside(base, &address.octets()),
+                _ => continue,
+            };
+            if excluded {
+                if inside {
+                    return Some(false);
+                }
+            } else {
+                permitted = true;
+                inside_permitted |= inside;
             }
         }
     }
-    Some(names)
+    Some(!permitted || inside_permitted)
+}
+
+/// Whether `name` is inside the `dNSName` subtree `constraint`: the name
+/// itself or one under it, or with a leading dot only one under it; an empty
+/// constraint holds every name. Case and a trailing dot aside.
+fn dns_name_inside(constraint: &str, name: &str) -> bool {
+    let constraint = constraint.strip_suffix('.').unwrap_or(constraint);
+    let name = name.strip_suffix('.').unwrap_or(name);
+    if constraint.is_empty() {
+        return true;
+    }
+    let Some(split) = name.len().checked_sub(constraint.len()) else {
+        return false;
+    };
+    let (Some(head), Some(tail)) = (name.get(..split), name.get(split..)) else {
+        return false;
+    };
+    if !tail.eq_ignore_ascii_case(constraint) {
+        return false;
+    }
+    if constraint.starts_with('.') {
+        !head.is_empty()
+    } else {
+        head.is_empty() || head.ends_with('.')
+    }
+}
+
+/// Whether `address` is inside the `iPAddress` subtree `base`, an address
+/// and its mask of the same length; never for one of the other family.
+fn address_inside(base: &[u8], address: &[u8]) -> bool {
+    if base.len() != address.len() * 2 {
+        return false;
+    }
+    let (network, mask) = base.split_at(address.len());
+    address
+        .iter()
+        .zip(network)
+        .zip(mask)
+        .all(|((a, n), m)| a & m == n & m)
 }
 
 /// The host a `sip:` URI names as a SIP domain: none for another scheme,
@@ -252,7 +426,7 @@ fn wildcard_covers(pattern: &str, domain: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::DomainRules::{Platform, Rfc5922};
-    use super::{DomainIdentity, NotACertificate, domain_identity};
+    use super::{DomainIdentity, NotACertificate, domain_identity, domain_identity_in_chain};
 
     /// One DER element.
     fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
@@ -273,14 +447,7 @@ mod tests {
     /// `GeneralName` tag and value; `critical` writes the flag; no extension
     /// at all with `None`.
     fn certificate(names: Option<&[(u8, &str)]>, critical: bool) -> Vec<u8> {
-        let empty = tlv(0x30, &[]);
-        let mut tbs = tlv(0xa0, &tlv(0x02, &[2]));
-        tbs.extend(tlv(0x02, &[1]));
-        for _ in 0..5 {
-            // signature, issuer, validity, subject, subjectPublicKeyInfo
-            tbs.extend_from_slice(&empty);
-        }
-        if let Some(names) = names {
+        with_extension(names.map(|names| {
             let general: Vec<u8> = names
                 .iter()
                 .flat_map(|(tag, value)| tlv(*tag, value.as_bytes()))
@@ -290,7 +457,42 @@ mod tests {
                 extension.extend(tlv(0x01, &[0xff]));
             }
             extension.extend(tlv(0x04, &tlv(0x30, &general)));
-            // another extension first, which is skipped
+            extension
+        }))
+    }
+
+    /// An authority's certificate whose `nameConstraints` permit the
+    /// subtrees `permitted` and exclude `excluded`, each a `GeneralName` tag
+    /// and value.
+    fn authority(permitted: &[(u8, &[u8])], excluded: &[(u8, &[u8])]) -> Vec<u8> {
+        let subtrees = |tag: u8, bases: &[(u8, &[u8])]| {
+            if bases.is_empty() {
+                return Vec::new();
+            }
+            let list: Vec<u8> = bases
+                .iter()
+                .flat_map(|(form, base)| tlv(0x30, &tlv(*form, base)))
+                .collect();
+            tlv(tag, &list)
+        };
+        let constraints = [subtrees(0xa0, permitted), subtrees(0xa1, excluded)].concat();
+        let mut extension = tlv(0x06, &[0x55, 0x1d, 0x1e]);
+        extension.extend(tlv(0x01, &[0xff]));
+        extension.extend(tlv(0x04, &tlv(0x30, &constraints)));
+        with_extension(Some(extension))
+    }
+
+    /// A certificate with the contents of one extension, `extension`, after
+    /// another that is skipped; no extension at all with `None`.
+    fn with_extension(extension: Option<Vec<u8>>) -> Vec<u8> {
+        let empty = tlv(0x30, &[]);
+        let mut tbs = tlv(0xa0, &tlv(0x02, &[2]));
+        tbs.extend(tlv(0x02, &[1]));
+        for _ in 0..5 {
+            // signature, issuer, validity, subject, subjectPublicKeyInfo
+            tbs.extend_from_slice(&empty);
+        }
+        if let Some(extension) = extension {
             let mut extensions = tlv(
                 0x30,
                 &[tlv(0x06, &[0x55, 0x1d, 0x13]), tlv(0x04, &tlv(0x30, &[]))].concat(),
@@ -427,6 +629,172 @@ mod tests {
         assert_eq!(
             named(&[(URI, "sip:192.0.2.10")], "192.0.2.11"),
             DomainIdentity::Unnamed
+        );
+    }
+
+    #[test]
+    fn an_address_is_never_named_by_a_dns_name_spelling_it() {
+        // the HTTPS rules match an address against an iPAddress entry alone
+        for (name, domain) in [
+            ("203.0.113.5", "203.0.113.5"),
+            ("*.0.113.5", "203.0.113.5"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("2001:db8::1", "[2001:db8::1]"),
+        ] {
+            let identity = named(&[(DNS, name)], domain);
+            assert_eq!(identity, DomainIdentity::Unnamed, "{name} named {domain}");
+            assert!(!identity.accepted(Rfc5922, false));
+        }
+        assert_eq!(
+            named(
+                &[(URI, "sip:203.0.113.5"), (DNS, "203.0.113.5")],
+                "203.0.113.5"
+            ),
+            DomainIdentity::SipUri,
+            "a sip: URI still names an address"
+        );
+    }
+
+    const IP: u8 = 0x87;
+
+    fn in_chain(names: &[(u8, &str)], issuers: &[Vec<u8>], domain: &str) -> DomainIdentity {
+        domain_identity_in_chain(&certificate(Some(names), false), issuers, domain)
+            .expect("a certificate")
+    }
+
+    #[test]
+    fn a_sip_uri_names_its_host_only_where_every_issuer_may_name_it() {
+        let corp = authority(&[(DNS, b"corp.example")], &[]);
+        let leaf = [(URI, "sip:victim.example"), (DNS, "pbx.corp.example")];
+        assert_eq!(
+            in_chain(&leaf, core::slice::from_ref(&corp), "victim.example"),
+            DomainIdentity::Unnamed,
+            "the dNSName constraint holds for the URI's host too"
+        );
+        assert_eq!(
+            in_chain(&leaf, &[], "victim.example"),
+            DomainIdentity::SipUri,
+            "no issuer, no constraint"
+        );
+        for (constraint, domain) in [
+            (&b"corp.example"[..], "corp.example"),
+            (b"corp.example", "pbx.CORP.example."),
+            (b".corp.example", "pbx.corp.example"),
+            (b"", "anything.example"),
+        ] {
+            let issuer = authority(&[(DNS, constraint), (DNS, b"other.example")], &[]);
+            let uri = format!("sip:{domain}");
+            assert_eq!(
+                in_chain(&[(URI, &uri)], &[issuer], domain),
+                DomainIdentity::SipUri,
+                "{domain} is under {constraint:?}"
+            );
+        }
+        for (constraint, domain) in [
+            (&b".corp.example"[..], "corp.example"),
+            (b"corp.example", "evilcorp.example"),
+            (b"pbx.corp.example", "corp.example"),
+        ] {
+            let issuer = authority(&[(DNS, constraint)], &[]);
+            let uri = format!("sip:{domain}");
+            assert_eq!(
+                in_chain(&[(URI, &uri)], &[issuer], domain),
+                DomainIdentity::Unnamed,
+                "{domain} is not under {constraint:?}"
+            );
+        }
+        let excluding = authority(&[], &[(DNS, b"victim.example")]);
+        assert_eq!(
+            in_chain(
+                &[(URI, "sip:victim.example")],
+                &[excluding],
+                "victim.example"
+            ),
+            DomainIdentity::Unnamed
+        );
+        assert_eq!(
+            in_chain(
+                &[(URI, "sip:pbx.corp.example"), (URI, "sip:victim.example")],
+                core::slice::from_ref(&corp),
+                "pbx.corp.example"
+            ),
+            DomainIdentity::Unnamed,
+            "a second sip: URI the issuer may not name, and RFC 5922 reads none"
+        );
+        let unconstrained = authority(&[(IP, &[10, 0, 0, 0, 255, 0, 0, 0])], &[]);
+        assert_eq!(
+            in_chain(&leaf, &[unconstrained, corp], "victim.example"),
+            DomainIdentity::Unnamed,
+            "one issuer that may not name it is enough"
+        );
+    }
+
+    #[test]
+    fn an_address_in_a_sip_uri_is_held_to_the_issuers_address_ranges() {
+        let ten = authority(&[(IP, &[10, 0, 0, 0, 255, 0, 0, 0])], &[]);
+        assert_eq!(
+            in_chain(
+                &[(URI, "sip:10.1.2.3")],
+                core::slice::from_ref(&ten),
+                "10.1.2.3"
+            ),
+            DomainIdentity::SipUri
+        );
+        assert_eq!(
+            in_chain(&[(URI, "sip:192.0.2.10")], &[ten], "192.0.2.10"),
+            DomainIdentity::Unnamed
+        );
+        let v6 = [
+            &[0x20, 0x01, 0x0d, 0xb8][..],
+            &[0; 12],
+            &[0xff; 4],
+            &[0; 12],
+        ]
+        .concat();
+        let documentation = authority(&[(IP, &v6)], &[]);
+        assert_eq!(
+            in_chain(
+                &[(URI, "sip:[2001:db8::1]")],
+                core::slice::from_ref(&documentation),
+                "2001:db8::1"
+            ),
+            DomainIdentity::SipUri
+        );
+        assert_eq!(
+            in_chain(&[(URI, "sip:192.0.2.10")], &[documentation], "192.0.2.10"),
+            DomainIdentity::Unnamed,
+            "an IPv4 address is in no IPv6 range"
+        );
+        let names_only = authority(&[(DNS, b"corp.example")], &[]);
+        assert_eq!(
+            in_chain(&[(URI, "sip:192.0.2.10")], &[names_only], "192.0.2.10"),
+            DomainIdentity::SipUri,
+            "a constraint on names leaves addresses free, as RFC 5280 reads it"
+        );
+    }
+
+    #[test]
+    fn a_constraint_on_uris_or_one_that_cannot_be_read_allows_no_sip_uri() {
+        for issuer in [
+            authority(&[(URI, b"example.com")], &[]),
+            authority(&[], &[(URI, b".other.example")]),
+            authority(&[(IP, &[10, 0, 0, 0])], &[]),
+            b"not DER".to_vec(),
+        ] {
+            assert_eq!(
+                in_chain(&[(URI, "sip:example.com")], &[issuer], "example.com"),
+                DomainIdentity::Unnamed
+            );
+        }
+        let corp = authority(&[(DNS, b"corp.example")], &[]);
+        assert_eq!(
+            in_chain(
+                &[(DNS, "victim.example")],
+                &[corp, b"not DER".to_vec()],
+                "victim.example"
+            ),
+            DomainIdentity::DnsName,
+            "a dNSName is the platform's to hold to the constraints, and no URI is read"
         );
     }
 

@@ -115,6 +115,18 @@ check, written before the entry point existed; the same check in C# and in
 Kotlin is further down, and all three refused the wildcard certificate and
 took the `sip:` URI one when they were run.
 
+A platform holds a `dNSName` or an address to the name constraints of the
+authorities above the certificate and skips a URI, so a `sip:` URI counts
+only where every one of those constraints allows its host, read as the
+`dNSName` or address it stands for: an intermediate constrained to
+`corp.example` vouches for `sip:pbx.corp.example`, never for
+`sip:example.com`. The networking component reads the constraints in the
+chain the server sent, and on iOS in the chain the Security framework built;
+`sipral_certificate_check_domain` takes the leaf alone, so a layer that calls
+it from its own TLS does not hold a `sip:` URI to them yet. An address is
+named by a `sip:` URI alone, never by a `dNSName` that spells it, as the
+HTTPS rules read it.
+
 Each layer takes the setting where it takes its trust, and applies it to its
 own signalling connection and to every account's own connection:
 

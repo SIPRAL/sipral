@@ -21,7 +21,7 @@ use security_framework::certificate::SecCertificate;
 use security_framework::policy::SecPolicy;
 use security_framework::secure_transport::SslProtocolSide;
 use security_framework::trust::SecTrust;
-use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity};
+use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity_in_chain};
 use sipral_core::endpoint::TransportErrorKind;
 
 use super::Trust;
@@ -84,9 +84,13 @@ impl PlatformServer {
         })
     }
 
-    /// The chain evaluated for `name`, or for any name (`None`): the Security framework's error
-    /// code when it does not hold.
-    fn evaluate(&self, chain: &[SecCertificate], name: Option<&str>) -> Result<(), i64> {
+    /// The chain evaluated for `name`, or for any name (`None`): the chain the evaluation built,
+    /// leaf first and anchor last, or the Security framework's error code when it does not hold.
+    fn evaluate(
+        &self,
+        chain: &[SecCertificate],
+        name: Option<&str>,
+    ) -> Result<Vec<SecCertificate>, i64> {
         let policy = SecPolicy::create_ssl(SslProtocolSide::SERVER, name);
         let mut trust = SecTrust::create_with_certificates(chain, &[policy])
             .map_err(|error| i64::from(error.code()))?;
@@ -98,7 +102,8 @@ impl PlatformServer {
         }
         trust
             .evaluate_with_error()
-            .map_err(|error| i64::try_from(error.code()).unwrap_or(i64::MIN))
+            .map_err(|error| i64::try_from(error.code()).unwrap_or(i64::MIN))?;
+        Ok(trust.chain())
     }
 }
 
@@ -131,13 +136,12 @@ impl ServerCertVerifier for PlatformServer {
             ServerName::IpAddress(address) => IpAddr::from(address).to_string(),
             _ => return Err(refusal(HOST_NAME_MISMATCH)),
         };
-        let matched = match self.evaluate(&chain, Some(&name)) {
-            Ok(()) => true,
+        let (matched, evaluated) = match self.evaluate(&chain, Some(&name)) {
+            Ok(evaluated) => (true, evaluated),
             Err(HOST_NAME_MISMATCH) => {
                 // the name alone failed: the chain, its dates and the rest once more with no
                 // name, so that what follows reads the name and nothing else
-                self.evaluate(&chain, None).map_err(refusal)?;
-                false
+                (false, self.evaluate(&chain, None).map_err(refusal)?)
             }
             Err(code) => return Err(refusal(code)),
         };
@@ -148,8 +152,15 @@ impl ServerCertVerifier for PlatformServer {
                 Err(refusal(HOST_NAME_MISMATCH))
             };
         };
-        let identity =
-            domain_identity(end_entity.as_ref(), &name).unwrap_or(DomainIdentity::Unnamed);
+        // the authorities the evaluation went through, an intermediate it fetched itself and
+        // the anchor included, and those the server sent: one more constrained authority can
+        // only refuse a sip: URI, never accept one
+        let issuers = intermediates
+            .iter()
+            .map(|der| der.to_vec())
+            .chain(evaluated.iter().skip(1).map(SecCertificate::to_der));
+        let identity = domain_identity_in_chain(end_entity.as_ref(), issuers, &name)
+            .unwrap_or(DomainIdentity::Unnamed);
         if identity.accepted(rules, matched) {
             Ok(ServerCertVerified::assertion())
         } else {
@@ -197,8 +208,8 @@ mod tests {
     use std::sync::Arc;
 
     use rcgen::{
-        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-        KeyPair, KeyUsagePurpose, SanType,
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa,
+        Issuer, KeyPair, KeyUsagePurpose, NameConstraints, SanType,
     };
     use rustls::client::danger::ServerCertVerifier;
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -329,6 +340,83 @@ mod tests {
             Err(Error::InvalidCertificate(CertificateError::NotValidForName)),
             "RFC 5922 §7.2: no wildcard"
         );
+    }
+
+    #[test]
+    fn a_sip_uri_an_intermediate_may_not_name_is_refused_under_either_rules() {
+        let day = time::Duration::days(1);
+        let now = time::OffsetDateTime::now_utc();
+        let authority = |constraints: Option<NameConstraints>, name: &str| {
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params.distinguished_name.push(DnType::CommonName, name);
+            params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            params.name_constraints = constraints;
+            params.not_before = now - day;
+            params.not_after = now + day * 30;
+            params
+        };
+        let root_key = KeyPair::generate().unwrap();
+        let root_params = authority(None, "Sipral test root");
+        let root = root_params.self_signed(&root_key).unwrap();
+        let middle_key = KeyPair::generate().unwrap();
+        let middle_params = authority(
+            Some(NameConstraints {
+                permitted_subtrees: vec![GeneralSubtree::DnsName("corp.test".to_owned())],
+                excluded_subtrees: Vec::new(),
+            }),
+            "Sipral test intermediate",
+        );
+        let middle = middle_params
+            .signed_by(&middle_key, &Issuer::from_params(&root_params, &root_key))
+            .unwrap();
+        let leaf = |names: Vec<SanType>| {
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.subject_alt_names = names;
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            params.not_before = now - day;
+            params.not_after = now + day * 30;
+            params
+                .signed_by(
+                    &KeyPair::generate().unwrap(),
+                    &Issuer::from_params(&middle_params, &middle_key),
+                )
+                .unwrap()
+                .der()
+                .clone()
+        };
+        let trust = Trust::PlatformAnd(vec![root.der().clone()]);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let checked = |rules: DomainRules, leaf: &CertificateDer<'_>, name: &str| {
+            PlatformServer::of(&trust, Some(rules), &provider)
+                .expect("the platform's authorities are in this trust")
+                .unwrap()
+                .verify_server_cert(
+                    leaf,
+                    core::slice::from_ref(middle.der()),
+                    &ServerName::try_from(name.to_owned()).unwrap(),
+                    &[],
+                    UnixTime::now(),
+                )
+                .map(|_| ())
+        };
+
+        let outside = leaf(vec![sip("sip:victim.test"), dns("pbx.corp.test")]);
+        for rules in [DomainRules::Platform, DomainRules::Rfc5922] {
+            assert_eq!(
+                checked(rules, &outside, "victim.test"),
+                Err(Error::InvalidCertificate(CertificateError::NotValidForName)),
+                "{rules:?}: a sip: URI got past the dNSName constraint of the authority above it"
+            );
+        }
+        let inside = leaf(vec![sip("sip:corp.test")]);
+        for rules in [DomainRules::Platform, DomainRules::Rfc5922] {
+            assert_eq!(
+                checked(rules, &inside, "corp.test"),
+                Ok(()),
+                "{rules:?}: a sip: URI inside the constraint names the domain"
+            );
+        }
     }
 
     #[test]
