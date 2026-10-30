@@ -4,7 +4,7 @@
 // The signalling surface through org.sipral.idiomatic between two clients
 // on 127.0.0.1: end reasons (RFC 3326) both ways, caller identity behind
 // the trust gate (RFC 3325, 3323, 5806, 7044), answer mode (RFC 5373,
-// Alert-Info), a 3xx answer, the session timer, the SRTP suite, a call
+// Alert-Info), a 180 Ringing, a 3xx answer, the session timer, the SRTP suite, a call
 // moved to a new socket after a network change, the signalling port kept
 // across it, and a clock reading the poll overtook being retried. Run by
 // IdiomaticCheck.kt's main, under -Xcheck:jni.
@@ -104,6 +104,20 @@ private suspend fun aCancelAsCompletedElsewhereIsNoMissedCall(): String {
         }
     }
     return "a CANCEL said the call was completed elsewhere"
+}
+
+private suspend fun aCallShownToSomebodyRingsTheCaller(): String {
+    pair().use { pair ->
+        val (placed, incoming) = ring(pair)
+        placed.use {
+            val (_, progress) = placed.events.awaitNext(SipralEventKind.CALL_PROGRESS, timeoutMs = 10_000) {
+                pair.bob.ringCall(incoming)
+            }
+            assertEquals(180L, progress.payload.call.statusCode)
+            pair.bob.rejectCall(incoming, 603)
+        }
+    }
+    return "a call rung by the far end reached the caller as 180 Ringing"
 }
 
 private suspend fun aRingingCallIsSentElsewhere(): String {
@@ -431,6 +445,7 @@ private fun aCallPlacedPastMaxDialogsIsRefused(): String {
 internal suspend fun signallingChecks(): String = listOf(
     aHangupWithAReasonReachesTheFarEnd(),
     aCancelAsCompletedElsewhereIsNoMissedCall(),
+    aCallShownToSomebodyRingsTheCaller(),
     aRingingCallIsSentElsewhere(),
     anAssertedIdentityIsReadOnlyFromATrustedPeer(),
     anAnonymousAccountWithholdsItsNumber(),

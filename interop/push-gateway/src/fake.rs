@@ -154,9 +154,19 @@ mod tests {
             call_id: None,
         };
         assert!(matches!(send(address, &push), PushOutcome::Accepted(_)));
-        let (length, _) = device.recv_from(&mut buffer).expect("woken");
+        // A SUBSCRIBE resent while the first one's answer was on its way is
+        // answered too: that second TOKEN can come before the WAKE.
+        device
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("timeout");
+        let woken = loop {
+            let (length, _) = device.recv_from(&mut buffer).expect("woken");
+            if !buffer[..length].starts_with(b"TOKEN ") {
+                break buffer[..length].to_vec();
+            }
+        };
         assert_eq!(
-            &buffer[..length],
+            woken,
             b"WAKE\n{\"kind\":\"call\",\"caller\":\"sip:bob@example.com\"}"
         );
         let stranger = PushRequest {

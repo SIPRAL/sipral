@@ -61,6 +61,17 @@ data class TelecomCall(
     val announced: Boolean,
 )
 
+/** An outgoing call the framework allowed and the library refused to
+ * place: [id] as [TelecomBridge.placeCall] returned it, the [target] it was
+ * given, and [error], the refusal, whose text is [reason]. */
+data class TelecomPlaceFailure(
+    val id: String,
+    val account: Long,
+    val target: String,
+    val reason: String,
+    val error: Exception,
+)
+
 /**
  * The ConnectionService helper's logic: every call the telecom framework
  * knows, keyed by an id minted here and carried in the framework's
@@ -70,6 +81,9 @@ data class TelecomCall(
  * with [connectionCreated], [connectionFailed], [answer], [reject],
  * [disconnect], [hold], [unhold] and [playDtmf], and pushes with
  * [pushArrived]. Call [endAll] before closing the client.
+ *
+ * An incoming call is rung, 180 Ringing, once the framework has created its
+ * connection and its INVITE is here, unless the user answered it first.
  *
  * Every entry point is thread-safe and holds one monitor for its whole
  * length, calls out included. Deliberate: events and framework callbacks
@@ -115,6 +129,9 @@ class TelecomBridge(
         var announced = false
         var answered = false
 
+        /** 180 Ringing has gone out for this incoming call. */
+        var rung = false
+
         /** The user declined before the INVITE came and the announcement could
          * no longer be forgotten: refuse the INVITE with this on arrival. */
         var refuseWith: Long = 0
@@ -145,6 +162,18 @@ class TelecomBridge(
 
     /** Every call the framework is showing, in the order they started. */
     val calls: StateFlow<List<TelecomCall>> = callsFlow
+
+    /**
+     * Hears each outgoing call the library refused to place once the
+     * framework had created its connection: a target that is not a SIP
+     * URI, an account gone, a message too large to send. By then the call
+     * has left [calls], and the framework has been told
+     * [TelecomDisconnect.ERROR] with the refusal's text as the reason.
+     * Called outside the bridge's monitor, on the thread that delivered
+     * [connectionCreated].
+     */
+    @Volatile
+    var placeFailed: (TelecomPlaceFailure) -> Unit = {}
 
     /** The SIP call handle behind [id], or zero. */
     fun callHandleOf(id: String): Long = synchronized(lock) { entries[id]?.call ?: 0L }
@@ -305,8 +334,16 @@ class TelecomBridge(
     // The framework's side
 
     /** The framework created the connection for [id]. It is brought up to the
-     * call's current state; for an outgoing call, the INVITE goes now. */
-    fun connectionCreated(id: String, connection: TelecomConnection): Unit = settle {
+     * call's current state; for an outgoing call, the INVITE goes now, and a
+     * refusal to send it reaches [placeFailed]. */
+    fun connectionCreated(id: String, connection: TelecomConnection) {
+        val refused = settle { created(id, connection) }
+        if (refused != null) {
+            placeFailed(refused)
+        }
+    }
+
+    private fun created(id: String, connection: TelecomConnection): TelecomPlaceFailure? {
         val entry = entries[id]
         val endedAlready = endedBeforeConnection.remove(id)
         if (entry == null || entry.closedForTelecom) {
@@ -314,7 +351,7 @@ class TelecomBridge(
             // An id never asked for is an error.
             connection.setDisconnected(entry?.closedWith ?: endedAlready ?: TelecomDisconnect.ERROR)
             entry?.awaitingConnection = false
-            return@settle
+            return null
         }
         entry.awaitingConnection = false
         entry.connection = connection
@@ -324,14 +361,17 @@ class TelecomBridge(
         if (entry.direction == TelecomDirection.OUTGOING && entry.phase == TelecomPhase.REQUESTED) {
             val handle = try {
                 sip.place(entry.account, entry.caller)
-            } catch (_: Exception) {
-                end(entry, TelecomDisconnect.ERROR)
-                return@settle
+            } catch (refused: Exception) {
+                val reason = refused.message ?: refused.toString()
+                end(entry, TelecomDisconnect.ERROR, reason)
+                return TelecomPlaceFailure(entry.id, entry.account, entry.caller, reason, refused)
             }
             entry.phase = TelecomPhase.DIALING
             bind(entry, handle)
         }
+        ringIfShown(entry)
         render(entry)
+        return null
     }
 
     /** The framework refused to create the connection for [id]. */
@@ -581,7 +621,25 @@ class TelecomBridge(
         when {
             entry.refuseWith != 0L -> quietly { sip.reject(call, entry.refuseWith) }
             entry.answered -> answerNow(entry)
+            else -> ringIfShown(entry)
         }
+    }
+
+    /**
+     * An incoming call rings (180, RFC 3261 §13.3.1.1) once the framework
+     * shows it, its connection created, and its INVITE is here, whichever
+     * comes last: the caller hears ringback while the person sees the call.
+     * Once only, and not for a call answered or closed before then: a pushed
+     * call answered before its INVITE gets its 200 OK and nothing before it.
+     */
+    private fun ringIfShown(entry: Entry) {
+        if (entry.direction != TelecomDirection.INCOMING || entry.rung || entry.answered ||
+            entry.closedForTelecom || entry.call == 0L || entry.connection == null
+        ) {
+            return
+        }
+        entry.rung = true
+        quietly { sip.ring(entry.call) }
     }
 
     private fun answerNow(entry: Entry) {
@@ -627,22 +685,27 @@ class TelecomBridge(
         }
     }
 
-    /** Tell the framework once, and let go of the connection. */
-    private fun tellClosed(entry: Entry, cause: TelecomDisconnect) {
+    /** Tell the framework once, with [reason] when there is one, and let go
+     * of the connection. */
+    private fun tellClosed(entry: Entry, cause: TelecomDisconnect, reason: String? = null) {
         if (entry.closedForTelecom) {
             return
         }
         entry.closedForTelecom = true
         entry.closedWith = cause
         entry.phase = TelecomPhase.ENDED
-        val connection = entry.connection
+        val connection = entry.connection ?: return
         entry.connection = null
-        connection?.setDisconnected(cause)
+        if (reason == null) {
+            connection.setDisconnected(cause)
+        } else {
+            connection.setDisconnected(cause, reason)
+        }
     }
 
     /** The call is over on both sides. */
-    private fun end(entry: Entry, cause: TelecomDisconnect) {
-        tellClosed(entry, cause)
+    private fun end(entry: Entry, cause: TelecomDisconnect, reason: String? = null) {
+        tellClosed(entry, cause, reason)
         if (entry.call != 0L) {
             quietly { sip.release(entry.call) }
         }

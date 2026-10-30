@@ -50,6 +50,10 @@ class SipralConnectionTest {
             asked += "forget $announcement"
         }
 
+        override fun ring(call: Long) {
+            asked += "ring $call"
+        }
+
         override fun answer(call: Long) {
             asked += "answer $call"
         }
@@ -129,6 +133,15 @@ class SipralConnectionTest {
     }
 
     @Test
+    fun aCallTheServiceShowsRingsOnce() {
+        val rig = Rig()
+        val connection = rig.ringing(1)
+        assertEquals(rig.recorder.asked.filter { it.startsWith("ring") }, listOf("ring 1"))
+        connection.onAnswer()
+        assertEquals(rig.recorder.asked.filter { it.startsWith("ring") || it.startsWith("answer") }, listOf("ring 1", "answer 1"))
+    }
+
+    @Test
     fun aLiveCallIsHeldResumedSentADigitAndHungUp() {
         val rig = Rig()
         val connection = rig.confirmed(1)
@@ -137,7 +150,7 @@ class SipralConnectionTest {
         connection.onPlayDtmfTone('9')
         connection.onDisconnect()
         assertEquals(
-            rig.recorder.asked.filter { !it.startsWith("report") && !it.startsWith("answer") },
+            rig.recorder.asked.filter { !it.startsWith("report") && !it.startsWith("ring") && !it.startsWith("answer") },
             listOf("hold 1", "resume 1", "dtmf 1 9", "hangup 1"),
         )
         assertTrue(rig.ended(1))

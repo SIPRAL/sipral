@@ -252,6 +252,8 @@ export interface Spec extends TurboModule {
   /** Resolves with the call's handle. */
   placeCall(account: string, target: string, options: NativeCallOptions): Promise<string>;
   answer(call: string, options: NativeAnswerOptions): Promise<void>;
+  /** 180 Ringing for a call that arrived and is not yet answered. */
+  ring(call: string): Promise<void>;
   reject(call: string, code: CodegenTypes.Int32): Promise<void>;
   hangup(call: string): Promise<void>;
   hold(call: string): Promise<void>;

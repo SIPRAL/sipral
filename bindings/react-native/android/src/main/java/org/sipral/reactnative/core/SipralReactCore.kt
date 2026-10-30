@@ -372,6 +372,12 @@ class SipralReactCore(
         Unit
     }
 
+    /** 180 Ringing for a call that arrived and waits to be answered. */
+    fun ring(call: String) = guarded {
+        val event = arrived[call] ?: throw SipralRefusal("wrongState", "call $call is not waiting to be answered")
+        open().ringCall(event)
+    }
+
     fun reject(call: String, code: Int) = guarded {
         val event = arrived.remove(call)
             ?: throw SipralRefusal("wrongState", "call $call is not waiting to be answered")

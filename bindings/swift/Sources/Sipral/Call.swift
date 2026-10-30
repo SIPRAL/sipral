@@ -217,6 +217,17 @@ public final class Call: @unchecked Sendable {
         }
     }
 
+    /// `sipral_call_ring`: 180 Ringing, for a call that came in and is
+    /// being shown to the person it is for (RFC 3261 §13.3.1.1), so the
+    /// caller hears ringback until `answer()`. `CallKitBridge` sends it for
+    /// a call it binds once the screen is up; a call already answered is
+    /// `.wrongState`, with nothing sent.
+    public func ring() throws {
+        try retryingBusy {
+            try Sipral.callRing(stack: stack.handle, call: handle, sdp: [], nowMs: stack.nowMs())
+        }
+    }
+
     /// `sipral_call_reject`: 486 Busy Here, 603 Decline, or whatever
     /// response code fits.
     public func reject(code: UInt32 = 486) throws {

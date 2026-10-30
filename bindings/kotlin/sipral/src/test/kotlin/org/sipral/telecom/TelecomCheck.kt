@@ -125,8 +125,15 @@ internal class FakeConnection(val id: String, val log: Log) : TelecomConnection 
         farEndHolding = held; log.add("conn $id remote-hold $held")
     }
 
+    @Volatile var reason: String? = null
+
     override fun setDisconnected(cause: TelecomDisconnect) {
         state = "disconnected"; this.cause = cause; log.add("conn $id disconnected $cause")
+    }
+
+    override fun setDisconnected(cause: TelecomDisconnect, reason: String) {
+        this.reason = reason
+        setDisconnected(cause)
     }
 
     override fun setCaller(caller: String, displayName: String?) {
@@ -140,6 +147,9 @@ internal class FakeSip(val log: Log) : SipCalls {
     var forgetCrosses = false
     var nextCall = 500L
     var hold: Pair<Boolean, Boolean> = false to false
+
+    /** What [place] throws, when it is to refuse. */
+    var placeRefusal: Exception? = null
 
     override fun announce(account: Long, caller: String?, callId: String?): SipralAnnounced {
         val who = caller ?: "anybody"
@@ -161,10 +171,12 @@ internal class FakeSip(val log: Log) : SipCalls {
         }
     }
 
+    override fun ring(call: Long) = log.add("ring $call")
     override fun answer(call: Long) = log.add("answer $call")
     override fun reject(call: Long, code: Long) = log.add("reject $call $code")
     override fun place(account: Long, target: String): Long {
         log.add("place $account $target")
+        placeRefusal?.let { throw it }
         return nextCall++
     }
 
@@ -231,8 +243,10 @@ private fun fakeSequences(): String {
         announcedInvite(bridge, 900, "\"Alice\" <sip:alice@example.invalid>")
         assertEquals(1, log.count("report"), "the matched INVITE was reported again: ${log.snapshot()}")
         assertEquals(900, bridge.callHandleOf(id))
+        assertEquals(1, log.count("ring 900"), "the call shown was not rung once matched: ${log.snapshot()}")
         bridge.answer(id)
         assertTrue(log.count("answer 900") == 1)
+        assertTrue(log.indexOf("ring 900") < log.indexOf("answer 900"))
         bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = 900))
         assertEquals("active", conn.state)
         bridge.hold(id)
@@ -291,7 +305,7 @@ private fun fakeSequences(): String {
     }
 
     // Answered before the INVITE came: the answer is owed, and given the
-    // moment the INVITE is matched.
+    // moment the INVITE is matched, with no 180 before the 200.
     Rig().run {
         val id = bridge.pushArrived(ACCOUNT, "sip:alice@example.invalid")
         platform.create(id)
@@ -299,6 +313,47 @@ private fun fakeSequences(): String {
         assertEquals(0, log.count("answer"))
         announcedInvite(bridge, 901, "<sip:alice@example.invalid>")
         assertEquals(1, log.count("answer 901"))
+        assertEquals(0, log.count("ring"), "a call answered before its INVITE was rung: ${log.snapshot()}")
+        ran++
+    }
+
+    // An INVITE with no push: it rings once the framework has created its
+    // connection, not when it is only reported, and only once.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 930, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val id = bridge.calls.value.single().id
+        assertEquals(0, log.count("ring"), "rung before the framework showed it: ${log.snapshot()}")
+        platform.create(id)
+        assertEquals(1, log.count("ring 930"), log.snapshot().toString())
+        bridge.answer(id)
+        bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = 930))
+        assertEquals(1, log.count("ring"), log.snapshot().toString())
+        ran++
+    }
+
+    // A push whose INVITE the library already had (announce answers
+    // Arrived): bound before the framework shows it, rung once it does.
+    Rig().run {
+        sip.nextAnnounce = SipralAnnounced.Arrived(931)
+        val id = bridge.pushArrived(ACCOUNT, "sip:alice@example.invalid")
+        assertEquals(0, log.count("ring"), log.snapshot().toString())
+        platform.create(id)
+        assertEquals(1, log.count("ring 931"), log.snapshot().toString())
+        ran++
+    }
+
+    // Declined, or the framework refusing the connection, before anything
+    // rang: nothing rings afterwards.
+    Rig().run {
+        val id = bridge.pushArrived(ACCOUNT, "sip:alice@example.invalid")
+        sip.forgetCrosses = true
+        bridge.reject(id)
+        announcedInvite(bridge, 932, "<sip:alice@example.invalid>")
+        assertEquals(1, log.count("reject 932 603"), log.snapshot().toString())
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 933, account = ACCOUNT, message = invite("<sip:bob@example.invalid>")))
+        val refused = bridge.calls.value.single { it.call == 933L }.id
+        bridge.connectionFailed(refused)
+        assertEquals(0, log.count("ring"), "a call declined or never shown was rung: ${log.snapshot()}")
         ran++
     }
 
@@ -478,6 +533,35 @@ private fun fakeSequences(): String {
         ran++
     }
 
+    // Outgoing, and the library refuses to place it: the call ends as an
+    // error, and why reaches both the framework and the application, the
+    // latter once the call has left the list and outside the monitor.
+    Rig().run {
+        val heard = mutableListOf<TelecomPlaceFailure>()
+        var listedWhenHeard: List<TelecomCall>? = null
+        var monitorFree = false
+        bridge.placeFailed = { failure ->
+            heard += failure
+            listedWhenHeard = bridge.calls.value
+            val probe = Thread { bridge.callHandleOf(failure.id) }
+            probe.start()
+            probe.join(2_000)
+            monitorFree = !probe.isAlive
+        }
+        sip.placeRefusal = SipralException(SipralStatus.INVALID_ARGUMENT, "the target is not a SIP or tel URI")
+        val id = bridge.placeCall(ACCOUNT, "*43")
+        val conn = platform.create(id)
+        assertEquals(1, log.count("place $ACCOUNT *43"))
+        assertEquals(TelecomDisconnect.ERROR, conn.cause)
+        val reason = "INVALID_ARGUMENT: the target is not a SIP or tel URI"
+        assertEquals(reason, conn.reason, "the framework was not told why")
+        assertEquals(listOf(TelecomPlaceFailure(id, ACCOUNT, "*43", reason, sip.placeRefusal!!)), heard)
+        assertEquals(emptyList(), listedWhenHeard, "the application heard of it while the call was still listed")
+        assertTrue(monitorFree, "the application was told under the bridge's monitor")
+        assertTrue(bridge.calls.value.isEmpty())
+        ran++
+    }
+
     // The framework refused an incoming call: it is turned away as busy.
     Rig().run {
         bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 906, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
@@ -619,9 +703,11 @@ private fun fakeSequences(): String {
     ran++
 
     return "$ran sequences against fake telecom and SIP sides (push before INVITE, the platform's hold " +
-        "kept through a refused re-INVITE, answer before INVITE, " +
+        "kept through a refused re-INVITE, answer before INVITE, a 180 once the framework shows the call and " +
+        "none for a call answered, declined or refused first, " +
         "two callers out of order, INVITE before push both ways, a push past the window, the missing announcement " +
-        "by name, a match no screen holds, decline crossing a match, busy, refused, missed, " +
+        "by name, a match no screen holds, decline crossing a match, busy, a call the library would not place " +
+        "and why, refused, missed, " +
         "a framework that will not take the call, a late confirmation after a hang-up, a call over before its " +
         "connection existed, every call ended at once)"
 }
@@ -669,9 +755,18 @@ private suspend fun overLoopback(): String {
         val id = bridge.pushArrived(bob.handle, "sip:alice@example.invalid", "Alice")
         assertEquals(0L, bridge.callHandleOf(id), "the announce said the INVITE had already arrived")
         val conn = platform.create(id)
+        // undispatched: subscribed before the INVITE goes, so the 180 cannot be missed
+        val ringing = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            withTimeout(15_000) {
+                caller.events.first {
+                    it.kind == SipralEventKind.CALL_PROGRESS.value.toLong() && it.payload.call.statusCode == 180L
+                }
+            }
+        }
         val placed = caller.placeCall(alice, target = "sip:bob@example.invalid")
         log.waitFor("the INVITE to be matched to the push") { bridge.callHandleOf(id) != 0L }
         assertEquals(2, log.count("report"), "the matched INVITE was reported as a second call: ${log.snapshot()}")
+        assertEquals(placed.handle, ringing.await().call, "the 180 was not for the call placed")
 
         bridge.answer(id)
         placed.waitConfirmed(15_000)
@@ -704,7 +799,7 @@ private suspend fun overLoopback(): String {
         assertEquals(1, log.count("conn $id disconnected"))
         placed.close()
 
-        return "over loopback, a push announced and its INVITE matched to the same screen, answered, " +
+        return "over loopback, a push announced and its INVITE matched to the same screen, rung, answered, " +
             "held and resumed from each end, a digit sent, hung up and let go"
     } finally {
         scope.cancel()

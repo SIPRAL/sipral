@@ -261,6 +261,29 @@ on macOS and on the iOS 26.5 simulator, over the XCFramework, with
 INVITE, and CallKit's own patience with a held Answer, are the phone's to
 show (step 11 below).
 
+**The caller hears it ring.** A UAS that alerts the user should say so with
+180 Ringing (RFC 3261 §13.3.1.1), and a call on the system's screen is being
+alerted. So the bridges send it once the screen is up and the INVITE is
+here, whichever comes last, and once only: `CallKitBridge` (and
+`LiveCommunicationBridge`, which runs it) when CallKit has shown a call
+reported through `reportIncomingCall` and the `Call` is bound to it, whether
+the INVITE came first or the push did; `TelecomBridge` when the framework has
+created the call's connection and the INVITE is matched to it. A call the
+user answered before its INVITE arrived gets its 200 OK and no 180 before
+it, and one declined or refused by the system gets neither. An application
+that shows a call on its own screen sends it itself: `Call.ring()` or
+`SipralStack.ringCall(_:)` in Swift, `ringCall` in Kotlin and Dart, `ring()`
+in Python, Node, React Native and C++, `RingCall` in .NET. Found on an iPhone XS on 30 October 2026:
+a call CallKit showed sent `100 Trying` and then nothing until the 200 OK,
+8.8 s later. A PBX that plays ringback itself (FreePBX's `Dial` with `r`)
+hid it; a direct call, or another PBX that passes the callee's progress on,
+did not. `CallKitBridgeTests` holds the order between two stacks on
+loopback, with CallKit's answer to the report held back: no 180 before the
+screen is up, one when it is, one for a call bound to a screen already up,
+none for a call answered before its INVITE. `TelecomCheck` holds the same
+for `TelecomBridge` against fakes, and over loopback the caller reads the
+180 of a pushed call.
+
 ## C3 — a registration that freezes and thaws
 
 ### The snapshot
@@ -982,7 +1005,8 @@ order:
    logged, and the call rings for as long as Android lets the process run;
    read `RemoteMessage.priority` before relying on it.
 3. While it rings, the process stays: the INVITE is matched to the
-   announced call, or the announcement's twenty seconds run out
+   announced call (and the caller is sent 180 Ringing, the framework
+   having shown the call), or the announcement's twenty seconds run out
    (`ANNOUNCED_CALL_MISSING`), or the caller cancels, or the user declines.
    Each of the last three ends the call, and with no other call the service
    stops.
@@ -1686,7 +1710,7 @@ on every open. Three things feed it:
 | `.ended` with `.shouldResume` | `AudioSessionObserver` | A new device opened. Without `.shouldResume` the interruption stays one of the reasons the device is let go, as Apple asks, until the application calls `resume(.interrupted)`; either way `interruptionEnded(shouldResume:)` is reported |
 | `routeChangeNotification` | `AudioSessionObserver` | Reported with the output the session is on now and why it moved (`newDeviceAvailable`, `oldDeviceUnavailable`, anything else). An engine that stops because of it (`AVAudioEngineConfigurationChange`) is started again in place, and only one that will not start is the device failing |
 | `mediaServicesWereLostNotification`, then `mediaServicesWereResetNotification` | `AudioSessionObserver` | The device let go when the services go, and built again from nothing when they come back: every audio object made before a reset is dead |
-| `CXProviderDelegate.provider(_:didActivate:)`, `didDeactivate` | `CallKitAdapter` to `CallKitBridge` | A call's device starts only once the system has activated the session (`CallAudioPause.sessionInactive` until then), and is let go when the system deactivates it |
+| `CXProviderDelegate.provider(_:didActivate:)`, `didDeactivate` | `CallKitAdapter` to `CallKitBridge` | A call's device starts only once the system has activated the session (`CallAudioPause.sessionInactive` until then), and is let go when the system deactivates it. An activation also ends an interruption: after Hold & Accept for a cellular call and that call's end, iOS 18.7 on an iPhone XS posted the interruption's start and never its end, and `didActivate` was the only sign the session was the call's again |
 | `CXSetHeldCallAction` — Hold & Accept for a cellular call, CarPlay, a headset | `CallKitBridge.handleHold` | The device let go at once, the far end held with a re-INVITE; the reverse on resume |
 | `CXSetMutedCallAction` | `CallKitBridge.handleMute` | Silence sent in the microphone's place |
 | `providerDidReset` | `CallKitBridge.providerDidReset` | Every call hung up and its device let go: the system's call service no longer knows them |

@@ -31,12 +31,15 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.runBlocking
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
+import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
 import org.sipral.telecom.AudioRoute
 import org.sipral.telecom.SipCalls
 import org.sipral.telecom.TelecomBridge
 import org.sipral.telecom.TelecomDisconnect
 import org.sipral.telecom.TelecomPhase
+import org.sipral.telecom.TelecomPlaceFailure
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertNull
@@ -52,6 +55,10 @@ class CoreTelecomPlatformTest {
             asked += "forget $announcement"
         }
 
+        override fun ring(call: Long) {
+            asked += "ring $call"
+        }
+
         override fun answer(call: Long) {
             asked += "answer $call"
         }
@@ -60,8 +67,13 @@ class CoreTelecomPlatformTest {
             asked += "reject $call $code"
         }
 
+        /** What [place] throws, when it is to refuse. */
+        @Volatile
+        var placeRefusal: Exception? = null
+
         override fun place(account: Long, target: String): Long {
             asked += "place $target"
+            placeRefusal?.let { throw it }
             return OUTGOING
         }
 
@@ -255,6 +267,13 @@ class CoreTelecomPlatformTest {
     }
 
     @Test
+    fun anIncomingCallRingsOnceTheFrameworkHasAddedIt() = rig {
+        ringing()
+        waitFor { "ring $INCOMING" in sip.asked }
+        assertEquals(sip.asked.count { it.startsWith("ring") }, 1, sip.asked.toString())
+    }
+
+    @Test
     fun anAnswerFromTheFrameworkIsNotAnsweredBackToIt() = rig {
         // a watch or a car answered: the framework has the call active once the
         // callback returns
@@ -299,6 +318,20 @@ class CoreTelecomPlatformTest {
         bridge.placeCall(ACCOUNT, "sip:bob@example.invalid")
         waitFor { bridge.calls.value.none { it.caller == "sip:bob@example.invalid" } }
         assertFalse(sip.asked.any { it.startsWith("place") }, "nothing is sent for a call the framework refused")
+    }
+
+    @Test
+    fun aCallTheLibraryWillNotPlaceIsDisconnectedAndItsReasonHeard() = rig {
+        val heard = CopyOnWriteArrayList<TelecomPlaceFailure>()
+        bridge.placeFailed = { heard += it }
+        sip.placeRefusal = SipralException(SipralStatus.INVALID_ARGUMENT, "the target is not a SIP or tel URI")
+        val id = bridge.placeCall(ACCOUNT, "*43")
+        waitFor { heard.isNotEmpty() && adder.added.singleOrNull()?.control?.ended?.isCompleted == true }
+        assertEquals(heard.single().id, id)
+        assertEquals(heard.single().target, "*43")
+        assertEquals(heard.single().reason, "INVALID_ARGUMENT: the target is not a SIP or tel URI")
+        assertEquals(adder.added.single().control.asked, listOf("disconnect"))
+        assertTrue(bridge.calls.value.isEmpty())
     }
 
     @Test

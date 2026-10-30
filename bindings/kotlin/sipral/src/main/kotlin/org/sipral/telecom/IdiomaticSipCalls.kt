@@ -57,6 +57,10 @@ class IdiomaticSipCalls(
         client.forgetAnnouncement(announcement)
     }
 
+    override fun ring(call: Long) {
+        client.ringCall(call)
+    }
+
     override fun answer(call: Long) {
         calls[call] = client.answerCall(call, mediaHost = mediaHost)
     }

@@ -44,6 +44,10 @@ final class PhoneModel: ObservableObject {
     @Published private(set) var lifecycleText = "-"
     @Published private(set) var countersText = "-"
     @Published var wholeMessages = true
+    /// The screen stays on while the application is in front: for a run on
+    /// a phone nobody is holding. Kept between launches.
+    @Published private(set) var keepsScreenOn = false
+    private static let keepsScreenOnKey = "keepsScreenOn"
 
     let log: EvidenceLog
     /// CallKit and PushKit: on a device, never on the simulator.
@@ -84,6 +88,7 @@ final class PhoneModel: ObservableObject {
         settings = script.settings ?? store.load()
         password = script.password ?? ((try? store.password()) ?? "")
         wholeMessages = settings.wholeMessages
+        keepsScreenOn = script.keepsScreenOn || UserDefaults.standard.bool(forKey: Self.keepsScreenOnKey)
         voipToken = store.voipToken
         log.onNote = { [weak self] line in
             Task { @MainActor in self?.appendTimeline(line) }
@@ -109,6 +114,7 @@ final class PhoneModel: ObservableObject {
         note("launch \(info?["CFBundleShortVersionString"] ?? "?") (\(info?["CFBundleVersion"] ?? "?")), "
             + "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion), \(Self.machine()), "
             + "CallKit \(systemCalls ? "on" : "off (the simulator refuses it)")")
+        UIApplication.shared.isIdleTimerDisabled = keepsScreenOn
         lifecycle.storageFailed = { [log] error in
             log.note("registration snapshot not usable: \(error)")
         }
@@ -122,7 +128,13 @@ final class PhoneModel: ObservableObject {
     }
 
     /// An account is up to place a call on.
-    var canDial: Bool { stack != nil && account != nil }
+    var canDial: Bool { stack != nil && account != nil && !replacing }
+
+    /// The stack is being closed for another (a new token, new settings):
+    /// a call placed now would be hung up with it.
+    private var replacing = false
+    /// A token that came during a call, put on the REGISTER once it ends.
+    private var tokenWaitsForCallEnd = false
 
     private func setUpSystemCalls() {
         let configuration = CXProviderConfiguration()
@@ -160,8 +172,13 @@ final class PhoneModel: ObservableObject {
         store.voipToken = token
         note(token == nil ? "VoIP push token invalidated" : "VoIP push token \(Self.hex(token ?? []))")
         updatePushText()
-        // The token rides on every REGISTER: a new one means a new account.
-        if token != before, account != nil {
+        // The token rides on every REGISTER: a new one means a new account,
+        // which would end a call in progress, so it waits for that call.
+        guard token != before, account != nil else { return }
+        if session != nil {
+            tokenWaitsForCallEnd = true
+            note("the new token goes on the REGISTER when the call ends")
+        } else {
             register()
         }
     }
@@ -226,9 +243,11 @@ final class PhoneModel: ObservableObject {
             open(settings, password: password)
             return
         }
+        replacing = true
         Task {
             await tearDown()
             open(settings, password: password)
+            replacing = false
         }
     }
 
@@ -462,6 +481,13 @@ final class PhoneModel: ObservableObject {
         }
         guard let bridge else {
             offer = IncomingOffer(event: event, caller: caller)
+            // shown on the sample's own screen, so the caller hears it ring;
+            // under CallKit the bridge rings the call once the system shows it
+            do {
+                try stack.ringCall(event)
+            } catch {
+                note("ringing not sent: \(error)")
+            }
             if script.answers {
                 answer()
             }
@@ -617,7 +643,10 @@ final class PhoneModel: ObservableObject {
     }
 
     private func ended(_ session: CallSession, event: SipralEvent) {
-        let cause = event.callData?.endCause.map { $0.text ?? "SIP \($0.sip ?? 0)" } ?? "\(event.callData?.endReason.map { "\($0)" } ?? "?")"
+        let reason = event.callData?.endReason.map { "\($0)" } ?? "?"
+        let cause = event.callData?.endCause.flatMap { cause in
+            cause.text ?? cause.sip.map { "SIP \($0)" } ?? cause.q850.map { "\(reason), Q.850 cause \($0)" }
+        } ?? reason
         if let stats = session.call.finalStatistics {
             note("call ended (\(cause)): sent \(stats.packets_sent), received \(stats.packets_received), lost \(stats.packets_lost)")
         } else {
@@ -629,6 +658,10 @@ final class PhoneModel: ObservableObject {
             self.session = nil
         }
         script.callEnded(on: self)
+        if tokenWaitsForCallEnd, self.session == nil {
+            tokenWaitsForCallEnd = false
+            register()
+        }
     }
 
     // MARK: - in a call
@@ -749,6 +782,13 @@ final class PhoneModel: ObservableObject {
     }
 
     // MARK: - diagnostics
+
+    func setKeepsScreenOn(_ on: Bool) {
+        keepsScreenOn = on
+        UserDefaults.standard.set(on, forKey: Self.keepsScreenOnKey)
+        UIApplication.shared.isIdleTimerDisabled = on
+        note(on ? "the screen is kept on" : "the screen locks as the system says")
+    }
 
     func setWholeMessages(_ on: Bool) {
         wholeMessages = on

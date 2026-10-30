@@ -187,7 +187,7 @@ class Phone(private val app: Application) {
     private suspend fun open(trigger: String, push: String?) {
         val s = settings
         if (s.aor.isBlank() || s.registrarAddress.isBlank()) {
-            status = "an address of record and a registrar address (host:port) are both needed"
+            status = "an address of record and a registrar (host:port) are both needed"
             return
         }
         store.save(s)
@@ -201,6 +201,14 @@ class Phone(private val app: Application) {
                 else -> SipralTransport.UDP
             }
             val streamed = transport != SipralTransport.UDP
+            // The library takes the registrar as an address and a port; a name
+            // typed in the field is looked up here, off the main thread, and over
+            // TLS the certificate is still checked against the name
+            val typedServer = s.registrarAddress.trim()
+            val server = withContext(Dispatchers.IO) { registrarAddressOf(typedServer) }
+            if (server != typedServer) {
+                note("registrar $typedServer is $server")
+            }
             // A STUN server makes the registered Contact and every call's SDP
             // name the address seen beyond the NAT. A TURN relay is usable only
             // under ICE, so ICE is offered when one is given.
@@ -224,7 +232,12 @@ class Phone(private val app: Application) {
                     audio = mode,
                     network = network,
                     signalling = transport,
-                    signallingServer = if (streamed) s.registrarAddress.trim() else null,
+                    signallingServer = if (streamed) server else null,
+                    tlsServerName = if (transport == SipralTransport.TLS && server != typedServer) {
+                        hostPortOf(typedServer)?.first
+                    } else {
+                        null
+                    },
                 )
                 if (push == null) {
                     // a push declares its own, in wakeForPush
@@ -233,7 +246,7 @@ class Phone(private val app: Application) {
                 logTo(opened)
                 opened to opened.addAccount(
                     aor = s.aor.trim(),
-                    registrarAddress = s.registrarAddress.trim(),
+                    registrarAddress = server,
                     registrar = s.registrar.trim().ifEmpty { null },
                     authUser = s.authUser.trim().ifEmpty { null },
                     authPassword = s.authPassword.ifEmpty { null },
@@ -365,6 +378,8 @@ class Phone(private val app: Application) {
             }
         }
         bridge = wired
+        // the framework allowed the call and the library would not send it
+        wired.placeFailed = { note("call to ${it.target} failed: ${it.reason}") }
         note("telecom: ${describe(adapter)}, API ${Build.VERSION.SDK_INT}")
         wired.collect(scope, opened.events)
         monitor = SipralNetworkMonitor(app, opened, sip, scope, network) { note(it) }
@@ -484,13 +499,15 @@ class Phone(private val app: Application) {
     // so both run off the main thread
     fun call() {
         val added = account ?: return
-        val dialled = target.trim()
-        if (dialled.isNotEmpty()) {
+        val typed = target.trim()
+        if (typed.isNotEmpty()) {
+            val dialled = dialTarget(typed, added.aor)
+            note("calling $dialled")
             scope.launch {
                 try {
                     withContext(Dispatchers.IO) { bridge?.placeCall(added.handle, dialled) }
                 } catch (failed: Exception) {
-                    note("call failed: ${failed.message}")
+                    note("call to $dialled failed: ${failed.message}")
                 }
             }
         }

@@ -192,6 +192,7 @@ client.events.collect { event ->
     val name = identity.asserted?.displayName ?: event.payload.call.fromDisplay?.toString(Charsets.UTF_8)
     if (SipralPrivacy.ID in identity.privacy) { /* number withheld */ }
     client.answering(event).answerAfterMs?.let { /* the caller asked to be answered without the person */ }
+    client.ringCall(event)   // 180 Ringing, once it is shown: the caller hears ringback
     client.redirectCall(event, listOf("sip:desk@example.com"), reason = "no-answer")   // a 302
 }
 ```
@@ -800,12 +801,20 @@ Split in two, so that the part worth testing needs no Android:
   `sipral.aar`) is the logic. `TelecomBridge` runs C2's sequence -- a push
   is reported to the telecom framework first, then announced (which
   refreshes the binding), and the INVITE that follows is matched to the
-  screen already up rather than reported again -- and maps the framework's
+  screen already up rather than reported again -- rings an incoming call
+  (180, `SipCalls.ring`) once the framework has created its connection and
+  the INVITE is here, unless the user answered first, maps the framework's
   answer, reject, hold, unhold, DTMF and disconnect onto the call, and the
   call's progress, hold (both ends'), and end back onto the framework, with a
   `DisconnectCause` for each way a call ends -- including a call that ended
   while the framework was still creating its connection, whose connection is
-  disconnected with that cause the moment it exists. `endAll` ends every call
+  disconnected with that cause the moment it exists. An outgoing call the
+  library refuses to place once the framework has allowed it (a target that
+  is not a SIP URI, a message too large to send) is disconnected as an
+  error with the refusal's text as the `DisconnectCause`'s reason, and the
+  application hears it as a `TelecomPlaceFailure` through
+  `TelecomBridge.placeFailed`: a placed call that only vanished from `calls`
+  would say nothing about why. `endAll` ends every call
   at once, for an application about to close its client: once the client is
   closed nothing would end them, and a connection nobody ends stays up in
   the framework for as long as the process lives. The framework is behind
@@ -943,8 +952,10 @@ the service starts while the push's exemption lasts (`docs/15-mobile.md`,
 "Lifecycle on Android"). `IdiomaticSipCalls` with no `mediaHost` binds each
 call's media on the network that is up when the call starts.
 
-`android/sample` is a Compose skeleton, not a product: register, call, a
-simulated push standing in for a push service, answer and decline, hold, a
+`android/sample` is a Compose skeleton, not a product: register (the
+registrar's host name looked up to the address `registrarAddress` takes),
+call (a bare number or name dialled at the account's domain, a refusal to
+place it noted with why), a simulated push standing in for a push service, answer and decline, hold, a
 DTMF keypad and the audio routes, with every call's microphone and speaker
 run by `SipralCallAudios` and every audio transition in its log -- it has no
 audio code of its own. Around it, what a store build needs: the call's

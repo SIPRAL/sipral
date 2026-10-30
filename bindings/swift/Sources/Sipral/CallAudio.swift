@@ -9,8 +9,11 @@ public enum CallAudioPause: Hashable, Sendable {
     /// On hold, by CallKit (`CXSetHeldCallAction`) or the application.
     case held
 
-    /// The system interrupted the audio session without CallKit holding the
-    /// call (`AVAudioSession.interruptionNotification`, `.began`).
+    /// The system interrupted the audio session
+    /// (`AVAudioSession.interruptionNotification`, `.began`). Lifted by the
+    /// interruption's end when the system allows, or by CallKit activating
+    /// the session again (`CallKitBridge.audioSessionActivated()`), which
+    /// may be the only end a call shown by CallKit hears.
     case interrupted
 
     /// CallKit has not activated the session, or deactivated it: Apple

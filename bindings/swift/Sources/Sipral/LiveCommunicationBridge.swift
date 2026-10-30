@@ -35,12 +35,11 @@ public final class LiveCommunicationBridge: @unchecked Sendable {
     }
 
     /// Reports an incoming call, possibly before its INVITE. The returned
-    /// `UUID` is later tied to a `Call` with `bind(uuid:to:)`.
+    /// `UUID` is later tied to a `Call` with `bind(uuid:to:)`, which rings
+    /// it (180) once the system shows it, as `CallKitBridge` does.
     @discardableResult
     public func reportIncomingCall(callerId: String) async throws -> UUID {
-        let uuid = UUID()
-        try await provider.reportIncomingConversation(uuid: uuid, callerId: callerId)
-        return uuid
+        try await calls.reportIncomingCall(callerId: callerId)
     }
 
     /// Asks the system for an outgoing call to `callee`, then runs `dial`

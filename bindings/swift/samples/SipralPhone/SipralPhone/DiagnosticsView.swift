@@ -26,6 +26,10 @@ struct DiagnosticsView: View {
                         get: { phone.wholeMessages },
                         set: { phone.setWholeMessages($0) }
                     ))
+                    Toggle("Keep the screen on", isOn: Binding(
+                        get: { phone.keepsScreenOn },
+                        set: { phone.setKeepsScreenOn($0) }
+                    ))
                     Button("Share log") {
                         if let url = phone.writeEvidence() {
                             shared = SharedFile(url: url)

@@ -48,10 +48,15 @@ import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.awaitNext
 
-private class Phone(name: String, mode: SipralAudioMode = SipralAudioMode.Application, host: String = "127.0.0.1") {
+private class Phone(
+    name: String,
+    mode: SipralAudioMode = SipralAudioMode.Application,
+    host: String = "127.0.0.1",
+    codecs: String? = null,
+) {
     val events: MutableList<Map<String, Any>> = Collections.synchronizedList(ArrayList())
     val core = SipralReactCore(emit = { events += it }, audio = { mode })
-    val address = core.open(SipralOpenOptions(bindHost = host))
+    val address = core.open(SipralOpenOptions(bindHost = host, codecs = codecs))
     val aor = "sip:$name@sipral.invalid"
 
     /** The first event, from the [after]th on, that [matches] -- or a failure naming what was seen. */
@@ -132,10 +137,12 @@ private fun everything(): String {
         bob.core.hangup(toCarol)
         carol.await("the end of the call Bob placed") { it["kind"] == "callEnded" }
 
-        // A second call, turned away with a final response.
+        // A second call, rung, then turned away with a final response.
         val second = alice.core.placeCall(aliceLine, "sip:bob@${bob.address}", destination = null, codecs = null)
         mark = bob.seen()
         val again = bob.await("the second call", mark) { it["kind"] == "incomingCall" && it["call"] != fromAlice }
+        bob.core.ring(again["call"] as String)
+        alice.await("the 180") { it["kind"] == "callProgress" && it["call"] == second && it["statusCode"] == 180 }
         bob.core.reject(again["call"] as String, 486)
         val refused = alice.await("the refusal") { it["kind"] == "callEnded" && it["call"] == second }
         assertEquals("refused", refused["endReason"])
@@ -467,7 +474,11 @@ private fun hostAddress(): String? = NetworkInterface.getNetworkInterfaces().asS
  * and its call is keyed by a handshake on the pair ICE chose. */
 private fun aWebRtcLineReachesTheLibrary(): String {
     val host = hostAddress() ?: error("no interface but loopback: ICE has no host candidate to check with")
-    val alice = Phone("alice", host = host)
+    // one codec, as the Kotlin layer's own test of the line: the offer with
+    // every codec of the default list sits at RFC 3261 §18.1.1's 1300 bytes,
+    // and the host address's length alone decides whether it still fits a
+    // datagram
+    val alice = Phone("alice", host = host, codecs = "PCMU")
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, codecs = "PCMU").use { bob ->
         try {
             val line = alice.core.addAccount(

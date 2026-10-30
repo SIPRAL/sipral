@@ -73,10 +73,15 @@ public final class CallKitBridge: @unchecked Sendable {
         /// End or Decline was tapped, or the answer timed out: the INVITE,
         /// if it comes, is declined.
         var ended = false
+        /// CallKit has put the screen up: the call rings (180) once bound.
+        var shown = false
     }
 
-    /// Shown and not yet bound; guarded by `stateQueue`.
+    /// Reported and not yet bound; guarded by `stateQueue`.
     private var waiting: [UUID: Waiting] = [:]
+    /// Calls bound before CallKit said their screen was up, which ring
+    /// when it does unless answered first; guarded by `stateQueue`.
+    private var ringWhenShown: Set<UUID> = []
 
     public init(provider: any CallKitProviding) {
         self.provider = provider
@@ -107,6 +112,12 @@ public final class CallKitBridge: @unchecked Sendable {
     /// returned `UUID` is the call's, and `reported` is told, when CallKit
     /// has answered, whether the screen was shown. A screen refused (Do Not
     /// Disturb, a blocked caller) is forgotten before `reported` hears of it.
+    ///
+    /// Once the screen is up and the `Call` bound, in whichever order the
+    /// two happen, the call is rung (`Call.ring()`, 180 Ringing): the
+    /// caller hears ringback while the person sees the call. A call
+    /// answered first, such as a pushed one whose Answer was tapped before
+    /// its INVITE came, gets its 200 OK and no 180.
     @discardableResult
     public func reportIncomingCall(
         callerId: String, displayName: String? = nil, reported: @escaping @Sendable (Result<UUID, Error>) -> Void
@@ -117,14 +128,34 @@ public final class CallKitBridge: @unchecked Sendable {
         provider.reportIncomingCall(uuid: uuid, callerId: callerId, displayName: displayName) { [weak self] error in
             if let error {
                 if let self {
-                    self.stateQueue.sync { _ = self.waiting.removeValue(forKey: uuid) }
+                    self.stateQueue.sync {
+                        _ = self.waiting.removeValue(forKey: uuid)
+                        self.ringWhenShown.remove(uuid)
+                    }
                 }
                 reported(.failure(error))
             } else {
+                self?.screenShown(uuid: uuid)
                 reported(.success(uuid))
             }
         }
         return uuid
+    }
+
+    /// CallKit put up `uuid`'s screen: a call bound to it already rings
+    /// now, and one still to come rings when it is bound.
+    private func screenShown(uuid: UUID) {
+        let bound = stateQueue.sync { () -> Call? in
+            if waiting[uuid] != nil {
+                waiting[uuid]?.shown = true
+                return nil
+            }
+            guard ringWhenShown.remove(uuid) != nil else { return nil }
+            return callsByUuid[uuid]
+        }
+        // A call that ended or was answered in the meantime refuses the
+        // ring, and there is nothing left to tell it.
+        try? bound?.ring()
     }
 
     /// Ties a shown `UUID` to its `Call` and mirrors the call's events onto
@@ -140,14 +171,21 @@ public final class CallKitBridge: @unchecked Sendable {
     /// 603 and binds nothing, since its screen is gone and the system was
     /// told. Take the application's own `Call.events()` before binding, to
     /// see what that answer brings.
+    ///
+    /// A call reported with `reportIncomingCall` and not answered rings
+    /// (180) as soon as its screen is up: now, if CallKit has shown it
+    /// already, or the moment it does. A `uuid` this bridge did not report,
+    /// an outgoing call's, rings nothing.
     public func bind(uuid: UUID, to call: Call) {
-        let asked = stateQueue.sync { () -> Waiting? in
+        let (asked, ringNow) = stateQueue.sync { () -> (Waiting?, Bool) in
             let asked = waiting.removeValue(forKey: uuid)
-            if asked?.ended != true {
-                callsByUuid[uuid] = call
-                uuidsByCallHandle[call.handle] = uuid
-            }
-            return asked
+            guard asked?.ended != true else { return (asked, false) }
+            callsByUuid[uuid] = call
+            uuidsByCallHandle[call.handle] = uuid
+            guard let asked, asked.answer == nil else { return (asked, false) }
+            if asked.shown { return (asked, true) }
+            ringWhenShown.insert(uuid)
+            return (asked, false)
         }
         if asked?.ended == true {
             // its screen is gone already, and the system was told so
@@ -192,6 +230,10 @@ public final class CallKitBridge: @unchecked Sendable {
             } catch {
                 answered(error)
             }
+        } else if ringNow {
+            // A caller who gave up in the meantime leaves nothing to ring;
+            // its end reaches CallKit through the events above.
+            try? call.ring()
         }
     }
 
@@ -257,6 +299,7 @@ public final class CallKitBridge: @unchecked Sendable {
             }
             audiosByUuid.removeValue(forKey: uuid)
             watchTasks.removeValue(forKey: uuid)?.cancel()
+            ringWhenShown.remove(uuid)
         }
     }
 
@@ -274,7 +317,11 @@ public final class CallKitBridge: @unchecked Sendable {
     // MARK: - actions CallKit asks for (CXProviderDelegate forwards here)
 
     public func handleAnswer(uuid: UUID) throws {
-        guard let call = call(for: uuid) else { throw CallKitBridgeError.unknownCall(uuid) }
+        let call = stateQueue.sync { () -> Call? in
+            ringWhenShown.remove(uuid)
+            return callsByUuid[uuid]
+        }
+        guard let call else { throw CallKitBridgeError.unknownCall(uuid) }
         try call.answer()
     }
 
@@ -290,7 +337,10 @@ public final class CallKitBridge: @unchecked Sendable {
     public func handleAnswer(uuid: UUID, completion: @escaping @Sendable (Error?) -> Void) {
         enum Step { case now(Call), later, unknown }
         let step = stateQueue.sync { () -> Step in
-            if let call = callsByUuid[uuid] { return .now(call) }
+            if let call = callsByUuid[uuid] {
+                ringWhenShown.remove(uuid)
+                return .now(call)
+            }
             guard waiting[uuid] != nil else { return .unknown }
             waiting[uuid]?.answer = completion
             return .later
@@ -401,10 +451,16 @@ public final class CallKitBridge: @unchecked Sendable {
     }
 
     /// `provider(_:didActivate:)`: attached devices (or the engine) open.
+    ///
+    /// It also ends an interruption: CallKit activates the session for
+    /// these calls once the call that interrupted them (a cellular call
+    /// taken with Hold & Accept) has let it go, and the system may never
+    /// post that interruption's end.
     public func audioSessionActivated() {
         let engine = stateQueue.sync { () -> (any CallAudioSessionEngine)? in
             sessionActive = true
             for audio in audiosByUuid.values {
+                audio.resume(.interrupted)
                 audio.resume(.sessionInactive)
             }
             return self.engine

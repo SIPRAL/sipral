@@ -55,6 +55,10 @@ class SipralCallForegroundTest {
             asked += "forget $announcement"
         }
 
+        override fun ring(call: Long) {
+            asked += "ring $call"
+        }
+
         override fun answer(call: Long) {
             asked += "answer $call"
         }

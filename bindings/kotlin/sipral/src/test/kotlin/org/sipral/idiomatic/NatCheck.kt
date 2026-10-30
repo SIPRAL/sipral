@@ -30,7 +30,6 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -254,9 +253,6 @@ private fun read(peer: DatagramSocket, prefix: String, withinMs: Long = 10_000):
     return null
 }
 
-private suspend fun firstEvent(client: SipralClient, withinMs: Long = 10_000, match: (SipralEvent) -> Boolean): SipralEvent? =
-    withTimeoutOrNull(withinMs) { client.events.first(match) }
-
 /** Every event `client` raises from now on, collected on its own thread,
  * for a check that blocks in `placeCall`. */
 private fun recordEvents(client: SipralClient, forMs: Long): MutableList<SipralEvent> {
@@ -444,9 +440,12 @@ private suspend fun iceBehindStunCarriesAudio(host: String): String {
                     alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
                 }
                 aliceCall.use {
-                    bob.answerCall(incoming, mediaHost = host).use { bobCall ->
-                        val chosen = firstEvent(alice) { it.kind == SipralEventKind.MEDIA_PATH_CHOSEN.value.toLong() }
-                        assertNotNull(chosen, "ICE never chose a path")
+                    // subscribed before answering: a path chosen before answerCall
+                    // returned would otherwise go by unseen
+                    val (answered, _) = alice.events.awaitNext(SipralEventKind.MEDIA_PATH_CHOSEN, timeoutMs = 15_000) {
+                        bob.answerCall(incoming, mediaHost = host)
+                    }
+                    answered.use { bobCall ->
                         val deadline = System.currentTimeMillis() + 5_000
                         while ((aliceCall.media == null || bobCall.media == null) && System.currentTimeMillis() < deadline) {
                             delay(20)
@@ -638,9 +637,12 @@ private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): Strin
                 alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
             }
             aliceCall.use {
-                bob.answerCall(incoming, mediaHost = host).use {
-                    val chosen = firstEvent(alice) { it.kind == SipralEventKind.MEDIA_PATH_CHOSEN.value.toLong() }
-                    assertNotNull(chosen, "ICE never chose a path")
+                // subscribed before answering: a path chosen before answerCall returned
+                // would otherwise go by unseen
+                val (answered, _) = alice.events.awaitNext(SipralEventKind.MEDIA_PATH_CHOSEN, timeoutMs = 15_000) {
+                    bob.answerCall(incoming, mediaHost = host)
+                }
+                answered.use {
                     val deadline = System.currentTimeMillis() + 5_000
                     while (aliceCall.media == null && System.currentTimeMillis() < deadline) {
                         delay(20)

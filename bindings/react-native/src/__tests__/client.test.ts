@@ -750,6 +750,15 @@ describe('a call that arrives', () => {
     expect(native.methods().filter((method) => method === 'answer')).toHaveLength(1);
   });
 
+  it('rings until it is answered, and not after', async () => {
+    const {native, incoming} = await ringing();
+    await incoming.call.ring();
+    expect(native.calls.at(-1)).toEqual({method: 'ring', args: ['42']});
+    await incoming.call.answer();
+    expect((await refusal(incoming.call.ring())).code).toBe('wrongState');
+    expect(native.methods().filter((method) => method === 'ring')).toHaveLength(1);
+  });
+
   it('is rejected with a final response only', async () => {
     const {native, incoming} = await ringing();
     expect((await refusal(incoming.call.reject(180))).code).toBe('invalidArgument');

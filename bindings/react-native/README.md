@@ -246,6 +246,7 @@ these:
 
 | Method | When |
 |---|---|
+| `ring()` | a call that arrived and is shown to the user, not yet answered: 180 Ringing, so the caller hears ringback |
 | `answer(options)`, `reject(code = 486)` | a call that arrived, once |
 | `hangup()` | until it has ended, in any state |
 | `hold()`, `resume()` | confirmed |

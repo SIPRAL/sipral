@@ -102,6 +102,9 @@ export class FakeNative implements Spec {
   answer(...args: Parameters<Spec['answer']>) {
     return this.settle('answer', args, undefined);
   }
+  ring(...args: Parameters<Spec['ring']>) {
+    return this.settle('ring', args, undefined);
+  }
   reject(...args: Parameters<Spec['reject']>) {
     return this.settle('reject', args, undefined);
   }

@@ -4,6 +4,10 @@
 package org.sipral.sample
 
 import android.content.Context
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.UnknownHostException
 import org.sipral.android.telecom.SipralKeystoreBox
 import org.sipral.android.telecom.SipralTelecomAdapter
 
@@ -34,6 +38,70 @@ fun telecomAdapterOf(setting: String, sdk: Int): SipralTelecomAdapter = when (se
     "connection-service" -> SipralTelecomAdapter.CONNECTION_SERVICE
     "core-telecom" -> SipralTelecomAdapter.CORE_TELECOM
     else -> SipralTelecomAdapter.preferred(sdk)
+}
+
+/**
+ * What the dial pad typed, as a URI, read as the iPhone sample reads it: a
+ * `sip:`, `sips:` or `tel:` URI as typed, `user@host` as `sip:user@host`,
+ * and a bare number or name (`100`, `*43`) as a user at the domain of the
+ * address of record [aor].
+ */
+fun dialTarget(typed: String, aor: String): String {
+    val trimmed = typed.trim()
+    if (SCHEMES.any { trimmed.startsWith(it, ignoreCase = true) }) {
+        return trimmed
+    }
+    if ('@' in trimmed) {
+        return "sip:$trimmed"
+    }
+    return "sip:$trimmed@${domainOf(aor)}"
+}
+
+/** The host part of an address of record, with its port if it has one. */
+internal fun domainOf(aor: String): String {
+    var uri = aor.trim().removePrefix("<").substringBefore('>')
+    SCHEMES.firstOrNull { uri.startsWith(it, ignoreCase = true) }?.let { uri = uri.substring(it.length) }
+    return uri.substringAfter('@').substringBefore(';').substringBefore('?')
+}
+
+private val SCHEMES = listOf("sip:", "sips:", "tel:")
+
+/** The registrar field split into host and port: `host:port`, a host
+ * being a name or an IPv4 address, or `[IPv6]:port`. Null when it is
+ * neither. */
+fun hostPortOf(text: String): Pair<String, Int>? {
+    val trimmed = text.trim()
+    val (host, port) = if (trimmed.startsWith("[")) {
+        val close = trimmed.indexOf(']')
+        if (close < 0 || !trimmed.startsWith("]:", close)) {
+            return null
+        }
+        trimmed.substring(1, close) to trimmed.substring(close + 2)
+    } else {
+        val colon = trimmed.indexOf(':')
+        if (colon < 0 || colon != trimmed.lastIndexOf(':')) {
+            return null
+        }
+        trimmed.substring(0, colon) to trimmed.substring(colon + 1)
+    }
+    val number = port.toIntOrNull()?.takeIf { it in 1..65_535 } ?: return null
+    return if (host.isEmpty()) null else host to number
+}
+
+/**
+ * The registrar field as the address the library's `registrarAddress`
+ * takes: a host name looked up by [lookup] (A and AAAA, the platform's
+ * resolver), an IPv4 address preferred since the sample binds on one, and
+ * an address given as it is. Blocks on the lookup, so it runs off the main
+ * thread. Throws `IllegalArgumentException` for a field that is not
+ * `host:port` and `UnknownHostException` for a name that does not resolve.
+ */
+fun registrarAddressOf(text: String, lookup: (String) -> Array<InetAddress> = InetAddress::getAllByName): String {
+    val (host, port) = hostPortOf(text)
+        ?: throw IllegalArgumentException("the registrar \"${text.trim()}\" is not host:port")
+    val found = lookup(host)
+    val chosen = found.firstOrNull { it is Inet4Address } ?: found.firstOrNull() ?: throw UnknownHostException(host)
+    return if (chosen is Inet6Address) "[${chosen.hostAddress}]:$port" else "${chosen.hostAddress}:$port"
 }
 
 /**

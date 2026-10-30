@@ -117,6 +117,8 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
         core.answer(call, options.text("codecs"))
     }
 
+    override fun ring(call: String, promise: Promise) = settle(promise) { core.ring(call) }
+
     override fun reject(call: String, code: Double, promise: Promise) = settle(promise) { core.reject(call, code.toInt()) }
 
     override fun hangup(call: String, promise: Promise) = settle(promise) { core.hangup(call) }

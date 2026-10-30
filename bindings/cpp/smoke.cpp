@@ -6,8 +6,9 @@
  * with its status, an account goes with its object, a call's INVITE passes a
  * message hook that adds a header, a hook that throws keeps the message
  * and has its exception come out of the next poll(), an account that is a
- * WebRTC line offers DTLS-SRTP on UDP/TLS/RTP/SAVPF, and one that takes a
- * PBX's unasked mailbox state reads it.
+ * WebRTC line offers DTLS-SRTP on UDP/TLS/RTP/SAVPF, one that takes a
+ * PBX's unasked mailbox state reads it, and a call that came in is rung with
+ * 180 Ringing.
  *
  * Exits 0 when every check holds; prints each one that did not.
  */
@@ -200,6 +201,46 @@ int main()
     expect(answered, "an account with unsolicited_mwi did not answer the unasked NOTIFY 200");
     expect(waiting.size() == 1 && waiting[0].first == lamp.handle() && waiting[0].second == 4,
            "the unasked mailbox state did not reach the account with its four new messages");
+
+    // a call that came in, rung: 180 Ringing goes back to the caller
+    sipral::Handle arrived = SIPRAL_HANDLE_NONE;
+    sipral::StackOptions called;
+    called.bind_address = "127.0.0.1:5996";
+    called.on_event = [&arrived](const sipral::Event &event) {
+        if (event.kind() == SIPRAL_EVENT_KIND_INCOMING_CALL) {
+            arrived = event.call();
+        }
+    };
+    sipral::Stack callee(std::move(called));
+    sipral::Account line_in = callee.add_account(alice());
+    const std::string invite = "INVITE sip:alice@127.0.0.1:5996 SIP/2.0\r\n"
+                               "Via: SIP/2.0/UDP 127.0.0.1:5999;branch=z9hG4bK-smoke-ring\r\n"
+                               "Max-Forwards: 70\r\n"
+                               "From: <sip:carol@127.0.0.1>;tag=caller\r\n"
+                               "To: <sip:alice@127.0.0.1>\r\n"
+                               "Call-ID: smoke-ring\r\n"
+                               "CSeq: 1 INVITE\r\n"
+                               "Contact: <sip:carol@127.0.0.1:5999>\r\n"
+                               "Content-Length: 0\r\n\r\n";
+    const std::string to_callee = "127.0.0.1:5996";
+    expect(sipral_stack_receive_datagram(callee.handle(), SIPRAL_TRANSPORT_MAIN,
+                                         reinterpret_cast<const std::uint8_t *>(invite.data()), invite.size(),
+                                         pbx.data(), pbx.size(), to_callee.data(), to_callee.size(),
+                                         sipral::now_ms()) == SIPRAL_STATUS_OK,
+           "the INVITE was not taken in");
+    callee.poll();
+    expect(arrived != SIPRAL_HANDLE_NONE, "the INVITE raised no incoming call");
+    if (arrived != SIPRAL_HANDLE_NONE) {
+        sent(callee.handle());
+        sipral::Call incoming(callee.handle(), arrived);
+        incoming.ring();
+        bool rang = false;
+        for (const auto &message : sent(callee.handle())) {
+            rang = rang || message.rfind("SIP/2.0 180 ", 0) == 0;
+        }
+        expect(rang, "Call::ring() sent no 180 Ringing");
+        incoming.reject(603);
+    }
 
     expect(sipral::advertised_address("0.0.0.0:0", "127.0.0.1:5999").rfind("127.0.0.1:", 0) == 0,
            "the way toward loopback is not loopback");

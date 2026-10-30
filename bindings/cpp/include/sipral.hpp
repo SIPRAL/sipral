@@ -333,6 +333,8 @@ public:
     Handle handle() const noexcept { return call_; }
 
     void answer() { detail::check(sipral_call_answer(stack_, call_, nullptr, 0, now_ms()), "sipral_call_answer"); }
+    /** 180 Ringing, for a call that came in and is shown to the person it is for (RFC 3261 §13.3.1.1). */
+    void ring() { detail::check(sipral_call_ring(stack_, call_, nullptr, 0, now_ms()), "sipral_call_ring"); }
     void reject(std::uint32_t code = 486)
     {
         detail::check(sipral_call_reject(stack_, call_, code, now_ms()), "sipral_call_reject");

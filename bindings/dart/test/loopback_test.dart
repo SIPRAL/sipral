@@ -303,6 +303,40 @@ void main() {
     call.close();
   });
 
+  test(
+    'a call rung by the far end reaches the caller as 180 Ringing',
+    () async {
+      final fromAlice = alice.addAccount(
+        'sip:alice@sipral.invalid',
+        registrarAddress: bob.bindAddress,
+      );
+      bob.addAccount(
+        'sip:bob@sipral.invalid',
+        registrarAddress: alice.bindAddress,
+      );
+      final ringing = bob.events.firstWhere(
+        (event) => event.kind == SipralEventKind.incomingCall,
+      );
+      // subscribed before the 180 can come
+      final heard = alice.events.firstWhere(
+        (event) =>
+            event.kind == SipralEventKind.callProgress &&
+            event.statusCode == 180,
+      );
+      final call = await alice.placeCall(
+        fromAlice,
+        'sip:bob@${bob.bindAddress}',
+      );
+      final incoming = await ringing.timeout(const Duration(seconds: 15));
+      bob.ringCall(incoming);
+      final progress = await heard.timeout(const Duration(seconds: 15));
+      expect(progress.call, call.handle);
+      bob.rejectCall(incoming, code: 603);
+      await call.whenEnded(timeout: const Duration(seconds: 15));
+      call.close();
+    },
+  );
+
   test('a call placed past maxDialogs is refused, and the ceiling is read '
       'back', () async {
     final capped = await SipralStack.open(maxDialogs: 1);

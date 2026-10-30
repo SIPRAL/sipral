@@ -511,9 +511,12 @@ with it: read `SipralEventKind.incomingCall` off `stack.events()` and call
 `stack.answerCall(event)` or `stack.rejectCall(event)`. To see everything
 the call does from its answer on, take it with
 `stack.takeIncomingCall(event)`, which hands over the `Call` still ringing,
-then its `events()`, then `answer()`. Under CallKit, bind the ringing `Call`
-into `CallKitBridge` instead, and CallKit's `CXAnswerCallAction` is what
-answers it.
+then its `events()`, then `answer()`. A call the application shows on its
+own screen is rung with `call.ring()` (or `stack.ringCall(event)` before it
+is taken): 180 Ringing, so the caller hears ringback (RFC 3261 §13.3.1.1).
+Under CallKit, bind the ringing `Call` into `CallKitBridge` instead: the
+bridge rings it once CallKit has put its screen up, and CallKit's
+`CXAnswerCallAction` is what answers it.
 
 ### The call's audio
 

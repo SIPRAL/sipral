@@ -1366,6 +1366,19 @@ class SipralClient private constructor(
         return call
     }
 
+    /** `sipral_call_ring`: 180 Ringing, for a call nothing has answered that is
+     * being shown to the person it is for (RFC 3261 §13.3.1.1), so the caller
+     * hears ringback until [answerCall]. `TelecomBridge` sends it once the
+     * telecom framework shows the call. */
+    fun ringCall(event: SipralEvent) {
+        ringCall(event.call)
+    }
+
+    /** [ringCall] by call handle. */
+    fun ringCall(callHandle: Long) {
+        retryBusy { Sipral.callRing(handle, callHandle, ByteArray(0), nowMs()) }
+    }
+
     /** `sipral_call_reject`, for a call nothing has answered. */
     fun rejectCall(event: SipralEvent, code: Long = 486) {
         rejectCall(event.call, code)

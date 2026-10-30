@@ -105,6 +105,8 @@ export class Peer {
   address = '';
   private readonly waiting: { method: string; resolve: (message: string) => void }[] = [];
   private readonly held: string[] = [];
+  /** The requests handed over already, by top `Via` and `CSeq`. */
+  private readonly taken = new Set<string>();
 
   private constructor() {
     this.socket = createSocket('udp4');
@@ -152,6 +154,17 @@ export class Peer {
     const reply = this.responder?.(message, from) ?? null;
     if (reply !== null) {
       this.send(reply, from);
+    }
+    if (!message.startsWith('SIP/2.0')) {
+      // A request resent over UDP before its answer landed is the same
+      // request, not the next one, as a server's transaction takes it
+      // (RFC 3261 §17.2.3): a slow run would otherwise hand a test the
+      // first PUBLISH again where it waits for the second.
+      const key = `${header('Via', message)} ${header('CSeq', message)}`;
+      if (this.taken.has(key)) {
+        return;
+      }
+      this.taken.add(key);
     }
     const index = this.waiting.findIndex((waiter) => message.startsWith(`${waiter.method} `));
     if (index >= 0) {

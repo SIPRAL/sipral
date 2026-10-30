@@ -323,10 +323,14 @@ final class SipralReactCoreTests: XCTestCase {
         try bob.core.hangup(toCarol)
         _ = try await carol.await("the end of the call Bob placed") { $0["kind"] as? String == "callEnded" }
 
-        // A second call, turned away with a final response.
+        // A second call, rung, then turned away with a final response.
         mark = bob.count
         let second = try alice.core.placeCall(aliceLine, "sip:bob@\(bob.address)", destination: nil, codecs: nil)
         let again = try await bob.await("the second call", after: mark) { $0["kind"] as? String == "incomingCall" }
+        try bob.core.ring(try XCTUnwrap(again["call"] as? String))
+        _ = try await alice.await("the 180") {
+            $0["kind"] as? String == "callProgress" && $0["call"] as? String == second && $0["statusCode"] as? Int == 180
+        }
         try bob.core.reject(try XCTUnwrap(again["call"] as? String), code: 486)
         let refused = try await alice.await("the refusal") {
             $0["kind"] as? String == "callEnded" && $0["call"] as? String == second

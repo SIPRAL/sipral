@@ -574,6 +574,23 @@ export class SipralCall {
     this.answered = true;
   }
 
+  /**
+   * Tell the caller a call that arrived is ringing, 180 Ringing, once it is
+   * shown to the person it is for (RFC 3261 §13.3.1.1): the caller hears
+   * ringback until {@link answer}.
+   */
+  async ring(): Promise<void> {
+    await this.client.run(
+      () => {
+        this.alive();
+        if (this.direction !== 'incoming' || this.answered) {
+          throw new SipralError('wrongState', `call ${this.id} is not waiting to be answered`);
+        }
+      },
+      (native) => native.ring(this.id),
+    );
+  }
+
   /** Turn away a call that arrived, with a final response: 486 Busy Here unless said otherwise. */
   async reject(code = 486): Promise<void> {
     await this.client.run(

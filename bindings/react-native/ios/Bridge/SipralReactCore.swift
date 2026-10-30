@@ -436,6 +436,16 @@ public final class SipralReactCore: @unchecked Sendable {
         }
     }
 
+    /// 180 Ringing for a call that arrived and waits to be answered.
+    public func ring(_ call: String) throws {
+        try guarded {
+            guard let event = locked({ arrived[call] }) else {
+                throw SipralRefusal("wrongState", "call \(call) is not waiting to be answered")
+            }
+            try open().ringCall(event)
+        }
+    }
+
     public func reject(_ call: String, code: Int) throws {
         try guarded {
             let event = try take(call, from: \.arrived, "call \(call) is not waiting to be answered")

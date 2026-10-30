@@ -163,7 +163,7 @@ private fun PhoneScreen(phone: Phone) {
     val s = phone.settings
     Text("Account", style = MaterialTheme.typography.titleMedium)
     Field("Address of record", s.aor) { v -> phone.edit { it.copy(aor = v) } }
-    Field("Registrar address (host:port)", s.registrarAddress) { v -> phone.edit { it.copy(registrarAddress = v) } }
+    Field("Registrar (host:port, a name or an address)", s.registrarAddress) { v -> phone.edit { it.copy(registrarAddress = v) } }
     Field("Registrar URI (empty: no registration)", s.registrar) { v -> phone.edit { it.copy(registrar = v) } }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("Transport")

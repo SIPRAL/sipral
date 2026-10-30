@@ -73,6 +73,9 @@ codec's) has the library convert both ways, and `sampleRate` and
 and `answerCall(event, codecs: 'PCMA,PCMU')` give one call its own codecs in
 place of the stack's; an answer keeps the offer's order (RFC 3264 §6.1), so
 answering it chooses which codecs rather than which comes first.
+`ringCall(event)` sends 180 Ringing for an incoming call shown to the user
+and not yet answered, so the caller hears ringback; `rejectCall(event)`
+refuses it.
 
 The stack signals over its UDP socket. An account can have a connection of
 its own beside it, to its own server, so that one stack holds an account on

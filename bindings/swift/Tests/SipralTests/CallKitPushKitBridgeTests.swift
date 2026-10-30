@@ -157,6 +157,48 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertNotNil(hungUp, "a call CallKit forgot was left up")
     }
 
+    /// A cellular call taken with Hold & Accept, as an iPhone XS ran it:
+    /// CallKit holds ours and deactivates the session, the system posts an
+    /// interruption's start and never its end, then CallKit resumes ours and
+    /// activates the session again. That activation is the end of the
+    /// interruption; the audio was left paused for it, the call running
+    /// with nothing heard either way.
+    func testAnInterruptionWhoseEndNeverComesIsOverWhenCallKitActivatesTheSession() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+
+        let bridge = CallKitBridge(provider: RecordingProvider())
+        let uuid = UUID()
+        bridge.bind(uuid: uuid, to: bobCall)
+        let aliceEvents = Recorder(aliceCall.events())
+        try bridge.handleAnswer(uuid: uuid)
+        _ = await aliceEvents.first(within: 5) { $0.kind == .callConfirmed }
+
+        let device = FakeCallAudioDevice()
+        let audio = CallAudio(
+            sampleRate: 8000, frameSamples: 160, frames: AsyncStream { _ in }, send: { _ in }, device: device,
+            retryDelays: [0]
+        )
+        defer { audio.close() }
+        bridge.attach(audio, to: uuid)
+        audio.start()
+        bridge.audioSessionActivated()
+        let running = await eventually(within: 5) { audio.state == .running }
+        XCTAssertTrue(running)
+
+        try bridge.handleHold(uuid: uuid, onHold: true)
+        bridge.audioSessionDeactivated()
+        audio.interruptionBegan()
+        try bridge.handleHold(uuid: uuid, onHold: false)
+        bridge.audioSessionActivated()
+
+        let back = await eventually(within: 5) { audio.pauses.isEmpty && audio.state == .running }
+        XCTAssertTrue(back, "the call's audio stayed paused for \(audio.pauses)")
+    }
+
     /// In device mode the session drives the whole engine: opened at
     /// `didActivate` (or at once if already active), closed at deactivation
     /// and reset, muted with CallKit.
@@ -282,6 +324,80 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertEqual(endReason, .localHangup)
         let unbound = await eventually(within: 5) { bridge.call(for: uuid) == nil }
         XCTAssertTrue(unbound, "a call closed out from under the bridge must still be unbound")
+    }
+
+    /// Whether the caller's `heard` events hold a 180 Ringing.
+    private static func isRinging(_ event: SipralEvent) -> Bool {
+        event.kind == .callProgress && event.callData?.statusCode == 180
+    }
+
+    /// A call bound while CallKit has yet to show its screen rings (180)
+    /// the moment the screen is up, and not before.
+    func testACallBoundBeforeItsScreenRingsOnceTheScreenIsUp() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let heard = Recorder(aliceCall.events())
+
+        let provider = DeferringProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let uuid = bridge.reportIncomingCall(callerId: "sip:alice@sipral.invalid") { _ in }
+        bridge.bind(uuid: uuid, to: bobCall)
+        let early = await heard.first(within: 1, where: Self.isRinging)
+        XCTAssertNil(early, "the call rang before CallKit showed it")
+
+        provider.answer()
+        let rang = await heard.first(within: 10, where: Self.isRinging)
+        XCTAssertNotNil(rang, "the caller never heard the shown call ring: \(heard.elements.map(\.kindName))")
+        XCTAssertEqual(heard.elements.filter(Self.isRinging).count, 1)
+    }
+
+    /// A pushed call: the screen is up before its INVITE, and the call
+    /// rings as soon as it is bound to that screen.
+    func testACallBoundToAScreenAlreadyUpRingsAtOnce() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let heard = Recorder(aliceCall.events())
+
+        let provider = DeferringProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let uuid = bridge.reportIncomingCall(callerId: "sip:alice@sipral.invalid") { _ in }
+        provider.answer()
+        bridge.bind(uuid: uuid, to: bobCall)
+
+        let rang = await heard.first(within: 10, where: Self.isRinging)
+        XCTAssertNotNil(rang, "the caller never heard the shown call ring: \(heard.elements.map(\.kindName))")
+    }
+
+    /// Answer tapped on a pushed screen before its INVITE came: the call
+    /// is answered when bound, and the caller gets the 200 OK with no 180
+    /// before it.
+    func testACallAnsweredBeforeItsInviteCameIsAnsweredWithoutRinging() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await ringingCall(from: alice, to: bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let heard = Recorder(aliceCall.events())
+
+        let provider = DeferringProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let uuid = bridge.reportIncomingCall(callerId: "sip:alice@sipral.invalid") { _ in }
+        provider.answer()
+        let answered = Box<String>()
+        bridge.handleAnswer(uuid: uuid) { failure in answered.value = failure.map { "\($0)" } ?? "answered" }
+        XCTAssertNil(answered.value, "an Answer with no call to answer was settled")
+        bridge.bind(uuid: uuid, to: bobCall)
+
+        XCTAssertEqual(answered.value, "answered", "the kept Answer was not carried out at bind")
+        let confirmed = await heard.first(within: 10) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(confirmed, "the caller never saw the answer: \(heard.elements.map(\.kindName))")
+        XCTAssertFalse(heard.elements.contains(where: Self.isRinging), "a call answered at bind rang first")
     }
 }
 

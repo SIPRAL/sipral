@@ -253,7 +253,9 @@ class SipralCoreCall internal constructor(
         override fun setOnHold() = request(Shown.INACTIVE)
         override fun setRemoteHold(held: Boolean) = Unit
 
-        override fun setDisconnected(cause: TelecomDisconnect) {
+        override fun setDisconnected(cause: TelecomDisconnect) = setDisconnected(cause, cause.name.lowercase())
+
+        override fun setDisconnected(cause: TelecomDisconnect, reason: String) {
             synchronized(lock) {
                 if (shown == Shown.ENDED) {
                     return
@@ -261,7 +263,7 @@ class SipralCoreCall internal constructor(
                 shown = Shown.ENDED
             }
             steps.trySend {
-                val result = disconnect(DisconnectCause(disconnectCodeOf(cause), null, null, cause.name.lowercase()))
+                val result = disconnect(DisconnectCause(disconnectCodeOf(cause), null, null, reason))
                 if (result is CallControlResult.Error) {
                     report("core-telecom: disconnect of $id refused, error ${result.errorCode}")
                 }

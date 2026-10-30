@@ -315,6 +315,11 @@ final class AppModel {
         }
         incoming = Incoming(event: event, caller: caller, detail: detail.joined(separator: ", "))
         try? stack.audio?.ring(Self.ringTone, sampleRate: 8_000)
+        do {
+            try stack.ringCall(event)
+        } catch {
+            append("ringing not sent: \(error)")
+        }
         if let after = answering?.answerAfterMs {
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: after * 1_000_000)

@@ -1692,8 +1692,9 @@ public final class SipralStack: @unchecked Sendable {
     }
 
     /// A `Call` for an incoming call that is left ringing: its media socket
-    /// opened and its events routed, and nothing sent. `Call.answer()`
-    /// answers it later, `Call.reject(code:)` refuses it.
+    /// opened and its events routed, and nothing sent. `Call.ring()` tells
+    /// the caller it rings, `Call.answer()` answers it later,
+    /// `Call.reject(code:)` refuses it.
     ///
     /// For a call shown to a person first: on iOS, bind it into
     /// `CallKitBridge` before the user taps Answer, so `CXAnswerCallAction`
@@ -1733,6 +1734,15 @@ public final class SipralStack: @unchecked Sendable {
             throw error
         }
         return call
+    }
+
+    /// `sipral_call_ring`: 180 Ringing for `event`'s incoming call, without
+    /// taking it, once it is shown to the person it is for (RFC 3261
+    /// §13.3.1.1). `Call.ring()` is the same for a call taken.
+    public func ringCall(_ event: SipralEvent) throws {
+        try retryingBusy {
+            try Sipral.callRing(stack: handle, call: event.call, sdp: [], nowMs: nowMs())
+        }
     }
 
     public func rejectCall(_ event: SipralEvent, code: UInt32 = 486) throws {

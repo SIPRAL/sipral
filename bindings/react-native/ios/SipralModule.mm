@@ -214,6 +214,11 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   [_bridge answer:call options:given resolve:resolve reject:reject];
 }
 
+- (void)ring:(NSString *)call resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge ring:call resolve:resolve reject:reject];
+}
+
 - (void)reject:(NSString *)call
           code:(NSInteger)code
        resolve:(RCTPromiseResolveBlock)resolve

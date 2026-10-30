@@ -75,8 +75,13 @@ class SipralConnection internal constructor(
             }
         }
 
-        override fun setDisconnected(cause: TelecomDisconnect) = onMain {
-            self.setDisconnected(DisconnectCause(codeOf(cause)))
+        override fun setDisconnected(cause: TelecomDisconnect) = disconnected(DisconnectCause(codeOf(cause)))
+
+        override fun setDisconnected(cause: TelecomDisconnect, reason: String) =
+            disconnected(DisconnectCause(codeOf(cause), null, null, reason))
+
+        private fun disconnected(why: DisconnectCause) = onMain {
+            self.setDisconnected(why)
             // destroyed on the main thread's next turn, never inside this one: the
             // bridge can say "disconnected" from inside onCreateIncomingConnection,
             // before the service is listening for the destruction

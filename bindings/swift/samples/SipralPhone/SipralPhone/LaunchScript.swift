@@ -20,6 +20,8 @@ import Foundation
 ///   incoming screen at once.
 /// - `SIPRAL_PHONE_EVIDENCE=1`: write the evidence file when a call ends;
 ///   `SIPRAL_PHONE_UNREGISTER=1`: unregister when it ends.
+/// - `SIPRAL_PHONE_SCREEN_ON=1`: keep the screen on while the application
+///   is in front, as Diagnostics' "Keep the screen on" does.
 struct LaunchScript {
     let settings: PhoneSettings?
     let password: String?
@@ -30,6 +32,7 @@ struct LaunchScript {
     let answers: Bool
     let evidence: Bool
     let unregisters: Bool
+    let keepsScreenOn: Bool
 
     init(environment: [String: String]) {
         func value(_ name: String) -> String? {
@@ -57,6 +60,7 @@ struct LaunchScript {
         answers = value("ANSWER") == "1"
         evidence = value("EVIDENCE") == "1"
         unregisters = value("UNREGISTER") == "1"
+        keepsScreenOn = value("SCREEN_ON") == "1"
     }
 
     @MainActor
@@ -64,7 +68,9 @@ struct LaunchScript {
         guard let call else { return }
         Task {
             for _ in 0..<100 {
-                if case .registered = model.registration { break }
+                // canDial too: a VoIP token that arrives just after launch
+                // replaces the stack, and a call placed on the old one ends
+                if case .registered = model.registration, model.canDial { break }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
             if callAfter > 0 {

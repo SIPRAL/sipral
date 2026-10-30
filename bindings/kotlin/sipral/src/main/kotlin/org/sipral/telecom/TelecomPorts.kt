@@ -48,6 +48,12 @@ interface TelecomConnection {
      * connection is destroyed after this and told nothing more. */
     fun setDisconnected(cause: TelecomDisconnect)
 
+    /** [setDisconnected] with why, in words: the library's refusal of a
+     * call it was asked to place. Kept by the framework as the disconnect's
+     * reason, which `dumpsys telecom` shows; a framework with nowhere to keep
+     * it is told the cause alone. */
+    fun setDisconnected(cause: TelecomDisconnect, reason: String) = setDisconnected(cause)
+
     /** Who is calling, for a call a push raised without naming them: the
      * INVITE's `From` URI and, when known, its name. Nothing, for a
      * framework that cannot change a call it already shows. */
@@ -96,6 +102,9 @@ interface SipCalls {
      * expired. */
     fun forgetAnnouncement(announcement: Long)
 
+    /** `sipral_call_ring`: 180 Ringing for an incoming call the framework
+     * is showing. */
+    fun ring(call: Long)
     fun answer(call: Long)
     fun reject(call: Long, code: Long)
 

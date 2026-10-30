@@ -1307,6 +1307,19 @@ final class SipralStack {
     return call;
   }
 
+  /// Say the `SipralEventKind.incomingCall` [incoming] is ringing: 180
+  /// Ringing, once the call is shown to the person it is for (RFC 3261
+  /// §13.3.1.1), so the caller hears ringback until [answerCall].
+  void ringCall(SipralStackEvent incoming) {
+    _ensureOpen();
+    _checkNow(
+      _sipral,
+      'sipral_call_ring',
+      () => _sipral.callRing(_handle, incoming.call, ffi.nullptr, 0, nowMs()),
+    );
+    _poll();
+  }
+
   /// Refuse the `SipralEventKind.incomingCall` [incoming] with [code].
   void rejectCall(SipralStackEvent incoming, {int code = 486}) {
     _ensureOpen();
