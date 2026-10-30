@@ -157,7 +157,7 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertNotNil(hungUp, "a call CallKit forgot was left up")
     }
 
-    /// A cellular call taken with Hold & Accept, as an iPhone XS ran it:
+    /// A cellular call taken with Hold & Accept, as a real phone ran it:
     /// CallKit holds ours and deactivates the session, the system posts an
     /// interruption's start and never its end, then CallKit resumes ours and
     /// activates the session again. That activation is the end of the

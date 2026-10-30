@@ -234,7 +234,7 @@ _terminateAppIfThereAreUnhandledVoIPPushes]`) and no longer woken by VoIP
 pushes. So the adapter and these two calls report to CallKit before they
 return, and announce, refresh and call the completion handler once CallKit
 has answered; the bridge's `async` calls are for code outside a delegate.
-Found on an iPhone XS with iOS 18.7: a simulator receives no VoIP push, and
+Found on a real phone: a simulator receives no VoIP push, and
 a fake `CXProvider` holds no deadline, so the tests pin the order instead
 (`PushReportedInTheDelegateTests`).
 
@@ -273,7 +273,7 @@ user answered before its INVITE arrived gets its 200 OK and no 180 before
 it, and one declined or refused by the system gets neither. An application
 that shows a call on its own screen sends it itself: `Call.ring()` or
 `SipralStack.ringCall(_:)` in Swift, `ringCall` in Kotlin and Dart, `ring()`
-in Python, Node, React Native and C++, `RingCall` in .NET. Found on an iPhone XS on 30 October 2026:
+in Python, Node, React Native and C++, `RingCall` in .NET. Found on a real phone on 30 October 2026:
 a call CallKit showed sent `100 Trying` and then nothing until the 200 OK,
 8.8 s later. A PBX that plays ringback itself (FreePBX's `Dial` with `r`)
 hid it; a direct call, or another PBX that passes the callee's progress on,
@@ -1320,6 +1320,13 @@ PCMU.
 
 ### On a real Android phone
 
+Run on an Android phone against the lab's FreePBX on 30 October 2026, the
+sample installed from the debug APK and its account handed over by
+`account-import.properties`: registration over UDP, a call to the echo with
+digits both ways through the self-managed `ConnectionService`, and a call
+the library refused to place told with its reason. What follows is the
+whole list.
+
 What only a phone can show, in the order that wastes least time, with what
 to expect and what to send back. Every step ends with **Diagnostics →
 Share log** sent to the developer, unless it says otherwise; the bundle
@@ -1710,7 +1717,7 @@ on every open. Three things feed it:
 | `.ended` with `.shouldResume` | `AudioSessionObserver` | A new device opened. Without `.shouldResume` the interruption stays one of the reasons the device is let go, as Apple asks, until the application calls `resume(.interrupted)`; either way `interruptionEnded(shouldResume:)` is reported |
 | `routeChangeNotification` | `AudioSessionObserver` | Reported with the output the session is on now and why it moved (`newDeviceAvailable`, `oldDeviceUnavailable`, anything else). An engine that stops because of it (`AVAudioEngineConfigurationChange`) is started again in place, and only one that will not start is the device failing |
 | `mediaServicesWereLostNotification`, then `mediaServicesWereResetNotification` | `AudioSessionObserver` | The device let go when the services go, and built again from nothing when they come back: every audio object made before a reset is dead |
-| `CXProviderDelegate.provider(_:didActivate:)`, `didDeactivate` | `CallKitAdapter` to `CallKitBridge` | A call's device starts only once the system has activated the session (`CallAudioPause.sessionInactive` until then), and is let go when the system deactivates it. An activation also ends an interruption: after Hold & Accept for a cellular call and that call's end, iOS 18.7 on an iPhone XS posted the interruption's start and never its end, and `didActivate` was the only sign the session was the call's again |
+| `CXProviderDelegate.provider(_:didActivate:)`, `didDeactivate` | `CallKitAdapter` to `CallKitBridge` | A call's device starts only once the system has activated the session (`CallAudioPause.sessionInactive` until then), and is let go when the system deactivates it. An activation also ends an interruption: after Hold & Accept for a cellular call and that call's end, iOS posted the interruption's start and never its end, and `didActivate` was the only sign the session was the call's again |
 | `CXSetHeldCallAction` — Hold & Accept for a cellular call, CarPlay, a headset | `CallKitBridge.handleHold` | The device let go at once, the far end held with a re-INVITE; the reverse on resume |
 | `CXSetMutedCallAction` | `CallKitBridge.handleMute` | Silence sent in the microphone's place |
 | `providerDidReset` | `CallKitBridge.providerDidReset` | Every call hung up and its device let go: the system's call service no longer knows them |
@@ -1962,6 +1969,14 @@ The App ID `org.sipral.phone` and the distribution certificate are what
 Connect was not run.
 
 ## On a real iPhone
+
+Run on an iPhone against the lab's FreePBX on 30 October 2026, driven by the
+launch script (`SIPRAL_PHONE_*` through `xcrun devicectl device process
+launch --environment-variables`): registration over UDP, TCP and TLS, calls
+to the echo over UDP and TLS with digits, a call from the PBX and one
+straight from another stack answered on CallKit's screen with 180 sent first,
+and a cellular call taken with Hold & Accept and given back. A VoIP push
+end to end waits for an APNs key.
 
 The run on the phone is short and every step ends with the same thing: on
 Diagnostics, "Share log", and the file sent back (AirDrop, Mail, Messages).
