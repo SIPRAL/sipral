@@ -24,6 +24,7 @@
 
 use std::time::Duration;
 
+use crate::rtcp_stats::InterarrivalJitter;
 use crate::voip_metrics::{BurstGapMetrics, GminTracker, PacketOutcome};
 use crate::wire::RtpPacket;
 
@@ -225,7 +226,9 @@ pub enum Pull<'a> {
     /// The next packet in order.
     Packet(Frame<'a>),
     /// Its sequence number came due and nothing was in the slot. Later packets
-    /// are waiting, so this one is not coming: conceal it.
+    /// are waiting, so this one is not coming: conceal it. Also a packet that
+    /// came under a payload type the stream does not play, which was received
+    /// and is not counted lost.
     Conceal,
     /// The pause is being made one frame longer, on purpose, to lengthen the
     /// delay. Nothing was consumed; repeat the last frame or play comfort
@@ -259,7 +262,8 @@ pub struct Frame<'a> {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Quality {
-    /// Packets taken in and held for playout.
+    /// Packets taken in and held for playout, with those of the source that
+    /// came under a payload type the stream does not play.
     pub received: u64,
     /// Sequence numbers that came due with nothing in them, plus the ones the
     /// window moved past unfilled.
@@ -293,7 +297,10 @@ pub struct Quality {
     pub target_delay: Duration,
     /// Interarrival jitter, the smoothed mean deviation of transit time
     /// (RFC 3550 §6.4.1). Measured here from the buffer's own arrivals, so it
-    /// is available on a session with RTCP switched off.
+    /// is available on a session with RTCP switched off. It is the current
+    /// source's: a new SSRC starts it from zero, and a new timestamp base
+    /// under the same one does not enter it. Of packets that repeat a
+    /// timestamp, as RFC 4733 events do, only the first is timed.
     pub jitter: Duration,
     /// Frames concealed or lost to an under-run ([`Quality::underruns`]) as
     /// a fraction of frames played, over the last ten seconds or so. Both
@@ -321,6 +328,10 @@ struct Counters {
 #[derive(Debug, Default)]
 struct Slot {
     filled: bool,
+    /// Filled by a packet of the source whose payload type this stream does
+    /// not play ([`JitterBuffer::ignore`]): its sequence number arrived, and
+    /// nothing in it is played.
+    ignored: bool,
     sequence: u16,
     timestamp: u32,
     payload_type: u8,
@@ -360,10 +371,7 @@ struct Timing {
     last_sequence: u16,
     last_timestamp: u32,
     seen: bool,
-    transit: Option<u32>,
-    /// The jitter estimate scaled by sixteen, so §6.4.1's 1/16 gain is exact
-    /// rather than rounded away at every update.
-    jitter_scaled: u32,
+    jitter: InterarrivalJitter,
     base_current: Option<u32>,
     base_previous: Option<u32>,
     base_age: u32,
@@ -383,8 +391,7 @@ impl Timing {
             last_sequence: 0,
             last_timestamp: 0,
             seen: false,
-            transit: None,
-            jitter_scaled: 0,
+            jitter: InterarrivalJitter::new(),
             base_current: None,
             base_previous: None,
             base_age: 0,
@@ -402,7 +409,17 @@ impl Timing {
     fn note(&mut self, sequence: u16, timestamp: u32, arrival: u32, spurt: Option<u32>) {
         self.since_decay = self.since_decay.saturating_add(1);
         self.since_shrink = self.since_shrink.saturating_add(1);
+        // RFC 4733 §2.2.1: every packet of a named event carries the instant
+        // the event began, so the second and later ones arrive later and
+        // later against the same timestamp. That is the event lasting, not
+        // the path: only the first packet of a timestamp is timed here. The
+        // reception report's estimate takes them all, as §2.5.2.2 requires
+        // of it ("based on all packets with a given timestamp").
+        let repeated = self.seen && timestamp == self.last_timestamp;
         self.learn_span(sequence, timestamp);
+        if repeated {
+            return;
+        }
 
         // transit is the offset between the two clocks plus the path delay.
         // The offset is unknown and constant, so it cancels in everything
@@ -416,15 +433,12 @@ impl Timing {
         {
             self.rebase();
         }
-        if let Some(previous) = self.transit {
-            let d = transit.wrapping_sub(previous).cast_signed().unsigned_abs();
-            let round_off = self.jitter_scaled.saturating_add(8) >> 4;
-            self.jitter_scaled = self
-                .jitter_scaled
-                .saturating_add(d)
-                .saturating_sub(round_off);
+        // a sender that moved to another timestamp base, keeping its SSRC,
+        // is on another timeline: its delay is measured from this packet on,
+        // the same as a new spurt's above
+        if self.jitter.on_packet(timestamp, arrival, self.clock_rate) {
+            self.rebase();
         }
-        self.transit = Some(transit);
 
         let relative = self.relative(transit);
         self.record(relative);
@@ -540,7 +554,7 @@ impl Timing {
     /// been re-based. The delay distribution and the jitter estimate describe
     /// the path rather than the stream, and the path has not changed.
     fn restart(&mut self) {
-        self.transit = None;
+        self.jitter.new_timeline();
         self.rebase();
         self.seen = false;
         self.streak = 0;
@@ -855,6 +869,21 @@ impl JitterBuffer {
     /// Validity is checked before this, so a wild sequence number never moves
     /// the window.
     pub fn insert(&mut self, packet: &RtpPacket<'_>, arrival: Duration) -> Insert {
+        self.place(packet, arrival, false)
+    }
+
+    /// Take a packet of the stream's source whose payload type this stream
+    /// does not play, which RFC 3550 §5.1 says to ignore. Its sequence number
+    /// still arrived: RFC 3550 §6.4.1 counts every packet of the source, and
+    /// RFC 4733 §2.5.1.6 numbers event packets so that a receiver can tell
+    /// them from loss. It holds its place and plays as [`Pull::Conceal`]
+    /// without being counted lost; it is not timed, since the clock its
+    /// timestamp runs at is the payload format's (§5.1), not known here.
+    pub(crate) fn ignore(&mut self, packet: &RtpPacket<'_>, arrival: Duration) -> Insert {
+        self.place(packet, arrival, true)
+    }
+
+    fn place(&mut self, packet: &RtpPacket<'_>, arrival: Duration, ignored: bool) -> Insert {
         let header = packet.header();
         let sequence = header.sequence;
 
@@ -870,7 +899,9 @@ impl JitterBuffer {
             // it is unplayable, but it is also the clearest evidence there is
             // that the buffer is too short, so its arrival still counts, and
             // counts in full whatever its marker says
-            self.note_arrival(sequence, header.timestamp, arrival, false);
+            if !ignored {
+                self.note_arrival(sequence, header.timestamp, arrival, false);
+            }
             self.counts.discarded_late = self.counts.discarded_late.saturating_add(1);
             if self.next.wrapping_sub(sequence) <= LATE_WINDOW && self.take_lost(sequence) {
                 self.gmin.late();
@@ -900,6 +931,7 @@ impl JitterBuffer {
             return Insert::Late;
         };
         slot.filled = true;
+        slot.ignored = ignored;
         slot.sequence = sequence;
         slot.timestamp = header.timestamp;
         slot.payload_type = header.payload_type;
@@ -907,7 +939,9 @@ impl JitterBuffer {
         // the slot keeps its allocation across packets, so a stream that has
         // been running for a while has stopped allocating altogether
         slot.payload.clear();
-        slot.payload.extend_from_slice(payload);
+        if !ignored {
+            slot.payload.extend_from_slice(payload);
+        }
 
         self.held = self.held.saturating_add(1);
         self.arrived = self.arrived.saturating_add(1);
@@ -921,6 +955,14 @@ impl JitterBuffer {
         } else {
             self.highest = sequence;
         }
+        let outcome = if displaced > 0 {
+            Insert::Displaced(displaced)
+        } else {
+            Insert::Accepted
+        };
+        if ignored {
+            return outcome;
+        }
         self.note_arrival(
             sequence,
             header.timestamp,
@@ -931,12 +973,7 @@ impl JitterBuffer {
             self.pace
                 .arrived(sequence, header.timestamp, header.marker, self.timing.span);
         }
-
-        if displaced > 0 {
-            Insert::Displaced(displaced)
-        } else {
-            Insert::Accepted
-        }
+        outcome
     }
 
     /// Take the next frame, and say whether the one before it was speech.
@@ -1007,10 +1044,17 @@ impl JitterBuffer {
         self.advance_base(1);
         self.held = self.held.saturating_sub(1);
 
-        let Some(slot) = self.slots.get(index) else {
+        let Some(slot) = self.slots.get_mut(index) else {
             // it was filled a moment ago, so this cannot happen either
             return Pull::Empty;
         };
+        if slot.ignored {
+            // the source's packet, so not a loss, but nothing to play
+            slot.filled = false;
+            self.loss.record(false);
+            self.spurts.consumed();
+            return Pull::Conceal;
+        }
         let (sequence, timestamp, marker) = (slot.sequence, slot.timestamp, slot.marker);
         self.played(sequence, timestamp, marker);
 
@@ -1039,7 +1083,7 @@ impl JitterBuffer {
             return None;
         }
         let slot = self.slots.get(self.index_of(self.next))?;
-        slot.filled.then_some(Frame {
+        (slot.filled && !slot.ignored).then_some(Frame {
             sequence: slot.sequence,
             timestamp: slot.timestamp,
             payload_type: slot.payload_type,
@@ -1078,10 +1122,12 @@ impl JitterBuffer {
 
     /// Start RFC 3611 §4.7's figures again for a new source: §4.7.1's rates
     /// count "from the source ... since the beginning of reception". `Gmin`
-    /// stays (§4.7.2); the buffer's own counters carry on.
+    /// stays (§4.7.2); the buffer's own counters carry on. The interarrival
+    /// jitter starts again too: RFC 3550 §6.4.1 keeps it per "source SSRC_n".
     pub(crate) fn begin_source(&mut self) {
         self.gmin = GminTracker::new(self.gmin.gmin());
         self.resolved_lost = [0; LATE_WORDS];
+        self.timing.jitter = InterarrivalJitter::new();
     }
 
     /// Rebuild for a stream that changed codec mid-call, keeping what the call
@@ -1111,11 +1157,12 @@ impl JitterBuffer {
         let mut discarded = 0_u16;
         for offset in 0..self.queued() {
             let sequence = self.next.wrapping_add(offset);
-            let filled = self
-                .slots
-                .get(self.index_of(sequence))
-                .is_some_and(|slot| slot.filled);
-            if filled {
+            let slot = self.slots.get(self.index_of(sequence));
+            let filled = slot.is_some_and(|slot| slot.filled);
+            let ignored = slot.is_some_and(|slot| slot.ignored);
+            if filled && ignored {
+                self.resolve(sequence, PacketOutcome::Received);
+            } else if filled {
                 discarded = discarded.saturating_add(1);
                 self.resolve(sequence, PacketOutcome::Discarded);
             } else {
@@ -1172,7 +1219,7 @@ impl JitterBuffer {
             silenced: self.counts.silenced,
             delay: self.packets_to_duration(self.queued()),
             target_delay: self.packets_to_duration(self.target),
-            jitter: ticks_to_duration(self.clock_rate, self.timing.jitter_scaled >> 4),
+            jitter: ticks_to_duration(self.clock_rate, self.timing.jitter.ticks()),
             loss_rate: self.loss.rate(),
         }
     }
@@ -1460,9 +1507,15 @@ impl JitterBuffer {
                 && slot.filled
             {
                 slot.filled = false;
+                let ignored = slot.ignored;
                 self.held = self.held.saturating_sub(1);
-                self.counts.discarded_overflow = self.counts.discarded_overflow.saturating_add(1);
-                self.resolve(self.next, PacketOutcome::Discarded);
+                if ignored {
+                    self.resolve(self.next, PacketOutcome::Received);
+                } else {
+                    self.counts.discarded_overflow =
+                        self.counts.discarded_overflow.saturating_add(1);
+                    self.resolve(self.next, PacketOutcome::Discarded);
+                }
             } else {
                 self.counts.lost = self.counts.lost.saturating_add(1);
                 self.resolve(self.next, PacketOutcome::Lost);
@@ -1496,11 +1549,16 @@ impl JitterBuffer {
         let index = self.index_of(self.next);
         let filled = self.slots.get(index).is_some_and(|slot| slot.filled);
         if filled {
+            let mut ignored = false;
             if let Some(slot) = self.slots.get_mut(index) {
                 slot.filled = false;
+                ignored = slot.ignored;
             }
             self.held = self.held.saturating_sub(1);
-            self.counts.shrunk = self.counts.shrunk.saturating_add(1);
+            // a packet with nothing to play takes no audio with it
+            if !ignored {
+                self.counts.shrunk = self.counts.shrunk.saturating_add(1);
+            }
             self.resolve(self.next, PacketOutcome::Received);
         } else {
             self.counts.lost = self.counts.lost.saturating_add(1);
@@ -1522,7 +1580,10 @@ impl JitterBuffer {
         // past is resolved right here, once each and in order: those held
         // but never played are RFC 3611 §4.7.1 discards (overflow at "the
         // receiving jitter buffer"); the rest were never received at all
+        // the source's packets this stream ignores were received, and are
+        // neither discards nor loss
         let mut displaced: u16 = 0;
+        let mut ignored: u16 = 0;
         let mut sequence = self.next;
         for _ in 0..steps {
             let index = self.index_of(sequence);
@@ -1530,8 +1591,13 @@ impl JitterBuffer {
                 && slot.filled
             {
                 slot.filled = false;
-                displaced = displaced.saturating_add(1);
-                self.resolve(sequence, PacketOutcome::Discarded);
+                if slot.ignored {
+                    ignored = ignored.saturating_add(1);
+                    self.resolve(sequence, PacketOutcome::Received);
+                } else {
+                    displaced = displaced.saturating_add(1);
+                    self.resolve(sequence, PacketOutcome::Discarded);
+                }
             } else {
                 self.resolve(sequence, PacketOutcome::Lost);
             }
@@ -1542,14 +1608,16 @@ impl JitterBuffer {
             sequence = sequence.wrapping_add(1);
         }
 
-        self.held = self.held.saturating_sub(displaced);
+        self.held = self.held.saturating_sub(displaced).saturating_sub(ignored);
         self.counts.discarded_overflow = self
             .counts
             .discarded_overflow
             .saturating_add(u64::from(displaced));
         // what the window passed over without ever holding is loss the
         // consumer will never be told about any other way
-        let skipped = u64::from(advance).saturating_sub(u64::from(displaced));
+        let skipped = u64::from(advance)
+            .saturating_sub(u64::from(displaced))
+            .saturating_sub(u64::from(ignored));
         self.counts.lost = self.counts.lost.saturating_add(skipped);
         self.advance_base(advance);
         displaced
@@ -2717,6 +2785,84 @@ mod tests {
             1,
             "drift accumulated over a call is not jitter"
         );
+    }
+
+    /// RFC 4733 §2.2.1: "several RTP packets may carry the same timestamp",
+    /// the instant a named event began, and each arrives later against it
+    /// than the one before for as long as the event lasts. The path did
+    /// nothing; neither the jitter nor the delay the buffer aims at moves.
+    #[test]
+    fn packets_that_repeat_a_timestamp_are_not_timed_as_late() {
+        let mut buffer = buffer(100, 2);
+        steady(&mut buffer, 0, 100);
+        let before = buffer.quality();
+        let began = 100 * SPAN;
+        for sequence in 100..107_u16 {
+            let arrival = FRAME * u32::from(sequence);
+            insert_raw(&mut buffer, sequence, began, sequence == 100, arrival);
+            buffer.pull(Activity::Speech);
+        }
+        // the audio after it carries on from the instant the event ended
+        for sequence in 107..200_u16 {
+            let timestamp = u32::from(sequence) * SPAN;
+            insert_raw(
+                &mut buffer,
+                sequence,
+                timestamp,
+                false,
+                FRAME * u32::from(sequence),
+            );
+            buffer.pull(Activity::Speech);
+            let after = buffer.quality();
+            assert_eq!(after.jitter, before.jitter, "packet {sequence}");
+            assert!(
+                after.target_delay <= before.target_delay,
+                "packet {sequence}: the target went to {:?} from {:?}",
+                after.target_delay,
+                before.target_delay
+            );
+        }
+    }
+
+    /// A far end that moves its timestamps to a new random base mid-call,
+    /// keeping its SSRC and its sequence numbers: a PBX handing the call from
+    /// early media to the answered channel, with or without a marker on the
+    /// first packet. RFC 3550 §5.1 wants a timestamp clock "that increments
+    /// monotonically and linearly in time to allow synchronization and jitter
+    /// calculations"; the step from one timeline to another is neither, so it
+    /// is not jitter and not a late packet either.
+    #[test]
+    fn a_new_timestamp_base_on_the_same_stream_is_neither_jitter_nor_delay() {
+        // forward, and far enough to read as backward in 32 bits
+        for jump in [1_190_000_000_u32, 3_000_000_000] {
+            for marker in [false, true] {
+                let mut buffer = buffer(100, 2);
+                jittered(&mut buffer, 0, 120);
+                let before = buffer.quality();
+                assert!(before.jitter > Duration::ZERO, "the path is a jittery one");
+                for sequence in 120..240_u16 {
+                    let timestamp = u32::from(sequence).wrapping_mul(SPAN).wrapping_add(jump);
+                    let opens = marker && sequence == 120;
+                    let arrival = FRAME * u32::from(sequence);
+                    insert_raw(&mut buffer, sequence, timestamp, opens, arrival);
+                    buffer.pull(Activity::Speech);
+                    let after = buffer.quality();
+                    assert!(
+                        after.jitter <= before.jitter,
+                        "jump {jump}, marker {marker}: {:?} of jitter after packet {sequence}, \
+                         {:?} before the jump",
+                        after.jitter,
+                        before.jitter
+                    );
+                    assert!(
+                        after.target_delay <= before.target_delay,
+                        "jump {jump}, marker {marker}: the target went to {:?} from {:?}",
+                        after.target_delay,
+                        before.target_delay
+                    );
+                }
+            }
+        }
     }
 
     #[test]

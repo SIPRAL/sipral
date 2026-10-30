@@ -47,6 +47,71 @@ pub(crate) fn round_trip_time(block: &ReportBlock, arrival_ntp: u64) -> Option<D
     Some(q16_to_duration(delay))
 }
 
+/// The most two consecutive arrivals' relative transit times may differ by,
+/// in seconds of the stream's clock, and still be one timeline.
+///
+/// §5.1 wants the timestamp from a clock "that increments monotonically and
+/// linearly in time to allow synchronization and jitter calculations", and
+/// A.1 sizes the same stream's misordering at "a maximum misordering time of
+/// 2 seconds". A difference past that is the sender moving to another
+/// timestamp base, as a new random one does (§5.1, "The initial value of the
+/// timestamp SHOULD be random"), not delay: a figure hours long otherwise.
+const TIMELINE_SECONDS: u32 = 2;
+
+/// §6.4.1's interarrival jitter for one source, kept as A.8's integer form.
+///
+/// A packet whose transit differs from the previous one's by more than
+/// [`TIMELINE_SECONDS`] starts a new timeline: its transit is the reference
+/// from then on and its difference is not taken in.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct InterarrivalJitter {
+    transit: Option<u32>,
+    /// The estimate scaled by sixteen, so the 1/16 gain the RFC requires is
+    /// exact rather than rounded every update.
+    scaled: u32,
+}
+
+impl InterarrivalJitter {
+    /// A source nothing has arrived from.
+    #[must_use]
+    pub(crate) const fn new() -> Self {
+        Self {
+            transit: None,
+            scaled: 0,
+        }
+    }
+
+    /// Take one arrival: the packet's own timestamp, and the receiver's
+    /// clock when it arrived, both at `clock_rate`. `true` when it started a
+    /// new timeline rather than continuing the last one.
+    pub(crate) fn on_packet(&mut self, rtp_timestamp: u32, arrival: u32, clock_rate: u32) -> bool {
+        let transit = arrival.wrapping_sub(rtp_timestamp);
+        let previous = self.transit.replace(transit);
+        let Some(previous) = previous else {
+            return false;
+        };
+        let d = transit.wrapping_sub(previous).cast_signed().unsigned_abs();
+        if d > clock_rate.saturating_mul(TIMELINE_SECONDS) {
+            return true;
+        }
+        let round_off = self.scaled.saturating_add(8) >> 4;
+        self.scaled = self.scaled.saturating_add(d).saturating_sub(round_off);
+        false
+    }
+
+    /// Forget the last transit, keeping the estimate, for a source whose
+    /// timestamps start again on a new base.
+    pub(crate) const fn new_timeline(&mut self) {
+        self.transit = None;
+    }
+
+    /// The estimate in timestamp units, as a report block carries it.
+    #[must_use]
+    pub(crate) const fn ticks(&self) -> u32 {
+        self.scaled >> 4
+    }
+}
+
 /// What is remembered about one source in order to keep reporting on it:
 /// the jitter estimate, the interval snapshot fraction-lost needs, and the
 /// last SR heard from it.
@@ -54,11 +119,7 @@ pub(crate) fn round_trip_time(block: &ReportBlock, arrival_ntp: u64) -> Option<D
 pub(crate) struct ReceptionTracker {
     expected_prior: u64,
     received_prior: u64,
-    transit: Option<u32>,
-    /// The jitter estimate, scaled by sixteen (A.8's integer form), so the
-    /// 1/16 gain the RFC requires is exact rather than rounded every
-    /// update.
-    jitter_scaled: u32,
+    jitter: InterarrivalJitter,
     last_sr_ntp: Option<u64>,
     last_sr_arrival_ntp: Option<u64>,
 }
@@ -70,8 +131,7 @@ impl ReceptionTracker {
         Self {
             expected_prior: 0,
             received_prior: 0,
-            transit: None,
-            jitter_scaled: 0,
+            jitter: InterarrivalJitter::new(),
             last_sr_ntp: None,
             last_sr_arrival_ntp: None,
         }
@@ -79,18 +139,9 @@ impl ReceptionTracker {
 
     /// Update the jitter estimate for one arriving packet (§6.4.1, A.8).
     /// `rtp_timestamp` is the packet's own, `arrival` is the receiver's
-    /// clock at the moment it arrived, on the same clock.
-    pub(crate) fn on_packet(&mut self, rtp_timestamp: u32, arrival: u32) {
-        let transit = arrival.wrapping_sub(rtp_timestamp);
-        if let Some(previous) = self.transit {
-            let d = transit.wrapping_sub(previous).cast_signed().unsigned_abs();
-            let round_off = self.jitter_scaled.saturating_add(8) >> 4;
-            self.jitter_scaled = self
-                .jitter_scaled
-                .saturating_add(d)
-                .saturating_sub(round_off);
-        }
-        self.transit = Some(transit);
+    /// clock at the moment it arrived, both at `clock_rate`.
+    pub(crate) fn on_packet(&mut self, rtp_timestamp: u32, arrival: u32, clock_rate: u32) {
+        self.jitter.on_packet(rtp_timestamp, arrival, clock_rate);
     }
 
     /// Remember an SR just received from this source, so a future report
@@ -100,12 +151,14 @@ impl ReceptionTracker {
         self.last_sr_arrival_ntp = Some(arrival_ntp);
     }
 
-    /// Forget the interval snapshot and the SR bookkeeping, keeping the
-    /// jitter estimate. For a source that has restarted, whose
-    /// [`crate::source::SequenceState`] has already re-based on its own.
+    /// Forget the interval snapshot, the SR bookkeeping and the last transit,
+    /// keeping the jitter estimate. For a source that has restarted, whose
+    /// [`crate::source::SequenceState`] has already re-based on its own and
+    /// whose timestamps start again wherever it restarted them.
     pub(crate) fn restart(&mut self) {
         self.expected_prior = 0;
         self.received_prior = 0;
+        self.jitter.new_timeline();
         self.last_sr_ntp = None;
         self.last_sr_arrival_ntp = None;
     }
@@ -158,7 +211,7 @@ impl ReceptionTracker {
             cumulative_lost: i32::try_from(cumulative_lost).unwrap_or(0),
             extended_highest_sequence: u32::try_from(sequence.extended_highest() & 0xFFFF_FFFF)
                 .unwrap_or(u32::MAX),
-            jitter: self.jitter_scaled >> 4,
+            jitter: self.jitter.ticks(),
             last_sr,
             delay_since_last_sr,
         }
@@ -172,6 +225,9 @@ mod tests {
     use crate::source::SequenceState;
     use std::time::Duration;
 
+    /// Eight kilohertz, the clock every stream here runs at.
+    const RATE: u32 = 8000;
+
     #[test]
     fn a_steady_stream_settles_the_jitter_estimate_near_the_true_spacing_variance() {
         // §6.4.1: J(i) = J(i-1) + (|D(i-1,i)| - J(i-1))/16, sampled at
@@ -181,9 +237,9 @@ mod tests {
         // perfectly regular arrivals: transit is constant, so D is always
         // zero and jitter should decay to zero regardless of where it
         // started
-        tracker.on_packet(0, 1000);
+        tracker.on_packet(0, 1000, RATE);
         for step in 1..50 {
-            tracker.on_packet(step * 160, 1000 + step * 160);
+            tracker.on_packet(step * 160, 1000 + step * 160, RATE);
         }
         let block = tracker.block(1, &sequence, 0);
         assert_eq!(block.jitter, 0, "no variance in spacing, no jitter");
@@ -193,13 +249,64 @@ mod tests {
     fn a_late_packet_moves_the_jitter_estimate_by_a_sixteenth_of_the_difference() {
         let mut tracker = ReceptionTracker::new();
         let sequence = SequenceState::new();
-        tracker.on_packet(0, 1000); // transit = 1000, no jitter sample yet
-        tracker.on_packet(160, 1160); // transit = 1000, D = 0
+        tracker.on_packet(0, 1000, RATE); // transit = 1000, no jitter sample yet
+        tracker.on_packet(160, 1160, RATE); // transit = 1000, D = 0
         // this one arrives 320 timestamp units later than its spacing
         // predicts: D = 320, so jitter should move by 320/16 = 20
-        tracker.on_packet(320, 1640);
+        tracker.on_packet(320, 1640, RATE);
         let block = tracker.block(1, &sequence, 0);
         assert_eq!(block.jitter, 20);
+    }
+
+    #[test]
+    fn a_new_timestamp_base_from_the_same_source_does_not_enter_the_estimate() {
+        // §5.1: a timestamp clock "that increments monotonically and linearly
+        // in time to allow synchronization and jitter calculations"; a jump
+        // to a random new base is a second timeline, not a delay
+        for jump in [1_190_000_000_u32, 94_000_000, 3_000_000_000] {
+            let mut tracker = ReceptionTracker::new();
+            let sequence = SequenceState::new();
+            for step in 0..50 {
+                tracker.on_packet(step * 160, 1000 + step * 160, RATE);
+            }
+            for step in 50..100_u32 {
+                tracker.on_packet((step * 160).wrapping_add(jump), 1000 + step * 160, RATE);
+            }
+            let block = tracker.block(1, &sequence, 0);
+            assert_eq!(block.jitter, 0, "a jump of {jump} was read as jitter");
+        }
+    }
+
+    #[test]
+    fn a_transit_change_inside_two_seconds_is_still_jitter() {
+        // the bound is A.1's two seconds of misordering at the clock rate;
+        // a path that holds one packet back for less is a path, and §6.4.1's
+        // formula takes it in full
+        let mut tracker = ReceptionTracker::new();
+        let sequence = SequenceState::new();
+        tracker.on_packet(0, 1000, RATE);
+        tracker.on_packet(160, 1160 + 15_000, RATE);
+        let block = tracker.block(1, &sequence, 0);
+        assert_eq!(block.jitter, 15_000 / 16);
+    }
+
+    #[test]
+    fn a_restarted_source_measures_its_transit_on_the_new_timeline() {
+        // A.1's restart re-bases the sequence numbers, and the timestamps
+        // that come with them start from wherever the far end restarted:
+        // here a second on, close enough to read as delay if the last
+        // transit were kept
+        let mut tracker = ReceptionTracker::new();
+        let sequence = SequenceState::new();
+        for step in 0..50 {
+            tracker.on_packet(step * 160, 1000 + step * 160, RATE);
+        }
+        tracker.restart();
+        for step in 50..100 {
+            tracker.on_packet(RATE + step * 160, 1000 + step * 160, RATE);
+        }
+        let block = tracker.block(1, &sequence, 0);
+        assert_eq!(block.jitter, 0, "the restart was read as jitter");
     }
 
     #[test]

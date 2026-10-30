@@ -3253,6 +3253,179 @@ fn a_call_that_ends_gives_up_its_media_and_says_what_it_cost() {
     assert_eq!(callee.quality.received, 9);
 }
 
+/// Digits sent as RFC 4733 events ride the audio's SSRC and sequence numbers, with the instant each
+/// began repeated in every packet of it (§2.2.1). On a clean path they are neither loss nor jitter
+/// at the far end: not under the number the far end's description gave them, and not under one it
+/// did not, whose content it ignores (RFC 3550 §5.1) while still counting the packets as the
+/// source's (§6.4.1, RFC 4733 §2.5.1.6). Three digits read as over 20 ms of jitter on a clean path,
+/// and under an unplanned number as a lost packet for each packet of each digit.
+#[test]
+fn digits_from_the_far_end_are_neither_loss_nor_jitter() {
+    for renumbered in [None, Some(120_u8)] {
+        let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+        let mut pair = Pair::new(catalog);
+        let call = pair.connect();
+        let remote = pair.callee.call().expect("the callee knows the call");
+        let clean = Duration::from_millis(1);
+
+        let mut samples = vec![0_i16; 160];
+        let mut phase = 0_u32;
+        for tick in 0..400_u32 {
+            if matches!(tick, 100 | 110 | 120) {
+                pair.caller
+                    .engine
+                    .session(call)
+                    .expect("the caller's media")
+                    .send_dtmf(Digit::from_char('5').expect("a key"), DEFAULT_DIGIT)
+                    .expect("the digit is queued");
+            }
+            tone(&mut samples, 8_000, &mut phase);
+            let sent = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("the caller's media")
+                .capture(&samples, pair.now)
+                .expect("the frame encodes")
+                .map(|datagram| datagram.payload.to_vec());
+            let mut session = pair
+                .callee
+                .engine
+                .session(remote)
+                .expect("the callee's media");
+            if let Some(mut datagram) = sent {
+                // PCMU is 0 (RFC 3551 table 4); anything else here is a digit, and the marker bit
+                // shares its octet
+                if datagram[1] & 0x7f != 0
+                    && let Some(number) = renumbered
+                {
+                    datagram[1] = (datagram[1] & 0x80) | number;
+                }
+                let arrival = session.receive(&mut datagram, caller_media(), pair.now);
+                assert!(
+                    matches!(
+                        arrival,
+                        Arrival::Queued
+                            | Arrival::Dropped(
+                                crate::Discard::Probation | crate::Discard::PayloadType(_)
+                            )
+                    ),
+                    "frame {tick} was refused: {arrival:?}"
+                );
+            }
+            let mut played = vec![0_i16; session.frame_samples()];
+            session.playback(&mut played);
+            let quality = session.statistics(pair.now).quality;
+            assert_eq!(quality.lost, 0, "renumbered {renumbered:?}, frame {tick}");
+            assert!(
+                quality.jitter < clean,
+                "renumbered {renumbered:?}: {:?} of jitter at frame {tick}",
+                quality.jitter
+            );
+            drop(session);
+            pair.advance();
+        }
+
+        pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+        pair.caller.drain(pair.now, false);
+        pair.settle();
+        let ended = pair
+            .callee
+            .media_events()
+            .into_iter()
+            .find_map(|event| match event {
+                MediaEvent::Ended(statistics) => Some(*statistics),
+                _ => None,
+            })
+            .expect("the far end said what it cost");
+        assert_eq!(ended.quality.lost, 0, "renumbered {renumbered:?}");
+        assert!(ended.quality.jitter < clean, "renumbered {renumbered:?}");
+    }
+}
+
+/// A far end whose stream changes under the same call: first a new timestamp base on the same SSRC
+/// (a PBX moving the call from early media to the answered channel), then a new SSRC with a random
+/// base of its own, on the same port. Interarrival jitter (RFC 3550 §6.4.1) is a figure for one
+/// source on one timeline; read as transit, either change was hours of it in the statistics polled
+/// during the call and in the record written at its end.
+#[test]
+fn a_far_end_that_changes_its_timeline_mid_call_keeps_its_jitter_in_milliseconds() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let plausible = Duration::from_millis(10);
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    for tick in 0..450_u32 {
+        tone(&mut samples, 8_000, &mut phase);
+        let sent = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .capture(&samples, pair.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        let mut session = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media");
+        if let Some(mut datagram) = sent {
+            // RFC 3550 §5.1: the timestamp is octets 4 to 7, the SSRC 8 to 11
+            let mut shift = 0_u32;
+            if tick >= 150 {
+                shift = shift.wrapping_add(1_190_000_000);
+            }
+            if tick >= 300 {
+                shift = shift.wrapping_add(94_000_000);
+                datagram[8..12].copy_from_slice(&0x5eed_0002_u32.to_be_bytes());
+            }
+            let timestamp =
+                u32::from_be_bytes([datagram[4], datagram[5], datagram[6], datagram[7]]);
+            datagram[4..8].copy_from_slice(&timestamp.wrapping_add(shift).to_be_bytes());
+            let arrival = session.receive(&mut datagram, caller_media(), pair.now);
+            assert!(
+                matches!(
+                    arrival,
+                    Arrival::Queued
+                        | Arrival::Dropped(
+                            crate::Discard::Probation | crate::Discard::SecondSource(_)
+                        )
+                ),
+                "frame {tick} was refused: {arrival:?}"
+            );
+        }
+        let mut played = vec![0_i16; session.frame_samples()];
+        session.playback(&mut played);
+        let jitter = session.statistics(pair.now).quality.jitter;
+        assert!(jitter < plausible, "{jitter:?} of jitter at frame {tick}");
+        drop(session);
+        pair.advance();
+    }
+
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let ended = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .find_map(|event| match event {
+            MediaEvent::Ended(statistics) => Some(*statistics),
+            _ => None,
+        })
+        .expect("the far end said what it cost");
+    assert!(
+        ended.quality.jitter < plausible,
+        "the call's record says {:?} of jitter",
+        ended.quality.jitter
+    );
+    assert_eq!(ended.quality.lost, 0, "nothing was lost on the way");
+}
+
 /// Hold is a session change, and what it has to reach is the media: a stream
 /// that keeps sending into a held call is a stream the far end has said it is
 /// not listening to.

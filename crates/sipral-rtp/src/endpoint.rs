@@ -692,6 +692,7 @@ impl RtpSession {
         let header = packet.header();
 
         if !self.inbound.accepted.contains(header.payload_type) {
+            self.count_ignored(&packet, from, now);
             return Received::Dropped(Discard::PayloadType(header.payload_type));
         }
 
@@ -749,20 +750,8 @@ impl RtpSession {
             }
         }
 
-        match self.inbound.sequence.update(header.sequence) {
-            SeqUpdate::Probation => return Received::Dropped(Discard::Probation),
-            SeqUpdate::Rejected => return Received::Dropped(Discard::BadSequence),
-            SeqUpdate::Restarted => {
-                self.inbound.buffer.restart();
-                // the loss and jitter bookkeeping describe a stream that no
-                // longer exists once the far end has restarted, the same
-                // reasoning `SequenceState::rebase` already applies to itself
-                self.inbound.rtcp.restart();
-                if let Some(feedback) = self.feedback.as_mut() {
-                    feedback.restarted();
-                }
-            }
-            SeqUpdate::InOrder | SeqUpdate::Misordered => {}
+        if let Err(why) = self.take_sequence(header.sequence) {
+            return Received::Dropped(why);
         }
 
         if !self.inbound.member_known {
@@ -773,9 +762,10 @@ impl RtpSession {
             self.inbound.sender_known = true;
             self.timer.note_sender();
         }
+        let clock_rate = self.outbound.clock_rate;
         self.inbound
             .rtcp
-            .on_packet(header.timestamp, clock_ticks(self.outbound.clock_rate, now));
+            .on_packet(header.timestamp, clock_ticks(clock_rate, now), clock_rate);
 
         match self.inbound.buffer.insert(&packet, now) {
             Insert::Accepted | Insert::Displaced(_) => {
@@ -796,6 +786,62 @@ impl RtpSession {
             }
             Insert::Duplicate => Received::Dropped(Discard::Duplicate),
             Insert::Late => Received::Dropped(Discard::Late),
+        }
+    }
+
+    /// Count `sequence` from the source being listened to (RFC 3550 A.1), or
+    /// say why it is not one of its packets.
+    fn take_sequence(&mut self, sequence: u16) -> Result<(), Discard> {
+        match self.inbound.sequence.update(sequence) {
+            SeqUpdate::Probation => return Err(Discard::Probation),
+            SeqUpdate::Rejected => return Err(Discard::BadSequence),
+            SeqUpdate::Restarted => {
+                self.inbound.buffer.restart();
+                // the loss and jitter bookkeeping describe a stream that no
+                // longer exists once the far end has restarted, the same
+                // reasoning `SequenceState::rebase` already applies to itself
+                self.inbound.rtcp.restart();
+                if let Some(feedback) = self.feedback.as_mut() {
+                    feedback.restarted();
+                }
+            }
+            SeqUpdate::InOrder | SeqUpdate::Misordered => {}
+        }
+        Ok(())
+    }
+
+    /// Count a packet of the source being listened to whose payload type
+    /// this stream does not take, and play nothing of it.
+    ///
+    /// RFC 3550 §5.1: "A receiver MUST ignore packets with payload types
+    /// that it does not understand", which is what it does with what they
+    /// carry. They are still the source's packets: §6.4.1 counts loss as
+    /// expected less received from `SSRC_n`, and RFC 4733 §2.5.1.6 numbers
+    /// event packets "to permit the receiver to detect lost packets", so an
+    /// event under a number this end did not plan would otherwise read as a
+    /// lost packet. Only from the latched address and the source already
+    /// valid: A.1 lets the payload type stand in for validity only for "a
+    /// source that has not been heard before". Not timed for jitter, since
+    /// the clock a timestamp runs at belongs to its payload format (§5.1).
+    fn count_ignored(&mut self, packet: &RtpPacket<'_>, from: SocketAddr, now: Duration) {
+        let header = packet.header();
+        if self.inbound.latch != Some(from)
+            || self.inbound.source != Some(header.ssrc)
+            || !self.inbound.sequence.is_valid()
+        {
+            return;
+        }
+        self.inbound.contender = None;
+        if self.take_sequence(header.sequence).is_err() {
+            return;
+        }
+        if matches!(
+            self.inbound.buffer.ignore(packet, now),
+            Insert::Accepted | Insert::Displaced(_)
+        ) && let Some(feedback) = self.feedback.as_mut()
+        {
+            // nor is it a gap to ask for again (RFC 4585 §6.2.1)
+            feedback.arrived(header.sequence, now);
         }
     }
 
@@ -2324,6 +2370,291 @@ mod tests {
             assert_eq!(after.ssrc, 9);
             assert_eq!((after.loss_rate, after.discard_rate), (0, 0));
         }
+    }
+
+    /// One packet from the far end with its timing chosen by the test.
+    fn timed(ssrc: u32, sequence: u16, timestamp: u32, marker: bool) -> Vec<u8> {
+        let header = RtpHeader {
+            marker,
+            payload_type: 8,
+            sequence,
+            timestamp,
+            ssrc,
+        };
+        let payload = sequence.to_be_bytes();
+        let mut out = vec![0; 32];
+        let n = PacketBuilder::new(header, &payload)
+            .write(&mut out)
+            .expect("room");
+        out.truncate(n);
+        out
+    }
+
+    /// The jitter the next reception report block would carry, in timestamp
+    /// ticks, and the one the buffer measured, for the source being heard.
+    fn jitter_now(session: &mut RtpSession) -> (u32, Duration) {
+        let ssrc = session.remote_ssrc().expect("a source");
+        let inbound = &mut session.inbound;
+        let block = inbound.rtcp.block(ssrc, &inbound.sequence, 0);
+        (block.jitter, inbound.buffer.quality().jitter)
+    }
+
+    /// Ten milliseconds, and the same at eight kilohertz.
+    const PLAUSIBLE: Duration = Duration::from_millis(10);
+    const PLAUSIBLE_TICKS: u32 = 80;
+
+    /// A far end on a clean path that sends three digits as RFC 4733 events
+    /// on payload type 101, under the audio's SSRC and in its sequence
+    /// space: the audio pauses, each digit goes out as four updates every 20
+    /// ms carrying the instant it began (§2.2.1) and three copies of its end
+    /// (§2.5.1.4), then the audio picks up where the digit ended. Returns
+    /// what each pull said, as (lost, jitter the buffer measured).
+    fn digits_on_a_clean_path(session: &mut RtpSession) -> Vec<(u64, Duration)> {
+        let mut sequence = 1000_u16;
+        let mut timestamp = 0x1234_0000_u32;
+        let mut now = Duration::ZERO;
+        let mut seen = Vec::new();
+        let audio = |session: &mut RtpSession, sequence: &mut u16, timestamp: &mut u32, now| {
+            session.receive(&mut timed(7, *sequence, *timestamp, false), addr(PEER), now);
+            *sequence = sequence.wrapping_add(1);
+            *timestamp = timestamp.wrapping_add(160);
+        };
+        for digit in 0..3_u8 {
+            for _ in 0..50 {
+                audio(session, &mut sequence, &mut timestamp, now);
+                session.pull(Activity::Speech);
+                seen.push((session.quality().lost, session.quality().jitter));
+                now += Duration::from_millis(20);
+            }
+            let began = timestamp;
+            let mut reports: Vec<(EventReport, bool)> = (1..=4_u16)
+                .map(|update| {
+                    let report = EventReport {
+                        event: digit,
+                        end: false,
+                        volume: 10,
+                        duration: 160 * update,
+                    };
+                    (report, update == 1)
+                })
+                .collect();
+            let end = EventReport {
+                event: digit,
+                end: true,
+                volume: 10,
+                duration: 800,
+            };
+            reports.extend([(end, false), (end, false), (end, false)]);
+            for (report, marker) in reports {
+                let mut payload = [0_u8; super::EVENT_LEN];
+                report.write(&mut payload).expect("room");
+                let header = RtpHeader {
+                    marker,
+                    payload_type: EVENT_PT,
+                    sequence,
+                    timestamp: began,
+                    ssrc: 7,
+                };
+                let mut out = vec![0; 32];
+                let n = PacketBuilder::new(header, &payload)
+                    .write(&mut out)
+                    .expect("room");
+                out.truncate(n);
+                session.receive(&mut out, addr(PEER), now);
+                sequence = sequence.wrapping_add(1);
+                session.pull(Activity::Speech);
+                seen.push((session.quality().lost, session.quality().jitter));
+                now += Duration::from_millis(20);
+            }
+            // seven packets of 20 ms went by: the audio clock ran through them
+            timestamp = began.wrapping_add(7 * 160);
+        }
+        for _ in 0..50 {
+            audio(session, &mut sequence, &mut timestamp, now);
+            session.pull(Activity::Speech);
+            seen.push((session.quality().lost, session.quality().jitter));
+            now += Duration::from_millis(20);
+        }
+        seen
+    }
+
+    #[test]
+    fn named_events_on_the_audios_source_are_neither_loss_nor_path_jitter() {
+        let mut config = config();
+        config.accepted = [8_u8, EVENT_PT].into_iter().collect();
+        let mut session = RtpSession::new(&config, 0.5);
+        for (pull, (lost, jitter)) in digits_on_a_clean_path(&mut session).into_iter().enumerate() {
+            assert_eq!(lost, 0, "pull {pull}: a digit's packets read as loss");
+            // RFC 4733 §2.2.1: an event's packets all carry the instant it
+            // began, so each one after the first arrives later against it
+            // without the path having moved at all
+            assert_eq!(
+                jitter,
+                Duration::ZERO,
+                "pull {pull}: a digit read as jitter on a clean path"
+            );
+        }
+        let inbound = &mut session.inbound;
+        let block = inbound.rtcp.block(7, &inbound.sequence, 0);
+        assert_eq!((block.fraction_lost, block.cumulative_lost), (0, 0));
+        // §2.5.2.2: "The receiver MUST calculate jitter for RTCP receiver
+        // reports based on all packets with a given timestamp", so the
+        // report's figure is the one that sees the digits
+        assert!(block.jitter > 0, "the report left the event packets out");
+    }
+
+    #[test]
+    fn a_digit_under_a_payload_type_this_end_did_not_plan_is_not_loss() {
+        // the far end sends its events under a number this end's
+        // description did not give them: §5.1 has the receiver ignore what
+        // they carry, and they are still the source's packets, numbered so
+        // "to permit the receiver to detect lost packets" (RFC 4733
+        // §2.5.1.6)
+        let mut session = session();
+        assert!(!config().accepted.contains(EVENT_PT));
+        let seen = digits_on_a_clean_path(&mut session);
+        for (pull, (lost, jitter)) in seen.into_iter().enumerate() {
+            assert_eq!(lost, 0, "pull {pull}: an ignored packet read as loss");
+            assert_eq!(jitter, Duration::ZERO, "pull {pull}");
+        }
+        let inbound = &mut session.inbound;
+        let block = inbound.rtcp.block(7, &inbound.sequence, 0);
+        assert_eq!((block.fraction_lost, block.cumulative_lost), (0, 0));
+        let metrics = session.voip_metrics(None).expect("a source");
+        assert_eq!((metrics.loss_rate, metrics.discard_rate), (0, 0));
+        assert_eq!(
+            session.quality().received,
+            3 * 50 + 3 * 7 + 50 - 1,
+            "every packet but the one on probation"
+        );
+        // and what they carry is still not taken in
+        let mut out = timed(7, 2000, 0, false);
+        out[1] = EVENT_PT;
+        assert_eq!(
+            session.receive(&mut out, addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::PayloadType(EVENT_PT))
+        );
+    }
+
+    #[test]
+    fn a_payload_type_this_end_did_not_plan_counts_for_nobody_but_the_source() {
+        // the same packet from another SSRC, or from an address the stream
+        // is not latched to, says nothing about the source's sequence
+        let mut session = session();
+        let next = establish(&mut session, 7, addr(PEER));
+        let mut stranger = timed(9, next, 0, false);
+        stranger[1] = EVENT_PT;
+        session.receive(&mut stranger, addr(PEER), Duration::ZERO);
+        let mut elsewhere = timed(7, next, 0, false);
+        elsewhere[1] = EVENT_PT;
+        session.set_following(true);
+        session.receive(&mut elsewhere, addr(IMPOSTOR), Duration::ZERO);
+        session.set_following(false);
+        assert_eq!(session.quality().received, 1);
+        assert_eq!(
+            session.receive(&mut datagram(7, next + 1, 8), addr(PEER), Duration::ZERO),
+            Received::Queued
+        );
+        let inbound = &mut session.inbound;
+        let block = inbound.rtcp.block(7, &inbound.sequence, 0);
+        assert_eq!(block.cumulative_lost, 1, "the sequence number never came");
+    }
+
+    #[test]
+    fn the_same_source_on_a_new_timestamp_base_keeps_its_jitter_in_milliseconds() {
+        // a PBX moving the call from early media to the answered channel
+        // under the same SSRC and sequence numbers, the first packet on the
+        // new base with or without a marker
+        for (jump, marker) in [
+            (1_190_000_000_u32, false),
+            (1_190_000_000, true),
+            (94_000_000, false),
+            (3_000_000_000, true),
+        ] {
+            let mut session = session();
+            let mut timestamp = 0x1357_9bdf_u32;
+            for step in 0..300_u16 {
+                if step == 150 {
+                    timestamp = timestamp.wrapping_add(jump);
+                }
+                // a path that holds every other packet back by two
+                // milliseconds, so there is some jitter to keep
+                let wobble = Duration::from_millis(u64::from(step % 2) * 2);
+                let at = Duration::from_millis(20) * u32::from(step) + wobble;
+                let opens = marker && step == 150;
+                session.receive(&mut timed(7, 1000 + step, timestamp, opens), addr(PEER), at);
+                session.pull(Activity::Speech);
+                timestamp = timestamp.wrapping_add(160);
+                if step < 2 {
+                    continue;
+                }
+                let (reported, measured) = jitter_now(&mut session);
+                assert!(
+                    reported < PLAUSIBLE_TICKS && measured < PLAUSIBLE,
+                    "jump {jump}, marker {marker}, packet {step}: {reported} ticks reported, \
+                     {measured:?} measured"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_source_mid_call_starts_its_own_jitter_estimate() {
+        // §6.4.1 keeps the jitter of "source SSRC_n": a second source with
+        // its own random timestamp base, on the same port, starts from
+        // nothing rather than from the first one's figure or its timeline
+        let mut session = session();
+        let mut at = Duration::ZERO;
+        for step in 0..150_u16 {
+            let late = Duration::from_millis(u64::from(step % 2) * 6);
+            let timestamp = 0x1357_9bdf_u32.wrapping_add(u32::from(step) * 160);
+            session.receive(
+                &mut timed(7, 1000 + step, timestamp, false),
+                addr(PEER),
+                at + late,
+            );
+            session.pull(Activity::Speech);
+            at += Duration::from_millis(20);
+        }
+        let (_, carried) = jitter_now(&mut session);
+        assert!(carried > Duration::from_millis(2), "the first path jitters");
+
+        let mut heard = false;
+        for step in 0..150_u16 {
+            let timestamp = 0xdead_beef_u32.wrapping_add(u32::from(step) * 160);
+            let received = session.receive(
+                &mut timed(9, 40_000 + step, timestamp, false),
+                addr(PEER),
+                at,
+            );
+            session.pull(Activity::Speech);
+            at += Duration::from_millis(20);
+            if received != Received::Queued {
+                continue;
+            }
+            let (reported, measured) = jitter_now(&mut session);
+            if !heard {
+                heard = true;
+                assert_eq!(session.remote_ssrc(), Some(9));
+                assert_eq!(
+                    (reported, measured),
+                    (0, Duration::ZERO),
+                    "the new source's first packet inherited an estimate"
+                );
+            }
+            assert!(
+                reported < PLAUSIBLE_TICKS && measured < PLAUSIBLE,
+                "packet {step} of the new source: {reported} ticks reported, {measured:?} measured"
+            );
+        }
+        assert!(heard, "the new source was never taken");
+        // A.1: its sequence numbers are counted from its own first packet,
+        // so nothing of the first source's numbering reads as loss
+        let inbound = &mut session.inbound;
+        let block = inbound.rtcp.block(9, &inbound.sequence, 0);
+        assert_eq!((block.fraction_lost, block.cumulative_lost), (0, 0));
+        let metrics = session.voip_metrics(None).expect("a source");
+        assert_eq!(metrics.loss_rate, 0);
     }
 
     #[test]

@@ -496,6 +496,21 @@ someone configured once. Design targets:
   §4.1) that looks later than the target allows for is taken as a new start
   for the delay measurement: its own lateness can only lengthen a pause the
   sender chose. Seen from FreeSWITCH at the start of a DTLS-SRTP call.
+- **A new timestamp base is not jitter.** Interarrival jitter (RFC 3550
+  §6.4.1) is kept per source, so a new SSRC starts it from zero; on the same
+  SSRC, two arrivals whose transit times differ by more than two seconds of the
+  stream's clock (A.1's misordering allowance) are read as the sender moving
+  to another timeline, as a PBX does between early media and the answered
+  call, and the difference enters neither `Quality::jitter`, the report
+  block's jitter, nor the delay target: taken as transit, a random new base
+  reads as hours of jitter.
+- **A digit is neither loss nor delay.** RFC 4733 events share the audio's
+  SSRC and sequence numbers, and every packet of one carries the instant it
+  began (§2.2.1), so only the first packet of a timestamp is timed for
+  `Quality::jitter` and the delay target; the report block's jitter takes
+  them all, as §2.5.2.2 asks. A packet of the source under a payload type
+  this end did not plan is ignored for playout (RFC 3550 §5.1) but still
+  counted as received, so an event under an unexpected number is not loss.
 - **A stream that comes back further on starts there.** When playout has run
   dry and the next packet is some sequence numbers ahead, those numbers are
   counted lost and playout starts at the packet, rather than concealing the
