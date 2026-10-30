@@ -2595,6 +2595,49 @@ mod tests {
         );
     }
 
+    /// The Binding request for the signalling socket leaves by `sipral_stack_poll_transmit`, and
+    /// the trace wrote its octets as they were.
+    #[test]
+    fn the_binding_request_the_trace_sees_is_one_line_naming_it() {
+        let mut observed = Observed::default();
+        let stack = asking_stack(&mut observed);
+        let heard = crate::log::tests::Heard::default();
+        crate::log::tests::listen(stack, crate::log::SipralLogLevel::Trace, &heard);
+        let on = crate::media::SipralToggle::On as u32;
+        assert_eq!(
+            unsafe { crate::log::sipral_stack_diagnostic_trace(stack, on) },
+            SipralStatus::Ok
+        );
+        let account = account_on(stack);
+        assert_eq!(
+            unsafe { sipral_account_register(stack, account, 10) },
+            SipralStatus::Ok
+        );
+        let out = signalling_out(stack);
+        assert!(is_stun(&out[0].0), "{out:?}");
+        let transaction = out[0].0[8..20]
+            .iter()
+            .fold(String::new(), |hex, byte| hex + &format!("{byte:02x}"));
+        let sent: Vec<String> = heard
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, target, message, _)| {
+                target == "sip" && message.starts_with(&format!("sent to {SERVER},"))
+            })
+            .map(|(_, _, message, _)| message.clone())
+            .collect();
+        assert_eq!(
+            sent,
+            [format!(
+                "sent to {SERVER}, {} bytes, a STUN Binding Request, transaction {transaction}",
+                out[0].0.len()
+            )]
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
     const SECOND: &str = "198.51.100.2:3478";
     const THIRD: &str = "198.51.100.3:3478";
 

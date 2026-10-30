@@ -40,6 +40,10 @@ use std::time::Instant;
 use sipral_diag::{Mode, Redactor, redact_message, redact_text, strip_secrets, strip_secrets_text};
 use zeroize::Zeroizing;
 
+use sipral_ua::websocket::Arrival;
+
+use crate::wire_text::{self, Frame, Shape};
+
 /// Lines the bucket lets through at once before the per-second rate applies.
 pub const BURST: u32 = 200;
 
@@ -400,11 +404,15 @@ impl Log {
 
     /// A whole SIP message at [`LogLevel::Trace`], redacted with [`sipral_diag::redact_message`]:
     /// credentials and SDES keys dropped, user parts, display names and IP literals pseudonymised.
-    /// Unparseable bytes are logged by size only, since nothing guarantees every identifier in them
-    /// was found.
+    /// Unparseable bytes are logged by size only, and a body that is not text is withheld, since
+    /// nothing guarantees every identifier in them was found.
     ///
     /// With [`Log::set_diagnostic`] on, the message and peer are written as they are, minus
     /// secrets.
+    ///
+    /// Either way the line is text: bytes that are not a SIP message (STUN, a keep-alive, RTP,
+    /// RTCP, DTLS, other binary) are one line naming them, and an octet of a message that is not
+    /// text is written `\xNN`.
     pub fn sip_message(&self, travel: Travel, peer: SocketAddr, bytes: &[u8], now: Instant) {
         self.message(travel, Some(peer), bytes, now);
     }
@@ -415,39 +423,98 @@ impl Log {
         self.message(travel, None, bytes, now);
     }
 
+    /// [`Log::sip_message`] for what this stack writes on a WebSocket it runs (RFC 7118): a data
+    /// frame is written as the message it carries, unmasked, and a control frame as one line
+    /// naming it. Bytes that are not one frame, the opening handshake among them, are written as
+    /// [`Log::sip_message`] writes them.
+    pub fn sip_websocket_frame(
+        &self,
+        travel: Travel,
+        peer: SocketAddr,
+        bytes: &[u8],
+        now: Instant,
+    ) {
+        if !self.enabled(LogLevel::Trace) {
+            return;
+        }
+        match wire_text::websocket_frame(bytes) {
+            Some(Frame::Data(message)) => self.message(travel, Some(peer), &message, now),
+            Some(Frame::Control(name)) => self.control(travel, peer, bytes.len(), &name, now),
+            None => self.message(travel, Some(peer), bytes, now),
+        }
+    }
+
+    /// What a WebSocket this stack runs read, as `sipral_ua`'s tap kept it
+    /// ([`sipral_ua::UserAgent::tap_websockets`]): the handshake answer and each message as
+    /// [`Log::sip_message`] writes them, and a ping, pong or close as one line. A server's control
+    /// frame is unmasked and under 126 octets of payload (RFC 6455 §5.5), so its length on the
+    /// wire is its payload and a two-octet header.
+    pub fn sip_websocket_arrival(&self, peer: SocketAddr, arrival: &Arrival, now: Instant) {
+        let (payload, name) = match arrival {
+            Arrival::Answer(bytes) | Arrival::Message(bytes) => {
+                self.message(Travel::Received, Some(peer), bytes, now);
+                return;
+            }
+            Arrival::Ping(payload) => (payload.len(), "a WebSocket ping".to_owned()),
+            Arrival::Pong(payload) => (payload.len(), "a WebSocket pong".to_owned()),
+            Arrival::Close { code, reason } => (
+                reason.len() + code.map_or(0, |_| 2),
+                wire_text::close_line(*code),
+            ),
+        };
+        self.control(Travel::Received, peer, 2 + payload, &name, now);
+    }
+
+    /// One line for a WebSocket control frame of `len` octets.
+    fn control(&self, travel: Travel, peer: SocketAddr, len: usize, name: &str, now: Instant) {
+        self.admit(LogLevel::Trace, "sip", now, |redactor, diagnostic| {
+            let heading = heading(travel, Some(peer), redactor, diagnostic);
+            format!("{heading}, {len} bytes, {name}")
+        });
+    }
+
+    /// The bytes of a SIP message as text, whatever they hold: what is not a message is named in
+    /// one line ([`wire_text::shape`]), and a message's octets that are not text are written
+    /// `\xNN` ([`wire_text::printable`]). Pseudonymised, a body that is not text is withheld,
+    /// since nothing finds the identifiers in it.
     fn message(&self, travel: Travel, peer: Option<SocketAddr>, bytes: &[u8], now: Instant) {
         self.admit(LogLevel::Trace, "sip", now, |redactor, diagnostic| {
-            let way = match (travel, peer.is_some()) {
-                (Travel::Received, true) => "received from",
-                (Travel::Sent, true) => "sent to",
-                (Travel::Received, false) => "received",
-                (Travel::Sent, false) => "sent",
-            };
-            let peer = peer.map_or_else(
-                || String::from("on a connection"),
-                |peer| {
-                    if diagnostic {
-                        peer.to_string()
-                    } else {
-                        redact_text(&peer.to_string(), redactor)
-                    }
-                },
-            );
+            let heading = heading(travel, peer, redactor, diagnostic);
+            if let Shape::Summary(summary) = wire_text::shape(bytes, diagnostic) {
+                return format!("{heading}, {} bytes, {summary}", bytes.len());
+            }
             if diagnostic {
                 return format!(
-                    "{way} {peer}, {} bytes:\n{}",
+                    "{heading}, {} bytes:\n{}",
                     bytes.len(),
-                    String::from_utf8_lossy(&strip_secrets(bytes))
+                    wire_text::printable(&strip_secrets(bytes))
                 );
             }
             match redact_message(bytes, redactor) {
-                Ok(clean) => format!(
-                    "{way} {peer}, {} bytes:\n{}",
-                    bytes.len(),
-                    String::from_utf8_lossy(&clean)
-                ),
+                Ok(clean) => {
+                    let body = wire_text::body_start(bytes)
+                        .and_then(|at| bytes.get(at..))
+                        .unwrap_or_default();
+                    if wire_text::is_text(body) {
+                        return format!(
+                            "{heading}, {} bytes:\n{}",
+                            bytes.len(),
+                            wire_text::printable(&clean)
+                        );
+                    }
+                    let head = wire_text::body_start(&clean)
+                        .and_then(|at| clean.get(..at))
+                        .unwrap_or(&clean);
+                    format!(
+                        "{heading}, {} bytes:\n{}(a body of {} octets that is not all text, \
+                         withheld)",
+                        bytes.len(),
+                        wire_text::printable(head),
+                        body.len()
+                    )
+                }
                 Err(_) => format!(
-                    "{way} {peer}, {} bytes the parser does not read, withheld",
+                    "{heading}, {} bytes the parser does not read, withheld",
                     bytes.len()
                 ),
             }
@@ -526,6 +593,33 @@ impl Log {
         // a panicking producer leaves the queue and counters consistent
         self.0.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Which way a trace line's bytes went and the far end: "sent to" and the peer, pseudonymised
+/// unless `diagnostic`, or "received on a connection" when the far end was never named.
+fn heading(
+    travel: Travel,
+    peer: Option<SocketAddr>,
+    redactor: &mut Redactor,
+    diagnostic: bool,
+) -> String {
+    let way = match (travel, peer.is_some()) {
+        (Travel::Received, true) => "received from",
+        (Travel::Sent, true) => "sent to",
+        (Travel::Received, false) => "received",
+        (Travel::Sent, false) => "sent",
+    };
+    let peer = peer.map_or_else(
+        || String::from("on a connection"),
+        |peer| {
+            if diagnostic {
+                peer.to_string()
+            } else {
+                redact_text(&peer.to_string(), redactor)
+            }
+        },
+    );
+    format!("{way} {peer}")
 }
 
 /// A flush in progress on one log; ends when dropped, at the end of the batch or during unwinding.
@@ -923,6 +1017,259 @@ Content-Length: {}\r\n\r\n{sdp}",
             "{}",
             lines[1]
         );
+    }
+
+    /// The messages delivered so far, in order.
+    fn messages(seen: &Seen) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|line| line.2.clone())
+            .collect()
+    }
+
+    /// Whether a text tool reads `line` as one line: no control character at all.
+    fn one_line(line: &str) -> bool {
+        !line.chars().any(char::is_control)
+    }
+
+    /// Whether a text tool reads `line` as text: no control character but tab and the line ends a
+    /// message keeps, and no carriage return outside a CRLF.
+    fn text(line: &str) -> bool {
+        !line
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+            && line
+                .match_indices('\r')
+                .all(|(at, _)| line[at + 1..].starts_with('\n'))
+    }
+
+    /// A transaction id with control octets and octets that are no UTF-8 in it.
+    const TRANSACTION: [u8; 12] = [
+        0x00, 0x01, 0x02, 0x0a, 0x0d, 0x1b, 0x7f, 0x80, 0xfe, 0xff, 0x10, 0x20,
+    ];
+
+    /// A STUN message built by hand from RFC 8489 §5: `kind`, the magic cookie, [`TRANSACTION`],
+    /// then `attributes`.
+    fn stun(kind: [u8; 2], attributes: &[u8]) -> Vec<u8> {
+        let mut out = kind.to_vec();
+        out.extend_from_slice(&u16::try_from(attributes.len()).unwrap().to_be_bytes());
+        out.extend_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+        out.extend_from_slice(&TRANSACTION);
+        out.extend_from_slice(attributes);
+        out
+    }
+
+    /// The trace of an application asking a public STUN server wrote 28 octets as they were, NUL
+    /// and escape among them, and the log file became binary for every text tool after it.
+    #[test]
+    fn a_stun_request_and_its_answer_are_each_one_line_naming_them() {
+        // a Binding request with a FINGERPRINT, 28 bytes, and its answer with XOR-MAPPED-ADDRESS
+        let request = stun(
+            [0x00, 0x01],
+            &[0x80, 0x28, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef],
+        );
+        let answer = stun(
+            [0x01, 0x01],
+            &[
+                0x00, 0x20, 0x00, 0x08, 0x00, 0x01, 0xa1, 0x47, 0xe1, 0x12, 0xa6, 0x43,
+            ],
+        );
+        let refused = stun([0x01, 0x11], &[]);
+        let server: std::net::SocketAddr = "74.125.250.129:19302".parse().unwrap();
+        for diagnostic in [true, false] {
+            let log = Log::new(b"key");
+            log.set_diagnostic(diagnostic);
+            let seen = listening(&log, LogLevel::Trace);
+            let now = Instant::now();
+            log.sip_message(Travel::Sent, server, &request, now);
+            log.sip_message(Travel::Received, server, &answer, now);
+            log.sip_message(Travel::Received, server, &refused, now);
+            assert_eq!(log.flush(), 3);
+            let lines = messages(&seen);
+            for line in &lines {
+                assert!(one_line(line), "diagnostic {diagnostic}: {line:?}");
+            }
+            for (line, ending) in lines.iter().zip([
+                ", 28 bytes, a STUN Binding Request, transaction 0001020a0d1b7f80feff1020",
+                ", 32 bytes, a STUN Binding Success Response, transaction 0001020a0d1b7f80feff1020",
+                ", 20 bytes, a STUN Binding Error Response, transaction 0001020a0d1b7f80feff1020",
+            ]) {
+                assert!(line.ends_with(ending), "diagnostic {diagnostic}: {line:?}");
+            }
+            assert_eq!(
+                lines[0].starts_with("sent to 74.125.250.129:19302, "),
+                diagnostic,
+                "{:?}",
+                lines[0]
+            );
+        }
+    }
+
+    /// RFC 5626 §3.5.1: a ping is a double CRLF, its pong a single one.
+    #[test]
+    fn a_keep_alive_reads_as_one_rather_than_as_bare_line_ends() {
+        let peer = "198.51.100.4:5060".parse().unwrap();
+        for diagnostic in [true, false] {
+            let log = Log::new(b"key");
+            log.set_diagnostic(diagnostic);
+            let seen = listening(&log, LogLevel::Trace);
+            let now = Instant::now();
+            log.sip_message(Travel::Sent, peer, b"\r\n\r\n", now);
+            log.sip_message(Travel::Received, peer, b"\r\n", now);
+            log.sip_message_on_a_connection(Travel::Received, b"\r\n\r\n\r\n", now);
+            assert_eq!(log.flush(), 3);
+            let lines = messages(&seen);
+            for (line, ending) in lines.iter().zip([
+                ", 4 bytes, a keep-alive ping (CRLF CRLF)",
+                ", 2 bytes, a keep-alive pong (CRLF)",
+                ", 6 bytes, line ends only, as a keep-alive sends",
+            ]) {
+                assert!(one_line(line), "diagnostic {diagnostic}: {line:?}");
+                assert!(line.ends_with(ending), "diagnostic {diagnostic}: {line:?}");
+            }
+            assert_eq!(
+                lines[2],
+                "received on a connection, 6 bytes, line ends only, as a keep-alive sends"
+            );
+        }
+    }
+
+    /// RTP, RTCP and DTLS are named by their first octets (RFC 7983's ranges, RFC 5761 §4 for
+    /// RTCP); anything else is only said not to be text. The octets are shown in hex in the
+    /// diagnostic trace and withheld otherwise, since nothing finds an identifier in them.
+    #[test]
+    fn bytes_that_are_neither_sip_nor_text_are_named_never_written_raw() {
+        let arbitrary = [
+            0x00, 0xff, 0x1b, 0x07, 0x0d, 0x0a, 0x41, 0x42, 0x80, 0x90, 0x7f, 0x00, 0x01, 0x02,
+            0x03, 0x04, 0x05, 0x06,
+        ];
+        let mut media = vec![
+            0x80, 0x00, 0x12, 0x34, 0x00, 0x00, 0x00, 0xa0, 0xde, 0xad, 0xbe, 0xef,
+        ];
+        media.resize(172, 0xff);
+        let mut report = vec![0x80, 0xc8, 0x00, 0x06];
+        report.resize(28, 0x00);
+        let mut handshake = vec![0x16, 0xfe, 0xfd, 0x00, 0x00];
+        handshake.resize(29, 0x01);
+        let peer = "198.51.100.4:5060".parse().unwrap();
+        for diagnostic in [true, false] {
+            let log = Log::new(b"key");
+            log.set_diagnostic(diagnostic);
+            let seen = listening(&log, LogLevel::Trace);
+            let now = Instant::now();
+            for bytes in [&arbitrary[..], &media, &report, &handshake, b""] {
+                log.sip_message(Travel::Received, peer, bytes, now);
+            }
+            assert_eq!(log.flush(), 5);
+            let lines = messages(&seen);
+            let endings = if diagnostic {
+                [
+                    ", 18 bytes, not SIP and not text, starting \
+                     00 ff 1b 07 0d 0a 41 42 80 90 7f 00 01 02 03 04 ...",
+                    ", 172 bytes, not SIP: RTP, payload type 0, starting \
+                     80 00 12 34 00 00 00 a0 de ad be ef ff ff ff ff ...",
+                    ", 28 bytes, not SIP: RTCP, packet type 200, starting \
+                     80 c8 00 06 00 00 00 00 00 00 00 00 00 00 00 00 ...",
+                    ", 29 bytes, not SIP: DTLS, content type 22, starting \
+                     16 fe fd 00 00 01 01 01 01 01 01 01 01 01 01 01 ...",
+                    ", 0 bytes, empty",
+                ]
+            } else {
+                [
+                    ", 18 bytes, not SIP and not text, withheld",
+                    ", 172 bytes, not SIP: RTP, payload type 0",
+                    ", 28 bytes, not SIP: RTCP, packet type 200",
+                    ", 29 bytes, not SIP: DTLS, content type 22",
+                    ", 0 bytes, empty",
+                ]
+            };
+            for (line, ending) in lines.iter().zip(endings) {
+                assert!(one_line(line), "diagnostic {diagnostic}: {line:?}");
+                assert!(line.ends_with(ending), "diagnostic {diagnostic}: {line:?}");
+            }
+        }
+    }
+
+    /// An ISUP IAM (RFC 3204) with NUL, a carriage return of its own, escape and octets that are
+    /// no UTF-8.
+    const IAM: &[u8] = &[
+        0x01, 0x00, 0x49, 0x00, 0x00, 0x03, 0x02, 0x00, 0x07, 0x04, 0x10, 0x00, 0x33, 0x63, 0x21,
+        0x43, 0x00, 0x0d, 0x41, 0x1b, 0x9f, 0xfe,
+    ];
+
+    /// An INVITE whose multipart body carries SDP and [`IAM`], as a gateway to the PSTN sends it.
+    fn isup_invite() -> Vec<u8> {
+        let mut body = b"--unique-boundary-1\r\nContent-Type: application/sdp\r\n\r\n\
+v=0\r\no=- 1 1 IN IP4 192.0.2.7\r\ns=-\r\nc=IN IP4 192.0.2.7\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n\
+\r\n--unique-boundary-1\r\nContent-Type: application/isup;version=itu-t92+\r\n\
+Content-Disposition: signal;handling=optional\r\n\r\n"
+            .to_vec();
+        body.extend_from_slice(IAM);
+        body.extend_from_slice(b"\r\n--unique-boundary-1--\r\n");
+        let mut message = format!(
+            "INVITE sip:bob@198.51.100.4 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.7:5060;branch=z9hG4bK1\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: isup@d\r\n\
+CSeq: 1 INVITE\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed;boundary=unique-boundary-1\r\n\
+Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        message.extend_from_slice(&body);
+        message
+    }
+
+    /// The diagnostic trace writes each octet of a body that is not text as `\xNN`, so the text
+    /// parts still read as they were sent; the pseudonymised one withholds such a body, since the
+    /// numbers an ISUP part carries in BCD are found by nothing.
+    #[test]
+    fn a_message_with_a_binary_body_stays_text() {
+        let message = isup_invite();
+        let peer = "198.51.100.4:5060".parse().unwrap();
+        let log = Log::new(b"key");
+        let seen = listening(&log, LogLevel::Trace);
+        let now = Instant::now();
+        log.sip_message(Travel::Sent, peer, &message, now);
+        log.set_diagnostic(true);
+        log.sip_message(Travel::Sent, peer, &message, now);
+        assert_eq!(log.flush(), 2);
+        let lines = messages(&seen);
+        for line in &lines {
+            assert!(text(line), "{line:?}");
+            assert!(
+                line.contains("Content-Type: multipart/mixed;boundary=unique-boundary-1\r\n"),
+                "{line:?}"
+            );
+        }
+        let body = message.len() - message.windows(4).position(|w| w == b"\r\n\r\n").unwrap() - 4;
+        assert!(
+            lines[0].ends_with(&format!(
+                "\r\n\r\n(a body of {body} octets that is not all text, withheld)"
+            )),
+            "{:?}",
+            lines[0]
+        );
+        assert!(!lines[0].contains("m=audio"), "{:?}", lines[0]);
+        assert!(
+            lines[1].starts_with(&format!(
+                "sent to 198.51.100.4:5060, {} bytes:\nINVITE sip:bob@198.51.100.4 SIP/2.0\r\n",
+                message.len()
+            )),
+            "{:?}",
+            lines[1]
+        );
+        for kept in [
+            "m=audio 4000 RTP/AVP 0\r\n",
+            "Content-Type: application/isup;version=itu-t92+\r\n",
+            "\r\n\r\n\\x01\\x00I\\x00\\x00\\x03\\x02\\x00\\x07\\x04\\x10\\x003c!C\\x00\\x0dA\\x1b\\x9f\\xfe\r\n--unique-boundary-1--\r\n",
+        ] {
+            assert!(lines[1].contains(kept), "{kept:?} not in {:?}", lines[1]);
+        }
     }
 
     #[test]

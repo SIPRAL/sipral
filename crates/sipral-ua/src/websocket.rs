@@ -676,6 +676,8 @@ struct Link {
 enum Happened {
     Send(Vec<u8>),
     Message(Vec<u8>),
+    /// Kept for [`UserAgent::tap_websockets`]; messages are kept from [`Happened::Message`].
+    Heard(Arrival),
     /// Failed, or closed by the far end.
     Over {
         why: String,
@@ -693,7 +695,9 @@ impl Link {
         client_frame(opcode, payload, mask)
     }
 
-    fn read(&mut self, data: &[u8], now: Instant) -> Vec<Happened> {
+    /// What `data` read off the connection did. `tapping` keeps the handshake answer and each
+    /// control frame as [`Happened::Heard`].
+    fn read(&mut self, data: &[u8], now: Instant, tapping: bool) -> Vec<Happened> {
         let mut out = Vec::new();
         let mut data = data;
         if let State::Opening { ref accept, .. } = self.state {
@@ -709,6 +713,9 @@ impl Link {
             };
             let head = core::mem::take(&mut self.head);
             let (answer, rest) = head.split_at(end + 4);
+            if tapping {
+                out.push(Happened::Heard(Arrival::Answer(answer.to_vec())));
+            }
             if let Err(why) = check_answer(answer, accept) {
                 out.push(Happened::Over {
                     why: format!("the WebSocket handshake failed: {why}"),
@@ -727,7 +734,20 @@ impl Link {
         }
         self.reader.push(data);
         loop {
-            match self.reader.next_frame() {
+            let next = self.reader.next_frame();
+            if tapping {
+                let heard = match &next {
+                    Ok(Some(Frame::Ping(payload))) => Some(Arrival::Ping(payload.clone())),
+                    Ok(Some(Frame::Pong(payload))) => Some(Arrival::Pong(payload.clone())),
+                    Ok(Some(Frame::Close { code, reason })) => Some(Arrival::Close {
+                        code: *code,
+                        reason: reason.clone(),
+                    }),
+                    _ => None,
+                };
+                out.extend(heard.map(Happened::Heard));
+            }
+            match next {
                 Ok(Some(Frame::Text(message) | Frame::Binary(message))) => {
                     out.push(Happened::Message(message));
                 }
@@ -796,6 +816,45 @@ pub(crate) struct WebSockets {
     /// The latest time we were given; [`UserAgent::poll_transmit`] gets no
     /// time and this crate reads no clock.
     clock: Option<Instant>,
+    /// What arrived while [`UserAgent::tap_websockets`] is on, the newest
+    /// [`TAP_KEPT`].
+    tap: Option<VecDeque<Arrived>>,
+}
+
+/// How many arrivals wait for [`UserAgent::take_websocket_arrivals`] before
+/// the oldest is dropped, so a tap nobody takes from stays bounded.
+const TAP_KEPT: usize = 1_024;
+
+/// What a WebSocket this stack runs read, as a trace writes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    /// The server's answer to the opening handshake, up to its empty line.
+    Answer(Vec<u8>),
+    /// One message, from its data frame or the frames it was split across.
+    Message(Vec<u8>),
+    /// A ping, with its application data.
+    Ping(Vec<u8>),
+    /// A pong, with its application data.
+    Pong(Vec<u8>),
+    /// A close, with the status code when it carried one and the reason.
+    Close {
+        /// The status code (§7.4), when the frame had a body.
+        code: Option<u16>,
+        /// The reason, UTF-8.
+        reason: Vec<u8>,
+    },
+}
+
+/// One [`Arrival`] and the connection it came on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Arrived {
+    /// The transport the WebSocket is bound as.
+    pub transport: TransportId,
+    /// Its far end.
+    pub remote: SocketAddr,
+    /// What arrived.
+    pub arrival: Arrival,
 }
 
 impl WebSockets {
@@ -805,6 +864,22 @@ impl WebSockets {
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.links.values().map(Link::deadline).min()
+    }
+
+    /// Keep `arrival` while the tap is on, dropping the oldest past
+    /// [`TAP_KEPT`].
+    fn keep(&mut self, transport: TransportId, remote: SocketAddr, arrival: Arrival) {
+        let Some(tap) = self.tap.as_mut() else {
+            return;
+        };
+        if tap.len() >= TAP_KEPT {
+            tap.pop_front();
+        }
+        tap.push_back(Arrived {
+            transport,
+            remote,
+            arrival,
+        });
     }
 
     fn send(
@@ -847,6 +922,28 @@ impl UserAgent {
     #[must_use]
     pub fn runs_websocket(&self, transport: TransportId) -> bool {
         self.websockets.links.contains_key(&transport)
+    }
+
+    /// Keep what the WebSockets this stack runs read, for
+    /// [`UserAgent::take_websocket_arrivals`], or stop and drop what was
+    /// kept. Off by default. Only this module sees a message whole once its
+    /// frames are read, and a ping, pong or close at all.
+    pub fn tap_websockets(&mut self, on: bool) {
+        match (on, self.websockets.tap.is_some()) {
+            (true, false) => self.websockets.tap = Some(VecDeque::new()),
+            (false, true) => self.websockets.tap = None,
+            _ => {}
+        }
+    }
+
+    /// What [`UserAgent::tap_websockets`] kept, in order, each once: the
+    /// newest 1,024 since the last take, the older ones dropped.
+    pub fn take_websocket_arrivals(&mut self) -> Vec<Arrived> {
+        self.websockets
+            .tap
+            .as_mut()
+            .map(|tap| Vec::from(core::mem::take(tap)))
+            .unwrap_or_default()
     }
 
     /// `None` passes the input on unchanged.
@@ -993,11 +1090,12 @@ impl UserAgent {
             return Err(ReceiveError::UnknownTransport);
         };
         let (remote, local, protocol) = (link.remote, link.local, link.protocol);
-        let happened = link.read(data, now);
+        let happened = link.read(data, now, self.websockets.tap.is_some());
         let mut outcome = Ok(());
         for happening in happened {
             match happening {
                 Happened::Send(bytes) => self.websockets.send(transport, remote, protocol, bytes),
+                Happened::Heard(arrival) => self.websockets.keep(transport, remote, arrival),
                 Happened::Message(message) => {
                     let taken = self.take(
                         Input::Datagram {
@@ -1011,6 +1109,8 @@ impl UserAgent {
                     if taken.is_err() {
                         outcome = taken;
                     }
+                    self.websockets
+                        .keep(transport, remote, Arrival::Message(message));
                 }
                 Happened::Over { why, kind } => {
                     self.websocket_over(transport, why, kind, now);

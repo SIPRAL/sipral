@@ -274,6 +274,21 @@ again across the C ABI in `crates/sipral-ffi/src/log.rs`:
   name's colon are not counted, so `Authorization\0:` loses its value like
   any other; a test sweeps 720 such shapes through every strip. It is off
   by default and nothing but that call turns it on.
+- **The trace stays text in both modes.** Bytes that are no SIP message are
+  one line naming them: a STUN message by method, class and transaction id
+  in hex (`sent to 74.125.250.129:19302, 28 bytes, a STUN Binding Request,
+  transaction ...`), an RFC 5626 keep-alive as a ping (CRLF CRLF) or a pong
+  (CRLF), RTP, RTCP and DTLS by their first octet, and anything else as not
+  text, with its first sixteen octets in hex in the diagnostic trace and
+  withheld otherwise. In a message, an octet that is no UTF-8 or a control
+  character other than tab, line feed and the carriage return of a CRLF is
+  written `\xNN`, so an `application/isup` part (RFC 3204) reads as escapes
+  between the text parts; the pseudonymised trace withholds a body that is
+  not all text, since the numbers an ISUP part carries are found by
+  nothing. On a WebSocket the stack runs, both ways, the handshake is
+  written as text, each message as the message its frames carry (unmasked,
+  however frames and reads cut it), and a ping, pong or close as one line;
+  `UserAgent::tap_websockets` keeps what arrived for the trace.
 
 The level is set at run time, as often as wanted: `Log::enable`,
 `Log::set_level` and `Log::disable` in Rust; in C, `sipral_stack_log(stack,

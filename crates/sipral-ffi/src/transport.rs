@@ -396,6 +396,14 @@ entry! {
             if put.is_err() {
                 // already out of the queue; keep it rather than lose it
                 state.held = Some(pending);
+            } else if state.agent.runs_websocket(pending.transport) {
+                // a frame this stack masked: the trace writes the message inside
+                state.log.sip_websocket_frame(
+                    sipral::Travel::Sent,
+                    pending.destination,
+                    &pending.payload,
+                    state.last_instant(),
+                );
             } else {
                 state.log.sip_message(
                     sipral::Travel::Sent,
@@ -604,9 +612,16 @@ entry! {
             // the trace takes whole messages from the framing, only when tracing
             let tracing = state.log.enabled(sipral::LogLevel::Trace);
             state.agent.endpoint().tap_streams(tracing);
+            // a WebSocket the stack runs reads its frames before the framing ever sees them
+            state.agent.tap_websockets(tracing);
             let received = state
                 .agent
                 .receive(Input::StreamData { transport, data: read }, now);
+            for arrived in state.agent.take_websocket_arrivals() {
+                state
+                    .log
+                    .sip_websocket_arrival(arrived.remote, &arrived.arrival, now);
+            }
             for framed in state.agent.endpoint().take_stream_messages() {
                 let travel = sipral::Travel::Received;
                 match framed.remote {
@@ -3084,6 +3099,230 @@ pub(crate) mod tests {
             answer.starts_with(b"SIP/2.0 200 "),
             "{:?}",
             start_of(&answer)
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The trace lines a stack wrote to `heard` under `target` `sip` that begin with `way`.
+    fn traced(heard: &crate::log::tests::Heard, way: &str) -> Vec<String> {
+        heard
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, target, message, _)| target == "sip" && message.starts_with(way))
+            .map(|(_, _, message, _)| message.clone())
+            .collect()
+    }
+
+    /// A frame this stack masked is traced as the message it carries, and a ping as one line: the
+    /// trace wrote the masked octets as they were.
+    #[test]
+    fn a_websocket_the_stack_runs_is_traced_as_the_messages_its_frames_carry() {
+        const WS: u32 = 5;
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let heard = crate::log::tests::Heard::default();
+        crate::log::tests::listen(handle, crate::log::SipralLogLevel::Trace, &heard);
+        let on = crate::media::SipralToggle::On as u32;
+        assert_eq!(
+            unsafe { crate::log::sipral_stack_diagnostic_trace(handle, on) },
+            SipralStatus::Ok
+        );
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                WS,
+                SipralTransport::Ws as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                1_000,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let handshake = String::from_utf8(drain(handle).remove(0)).unwrap();
+        let key = handshake
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        let answer = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: sip\r\n\r\n",
+            sipral_ua::websocket::accept_for(key)
+        );
+        stream_in(handle, WS, answer.as_bytes(), 1_010);
+        let request = options("ws-trace").replace("SIP/2.0/UDP", "SIP/2.0/WS");
+        let mut frame = vec![0x81, 126];
+        frame.extend_from_slice(&u16::try_from(request.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(request.as_bytes());
+        stream_in(handle, WS, &frame, 1_020);
+        let framed = drain(handle).remove(0);
+        let at = if framed[1] & 0x7F == 126 { 4 } else { 2 };
+        let mask = &framed[at..at + 4];
+        let carried: Vec<u8> = framed[at + 4..]
+            .iter()
+            .zip(mask.iter().cycle())
+            .map(|(byte, key)| byte ^ key)
+            .collect();
+        // a quiet connection is pinged
+        let later = 1_020 + u64::try_from(sipral_ua::websocket::PING_EVERY.as_millis()).unwrap();
+        poll(handle, later + 1_000);
+        let pings = drain(handle);
+        assert_eq!(pings.len(), 1, "{pings:?}");
+        assert_eq!(pings[0][0], 0x89, "a ping");
+
+        let sent = traced(&heard, "sent");
+        assert_eq!(sent.len(), 3, "{sent:#?}");
+        assert_eq!(
+            sent[0],
+            format!(
+                "sent to {REGISTRAR}, {} bytes:\n{handshake}",
+                handshake.len()
+            )
+        );
+        assert_eq!(
+            sent[1],
+            format!(
+                "sent to {REGISTRAR}, {} bytes:\n{}",
+                carried.len(),
+                String::from_utf8(carried).unwrap()
+            )
+        );
+        assert_eq!(
+            sent[2],
+            format!(
+                "sent to {REGISTRAR}, {} bytes, a WebSocket ping",
+                pings[0].len()
+            )
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What a WebSocket the stack runs receives is traced as the stack reads it: the handshake
+    /// answer, one line per message however its frames and reads fall, and a ping or a close as
+    /// one line. Nothing that arrived on such a WebSocket was traced.
+    #[test]
+    fn a_websocket_the_stack_runs_traces_what_it_receives() {
+        const WS: u32 = 5;
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let heard = crate::log::tests::Heard::default();
+        crate::log::tests::listen(handle, crate::log::SipralLogLevel::Trace, &heard);
+        let on = crate::media::SipralToggle::On as u32;
+        assert_eq!(
+            unsafe { crate::log::sipral_stack_diagnostic_trace(handle, on) },
+            SipralStatus::Ok
+        );
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                WS,
+                SipralTransport::Ws as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                1_000,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let handshake = String::from_utf8(drain(handle).remove(0)).unwrap();
+        let key = handshake
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        let answer = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: sip\r\n\r\n",
+            sipral_ua::websocket::accept_for(key)
+        );
+        let request = options("ws-heard").replace("SIP/2.0/UDP", "SIP/2.0/WS");
+        // the message split over two frames (§5.4) and the reads cut inside the second
+        let (first, second) = request.as_bytes().split_at(40);
+        let mut frames = vec![0x01, u8::try_from(first.len()).unwrap()];
+        frames.extend_from_slice(first);
+        frames.extend_from_slice(&[0x80, 126]);
+        frames.extend_from_slice(&u16::try_from(second.len()).unwrap().to_be_bytes());
+        frames.extend_from_slice(second);
+        let mut stream = answer.clone().into_bytes();
+        stream.extend_from_slice(&frames);
+        let (opening, rest) = stream.split_at(answer.len() + 50);
+        stream_in(handle, WS, opening, 1_010);
+        stream_in(handle, WS, rest, 1_020);
+        stream_in(handle, WS, &[0x89, 0x02, 0x68, 0x69], 1_030);
+        stream_in(handle, WS, &[0x88, 0x02, 0x03, 0xe8], 1_040);
+
+        let received = traced(&heard, "received");
+        assert_eq!(
+            received,
+            [
+                format!(
+                    "received from {REGISTRAR}, {} bytes:\n{answer}",
+                    answer.len()
+                ),
+                format!(
+                    "received from {REGISTRAR}, {} bytes:\n{request}",
+                    request.len()
+                ),
+                format!("received from {REGISTRAR}, 4 bytes, a WebSocket ping"),
+                format!("received from {REGISTRAR}, 4 bytes, a WebSocket close, status 1000"),
+            ]
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What arrives on the SIP socket and is no SIP is traced as one line naming it, whatever
+    /// the stack then makes of it.
+    #[test]
+    fn a_datagram_that_is_not_sip_is_traced_as_one_line_naming_it() {
+        const SERVER: &str = "74.125.250.129:19302";
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let heard = crate::log::tests::Heard::default();
+        crate::log::tests::listen(handle, crate::log::SipralLogLevel::Trace, &heard);
+        let on = crate::media::SipralToggle::On as u32;
+        assert_eq!(
+            unsafe { crate::log::sipral_stack_diagnostic_trace(handle, on) },
+            SipralStatus::Ok
+        );
+        let transaction = [
+            0x00, 0x0a, 0x0d, 0x1b, 0x7f, 0x80, 0x00, 0xfe, 0xff, 0x01, 0x02, 0x03,
+        ];
+        let mut binding = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42];
+        binding.extend_from_slice(&transaction);
+        let mut answered = vec![0x01, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42];
+        answered.extend_from_slice(&transaction);
+        let garbage = [0x00, 0x00, 0x1b, 0x07, 0xff, 0xfe, 0x0d];
+        for (bytes, at) in [
+            (&binding[..], 1_000),
+            (&answered[..], 1_010),
+            (b"\r\n\r\n", 1_020),
+            (&garbage[..], 1_030),
+        ] {
+            let _ = feed(handle, SERVER, bytes, at);
+        }
+        let received = traced(&heard, "received");
+        assert_eq!(
+            received,
+            [
+                format!(
+                    "received from {SERVER}, 20 bytes, a STUN Binding Request, \
+                     transaction 000a0d1b7f8000feff010203"
+                ),
+                format!(
+                    "received from {SERVER}, 20 bytes, a STUN Binding Success Response, \
+                     transaction 000a0d1b7f8000feff010203"
+                ),
+                format!("received from {SERVER}, 4 bytes, a keep-alive ping (CRLF CRLF)"),
+                format!(
+                    "received from {SERVER}, 7 bytes, not SIP and not text, \
+                     starting 00 00 1b 07 ff fe 0d"
+                ),
+            ]
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

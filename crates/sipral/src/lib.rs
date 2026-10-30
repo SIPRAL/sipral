@@ -181,6 +181,8 @@ mod trickle_tests;
 mod webrtc;
 #[cfg(all(test, feature = "dtls", feature = "ice"))]
 mod webrtc_tests;
+#[cfg(feature = "redaction")]
+mod wire_text;
 
 pub use app_rate::APPLICATION_RATES;
 pub use capabilities::{Capabilities, SrtpKeying};
