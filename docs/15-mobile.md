@@ -1974,9 +1974,11 @@ Run on an iPhone against the lab's FreePBX on 30 October 2026, driven by the
 launch script (`SIPRAL_PHONE_*` through `xcrun devicectl device process
 launch --environment-variables`): registration over UDP, TCP and TLS, calls
 to the echo over UDP and TLS with digits, a call from the PBX and one
-straight from another stack answered on CallKit's screen with 180 sent first,
-and a cellular call taken with Hold & Accept and given back. A VoIP push
-end to end waits for an APNs key.
+straight from another stack answered on CallKit's screen with 180 sent first.
+A cellular call taken with Hold & Accept there left our call silent when it
+came back, which the bridge now mends (the `didActivate` row below); that
+step on the phone, and a VoIP push end to end, which waits for an APNs key,
+are still to run.
 
 The run on the phone is short and every step ends with the same thing: on
 Diagnostics, "Share log", and the file sent back (AirDrop, Mail, Messages).
