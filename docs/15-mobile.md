@@ -274,8 +274,8 @@ it, and one declined or refused by the system gets neither. An application
 that shows a call on its own screen sends it itself: `Call.ring()` or
 `SipralStack.ringCall(_:)` in Swift, `ringCall` in Kotlin and Dart, `ring()`
 in Python, Node, React Native and C++, `RingCall` in .NET. Found on a real phone on 30 October 2026:
-a call CallKit showed sent `100 Trying` and then nothing until the 200 OK,
-8.8 s later. A PBX that plays ringback itself (FreePBX's `Dial` with `r`)
+a call CallKit showed sent `100 Trying` and then nothing until the 200 OK.
+A PBX that plays ringback itself (FreePBX's `Dial` with `r`)
 hid it; a direct call, or another PBX that passes the callee's progress on,
 did not. `CallKitBridgeTests` holds the order between two stacks on
 loopback, with CallKit's answer to the report held back: no 180 before the
@@ -1975,10 +1975,8 @@ launch script (`SIPRAL_PHONE_*` through `xcrun devicectl device process
 launch --environment-variables`): registration over UDP, TCP and TLS, calls
 to the echo over UDP and TLS with digits, a call from the PBX and one
 straight from another stack answered on CallKit's screen with 180 sent first.
-A cellular call taken with Hold & Accept there left our call silent when it
-came back, which the bridge now mends (the `didActivate` row below); that
-step on the phone, and a VoIP push end to end, which waits for an APNs key,
-are still to run.
+The steps below that need a person at the phone, and a VoIP push end to end,
+are run next.
 
 The run on the phone is short and every step ends with the same thing: on
 Diagnostics, "Share log", and the file sent back (AirDrop, Mail, Messages).
