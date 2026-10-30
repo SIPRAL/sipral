@@ -101,15 +101,20 @@ let push = PushKitAdapter(bridge: pushBridge, decoder: { payload in
 ```
 
 An application that keeps its own `PKPushRegistryDelegate` and calls
-`PushKitBridge.handle(push:account:)` from it is a supported use: the bridge
-needs nothing from PushKit, which is why the adapter is a thin layer over
-it. That delegate then owns what the adapter does: calling `handle` (or
-`receive(_:mustReport:account:)`, which also takes the system's
-`mustReport`) inside the push handler, before its completion; showing and
-ending a push it cannot use with `reportUnusable(callerId:)`, since iOS
-stops delivering to an application that reports nothing; and handing every
-stack event to `matchIncomingCall`. It takes the adapter's place rather
-than running beside one, or each push would be reported twice.
+`PushKitBridge.handle(push:account:outcome:)` from it is a supported use:
+the bridge needs nothing from PushKit, which is why the adapter is a thin
+layer over it. That delegate then owns what the adapter does: calling
+`handle` (or `receive(_:mustReport:account:outcome:)`, which also takes the
+system's `mustReport`) in the push handler itself, not from a `Task` it
+starts, and calling the handler's completion from `outcome`; showing and
+ending a push it cannot use with `reportUnusable(callerId:done:)`; and
+handing every stack event to `matchIncomingCall`. These report to CallKit
+before they return. iOS checks for that report the moment the delegate
+method returns and, finding none, ends the application and stops waking
+it for VoIP pushes until it is reinstalled, so the `async` forms of the
+same calls cannot serve a delegate: its method has returned before any
+task it starts has run. The delegate takes the adapter's place rather than
+running beside one, or each push would be reported twice.
 
 A push's `name`, or for a call that came without one `CallEventData.callerName`
 (the asserted identity's display name from a trusted peer, else the

@@ -224,8 +224,19 @@ or, when it carried none, from the INVITE once matched; and
 `CallKitBridge.endShown(uuid:reason:)` takes down a screen the application
 will not ring, as unanswered, its INVITE declined if it comes. An
 application with its own `PKPushRegistryDelegate` calls
-`PushKitBridge.handle(push:account:)`, or `receive(_:mustReport:account:)`,
-from it instead (`bindings/swift/README.md`).
+`PushKitBridge.handle(push:account:outcome:)`, or
+`receive(_:mustReport:account:outcome:)`, from it instead
+(`bindings/swift/README.md`). The deadline is the delegate method's return,
+not its completion handler: iOS checks for a reported call as the method
+returns, and an application that reported from a task the method started
+is ended there (`-[PKPushRegistry
+_terminateAppIfThereAreUnhandledVoIPPushes]`) and no longer woken by VoIP
+pushes. So the adapter and these two calls report to CallKit before they
+return, and announce, refresh and call the completion handler once CallKit
+has answered; the bridge's `async` calls are for code outside a delegate.
+Found on an iPhone XS with iOS 18.7: a simulator receives no VoIP push, and
+a fake `CXProvider` holds no deadline, so the tests pin the order instead
+(`PushReportedInTheDelegateTests`).
 
 **The user answers before the INVITE.** On a phone this is the usual order:
 the push raises the call screen at once, and the INVITE follows the refresh

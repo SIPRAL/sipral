@@ -113,14 +113,13 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
 
     private func take(_ payload: PKPushPayload, mustReport: Bool, completion: @escaping () -> Void) {
         let fields = try? decoder(payload.dictionaryPayload)
-        let account = self.account()
-        let bridge = self.bridge
         let received = self.received
         let notShown = self.notShown
-        // The deadline is met by the CallKit report, the first thing a push
-        // that must be reported meets, not by this completion handler.
-        Task {
-            switch await bridge.receive(fields, mustReport: mustReport, account: account) {
+        // Reported to CallKit before this returns: iOS checks for the report
+        // as the delegate method returns, and ends the application if a push
+        // that must be reported has none.
+        bridge.receive(fields, mustReport: mustReport, account: account()) { outcome in
+            switch outcome {
             case .shown(let pending): received?(pending)
             case .unusable: received?(nil)
             case .notShown(let push): notShown?(push)

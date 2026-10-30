@@ -550,3 +550,147 @@ final class RecordingEngine: CallAudioSessionEngine, @unchecked Sendable {
         note("mute \(direction == .input ? "input" : "output") \(muted)")
     }
 }
+
+/// Stands in for `CXProvider` as iOS holds it to a push: a report counts
+/// the moment it is made, and CallKit answers it later, when `answer()` is
+/// called. A push handler that has not reported by the time it returns is
+/// what iOS ends the application for.
+final class DeferringProvider: CallKitProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reports: [(uuid: UUID, callerId: String)] = []
+    private var answers: [@Sendable (Error?) -> Void] = []
+    private var endings: [(uuid: UUID, reason: CallKitBridge.EndReason)] = []
+
+    var reported: [(uuid: UUID, callerId: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return reports
+    }
+
+    var ended: [(uuid: UUID, reason: CallKitBridge.EndReason)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return endings
+    }
+
+    /// CallKit's answers to every report made so far: the screens shown.
+    func answer() {
+        lock.lock()
+        let waiting = answers
+        answers.removeAll()
+        lock.unlock()
+        for answer in waiting {
+            answer(nil)
+        }
+    }
+
+    func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        reports.append((uuid, callerId))
+        answers.append(completion)
+    }
+
+    func reportCallConnecting(uuid: UUID) {}
+    func reportCallConnected(uuid: UUID) {}
+
+    func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason) {
+        lock.lock()
+        defer { lock.unlock() }
+        endings.append((uuid, reason))
+    }
+}
+
+/// What a `PKPushRegistryDelegate` gets from the bridge: the call reported
+/// before its method returns, on every path a push that must be reported
+/// can take.
+final class PushReportedInTheDelegateTests: XCTestCase {
+    func testAPushThatNamesACallerIsReportedBeforeReceiveReturns() throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = DeferringProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let outcome = Box<PushOutcome>()
+
+        pushKit.receive(VoipPushFields(callerId: "sip:alice@sipral.invalid"), account: account) { outcome.value = $0 }
+
+        XCTAssertEqual(provider.reported.map(\.callerId), ["sip:alice@sipral.invalid"],
+                       "the push handler returned with no call reported")
+        XCTAssertNil(outcome.value, "told before CallKit answered")
+        provider.answer()
+        guard case .shown(let pending)? = outcome.value else { return XCTFail("\(String(describing: outcome.value))") }
+        XCTAssertEqual(pending.uuid, provider.reported.first?.uuid)
+        XCTAssertNotNil(pending.announcement, "nothing waits for the INVITE")
+    }
+
+    func testAPushThatNamesNobodyIsReportedBeforeHandleReturns() throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = DeferringProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+
+        let result = Box<Result<PendingCall, Error>>()
+
+        let uuid = pushKit.handle(push: VoipPush(), account: account) { result.value = $0 }
+
+        XCTAssertEqual(provider.reported.map(\.uuid), [uuid], "the push handler returned with no call reported")
+        XCTAssertEqual(provider.reported.map(\.callerId), ["Unknown"])
+        provider.answer()
+        let pending = try XCTUnwrap(result.value).get()
+        XCTAssertEqual(pending.uuid, uuid)
+        XCTAssertEqual(pending.callerId, "", "a caller nothing named was made up")
+        XCTAssertNotNil(pending.announcement, "nothing waits for the INVITE")
+    }
+
+    func testAnUnreadablePushIsReportedBeforeReceiveReturnsAndEndedOnceShown() {
+        let provider = DeferringProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let outcome = Box<PushOutcome>()
+
+        pushKit.receive(nil, account: nil) { outcome.value = $0 }
+
+        XCTAssertEqual(provider.reported.map(\.callerId), ["Unknown"], "the push handler returned with no call reported")
+        XCTAssertTrue(provider.ended.isEmpty, "ended before CallKit had shown it")
+        provider.answer()
+        guard case .unusable? = outcome.value else { return XCTFail("\(String(describing: outcome.value))") }
+        XCTAssertEqual(provider.ended.map(\.reason), [.failed])
+    }
+
+    func testAPushThatNeedNotBeReportedIsNotShown() throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = DeferringProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let outcome = Box<PushOutcome>()
+
+        pushKit.receive(VoipPushFields(callerId: "sip:alice@sipral.invalid"), mustReport: false, account: account) {
+            outcome.value = $0
+        }
+
+        XCTAssertTrue(provider.reported.isEmpty)
+        guard case .notShown(let named)? = outcome.value else { return XCTFail("\(String(describing: outcome.value))") }
+        XCTAssertEqual(named?.callerId, "sip:alice@sipral.invalid")
+    }
+}
+
+/// One value set from another thread, read under a lock.
+final class Box<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: Value?
+
+    var value: Value? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return held
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            held = newValue
+        }
+    }
+}

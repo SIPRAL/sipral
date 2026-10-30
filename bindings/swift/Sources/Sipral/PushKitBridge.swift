@@ -71,7 +71,7 @@ public typealias VoipPushDecoder = @Sendable (_ payload: [AnyHashable: Any]) thr
 
 /// What `PushKitBridge` asks of the account a push woke: the announcement
 /// and the binding refresh `Account` makes.
-protocol PushAnnouncing {
+protocol PushAnnouncing: Sendable {
     func announce(caller: String?, callId: String?) throws -> (announcement: SipralHandle?, call: SipralHandle?)
     func refreshBinding() throws
 }
@@ -98,8 +98,10 @@ public enum PushOutcome: Sendable {
 /// > push -> report to CallKit before the handler returns -> announce ->
 /// > refresh the binding -> match the INVITE -> answer
 ///
-/// `handle(push:account:)` does the first two steps before returning: iOS
-/// stops delivering VoIP pushes to an app that misses that deadline. The
+/// `handle(push:account:outcome:)` and `receive(_:mustReport:account:outcome:)`
+/// report to CallKit before returning, from the PushKit delegate itself:
+/// iOS checks for the report as the delegate method returns, ends an
+/// application that has made none, and stops delivering it VoIP pushes. The
 /// stack does the matching; `PendingCall.resolve(with:)` then hands the
 /// `Call` to `CallKitBridge`.
 ///
@@ -148,9 +150,13 @@ public final class PushKitBridge: @unchecked Sendable {
     /// `Unknown`, and once matched its screen is given the INVITE's `From`
     /// URI and name.
     ///
-    /// An application with a `PKPushRegistryDelegate` of its own calls this
-    /// (or `receive(_:mustReport:account:)`) from its push handler, before
-    /// that handler's completion, in place of `PushKitAdapter`.
+    /// Not from a `PKPushRegistryDelegate`: iOS checks that a call was
+    /// reported the moment the delegate method returns, before any task it
+    /// started has run, and ends the application if none was. An
+    /// application with a delegate of its own calls
+    /// `handle(push:account:outcome:)`, or
+    /// `receive(_:mustReport:account:outcome:)`, from it instead, in place
+    /// of `PushKitAdapter`.
     @discardableResult
     public func handle(push: VoipPush, account: Account) async throws -> PendingCall {
         try await handle(push: push, announcer: account)
@@ -159,10 +165,38 @@ public final class PushKitBridge: @unchecked Sendable {
     /// `handle(push:account:)`, on whatever announces for the account.
     @discardableResult
     func handle(push: VoipPush, announcer account: some PushAnnouncing) async throws -> PendingCall {
-        let uuid = try await callKit.reportIncomingCall(
-            callerId: push.namesCaller ? push.callerId : Self.unknownCaller, displayName: push.displayName
-        )
+        try await withCheckedThrowingContinuation { continuation in
+            handle(push: push, announcer: account) { continuation.resume(with: $0) }
+        }
+    }
 
+    /// `handle(push:account:)` from a `PKPushRegistryDelegate`: the call is
+    /// reported to CallKit before this returns, as iOS requires, and the
+    /// rest (the announcement, the binding refresh) follows once CallKit
+    /// has shown it, `outcome` told how it went. Returns the screen's
+    /// `UUID`. Call the delegate's completion handler from `outcome`.
+    @discardableResult
+    public func handle(
+        push: VoipPush, account: Account, outcome: @escaping @Sendable (Result<PendingCall, Error>) -> Void
+    ) -> UUID {
+        handle(push: push, announcer: account, outcome: outcome)
+    }
+
+    /// `handle(push:account:outcome:)`, on whatever announces for the account.
+    @discardableResult
+    func handle(
+        push: VoipPush, announcer account: some PushAnnouncing,
+        outcome: @escaping @Sendable (Result<PendingCall, Error>) -> Void
+    ) -> UUID {
+        callKit.reportIncomingCall(
+            callerId: push.namesCaller ? push.callerId : Self.unknownCaller, displayName: push.displayName
+        ) { [self] reported in
+            outcome(reported.flatMap { uuid in Result { try announce(push, shownAs: uuid, on: account) } })
+        }
+    }
+
+    /// The steps after the screen: announce, record, refresh the binding.
+    private func announce(_ push: VoipPush, shownAs uuid: UUID, on account: some PushAnnouncing) throws -> PendingCall {
         // Announced and recorded under the queue `matchIncomingCall` takes,
         // in one step: an INVITE the stack matches to this announcement
         // must find it pending, and one already handed back to the
@@ -203,10 +237,23 @@ public final class PushKitBridge: @unchecked Sendable {
 
     /// A push nothing could be read from, or one that arrives with no
     /// account to announce it on: PushKit still requires a call reported
-    /// for it, so one is, and ended at once as failed.
+    /// for it, so one is, and ended at once as failed. Not from a
+    /// `PKPushRegistryDelegate`, which calls `reportUnusable(callerId:done:)`.
     public func reportUnusable(callerId: String?) async {
-        guard let uuid = try? await callKit.reportIncomingCall(callerId: callerId ?? Self.unknownCaller) else { return }
-        callKit.takeDown(uuid: uuid, reason: .failed)
+        await withCheckedContinuation { continuation in
+            reportUnusable(callerId: callerId) { continuation.resume() }
+        }
+    }
+
+    /// `reportUnusable(callerId:)`, reported to CallKit before this
+    /// returns; `done` is told once the screen has been ended.
+    public func reportUnusable(callerId: String?, done: @escaping @Sendable () -> Void) {
+        callKit.reportIncomingCall(callerId: callerId ?? Self.unknownCaller) { [callKit] reported in
+            if case .success(let uuid) = reported {
+                callKit.takeDown(uuid: uuid, reason: .failed)
+            }
+            done()
+        }
     }
 
     /// One push, as `PushKitAdapter` hands every one over: `fields` as the
@@ -221,18 +268,40 @@ public final class PushKitBridge: @unchecked Sendable {
     /// it nothing is shown or announced: the binding is refreshed (§4.1.3),
     /// and the INVITE, if one comes, arrives as an ordinary incoming call
     /// for the application to show, as one does while the application runs.
+    ///
+    /// Not from a `PKPushRegistryDelegate`, which calls
+    /// `receive(_:mustReport:account:outcome:)`.
     public func receive(_ fields: VoipPushFields?, mustReport: Bool = true, account: Account?) async -> PushOutcome {
+        await withCheckedContinuation { continuation in
+            receive(fields, mustReport: mustReport, account: account) { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// `receive(_:mustReport:account:)` from a `PKPushRegistryDelegate`, as
+    /// `PushKitAdapter` calls it: a push that must be reported is reported
+    /// to CallKit before this returns, and `outcome` is told what became of
+    /// it once the rest has run. Call the delegate's completion handler
+    /// from `outcome`.
+    public func receive(
+        _ fields: VoipPushFields?, mustReport: Bool = true, account: Account?,
+        outcome: @escaping @Sendable (PushOutcome) -> Void
+    ) {
         guard mustReport else {
             try? account?.refreshBinding()
-            return .notShown(fields?.push)
+            outcome(.notShown(fields?.push))
+            return
         }
         guard let fields, let account else {
-            await reportUnusable(callerId: fields?.callerId)
-            return .unusable
+            reportUnusable(callerId: fields?.callerId) { outcome(.unusable) }
+            return
         }
         let push = fields.push ?? VoipPush(callId: fields.callId, displayName: fields.displayName)
-        guard let pending = try? await handle(push: push, account: account) else { return .unusable }
-        return .shown(pending)
+        handle(push: push, account: account) { result in
+            switch result {
+            case .success(let pending): outcome(.shown(pending))
+            case .failure: outcome(.unusable)
+            }
+        }
     }
 
     /// Hand every event from `SipralStack.events()` here; three matter.

@@ -89,24 +89,40 @@ public final class CallKitBridge: @unchecked Sendable {
     /// `displayName` is what the screen shows for the caller, beside
     /// `callerId`: from the push, or from the INVITE
     /// (`CallEventData.callerName`) for a call that came without one.
+    ///
+    /// An `async` call cannot be made from a `PKPushRegistryDelegate`: iOS
+    /// checks that a call was reported the moment the delegate method
+    /// returns, before any task it started has run, and ends the
+    /// application if none was. That caller uses
+    /// `reportIncomingCall(callerId:displayName:reported:)`.
     @discardableResult
     public func reportIncomingCall(callerId: String, displayName: String? = nil) async throws -> UUID {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UUID, Error>) in
+            reportIncomingCall(callerId: callerId, displayName: displayName) { continuation.resume(with: $0) }
+        }
+    }
+
+    /// `reportIncomingCall(callerId:displayName:)`, reported to the
+    /// provider before this returns, as a PushKit delegate must: the
+    /// returned `UUID` is the call's, and `reported` is told, when CallKit
+    /// has answered, whether the screen was shown. A screen refused (Do Not
+    /// Disturb, a blocked caller) is forgotten before `reported` hears of it.
+    @discardableResult
+    public func reportIncomingCall(
+        callerId: String, displayName: String? = nil, reported: @escaping @Sendable (Result<UUID, Error>) -> Void
+    ) -> UUID {
         let uuid = UUID()
         // Kept before the report: the screen can be answered the moment it shows.
         stateQueue.sync { waiting[uuid] = Waiting() }
-        do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                provider.reportIncomingCall(uuid: uuid, callerId: callerId, displayName: displayName) { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume()
-                    }
+        provider.reportIncomingCall(uuid: uuid, callerId: callerId, displayName: displayName) { [weak self] error in
+            if let error {
+                if let self {
+                    self.stateQueue.sync { _ = self.waiting.removeValue(forKey: uuid) }
                 }
+                reported(.failure(error))
+            } else {
+                reported(.success(uuid))
             }
-        } catch {
-            stateQueue.sync { _ = waiting.removeValue(forKey: uuid) }
-            throw error
         }
         return uuid
     }
