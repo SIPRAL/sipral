@@ -22,3 +22,13 @@ reason = "sprintf-js, unbounded precision specifiers: reached only through the j
 id = "GHSA-gcqx-w48m-w2h4"
 ignoreUntil = 2027-01-27
 reason = "deepmerge, prototype poisoning in mergeObject(): reached only through jest-config, merging the React Native tests' own configuration while testing; not part of any shipped package, and 4.3.1, the last release, is affected"
+
+[[IgnoredVulns]]
+id = "GHSA-3g3m-2fjr-6pw4"
+ignoreUntil = 2027-01-31
+reason = "glob, an aborted walk keeps reading directories: reached only through jest and its coverage plugin, walking the React Native tests' own files while testing; not part of any shipped package, and the fix is only in glob 14, which jest 30.5.2, the last release, does not take"
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-01-31
+reason = "minimatch, pattern amplification in its preprocessing: reached only through jest and its coverage plugin, over the React Native tests' own patterns while testing; not part of any shipped package, and the fix is only in minimatch 11, which jest 30.5.2, the last release, does not take"

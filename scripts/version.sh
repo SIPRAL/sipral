@@ -112,10 +112,10 @@ status_of() {
     esac
 }
 
-MANIFESTS="Cargo.toml $(ls crates/*/Cargo.toml tools/*/Cargo.toml) interop/harness/Cargo.toml fuzz/Cargo.toml"
+MANIFESTS="Cargo.toml $(ls crates/*/Cargo.toml tools/*/Cargo.toml interop/*/Cargo.toml) fuzz/Cargo.toml"
 LOCKS="Cargo.lock crates/sipral-aec-webrtc/Cargo.lock fuzz/Cargo.lock"
 NAMES=""
-for f in crates/*/Cargo.toml tools/*/Cargo.toml interop/harness/Cargo.toml; do
+for f in crates/*/Cargo.toml tools/*/Cargo.toml interop/*/Cargo.toml; do
     NAMES="$NAMES $(sed -n 's/^name = "\(.*\)"$/\1/p' "$f" | head -1)"
 done
 
