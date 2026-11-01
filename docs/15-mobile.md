@@ -710,8 +710,10 @@ sample's push build, "The push build" below):
   started, `call_announced` before `incoming_call`.
 - One push Apple accepted, sent just as the iPhone sample went into the
   background, did not reach the application within the gateway's twenty
-  seconds, and the INVITE was answered 480; this is still being looked
-  into.
+  seconds, and the INVITE was answered 480. It did not happen again: four
+  more pushes, sent 0, 2, 40 and 150 seconds after the sample went into
+  the background, each reached it within two seconds. Apple's sandbox
+  promises no delivery time.
 
 ## Android, run on an emulator
 
