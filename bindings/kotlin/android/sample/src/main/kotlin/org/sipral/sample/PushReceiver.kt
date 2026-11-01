@@ -8,8 +8,8 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * A push, without a push service: what `FirebaseMessagingService
- * .onMessageReceived` would be handed for a call, delivered from a computer
+ * A push, without a push service: what the push build's `FcmService` is
+ * handed for a call (src/fcm), delivered from a computer
  * over adb so that a process the system killed can be woken the way a push
  * wakes it (`docs/15-mobile.md`):
  *

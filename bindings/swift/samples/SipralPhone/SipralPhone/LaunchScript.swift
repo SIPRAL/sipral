@@ -6,12 +6,15 @@ import Foundation
 /// A run driven from the launch environment instead of the screen, for the
 /// simulator and the lab, where nobody taps: `xcrun simctl launch` hands
 /// the application every `SIMCTL_CHILD_<NAME>` as `<NAME>`, and Xcode's
-/// scheme editor does the same on a phone. Nothing given here is saved.
+/// scheme editor does the same on a phone. Nothing given here is saved
+/// unless `SIPRAL_PHONE_SAVE=1` says so.
 ///
 /// - `SIPRAL_PHONE_SERVER`, `_PORT`, `_TRANSPORT` (udp, tcp, tls), `_USER`,
 ///   `_AUTH_USER`, `_DOMAIN`, `_PASSWORD`, `_SRTP` (off, offered,
 ///   required), `_REGISTER=0` for a peer with no registrar: the account
-///   for this run.
+///   for this run. `SIPRAL_PHONE_SAVE=1` keeps it as the Account screen's
+///   "Save and register" would, so that a launch a push causes later, with
+///   no environment, has it too.
 /// - `SIPRAL_PHONE_CALL`: what to dial once registered (or after five
 ///   seconds), `SIPRAL_PHONE_CALL_AFTER` seconds later (default none);
 ///   `SIPRAL_PHONE_CALL_SECONDS`: hang up that long after the call is
@@ -33,6 +36,7 @@ struct LaunchScript {
     let evidence: Bool
     let unregisters: Bool
     let keepsScreenOn: Bool
+    let saves: Bool
 
     init(environment: [String: String]) {
         func value(_ name: String) -> String? {
@@ -61,6 +65,7 @@ struct LaunchScript {
         evidence = value("EVIDENCE") == "1"
         unregisters = value("UNREGISTER") == "1"
         keepsScreenOn = value("SCREEN_ON") == "1"
+        saves = value("SAVE") == "1"
     }
 
     @MainActor

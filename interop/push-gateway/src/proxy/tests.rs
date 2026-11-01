@@ -502,6 +502,37 @@ fn a_message_is_pushed_on_fcm_and_sent_straight_on_apns() {
 }
 
 #[test]
+fn a_qualify_is_answered_here_while_the_device_sleeps() {
+    let mut gateway = Gateway::new(config());
+    let now = Instant::now();
+    registered(&mut gateway, 40000, 1, "fcm", now);
+    let target = SipUri::parse(&contact_uri(40000, "fcm"))
+        .expect("uri")
+        .moved_to(own())
+        .render();
+    let options = format!(
+        "OPTIONS {target} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bKq1;rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:alice@pbx.example>;tag=q1\r\n\
+         To: <{target}>\r\n\
+         Call-ID: qualify-1\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let actions = gateway.on_datagram(pbx(), options.as_bytes(), now);
+    assert!(pushes(&actions).is_empty(), "a qualify wakes nobody");
+    let (to, response) = only_send(&actions);
+    assert_eq!(to, pbx());
+    assert_eq!(response.status(), Some(200));
+    // the same request again: the same answer, still from here
+    let actions = gateway.on_datagram(pbx(), options.as_bytes(), now);
+    let (to, again) = only_send(&actions);
+    assert_eq!(to, pbx());
+    assert_eq!(again.to_bytes(), response.to_bytes());
+}
+
+#[test]
 fn too_short_unsupported_and_query_registers() {
     let mut gateway = Gateway::new(config());
     let now = Instant::now();

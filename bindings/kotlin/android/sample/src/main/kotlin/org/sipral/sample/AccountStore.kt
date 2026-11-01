@@ -10,6 +10,7 @@ import java.net.InetAddress
 import java.net.UnknownHostException
 import org.sipral.android.telecom.SipralKeystoreBox
 import org.sipral.android.telecom.SipralTelecomAdapter
+import org.sipral.idiomatic.SipralPush
 
 /** What the account screen holds, as typed. */
 data class AccountSettings(
@@ -146,6 +147,19 @@ class AccountStore(context: Context) {
             .putString("telecom", settings.telecom)
             .apply()
     }
+
+    /** The last push token and the project it belongs to, kept so that a
+     * process a push started registers with them before the push service
+     * has answered it again. */
+    var push: SipralPush?
+        get() {
+            val token = prefs.getString("push_token", null) ?: return null
+            val project = prefs.getString("push_project", null) ?: return null
+            return SipralPush("fcm", token, project)
+        }
+        set(value) {
+            prefs.edit().putString("push_token", value?.prid).putString("push_project", value?.param).apply()
+        }
 
     /** Whether the account was registered when the process last ran, so a
      * new process registers it again by itself. */

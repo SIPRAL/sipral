@@ -215,6 +215,7 @@ private fun PhoneScreen(phone: Phone) {
     OutlinedButton(onClick = {
         if (phone.pushCaller.isNotBlank()) phone.pushArrived(phone.pushCaller.trim())
     }) { Text("Simulate a push") }
+    Text(phone.pushText, style = MaterialTheme.typography.bodySmall)
 
     for (call in phone.calls) {
         CallCard(phone, call)

@@ -855,6 +855,16 @@ impl Gateway {
                 self.remember_answer(txn, from, bytes, now);
                 return;
             };
+            // A PBX's qualify (FreePBX's default, every 60 s): the device
+            // may be asleep and cannot answer, and a binding that does not
+            // answer is marked unreachable and never offered a call, the
+            // very call a push would have woken it for. The binding stands
+            // here, so this proxy answers for it.
+            if initial && method == "OPTIONS" {
+                let bytes = self.reply(&request, from, 200, "OK", &[], out);
+                self.remember_answer(txn, from, bytes, now);
+                return;
+            }
             let kind = match method.as_str() {
                 "INVITE" => Some(PushKind::Call),
                 "MESSAGE" => Some(PushKind::Message),

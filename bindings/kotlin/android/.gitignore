@@ -6,6 +6,9 @@
 /gradlew.bat
 /gradle/wrapper/gradle-wrapper.jar
 
+# A Firebase project's configuration, for the push build (sample/build.gradle.kts)
+/sample/google-services.json
+
 # Gradle and Android Studio output
 .gradle/
 .kotlin/

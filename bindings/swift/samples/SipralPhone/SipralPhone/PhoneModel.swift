@@ -87,6 +87,9 @@ final class PhoneModel: ObservableObject {
         #endif
         settings = script.settings ?? store.load()
         password = script.password ?? ((try? store.password()) ?? "")
+        if script.saves, script.settings != nil {
+            try? store.save(settings, password: password)
+        }
         wholeMessages = settings.wholeMessages
         keepsScreenOn = script.keepsScreenOn || UserDefaults.standard.bool(forKey: Self.keepsScreenOnKey)
         voipToken = store.voipToken

@@ -550,7 +550,11 @@ all, whether it rewrites `Contact`s (FreePBX's default) or not, and with no
 `Contact` back. Every other `Contact` a device sends carries its own address
 in one parameter, so what the PBX sends inside a dialog reaches the device
 behind any NAT, with no dialog state kept. Everything a device sends goes to
-the PBX.
+the PBX. An `OPTIONS` from the PBX for a binding that asked for pushes is
+answered 200 by the gateway itself: FreePBX qualifies every contact each
+minute, a sleeping device cannot answer, and a contact that does not answer
+is marked unavailable and never offered the call a push would have woken it
+for (found on a FreePBX on 1 November 2026).
 
 What a push carries is `kind` (`call`, `message`, `dialog`, `refresh`),
 `caller` (the held request's `From` URI, which `PushKitAdapter` reads),
@@ -610,7 +614,8 @@ push the harness answers twelve seconds late, past the timer: 480 at the
 gateway, and the announced call reported missing after twenty seconds.
 
 What it does not prove is the last hop: Apple's and Google's own delivery to
-a phone, and a phone's own suspend and wake. The senders for both are in the
+a phone, and a phone's own suspend and wake, which real phones showed on
+1 November 2026 ("Device day" below). The senders for both are in the
 gateway (`src/apns.rs`: HTTP/2 to `api.sandbox.push.apple.com` or
 `api.push.apple.com`, an ES256 provider token from the `.p8` key, `apns-topic`
 the bundle with `.voip`, `apns-push-type: voip`; `src/fcm.rs`: the service
@@ -622,7 +627,7 @@ credentials, reached all three endpoints and was answered as it should be:
 APNs `403 InvalidProviderToken` to a token signed by a key made up for the
 probe, on the sandbox and on production; Google's token endpoint
 `400 invalid_request` to an assertion nobody signed; FCM `401 UNAUTHENTICATED`
-to an access token nobody issued. With a real key, nothing has been sent.
+to an access token nobody issued.
 
 ### Device day: the gateway with real keys
 
@@ -651,12 +656,13 @@ sipral-push-gateway probe apns --apns-key /secure/AuthKey_ABC123DEFG.p8 \
 sipral-push-gateway probe fcm --fcm-service-account /secure/service-account.json
 ```
 
-What a working key should be answered with, by Apple's and Google's
-documentation, since nothing here has seen it yet: from APNs a refusal of
-the device token (`400 BadDeviceToken`) rather than of the provider token
-(`403 InvalidProviderToken`, what a key it does not know gets); from Google
-an access token, then a refusal of the registration token
-(`400 INVALID_ARGUMENT`) rather than `401 UNAUTHENTICATED`.
+What a working key is answered with, as Apple's and Google's documentation
+says and as the probe saw with real keys on 1 November 2026: from APNs a
+refusal of the device token (`400 BadDeviceToken`, on the sandbox and on
+production) rather than of the provider token (`403 InvalidProviderToken`,
+what a key it does not know gets, a key made without the APNs service
+included); from Google an access token, then a refusal of the registration
+token (`400 INVALID_ARGUMENT`) rather than `401 UNAUTHENTICATED`.
 `--apns-production` sends to production, for a TestFlight or App Store
 build; the sandbox is the default. With the phone's own token as
 `--device-token`, the probe pushes a call from `sip:probe@sipral.invalid`
@@ -680,6 +686,32 @@ of record and names the gateway as the address its requests go to
 above. The PBX needs no SIP setting changed, but a firewall in front of it
 (FreePBX has one) has to let the gateway's address in. The gateway prints one
 line per thing it does, the same lines the lab reads.
+
+**Run on 1 November 2026**, with the owner's keys, the gateway on a Mac in
+front of a FreePBX and an iPhone and an Android phone on the same Wi-Fi,
+each registered through it with its sample (`SipralPhone`, and the Android
+sample's push build, "The push build" below):
+
+- **The push leg alone.** With each sample's process ended, `probe
+  --device-token` with the phone's own token was accepted (APNs 200,
+  FCM 200) and started the application. On iOS, the stack was registered
+  0.15 s and the call on CallKit's screen 0.22 s after the launch; on
+  Android, the call rang through the self-managed `ConnectionService` 0.9 s
+  after the process started. Both reported the announced call missing
+  twenty seconds later, as the probe's call never comes.
+- **A call through the PBX.** Another extension called the phone's, its
+  sample's process ended (and on Android the phone locked): the gateway
+  held the INVITE and pushed, the woken phone's refresh was accepted, the
+  INVITE was released to it and matched to the screen the push had raised.
+  On iOS the INVITE reached the stack before PushKit handed the push over,
+  so the push's second screen was taken down at once, as `PushKitBridge`
+  does for a call already shown; the call was answered and audio flowed
+  both ways with no packet lost. On Android it rang 0.9 s after the process
+  started, `call_announced` before `incoming_call`.
+- One push Apple accepted, sent just as the iPhone sample went into the
+  background, did not reach the application within the gateway's twenty
+  seconds, and the INVITE was answered 480; this is still being looked
+  into.
 
 ## Android, run on an emulator
 
@@ -1385,16 +1417,18 @@ end, and `adb` on a computer for the steps that use it.
     `adb shell dumpsys batterystats org.sipral.sample > batterystats.txt`.
 11. **Doze overnight.** Registered, unplugged, screen off overnight. In the
     morning, before touching it, call it from the far end. *Expect,* with
-    no push service (this sample has none): no ring — the freezer and Doze
+    the build that has no push service: no ring — the freezer and Doze
     stop a background application, as above. Then open the app and call
-    again: *expect* a ring. To see the push path instead: `adb shell
-    dumpsys deviceidle tempwhitelist -d 10000 org.sipral.sample` and the
-    `SIMULATE_PUSH` broadcast above, then the call. *Send:* the bundle and
-    what rang.
+    again: *expect* a ring. To see the push path instead, the push build
+    registered through a push gateway ("The push build" below); or
+    `adb shell dumpsys deviceidle tempwhitelist -d 10000 org.sipral.sample`
+    and the `SIMULATE_PUSH` broadcast above, then the call. *Send:* the
+    bundle and what rang.
 12. **Process death.** In the background, `adb shell am kill
-    org.sipral.sample`, then the `SIMULATE_PUSH` broadcast naming the far
-    end as the PBX writes it. *Expect:* ringing within two seconds, "ready:
-    N ms after the cold start ... carried on". *Send:* the bundle.
+    org.sipral.sample`, then a push: from the gateway (the push build), or
+    the `SIMULATE_PUSH` broadcast naming the far end as the PBX writes it.
+    *Expect:* ringing within two seconds, "ready: N ms after the cold
+    start ... carried on". *Send:* the bundle.
 13. **Android 8 (API 26 or 27), if a phone is available.** Steps 1 to 4
     and 7. *Expect:* "audio: AudioRecord and AudioTrack" (no AAudio device
     mode below Android 9), calls heard both ways; no notifications or
@@ -1418,6 +1452,47 @@ end, and `adb` on a computer for the steps that use it.
     `ConnectionService`: steps 4 and 6 with it, if there is one. *Send:*
     the bundle after each adapter, both `dumpsys` files, and anything that
     behaved differently between the two.
+
+### The push build
+
+The sample is built with Firebase Cloud Messaging when it is given a
+Firebase project's `google-services.json` for `org.sipral.sample`, which
+never goes in the repository:
+
+```sh
+./gradlew -Psipral.repo=<the Maven directory android.sh wrote> \
+    -Psipral.googleServices=/secure/google-services.json :sample:assembleDebug
+```
+
+(or the file beside `sample/build.gradle.kts`, which git ignores). The
+project's values go into the resources Firebase initialises itself from,
+with no Google Services plugin, and `src/fcm` is compiled in: `FcmTokens`
+asks for the registration token when the process starts, `FcmService`
+takes a new one (`onNewToken`) and the gateway's data messages
+(`onMessageReceived`). The token and the project are RFC 8599's `pn-prid`
+and `pn-param` on every REGISTER (`SipralPush("fcm", token, project)`),
+kept in the application's preferences so a process a push started
+registers with them at once; a new token registers the account again, after
+the call in progress if there is one. A push of `kind` `call` is
+`Phone.pushArrived` with its `caller` and `call-id`, as the simulated one
+is; `message`, `dialog` and `refresh` refresh the binding, after which the
+gateway releases what it held. The Phone tab shows the token's start and
+what the registrar promised. Without the file, nothing of Firebase is
+resolved and the build is the one `android.sh` checks; why Firebase stays
+out of every published artefact is in `THIRD-PARTY-NOTICES.md`.
+
+**Run on an Android phone on 1 November 2026** (Android 12), the push build
+registered through the lab's gateway on this Mac in front of a FreePBX, the
+gateway holding the owner's real Firebase service account: the REGISTER
+carried `pn-provider=fcm`, the gateway added `+sip.pns` and the phone read
+"registrar promised pushes". With the sample's process killed
+(`am kill`, nothing of it running), `sipral-push-gateway probe fcm
+--device-token <the phone's token>` was accepted by Google (200) and
+delivered at high priority: the process started, the stack opened 224 ms
+later, the call rang through the self-managed `ConnectionService` 0.9 s
+after the process started, the registration was carried on from the last
+process's record and ready 1.1 s after it started, and, the probe's call
+never coming, the announced call was reported missing twenty seconds later.
 
 ## The Swift package on iOS
 
@@ -1975,8 +2050,9 @@ launch script (`SIPRAL_PHONE_*` through `xcrun devicectl device process
 launch --environment-variables`): registration over UDP, TCP and TLS, calls
 to the echo over UDP and TLS with digits, a call from the PBX and one
 straight from another stack answered on CallKit's screen with 180 sent first.
-The steps below that need a person at the phone, and a VoIP push end to end,
-are run next.
+A VoIP push end to end, through the lab's gateway with real keys, followed
+on 1 November ("Device day" above). The steps below that need a person at
+the phone are run next.
 
 The run on the phone is short and every step ends with the same thing: on
 Diagnostics, "Share log", and the file sent back (AirDrop, Mail, Messages).

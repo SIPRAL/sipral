@@ -530,6 +530,23 @@ Gradle while it builds and nothing of them is in any artefact, which is why
 `android.sh` holds only what the helper, the sample and the tests resolve to
 the allow-list.
 
+**The sample's push build.** Given a Firebase project's
+`google-services.json`, which is never in this repository
+(`-Psipral.googleServices=FILE`, `bindings/kotlin/android/sample/build.gradle.kts`),
+the sample is built with Firebase Cloud Messaging, so that a real push can
+wake it: `firebase-messaging` 26.0.1 from `firebase-bom` 35.1.0, and what it
+brings. Firebase's own libraries (`firebase-messaging`, `firebase-common`,
+`firebase-installations`, the `transport-*` libraries and the rest) are
+Apache-2.0, but `play-services-base`, `-basement`, `-cloud-messaging`,
+`-stats` and `-tasks`, `firebase-iid-interop` and
+`firebase-measurement-connector` are under the Android Software Development
+Kit License, which is not one `deny.toml` allows. That build is therefore
+outside what `android.sh` builds and checks, and nothing from it is
+published: no artefact of this repository, `sipral.aar` and the helper
+included, carries Firebase. An application that wants push on Android adds
+Firebase itself, under its own Firebase project, as every Android
+application with push does.
+
 The Android SDK and NDK the image installs are under the Android SDK licence,
 not an open-source one. They are tools and are not redistributed: nothing of
 the SDK is in this repository or in any artefact built from it except what the

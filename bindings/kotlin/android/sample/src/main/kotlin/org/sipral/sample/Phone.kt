@@ -53,6 +53,7 @@ import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralLifecycle
 import org.sipral.idiomatic.SipralNetwork
+import org.sipral.idiomatic.SipralPush
 import org.sipral.idiomatic.SipralTurnServer
 import org.sipral.idiomatic.audioOf
 import org.sipral.idiomatic.awaitNext
@@ -89,6 +90,17 @@ class Phone(private val app: Application) {
     var pushCaller by mutableStateOf("")
     var calls by mutableStateOf<List<TelecomCall>>(emptyList())
         private set
+
+    /** The push token the REGISTER carries, and what the registrar said
+     * about it, for the screen. */
+    var pushText by mutableStateOf("no push service in this build: simulated pushes only")
+        private set
+
+    /** RFC 8599's parameters for the account: the push service's token and
+     * project, once a build with one ([PushTokens]) has had them. */
+    private var push: SipralPush? = store.push
+    /** A token that came during a call, put on the REGISTER once it ends. */
+    private var tokenWaitsForCallEnd = false
 
     /** The newest hundred of the sample's own lines, for the screen. */
     val screenLog = mutableStateListOf<String>()
@@ -186,6 +198,9 @@ class Phone(private val app: Application) {
 
     private suspend fun open(trigger: String, push: String?) {
         val s = settings
+        // the push service's parameters, which the parameter named push (a
+        // caller) shadows
+        val asked = this.push
         if (s.aor.isBlank() || s.registrarAddress.isBlank()) {
             status = "an address of record and a registrar (host:port) are both needed"
             return
@@ -255,6 +270,7 @@ class Phone(private val app: Application) {
                     // keeps the way in open while the process runs (docs/06-nat.md,
                     // "Refresh"). Nothing is sent while it is frozen or dozing.
                     keepaliveMs = KEEPALIVE_MS,
+                    push = asked,
                 )
             }
             client = opened
@@ -304,6 +320,7 @@ class Phone(private val app: Application) {
             }
             store.keepRegistered = true
             status = "registered"
+            showPush(added)
             note(
                 "ready: ${added.timeToReadyMs ?: -1} ms after the cold start, " +
                     "${System.currentTimeMillis() - processStartedAt} ms after the process started" +
@@ -450,23 +467,116 @@ class Phone(private val app: Application) {
         scope.launch {
             starting?.join()
             store.keepRegistered = false
-            val opened = client ?: return@launch
-            account?.let { lifecycle.forget(it.aor) }
-            val added = account
-            if (added != null && settings.registrar.isNotBlank()) {
-                status = "unregistering"
-                withContext(Dispatchers.IO) {
-                    try {
-                        withTimeoutOrNull(5_000) {
-                            opened.events.awaitNext(timeoutMs = 5_000, matches = { isFinal(it, added) }) { added.unregister() }
-                        }
-                    } catch (failed: Exception) {
-                        note("unregister: $failed")
+            unregisterAndClose()
+        }
+    }
+
+    private suspend fun unregisterAndClose() {
+        val opened = client ?: return
+        account?.let { lifecycle.forget(it.aor) }
+        val added = account
+        if (added != null && settings.registrar.isNotBlank()) {
+            status = "unregistering"
+            withContext(Dispatchers.IO) {
+                try {
+                    withTimeoutOrNull(5_000) {
+                        opened.events.awaitNext(timeoutMs = 5_000, matches = { isFinal(it, added) }) { added.unregister() }
                     }
+                } catch (failed: Exception) {
+                    note("unregister: $failed")
                 }
             }
-            close()
-            status = "not registered"
+        }
+        close()
+        status = "not registered"
+    }
+
+    /**
+     * A token from the push service ([PushTokens], `onNewToken`), with the
+     * project it belongs to. It rides on every REGISTER, so a new one
+     * registers the account again: at once, or when the call in progress
+     * ends, since closing the stack would end it.
+     */
+    fun pushTokenChanged(token: String, project: String) {
+        main.post {
+            val changed = SipralPush("fcm", token, project)
+            if (push?.prid == changed.prid && push?.param == changed.param) {
+                pushText = "FCM token ${token.take(12)}…, project $project"
+                account?.let(::showPush)
+                return@post
+            }
+            push = changed
+            store.push = changed
+            note("FCM token ${token.take(12)}…, project $project")
+            pushText = "FCM token ${token.take(12)}…, project $project"
+            if (client == null && starting?.isActive != true) return@post
+            if (calls.isNotEmpty()) {
+                tokenWaitsForCallEnd = true
+                note("the new token goes on the REGISTER when the call ends")
+            } else {
+                registerAgain("a new push token")
+            }
+        }
+    }
+
+    /** The build has a push service, which has been asked for its token. */
+    fun pushServiceStarted(service: String) {
+        val known = push
+        pushText = if (known == null) {
+            "$service: no token yet"
+        } else {
+            "FCM token ${known.prid.take(12)}…, project ${known.param}"
+        }
+        note("push service: $service")
+    }
+
+    private fun registerAgain(why: String) {
+        scope.launch {
+            starting?.join()
+            unregisterAndClose()
+            start(why)
+        }
+    }
+
+    private fun showPush(added: SipralAccount) {
+        val asked = push ?: return
+        val echo = try {
+            added.pushEcho
+        } catch (_: SipralException) {
+            null
+        }
+        val promised = when {
+            echo == null -> "the registrar said nothing about push"
+            echo.accepted != 0L -> "registrar promised pushes"
+            else -> "registrar promised nothing"
+        }
+        pushText = "FCM token ${asked.prid.take(12)}…, project ${asked.param}: $promised"
+        note("push: $promised")
+    }
+
+    /**
+     * A push from the service that has the token: `kind` `call` with the
+     * held INVITE's `caller` and `call-id`, or `message`, `dialog` or
+     * `refresh`, after which the gateway forwards what it held once the
+     * refresh REGISTER is answered (`docs/15-mobile.md`, "The lab's push
+     * gateway"). [done] as for [pushArrived].
+     */
+    fun pushReceived(data: Map<String, String>, done: () -> Unit) {
+        when (val kind = data["kind"]) {
+            "call" -> pushArrived(data["caller"].orEmpty().trim(), data["call-id"]?.trim()?.ifEmpty { null }, done)
+            else -> {
+                note("push: ${kind ?: "no kind"}, the registration refreshed")
+                val opened = account
+                val job = if (opened != null) {
+                    scope.launch(Dispatchers.IO) { opened.refreshBinding() }
+                } else {
+                    start("woken by a push (${kind ?: "no kind"})")
+                }
+                scope.launch {
+                    withTimeoutOrNull(9_000) { job.join() }
+                    done()
+                }
+            }
         }
     }
 
@@ -591,6 +701,10 @@ class Phone(private val app: Application) {
      * Android cancels nothing a service in the foreground shows. */
     private fun reconcile(now: List<TelecomCall>) {
         calls = now
+        if (now.isEmpty() && tokenWaitsForCallEnd) {
+            tokenWaitsForCallEnd = false
+            registerAgain("the push token that came during the call")
+        }
         if (now.none { it.phase == TelecomPhase.RINGING }) {
             val manager = app.getSystemService(NotificationManager::class.java)
             manager.cancel(INCOMING_NOTIFICATION)

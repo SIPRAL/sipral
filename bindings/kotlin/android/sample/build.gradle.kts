@@ -12,6 +12,15 @@
 // -Psipral.variant=opus for the build whose natives carry libopus, and
 // -Psipral.versionCode=N for a store upload that needs a code higher than
 // the last one uploaded.
+//
+// The push build: given a Firebase project's google-services.json
+// (-Psipral.googleServices=FILE, or the file beside this one, never
+// committed), Firebase Cloud Messaging is compiled in from src/fcm, its
+// project read into the resources Firebase initialises itself from, with
+// no Google Services plugin. Without the file nothing of Firebase is
+// resolved and the build is the one android.sh checks; Firebase's Play
+// services libraries come under Google's own terms, not deny.toml's
+// licences (THIRD-PARTY-NOTICES.md).
 
 plugins {
     id("com.android.application")
@@ -29,6 +38,25 @@ val withOpus: Boolean = providers.gradleProperty("sipral.variant").orNull == "op
 // variants of one release never share a code.
 val derivedVersionCode: Int = sipralVersion.split('.').map { it.takeWhile(Char::isDigit).toInt() }
     .let { (major, minor, patch) -> ((major * 100 + minor) * 100 + patch) * 10 + if (withOpus) 1 else 0 }
+
+val googleServices: File? = (providers.gradleProperty("sipral.googleServices").orNull?.let(::File)
+    ?: file("google-services.json")).takeIf { it.isFile }
+
+// The values the Google Services plugin would write, for this application's
+// client in the file (developers.google.com/android/guides/google-services-plugin).
+val firebase: Map<String, String>? = googleServices?.let { json ->
+    val root = groovy.json.JsonSlurper().parse(json) as Map<*, *>
+    val project = root["project_info"] as Map<*, *>
+    val client = (root["client"] as List<*>).map { it as Map<*, *> }.firstOrNull {
+        ((it["client_info"] as Map<*, *>)["android_client_info"] as Map<*, *>)["package_name"] == "org.sipral.sample"
+    } ?: throw GradleException("$json has no Android application org.sipral.sample")
+    mapOf(
+        "google_app_id" to (client["client_info"] as Map<*, *>)["mobilesdk_app_id"] as String,
+        "google_api_key" to ((client["api_key"] as List<*>).first() as Map<*, *>)["current_key"] as String,
+        "gcm_defaultSenderId" to project["project_number"] as String,
+        "project_id" to project["project_id"] as String,
+    )
+}
 
 android {
     namespace = "org.sipral.sample"
@@ -48,6 +76,7 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
+        firebase?.forEach { (name, value) -> resValue("string", name, value) }
     }
 
     buildTypes {
@@ -62,6 +91,7 @@ android {
 
     buildFeatures {
         compose = true
+        resValues = firebase != null
     }
 
     compileOptions {
@@ -79,7 +109,21 @@ android {
     }
 }
 
+if (firebase != null) {
+    androidComponents {
+        onVariants { variant ->
+            variant.sources.kotlin?.addStaticSourceDirectory("src/fcm/kotlin")
+            variant.sources.manifests.addStaticManifestFile("src/fcm/AndroidManifest.xml")
+        }
+    }
+}
+
 dependencies {
+    if (firebase != null) {
+        // the newest Firebase BoM on Google's Maven on 2026-11-01
+        implementation(platform("com.google.firebase:firebase-bom:35.1.0"))
+        implementation("com.google.firebase:firebase-messaging")
+    }
     implementation(project(":telecom"))
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
