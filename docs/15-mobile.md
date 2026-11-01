@@ -1921,7 +1921,7 @@ CallKit, by `CallKitBridge`.
 - **Push parameters.** With a VoIP token and a team in the build
   (`SipralTeamIdentifier`, from `DEVELOPMENT_TEAM`), the account's REGISTER
   carries `pn-provider=apns`, the token in hex as `pn-prid` and
-  `TEAMID.org.sipral.phone.voip` as `pn-param`; a new token re-registers.
+  `TEAMID.org.sipral.sample.voip` as `pn-param`; a new token re-registers.
   Diagnostics says whether the registrar promised pushes (`pushEcho`). A
   push's payload names the caller under `caller`. What sends it is a proxy
   or push gateway holding the APNs key for the team ("Who sends the push",
@@ -1970,7 +1970,7 @@ With `DEVELOPMENT_TEAM` the phone build is signed for development with
 `-allowProvisioningUpdates`, and `--archive` archives it, signs it ad hoc
 with its entitlements, and exports an IPA for App Store Connect, signed for
 distribution; the upload is not run, and the script prints the commands
-that would. `SIPRAL_PHONE_BUNDLE_ID` replaces `org.sipral.phone`. Built from
+that would. `SIPRAL_PHONE_BUNDLE_ID` replaces `org.sipral.sample`. Built from
 Xcode instead, the team goes in `bindings/swift/samples/SipralPhone/Local.xcconfig`
 (`DEVELOPMENT_TEAM = ...`), which git ignores; choosing it in the Signing tab
 would write it into the project.
@@ -2041,8 +2041,9 @@ devices from which to generate a provisioning profile"); the archive and
 the export for App Store Connect succeeded, signed "Apple Distribution",
 4.4 MB, its entitlements `aps-environment` `production` and
 `beta-reports-active`, with the privacy manifest and the icon in the bundle.
-The App ID `org.sipral.phone` and the distribution certificate are what
-`-allowProvisioningUpdates` made in the account. The upload to App Store
+The App ID `org.sipral.phone` (the sample's identifier until 1 November
+2026, `org.sipral.sample` since, as on Android) and the distribution
+certificate are what `-allowProvisioningUpdates` made in the account. The upload to App Store
 Connect was not run.
 
 ## On a real iPhone

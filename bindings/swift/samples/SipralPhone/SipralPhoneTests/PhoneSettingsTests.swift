@@ -21,7 +21,7 @@ final class PhoneSettingsTests: XCTestCase {
     private var defaults: UserDefaults!
 
     override func setUp() {
-        suite = "org.sipral.phone.tests.\(UUID().uuidString)"
+        suite = "org.sipral.sample.tests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suite)
     }
 

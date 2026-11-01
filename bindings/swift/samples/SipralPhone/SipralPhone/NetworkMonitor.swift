@@ -11,7 +11,7 @@ import Sipral
 /// VPN are each told apart by what actually carries the traffic.
 final class NetworkMonitor: @unchecked Sendable {
     private let monitor = NWPathMonitor()
-    private let queue = DispatchQueue(label: "org.sipral.phone.network")
+    private let queue = DispatchQueue(label: "org.sipral.sample.network")
     /// What the stack was last told, or created on. Only on `queue`.
     private var told: SipralStack.Network?
 

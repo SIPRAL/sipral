@@ -60,7 +60,7 @@ final class PhoneModel: ObservableObject {
     private var pushBridge: PushKitBridge?
     private var pushAdapter: PushKitAdapter?
     private let accountBox = AccountBox()
-    private let lifecycle = SipralAppLifecycle(store: KeychainSnapshotStore(service: "org.sipral.phone.registration"))
+    private let lifecycle = SipralAppLifecycle(store: KeychainSnapshotStore(service: "org.sipral.sample.registration"))
     private var stack: SipralStack?
     private var account: Account?
     private var monitor: NetworkMonitor?
@@ -78,7 +78,7 @@ final class PhoneModel: ObservableObject {
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         log = EvidenceLog(directory: support.appendingPathComponent("Logs", isDirectory: true))
-        store = SettingsStore(defaults: .standard, secrets: KeychainSecretStore(service: "org.sipral.phone"))
+        store = SettingsStore(defaults: .standard, secrets: KeychainSecretStore(service: "org.sipral.sample"))
         script = LaunchScript(environment: ProcessInfo.processInfo.environment)
         #if targetEnvironment(simulator)
         systemCalls = false

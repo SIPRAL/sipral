@@ -13,7 +13,7 @@ final class EvidenceLog: @unchecked Sendable {
 
     let directory: URL
     private let maxBytes: Int
-    private let queue = DispatchQueue(label: "org.sipral.phone.log")
+    private let queue = DispatchQueue(label: "org.sipral.sample.log")
     private var handle: FileHandle?
     private var written = 0
     private var recentLines: [String] = []

@@ -10,7 +10,7 @@
 //   DEVELOPMENT_TEAM = ABCDE12345
 //   SIPRAL_PHONE_BUNDLE_ID = org.example.phone
 
-SIPRAL_PHONE_BUNDLE_ID = org.sipral.phone
+SIPRAL_PHONE_BUNDLE_ID = org.sipral.sample
 DEVELOPMENT_TEAM =
 
 #include? "Local.xcconfig"

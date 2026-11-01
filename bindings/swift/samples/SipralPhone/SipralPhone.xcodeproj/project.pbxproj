@@ -265,7 +265,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Sipral Phone";
+				INFOPLIST_KEY_CFBundleDisplayName = "Sipral sample";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sipral Phone uses the microphone to carry your voice in calls.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -295,7 +295,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Sipral Phone";
+				INFOPLIST_KEY_CFBundleDisplayName = "Sipral sample";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sipral Phone uses the microphone to carry your voice in calls.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

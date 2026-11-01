@@ -24,7 +24,7 @@
 # SIPRAL_TEAM_ID) in the environment is passed to xcodebuild with
 # -allowProvisioningUpdates, which lets Xcode create the App ID, the
 # certificates and the profiles the account lacks. SIPRAL_PHONE_BUNDLE_ID
-# replaces org.sipral.phone. Nothing here uploads: the IPA's path and the
+# replaces org.sipral.sample. Nothing here uploads: the IPA's path and the
 # command that would are printed, and the upload is the owner's.
 #
 # The project names its Swift package by path, DIR/apple/spm, where
@@ -58,7 +58,7 @@ APP_DIR="$ROOT/bindings/swift/samples/SipralPhone"
 PROJECT="$APP_DIR/SipralPhone.xcodeproj"
 DERIVED="$OUT/derived"
 TEAM="${DEVELOPMENT_TEAM:-${SIPRAL_TEAM_ID:-}}"
-BUNDLE_ID="${SIPRAL_PHONE_BUNDLE_ID:-org.sipral.phone}"
+BUNDLE_ID="${SIPRAL_PHONE_BUNDLE_ID:-org.sipral.sample}"
 
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
