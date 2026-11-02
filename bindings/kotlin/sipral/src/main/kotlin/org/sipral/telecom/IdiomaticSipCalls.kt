@@ -4,6 +4,8 @@
 package org.sipral.telecom
 
 import java.util.concurrent.ConcurrentHashMap
+import org.sipral.SipralException
+import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAnnounced
 import org.sipral.idiomatic.SipralCall
@@ -74,6 +76,21 @@ class IdiomaticSipCalls(
         calls[call.handle] = call
         return call.handle
     }
+
+    /** [SipralCall.consult] from [call]'s [SipralCall], on [account]. */
+    override fun consult(call: Long, account: Long, target: String): Long {
+        val held = known(call)
+        val consultation = held.consult(target, account(account), mediaHost = mediaHost)
+        calls[consultation.handle] = consultation
+        return consultation.handle
+    }
+
+    override fun transferTo(call: Long, other: Long) {
+        known(call).transferTo(known(other))
+    }
+
+    private fun known(call: Long): SipralCall =
+        calls[call] ?: throw SipralException(SipralStatus.STALE_HANDLE, "call ${call.toString(16)} was not answered or placed here")
 
     override fun hangup(call: Long) {
         val known = calls[call]

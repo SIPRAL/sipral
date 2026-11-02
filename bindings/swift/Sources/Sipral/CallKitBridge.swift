@@ -27,6 +27,11 @@ public protocol CallKitProviding: AnyObject, Sendable {
     func reportCallConnecting(uuid: UUID)
     func reportCallConnected(uuid: UUID)
     func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason)
+    /// Asks the system to take `uuid` off hold (`CXSetHeldCallAction`),
+    /// which comes back as `CallKitBridge.handleHold(uuid:onHold:)`: the
+    /// consultation that held it ended with no transfer. A provider that
+    /// cannot ask leaves the call held, for the person to resume.
+    func requestUnhold(uuid: UUID)
 }
 
 public extension CallKitProviding {
@@ -43,6 +48,8 @@ public extension CallKitProviding {
             reportCallerName(uuid: uuid, displayName: displayName)
         }
     }
+
+    func requestUnhold(uuid: UUID) {}
 }
 
 /// Mirrors `Call` events onto a `CallKitProviding` (the real `CXProvider` in
@@ -82,6 +89,13 @@ public final class CallKitBridge: @unchecked Sendable {
     /// Calls bound before CallKit said their screen was up, which ring
     /// when it does unless answered first; guarded by `stateQueue`.
     private var ringWhenShown: Set<UUID> = []
+    /// Each consultation bound with `bindConsultation(uuid:to:holding:)`,
+    /// and the held call it was placed for; guarded by `stateQueue`.
+    private var consultations: [UUID: UUID] = [:]
+    /// Held calls whose transfer is under way, or succeeded and has yet to
+    /// hang them up: their consultation ending takes nothing off hold.
+    /// Guarded by `stateQueue`.
+    private var transferring: Set<UUID> = []
 
     public init(provider: any CallKitProviding) {
         self.provider = provider
@@ -201,6 +215,8 @@ public final class CallKitBridge: @unchecked Sendable {
                     provider.reportCallConnected(uuid: uuid)
                 case .callProgress?:
                     provider.reportCallConnecting(uuid: uuid)
+                case .transferDone?:
+                    self.transferDone(uuid: uuid, statusCode: event.transferData?.statusCode ?? 0)
                 case .callEnded?:
                     let reason = Self.endReason(for: event.callData?.endReason)
                     provider.reportCallEnded(uuid: uuid, reason: reason)
@@ -243,6 +259,66 @@ public final class CallKitBridge: @unchecked Sendable {
 
     public func uuid(forCallHandle handle: SipralHandle) -> UUID? {
         stateQueue.sync { uuidsByCallHandle[handle] }
+    }
+
+    // MARK: - an attended transfer
+
+    /// `bind(uuid:to:)` for the consultation leg of an attended transfer:
+    /// `call`, normally from `Call.consult(target:...)`, was placed while
+    /// `held`, the call it consults for, is on hold. `handleTransfer(uuid:)`
+    /// then joins the two. Ending the consultation without a transfer, or
+    /// a transfer that fails once the consultation is gone, asks the system
+    /// to take `held` off hold (`CallKitProviding.requestUnhold(uuid:)`).
+    /// `CallKitAdapter.startConsultation(holding:callee:dial:)` holds,
+    /// shows, dials and binds in one.
+    public func bindConsultation(uuid: UUID, to call: Call, holding held: UUID) {
+        stateQueue.sync { consultations[uuid] = held }
+        bind(uuid: uuid, to: call)
+    }
+
+    /// Joins an attended transfer's two calls, named by either uuid: the
+    /// held call's far end is asked to call the consultation's far end in
+    /// its place (`Call.transfer(to:)`, RFC 3891). When that succeeds the
+    /// stack hangs the held call up and the party consulted hangs up the
+    /// consultation it swapped, so both are reported ended. A failed
+    /// transfer leaves both calls as they were.
+    ///
+    /// CallKit has no action for it: the application's own transfer button
+    /// calls this. `.unknownCall` for a uuid that is neither leg of a
+    /// consultation bound here.
+    public func handleTransfer(uuid: UUID) throws {
+        let legs = stateQueue.sync { () -> (held: UUID, call: Call, consultation: Call)? in
+            let held = consultations[uuid] ?? uuid
+            guard let consultation = consultations.first(where: { $0.value == held })?.key,
+                  let call = callsByUuid[held], let consulted = callsByUuid[consultation]
+            else { return nil }
+            // marked before the REFER goes, so an outcome that comes back
+            // faster than this returns finds it
+            transferring.insert(held)
+            return (held, call, consulted)
+        }
+        guard let legs else { throw CallKitBridgeError.unknownCall(uuid) }
+        do {
+            try legs.call.transfer(to: legs.consultation)
+        } catch {
+            _ = stateQueue.sync { transferring.remove(legs.held) }
+            throw error
+        }
+    }
+
+    /// The transfer `uuid`'s call asked for is over. A failed one is no
+    /// longer under way, and takes the call off hold if its consultation
+    /// has ended already; a successful one stays marked until the stack
+    /// hangs the call up.
+    private func transferDone(uuid: UUID, statusCode: UInt32) {
+        guard !(200...299).contains(statusCode) else { return }
+        let resume = stateQueue.sync { () -> Bool in
+            guard transferring.remove(uuid) != nil else { return false }
+            return !consultations.values.contains(uuid) && callsByUuid[uuid] != nil
+        }
+        if resume {
+            provider.requestUnhold(uuid: uuid)
+        }
     }
 
     /// Takes a shown call off the screen as `reason`, `.unanswered` unless
@@ -292,14 +368,26 @@ public final class CallKitBridge: @unchecked Sendable {
         provider.reportCaller(uuid: uuid, callerId: callerId, displayName: displayName)
     }
 
+    /// Forgets `uuid`'s call. A consultation that ends with no transfer
+    /// under way takes the call it held off hold; a held call that ends
+    /// leaves its consultation an ordinary call.
     private func unbind(uuid: UUID) {
-        stateQueue.sync {
+        let resume = stateQueue.sync { () -> UUID? in
             if let call = callsByUuid.removeValue(forKey: uuid) {
                 uuidsByCallHandle.removeValue(forKey: call.handle)
             }
             audiosByUuid.removeValue(forKey: uuid)
             watchTasks.removeValue(forKey: uuid)?.cancel()
             ringWhenShown.remove(uuid)
+            transferring.remove(uuid)
+            consultations = consultations.filter { $0.value != uuid }
+            guard let held = consultations.removeValue(forKey: uuid),
+                  !transferring.contains(held), callsByUuid[held] != nil
+            else { return nil }
+            return held
+        }
+        if let resume {
+            provider.requestUnhold(uuid: resume)
         }
     }
 
@@ -486,6 +574,9 @@ public final class CallKitBridge: @unchecked Sendable {
         let (calls, audios, engine, answers) = stateQueue.sync {
             () -> ([Call], [CallAudio], (any CallAudioSessionEngine)?, [(UUID, @Sendable (Error?) -> Void)]) in
             sessionActive = false
+            // every call goes, so no consultation's end takes another off hold
+            consultations.removeAll()
+            transferring.removeAll()
             // Calls still to arrive are declined when they do.
             var answers: [(UUID, @Sendable (Error?) -> Void)] = []
             for uuid in Array(waiting.keys) {

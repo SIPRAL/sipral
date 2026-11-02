@@ -15,6 +15,8 @@ final actor RecordingProvider: CallKitProviding {
     private(set) var connecting: [UUID] = []
     private(set) var connected: [UUID] = []
     private(set) var ended: [(uuid: UUID, reason: CallKitBridge.EndReason)] = []
+    /// The calls the system was asked to take off hold.
+    private(set) var unheld: [UUID] = []
     var failNextReport = false
 
     nonisolated func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void) {
@@ -51,6 +53,10 @@ final actor RecordingProvider: CallKitProviding {
         Task { await self.recordEnded(uuid, reason) }
     }
 
+    nonisolated func requestUnhold(uuid: UUID) {
+        Task { await self.recordUnheld(uuid) }
+    }
+
     private func consumeFailNextReport() -> Bool {
         defer { failNextReport = false }
         return failNextReport
@@ -66,6 +72,7 @@ final actor RecordingProvider: CallKitProviding {
     private func recordConnecting(_ uuid: UUID) { connecting.append(uuid) }
     private func recordConnected(_ uuid: UUID) { connected.append(uuid) }
     private func recordEnded(_ uuid: UUID, _ reason: CallKitBridge.EndReason) { ended.append((uuid, reason)) }
+    private func recordUnheld(_ uuid: UUID) { unheld.append(uuid) }
 }
 
 final class CallKitBridgeTests: XCTestCase {
@@ -104,6 +111,7 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertThrowsError(try bridge.handleHold(uuid: uuid, onHold: true))
         XCTAssertThrowsError(try bridge.handleDtmf(uuid: uuid, digits: "1"))
         XCTAssertThrowsError(try bridge.handleMute(uuid: uuid, muted: true))
+        XCTAssertThrowsError(try bridge.handleTransfer(uuid: uuid))
     }
 
     /// CallKit's hold, mute, session activation and reset all reach the
@@ -398,6 +406,116 @@ final class CallKitBridgeTests: XCTestCase {
         let confirmed = await heard.first(within: 10) { $0.kind == .callConfirmed }
         XCTAssertNotNil(confirmed, "the caller never saw the answer: \(heard.elements.map(\.kindName))")
         XCTAssertFalse(heard.elements.contains(where: Self.isRinging), "a call answered at bind rang first")
+    }
+
+    /// Alice's side of an attended transfer, bound to `bridge`: her call
+    /// with Bob up and held through CallKit, and the consultation with
+    /// Carol, from the same line, up and bound as consulting for it.
+    private struct Consulting {
+        let held = UUID()
+        let consultation = UUID()
+        let toBob: Call
+        let fromAlice: Call
+        let toCarol: Call
+        let fromConsultation: Call
+        let bobEvents: Recorder<SipralEvent>
+
+        func close() {
+            for call in [toBob, fromAlice, toCarol, fromConsultation] {
+                call.close()
+            }
+        }
+    }
+
+    private func consulting(
+        through bridge: CallKitBridge, alice: SipralStack, bob: SipralStack, carol: SipralStack
+    ) async throws -> Consulting {
+        let line = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: carol.bindAddress)
+        _ = try carol.addAccount(aor: "sip:carol@sipral.invalid", registrarAddress: alice.bindAddress)
+        let bobEvents = Recorder(bob.events())
+        let carolEvents = Recorder(carol.events())
+
+        let toBob = try alice.placeCall(account: line, target: "sip:bob@\(bob.bindAddress)")
+        let aliceEvents = Recorder(toBob.events())
+        let rang = await bobEvents.first(within: 10) { $0.kind == .incomingCall }
+        let fromAlice = try bob.answerCall(try XCTUnwrap(rang, "Alice's call never reached Bob"))
+        let up = await aliceEvents.first(within: 10) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(up, "Alice's call was never confirmed")
+
+        let toCarol = try toBob.consult(target: "sip:carol@\(carol.bindAddress)", destination: carol.bindAddress)
+        let consultEvents = Recorder(toCarol.events())
+        let consulted = await carolEvents.first(within: 10) { $0.kind == .incomingCall }
+        let fromConsultation = try carol.answerCall(try XCTUnwrap(consulted, "the consultation never reached Carol"))
+        let consultationUp = await consultEvents.first(within: 10) { $0.kind == .callConfirmed }
+        XCTAssertNotNil(consultationUp, "the consultation was never confirmed")
+
+        let legs = Consulting(
+            toBob: toBob, fromAlice: fromAlice, toCarol: toCarol, fromConsultation: fromConsultation,
+            bobEvents: bobEvents
+        )
+        bridge.bind(uuid: legs.held, to: toBob)
+        try bridge.handleHold(uuid: legs.held, onHold: true)
+        bridge.bindConsultation(uuid: legs.consultation, to: toCarol, holding: legs.held)
+        return legs
+    }
+
+    /// Ending the consultation instead of transferring goes back to the
+    /// call it held: the system is asked to take that call off hold.
+    func testEndingAConsultationTakesTheCallItHeldOffHold() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        let carol = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close(); carol.close() }
+        let provider = RecordingProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let legs = try await consulting(through: bridge, alice: alice, bob: bob, carol: carol)
+        defer { legs.close() }
+        let held = await provider.unheld
+        XCTAssertTrue(held.isEmpty, "a call was taken off hold while its consultation was still up")
+
+        try bridge.handleEnd(uuid: legs.consultation)
+        let ended = await eventually(within: 10) { await provider.ended.contains { $0.uuid == legs.consultation } }
+        XCTAssertTrue(ended, "the consultation was never reported ended")
+        let unheld = await eventually(within: 10) { await provider.unheld == [legs.held] }
+        let unholds = await provider.unheld
+        XCTAssertTrue(unheld, "the held call was not taken off hold: \(unholds)")
+        XCTAssertNotNil(bridge.call(for: legs.held), "the held call was let go with its consultation")
+        XCTAssertThrowsError(try bridge.handleTransfer(uuid: legs.held), "a transfer with no consultation left")
+    }
+
+    /// The consultation ends while its transfer is under way (here, the
+    /// party consulted hangs up first): nothing is taken off hold until the
+    /// transfer's outcome. It fails, since Carol's call to replace is gone,
+    /// and only then is the held call taken off hold.
+    func testAConsultationThatEndsDuringItsTransferWaitsForTheOutcome() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        let carol = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close(); carol.close() }
+        let provider = RecordingProvider()
+        let bridge = CallKitBridge(provider: provider)
+        let legs = try await consulting(through: bridge, alice: alice, bob: bob, carol: carol)
+        defer { legs.close() }
+
+        try bridge.handleTransfer(uuid: legs.consultation)
+        let asked = await legs.bobEvents.first(within: 10) { $0.kind == .transferRequested }
+        let request = try XCTUnwrap(asked, "Bob was never asked")
+        XCTAssertEqual(request.transferData?.attended, true)
+
+        try legs.fromConsultation.hangup()
+        let ended = await eventually(within: 10) { await provider.ended.contains { $0.uuid == legs.consultation } }
+        XCTAssertTrue(ended, "the consultation was never reported ended")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let early = await provider.unheld
+        XCTAssertTrue(early.isEmpty, "the held call was taken off hold with its transfer still under way")
+
+        let placed = try bob.acceptReferral(request)
+        defer { placed.close() }
+        let unheld = await eventually(within: 15) { await provider.unheld == [legs.held] }
+        let unholds = await provider.unheld
+        XCTAssertTrue(unheld, "a failed transfer left the call held: \(unholds)")
+        XCTAssertEqual(try legs.toBob.state, .confirmed, "a failed transfer lost the call")
     }
 }
 

@@ -1253,6 +1253,29 @@ class SipralClient private constructor(
         focus: Boolean = false,
         followRedirects: Boolean = false,
         iceTrickle: SipralIceTrickle? = null,
+    ): SipralCall = place(
+        account, target, mediaHost, mediaPort, destination, srtp, ice, headers, codecs, text, feedback, focus,
+        followRedirects, iceTrickle, consulting = null,
+    )
+
+    /** [placeCall], or with [consulting] the consultation leg of that call
+     * (`sipral_call_consult`), placed from the same [account]. */
+    internal fun place(
+        account: SipralAccount,
+        target: String,
+        mediaHost: String?,
+        mediaPort: Int,
+        destination: String?,
+        srtp: Long,
+        ice: SipralIce?,
+        headers: List<SipralHeader>,
+        codecs: String?,
+        text: Boolean,
+        feedback: Boolean,
+        focus: Boolean,
+        followRedirects: Boolean,
+        iceTrickle: SipralIceTrickle?,
+        consulting: Long?,
     ): SipralCall {
         val mediaHost = mediaHostFor(mediaHost, account, destination)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
@@ -1279,13 +1302,19 @@ class SipralClient private constructor(
         )
         val callHandle = try {
             mapMediaSocket(mediaSocket, mediaAddress)
-            retryBusy { Sipral.callPlace(handle, account.handle, config, nowMs()) }
+            retryBusy {
+                if (consulting != null) {
+                    Sipral.callConsult(handle, consulting, config, nowMs())
+                } else {
+                    Sipral.callPlace(handle, account.handle, config, nowMs())
+                }
+            }
         } catch (refused: Exception) {
             giveBackMediaSocket(mediaSocket, mediaAddress)
             textSocket?.close()
             throw refused
         }
-        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, textSocket = textSocket)
+        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, textSocket = textSocket, account = account)
         track(call, callHandle, mediaAddress)
         return call
     }
@@ -1308,10 +1337,13 @@ class SipralClient private constructor(
         codecs: String? = null,
         focus: Boolean = false,
         feedback: Boolean = false,
-    ): SipralCall = answerCall(
-        event.call, mediaHostFor(mediaHost, accountFor(event.account), null), mediaPort, event.payload.call,
-        Answered(text, codecs, focus, feedback),
-    )
+    ): SipralCall {
+        val line = accountFor(event.account)
+        return answerCall(
+            event.call, mediaHostFor(mediaHost, line, null), mediaPort, event.payload.call,
+            Answered(text, codecs, focus, feedback), line,
+        )
+    }
 
     /**
      * [answerCall] by call handle, for a caller that has only the handle (from
@@ -1339,6 +1371,7 @@ class SipralClient private constructor(
         mediaPort: Int,
         incoming: SipralCallEvent?,
         how: Answered,
+        account: SipralAccount? = null,
     ): SipralCall {
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
@@ -1348,7 +1381,7 @@ class SipralClient private constructor(
             giveBackMediaSocket(mediaSocket, mediaAddress)
             throw refused
         }
-        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, incoming, textSocket)
+        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress, incoming, textSocket, account)
         track(call, callHandle, mediaAddress)
         try {
             mapMediaSocket(mediaSocket, mediaAddress)
@@ -1434,7 +1467,8 @@ class SipralClient private constructor(
         srtp: Long = 0,
         ice: SipralIce? = null,
     ): SipralCall {
-        val mediaHost = mediaHostFor(mediaHost, accountFor(event.account), null)
+        val line = accountFor(event.account)
+        val mediaHost = mediaHostFor(mediaHost, line, null)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val config = SipralCallConfig(
@@ -1449,7 +1483,7 @@ class SipralClient private constructor(
             giveBackMediaSocket(mediaSocket, mediaAddress)
             throw refused
         }
-        val call = SipralCall(this, placed, mediaSocket, mediaAddress)
+        val call = SipralCall(this, placed, mediaSocket, mediaAddress, account = line)
         track(call, placed, mediaAddress)
         return call
     }

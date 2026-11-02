@@ -16,7 +16,7 @@
 use std::ffi::c_char;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sipral::{CallMedia, CodecCatalog, IcePolicy, SrtpPolicy};
 use sipral_core::endpoint::{SendError, TransportId};
@@ -669,32 +669,8 @@ entry! {
             }
             let placed = match media {
                 Some(local) => {
-                    let base = state.engine.account_catalog(id);
-                    let floor = floor_of(state, Some(id));
-                    let catalog = call_catalog(&base, floor, choices, codecs.as_deref())?;
-                    let trickling = full_trickle(state, catalog.as_ref().unwrap_or(&base), None);
-                    let outside = outside(state, local, trickling)?;
-                    let placed = match call_media(state, &base, catalog, outside, text) {
-                        // the stack's own catalogue, untouched
-                        None => {
-                            state.engine.place(&mut state.agent, id, outgoing, local, now)
-                        }
-                        Some(media) => state.engine.place_with(
-                            &mut state.agent,
-                            id,
-                            outgoing,
-                            local,
-                            media,
-                            now,
-                        ),
-                    };
-                    // the refused call's relay goes back onto its socket
-                    crate::nat::Nat::take_back(state, now);
-                    let placed = placed.map_err(|error| media_failed(&error))?;
-                    crate::nat::Nat::described(state, local, placed, trickling, now);
-                    state.manage(placed);
-                    state.expect_audio(placed);
-                    placed
+                    let wanted = (local, choices, codecs.as_deref(), text);
+                    place_managed(state, id, outgoing, wanted, now)?
                 }
                 None => state
                     .agent
@@ -712,6 +688,41 @@ entry! {
         unsafe { out_call.write(handle) };
         Ok(())
     }
+}
+
+/// Place a call whose media the stack runs, at `local`, with the call's own media choices, codec
+/// order and text socket: [`sipral_call_place`] with a `media_address`, and
+/// [`sipral_call_consult`] with one.
+fn place_managed(
+    state: &mut StackState,
+    account: sipral_ua::AccountId,
+    outgoing: OutgoingCall,
+    (local, choices, codecs, text): (SocketAddr, Choices, Option<&[&str]>, Option<SocketAddr>),
+    now: Instant,
+) -> Result<sipral::CallHandle, Fail> {
+    let base = state.engine.account_catalog(account);
+    let floor = floor_of(state, Some(account));
+    let catalog = call_catalog(&base, floor, choices, codecs)?;
+    let trickling = full_trickle(state, catalog.as_ref().unwrap_or(&base), None);
+    let outside = outside(state, local, trickling)?;
+    let placed = match call_media(state, &base, catalog, outside, text) {
+        // the stack's own catalogue, untouched
+        None => state
+            .engine
+            .place(&mut state.agent, account, outgoing, local, now),
+        Some(media) => {
+            state
+                .engine
+                .place_with(&mut state.agent, account, outgoing, local, media, now)
+        }
+    };
+    // the refused call's relay goes back onto its socket
+    crate::nat::Nat::take_back(state, now);
+    let placed = placed.map_err(|error| media_failed(&error))?;
+    crate::nat::Nat::described(state, local, placed, trickling, now);
+    state.manage(placed);
+    state.expect_audio(placed);
+    Ok(placed)
 }
 
 entry! {
@@ -1527,8 +1538,9 @@ entry! {
     /// Call the transfer target, and write the new call's handle to `out_consultation`.
     ///
     /// The consultation leg of an attended transfer; [`sipral_call_transfer_to`] follows.
-    /// Holding `call` first is the application's choice. `media_address` is
-    /// `SIPRAL_STATUS_NOT_SUPPORTED` here: place the consultation with `sdp` and run its audio.
+    /// Holding `call` first is the application's choice. It goes out from `call`'s account, and
+    /// is placed as [`sipral_call_place`] places one: with `media_address` the stack runs its
+    /// media, otherwise `sdp` is the offer and the audio is the application's.
     ///
     /// # Safety
     ///
@@ -1547,28 +1559,37 @@ entry! {
             ));
         }
         let config = unsafe { read_versioned(config) }?;
-        if unsafe { managed_media(&config) }?.is_some() {
-            return Err(fail(
-                SipralStatus::NotSupported,
-                "media_address is set and this build cannot manage the media of a consultation \
-                 leg; place it with sdp and run its audio in the application",
-            ));
-        }
-        // nothing to apply them to, but the same refusals as `sipral_call_place`
-        media_choices(&config)?;
-        unsafe { codec_order(&config) }?;
-        unsafe { text_address(&config, false) }?;
+        let media = unsafe { managed_media(&config) }?;
+        // checked before the call is looked up, so nothing is built
+        let choices = media_choices(&config)?;
+        let codecs = unsafe { codec_order(&config) }?;
+        let text = unsafe { text_address(&config, media.is_some()) }?;
         let focus = focus_of(&config)?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let mut outgoing = unsafe { outgoing_from(state, &config, false) }?;
+            let mut outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             if focus {
                 outgoing = outgoing.focus();
             }
-            let placed = state
-                .agent
-                .consult(id, &outgoing, now)
-                .map_err(|error| ua_failed(&error))?;
+            let placed = match media {
+                Some(local) => {
+                    let account = state
+                        .agent
+                        .consulting_account(id)
+                        .map_err(|error| ua_failed(&error))?;
+                    let wanted = (local, choices, codecs.as_deref(), text);
+                    let placed = place_managed(state, account, outgoing, wanted, now)?;
+                    state
+                        .agent
+                        .bind_consultation(id, placed)
+                        .map_err(|error| ua_failed(&error))?;
+                    placed
+                }
+                None => state
+                    .agent
+                    .consult(id, &outgoing, now)
+                    .map_err(|error| ua_failed(&error))?,
+            };
             if let Some(identity) = state.agent.call_identity(placed) {
                 state.record_identity(placed, identity);
             }
@@ -5209,12 +5230,14 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The consultation leg refuses a media address it would ignore rather than taking it.
+    /// A consultation leg with a media address is placed as a call with one is, the stack
+    /// writing its offer and running its audio, and is still the first call's consultation.
     #[test]
-    fn a_consultation_with_media_of_this_stacks_own_is_refused_rather_than_ignored() {
+    fn a_consultation_with_media_of_this_stacks_own_is_a_consultation_the_stack_runs() {
         let mut observed = Observed::default();
         let (handle, call) = media_call(&mut observed);
-        let (media_address, media_address_len) = as_text(MEDIA);
+        let _ = sent(handle);
+        let (media_address, media_address_len) = as_text("192.0.2.10:41002");
         let mut config = call_config();
         config.sdp = ptr::null();
         config.sdp_len = 0;
@@ -5230,9 +5253,39 @@ Alert-Info: <urn:alert:source:external>\r\n";
                 2_000,
             )
         };
-        assert_eq!(status, SipralStatus::NotSupported);
-        assert_eq!(consulted, SIPRAL_HANDLE_NONE);
-        assert!(last_error_text().contains("consultation"));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        assert!(start_line(&invite).starts_with("INVITE"));
+        assert!(
+            String::from_utf8_lossy(&invite).contains("m=audio 41002 "),
+            "the stack wrote the offer for the address given"
+        );
+
+        deliver(handle, &accepted(&invite, SECOND_ANSWER, true), 2_100);
+        poll(handle, 2_100);
+        assert_eq!(
+            state_of(handle, consulted),
+            SipralCallState::Consulting as u32
+        );
+        // one consultation at a time
+        let mut another = SIPRAL_HANDLE_NONE;
+        let refused = unsafe {
+            sipral_call_consult(
+                handle,
+                call,
+                ptr::from_ref(&config),
+                &raw mut another,
+                2_200,
+            )
+        };
+        assert_eq!(refused, SipralStatus::WrongState);
+        assert_eq!(another, SIPRAL_HANDLE_NONE);
+        assert_eq!(
+            unsafe { sipral_call_transfer_to(handle, call, consulted, 2_300) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

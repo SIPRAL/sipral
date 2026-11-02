@@ -220,21 +220,50 @@ impl UserAgent {
         outgoing: &OutgoingCall,
         now: Instant,
     ) -> Result<CallHandle, UaError> {
+        let account = self.consulting_account(call)?;
+        let placed = self.call(account, outgoing, now)?;
+        self.bind_consultation(call, placed)?;
+        Ok(placed)
+    }
+
+    /// The account a consultation from `call` goes out from, when `call` may
+    /// have one: the first half of [`UserAgent::consult`], for a caller that
+    /// places the leg itself, with media of its own.
+    ///
+    /// # Errors
+    /// As [`UserAgent::consult`], before anything is sent.
+    pub fn consulting_account(
+        &self,
+        call: CallHandle,
+    ) -> Result<crate::account::AccountId, UaError> {
         let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
         let state = held.state;
         // one consultation at a time, and no consulting from a consultation
         if !state.is_confirmed() || held.consulting.is_some() || held.consulting_for.is_some() {
             return Err(UaError::WrongState(state));
         }
-        let account = held.account.ok_or(UaError::NoSuchAccount)?;
-        let placed = self.call(account, outgoing, now)?;
-        if let Some(second) = self.calls.get_mut(&placed) {
-            second.consulting_for = Some(call);
-        }
+        held.account.ok_or(UaError::NoSuchAccount)
+    }
+
+    /// Make `placed`, a call just placed from
+    /// [`UserAgent::consulting_account`]'s account, the consultation of
+    /// `call`: the second half of [`UserAgent::consult`].
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`] for either handle, and what
+    /// [`UserAgent::consulting_account`] refuses.
+    pub fn bind_consultation(
+        &mut self,
+        call: CallHandle,
+        placed: CallHandle,
+    ) -> Result<(), UaError> {
+        self.consulting_account(call)?;
+        let second = self.calls.get_mut(&placed).ok_or(UaError::NoSuchCall)?;
+        second.consulting_for = Some(call);
         if let Some(first) = self.calls.get_mut(&call) {
             first.consulting = Some(placed);
         }
-        Ok(placed)
+        Ok(())
     }
 
     /// Hand this call to the far end of another one (RFC 3891).

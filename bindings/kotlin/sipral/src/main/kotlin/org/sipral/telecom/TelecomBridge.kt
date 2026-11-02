@@ -48,7 +48,9 @@ enum class TelecomPhase {
 
 /** One call as [TelecomBridge.calls] shows it. [call] is the SIP handle,
  * zero while a push-announced call's INVITE has not arrived; [caller] is
- * empty while a push that named nobody waits for it. */
+ * empty while a push that named nobody waits for it. [consulting] is, for
+ * the consultation leg of an attended transfer ([TelecomBridge.consult]),
+ * the id of the call it holds. */
 data class TelecomCall(
     val id: String,
     val direction: TelecomDirection,
@@ -59,6 +61,7 @@ data class TelecomCall(
     val call: Long,
     val remoteHold: Boolean,
     val announced: Boolean,
+    val consulting: String? = null,
 )
 
 /** An outgoing call the framework allowed and the library refused to
@@ -84,6 +87,10 @@ data class TelecomPlaceFailure(
  *
  * An incoming call is rung, 180 Ringing, once the framework has created its
  * connection and its INVITE is here, unless the user answered it first.
+ *
+ * An attended transfer is [consult], which holds a call and shows a second
+ * one to the party to hand it to, then [transfer], which joins the two;
+ * ending the consultation instead takes the first call off hold.
  *
  * Every entry point is thread-safe and holds one monitor for its whole
  * length, calls out included. Deliberate: events and framework callbacks
@@ -142,6 +149,17 @@ class TelecomBridge(
         /** Hold or unhold asked through [hold]/[unhold] and not yet agreed by
          * the dialog; null once it is. */
         var holdWanted: Boolean? = null
+
+        /** For a consultation, the id of the call it holds. */
+        var consultFor: String? = null
+
+        /** For a held call, the id of its consultation while that lasts. */
+        var consultation: String? = null
+
+        /** A transfer asked through [transfer] is under way, or succeeded and
+         * has yet to hang this call up: its consultation ending takes it off
+         * hold no more. */
+        var transferring = false
     }
 
     private val lock = Any()
@@ -286,6 +304,68 @@ class TelecomBridge(
         entry.id
     }
 
+    // An attended transfer
+
+    /**
+     * The consultation leg of an attended transfer: [id], a call that is up,
+     * is held as [hold] holds it, and the framework is asked for a second
+     * call, to [target] on the same account, as [placeCall] asks. Its INVITE
+     * goes once the framework has created the connection
+     * ([SipCalls.consult]). Returns the consultation's id, which
+     * [TelecomCall.consulting] ties to [id].
+     *
+     * [transfer] then joins the two. Ending the consultation without one, or
+     * a transfer that fails once the consultation has ended, takes [id] off
+     * hold as [unhold] does. One consultation per call, and none from a
+     * consultation: `IllegalStateException`, as for a call that is not up. A
+     * framework that refuses the second call takes [id] off hold before its
+     * refusal is rethrown.
+     */
+    fun consult(id: String, target: String): String = settle {
+        val held = liveEntry(id)
+        check(held != null && held.confirmed && held.consultation == null && held.consultFor == null) {
+            "call $id cannot consult: it is not up, or is part of a consultation already"
+        }
+        holdEntry(held)
+        val entry = Entry(newId(), TelecomDirection.OUTGOING, held.account, target, null, TelecomPhase.REQUESTED)
+        entry.consultFor = held.id
+        held.consultation = entry.id
+        entries[entry.id] = entry
+        entry.awaitingConnection = true
+        try {
+            platform.placeOutgoingCall(entry.id, target)
+        } catch (refused: RuntimeException) {
+            entry.awaitingConnection = false
+            forget(entry)
+            throw refused
+        }
+        entry.id
+    }
+
+    /**
+     * Join an attended transfer's two calls, named by either id: the held
+     * call's far end is asked to call the consultation's far end in its
+     * place ([SipCalls.transferTo], RFC 3891). When that succeeds the stack
+     * hangs the held call up and the party consulted hangs up the
+     * consultation it swapped, and each leaves the framework as its call
+     * ends. A failure the far end reports (`TRANSFER_DONE`) leaves both calls
+     * as they were, and takes the held one off hold if the consultation has
+     * ended meanwhile; one to send the request is thrown, with nothing
+     * changed. `IllegalStateException` for an id that is neither leg of a
+     * consultation that is up.
+     */
+    fun transfer(id: String): Unit = settle {
+        val entry = entries[id]
+        val held = entry?.consultFor?.let { entries[it] } ?: entry
+        val consultation = held?.consultation?.let { entries[it] }
+        check(
+            held != null && consultation != null && held.call != 0L && consultation.call != 0L &&
+                !held.closedForTelecom && !consultation.closedForTelecom,
+        ) { "call $id has no consultation to transfer to" }
+        sip.transferTo(held.call, consultation.call)
+        held.transferring = true
+    }
+
     /**
      * End every call, before the client is closed: afterwards no event will
      * end them, and a connection nobody ends stays in the framework and the
@@ -359,8 +439,10 @@ class TelecomBridge(
             connection.setCaller(entry.caller, entry.displayName)
         }
         if (entry.direction == TelecomDirection.OUTGOING && entry.phase == TelecomPhase.REQUESTED) {
+            // a consultation whose held call is still there leaves from it
+            val held = entry.consultFor?.let { entries[it] }?.takeIf { it.call != 0L && !it.closedForTelecom }
             val handle = try {
-                sip.place(entry.account, entry.caller)
+                if (held != null) sip.consult(held.call, entry.account, entry.caller) else sip.place(entry.account, entry.caller)
             } catch (refused: Exception) {
                 val reason = refused.message ?: refused.toString()
                 end(entry, TelecomDisconnect.ERROR, reason)
@@ -442,7 +524,16 @@ class TelecomBridge(
      * audio to someone else.
      */
     fun hold(id: String): Unit = settle {
-        val entry = liveEntry(id) ?: return@settle
+        liveEntry(id)?.let { holdEntry(it) }
+    }
+
+    /** The framework asked to unhold. Active at once, as `ConnectionService`'s
+     * guide requires for `onUnhold()`, with the resuming re-INVITE after. */
+    fun unhold(id: String): Unit = settle {
+        liveEntry(id)?.let { unholdEntry(it) }
+    }
+
+    private fun holdEntry(entry: Entry) {
         if (entry.confirmed) {
             entry.holdWanted = true
             entry.phase = TelecomPhase.HELD
@@ -451,10 +542,7 @@ class TelecomBridge(
         quietly { sip.hold(entry.call) }
     }
 
-    /** The framework asked to unhold. Active at once, as `ConnectionService`'s
-     * guide requires for `onUnhold()`, with the resuming re-INVITE after. */
-    fun unhold(id: String): Unit = settle {
-        val entry = liveEntry(id) ?: return@settle
+    private fun unholdEntry(entry: Entry) {
         if (entry.confirmed) {
             entry.holdWanted = false
             entry.phase = TelecomPhase.ACTIVE
@@ -483,10 +571,30 @@ class TelecomBridge(
             SipralEventKind.SESSION_CHANGED.value.toLong(),
             SipralEventKind.SESSION_CHANGE_FAILED.value.toLong(),
             -> sessionChanged(event.call)
+            SipralEventKind.TRANSFER_DONE.value.toLong() -> transferDone(event.call, event.payload.transfer.statusCode)
             SipralEventKind.CALL_ENDED.value.toLong() -> {
                 byCall[event.call]?.let { end(it, causeOf(it, statusOf(event.message))) }
             }
             else -> Unit
+        }
+    }
+
+    /** The transfer [call] asked for through [transfer] is over. A failed one
+     * is no longer under way, and takes the call off hold if its
+     * consultation has ended already; a successful one stays marked until
+     * the stack hangs the call up, an end the user's transfer caused. */
+    private fun transferDone(call: Long, status: Long) {
+        val entry = byCall[call] ?: return
+        if (!entry.transferring) {
+            return
+        }
+        if (status in 200L..299L) {
+            entry.endedLocally = true
+            return
+        }
+        entry.transferring = false
+        if (entry.consultation == null && !entry.closedForTelecom) {
+            unholdEntry(entry)
         }
     }
 
@@ -712,7 +820,20 @@ class TelecomBridge(
         forget(entry)
     }
 
+    /** Let the call go. A consultation that goes with no transfer under way
+     * takes the call it held off hold; a held call that goes leaves its
+     * consultation an ordinary call. */
     private fun forget(entry: Entry) {
+        val held = entry.consultFor?.let { entries[it] }?.takeIf { it.consultation == entry.id }
+        entry.consultFor = null
+        entry.consultation?.let { entries[it]?.consultFor = null }
+        entry.consultation = null
+        if (held != null) {
+            held.consultation = null
+            if (!held.transferring && held.call != 0L && !held.closedForTelecom) {
+                unholdEntry(held)
+            }
+        }
         entry.phase = TelecomPhase.ENDED
         entries.remove(entry.id)
         if (entry.awaitingConnection) {
@@ -758,6 +879,7 @@ class TelecomBridge(
                 call = it.call,
                 remoteHold = it.remoteHold,
                 announced = it.announced,
+                consulting = it.consultFor,
             )
         }
     }

@@ -1168,6 +1168,29 @@ Bluetooth, car), and the framework's own answer, disconnect and set-active
 requests, which come from a headset, a watch or a car; set-inactive was
 seen, from the cellular call.
 
+### An attended transfer on the system's call screen
+
+Both bridges show an attended transfer (RFC 5589 §7) as the system shows
+any second call: the first call held, the consultation as one more call
+of the same person, each with its own entry on the call screen.
+
+| | iOS (`CallKitBridge`) | Android (`TelecomBridge`) |
+|---|---|---|
+| Consult | `CallKitAdapter.startConsultation(holding:callee:dial:)`: one transaction of `CXSetHeldCallAction` and `CXStartCallAction`, then `Call.consult(target:)`, bound with `bindConsultation(uuid:to:holding:)` | `consult(id, target)`: the call held, the second call asked for with `placeOutgoingCall`, placed from the first with `SipCalls.consult` once its connection exists |
+| Transfer | `handleTransfer(uuid:)`, from the application's own button: CallKit has no transfer action | `transfer(id)`, from the application's own button |
+| Success | the stack hangs the first call up once the far end reports the new call up, and the party consulted hangs up the call its `Replaces` took over: both are reported ended | the same; the first call leaves the framework as ended locally |
+| Cancel | ending the consultation asks the system to take the first call off hold (`CallKitProviding.requestUnhold(uuid:)`, a `CXSetHeldCallAction`) | ending the consultation sets the first call active and resumes it |
+| A failed transfer | both calls as they were; the first is taken off hold only once the consultation has ended too | the same |
+
+The consultation is placed by `sipral_call_consult` from the account the
+first call is on, with the library running its audio as for any call; once
+up the stack reports it `CONSULTING`, and refuses a second consultation from
+the same call or one from the consultation itself. On loopback the
+party consulted refuses the takeover with 403, since by default it accepts
+a `Replaces` only from its own call's far end (RFC 3891 §3). The tests
+on loopback exercise that refusal and the cancel; `TelecomCheck.kt` also
+runs the success path, against its fakes.
+
 ### What ran on the emulator, 21 October 2026
 
 An `android-36` `google_apis` arm64-v8a AVD, headless, `-no-audio`, on the

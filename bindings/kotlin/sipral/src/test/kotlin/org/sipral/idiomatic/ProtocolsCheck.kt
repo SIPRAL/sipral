@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Sytek
 //
 // Real-time text, RTCP feedback, linear audio and conference focus between
-// two clients on 127.0.0.1; conference state, presence and unasked message
-// waiting against a notifier and compositor played on a local socket; and
+// two clients on 127.0.0.1; conference state, a watched line's dialogs,
+// presence and unasked message waiting against a notifier and compositor
+// played on a local socket; and
 // recording to a
 // SIPREC server on a TCP port. Run by IdiomaticCheck.kt's main under
 // -Xcheck:jni.
@@ -37,6 +38,9 @@ import org.sipral.SipralActivity
 import org.sipral.SipralBasic
 import org.sipral.SipralCodec
 import org.sipral.SipralConferenceUpdate
+import org.sipral.SipralDialogDirection
+import org.sipral.SipralDialogEnded
+import org.sipral.SipralDialogPhase
 import org.sipral.SipralEndpointStatus
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
@@ -189,8 +193,8 @@ private class FakePeer : AutoCloseable {
     val socket = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).apply { soTimeout = 20 }
     val address: String = "127.0.0.1:${socket.localPort}"
 
-    /** The next request of [method] within five seconds, and where from. */
-    suspend fun request(method: String): Pair<String, InetSocketAddress> = withTimeout(5_000) {
+    /** The next request of [method] within [timeoutMs], and where from. */
+    suspend fun request(method: String, timeoutMs: Long = 5_000): Pair<String, InetSocketAddress> = withTimeout(timeoutMs) {
         val buffer = ByteArray(65536)
         var found: Pair<String, InetSocketAddress>? = null
         while (found == null) {
@@ -310,6 +314,86 @@ private suspend fun aConferenceIsReadBackWholeFromItsNotifications(): String = F
         )
         assertEquals(SipralSubscriptionState.ACTIVE, watched.state)
         "a conference read back whole: ${room.members.size} members, ${room.userCount} counted"
+    }
+}
+
+private val LINE = """
+    <?xml version="1.0"?>
+    <dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info" version="1" state="full" entity="sip:2001@example.invalid">
+      <dialog id="ring-1" call-id="ring@192.0.2.7" local-tag="l1" remote-tag="r1" direction="recipient">
+        <state>early</state>
+        <local><identity display="Desk 2001">sip:2001@example.invalid</identity></local>
+        <remote><identity display="Carol">sip:0744@example.invalid</identity><target uri="sip:0744@192.0.2.7"/></remote>
+      </dialog>
+      <dialog id="talk-1" direction="initiator">
+        <state>confirmed</state>
+        <remote><identity>sip:2002@example.invalid</identity></remote>
+      </dialog>
+    </dialog-info>
+""".trimIndent()
+
+/**
+ * A colleague's line watched with the `dialog` package (RFC 4235): unknown
+ * until the notifier answers, then every dialog with its state, direction
+ * and the other end, and unknown again once the notifier lets the
+ * subscription go, rather than an idle line.
+ */
+private suspend fun aWatchedLineIsReadDialogByDialogAndIsUnknownWhileNotLive(): String = FakePeer().use { notifier ->
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+        val account = client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = notifier.address)
+        val watched = account.subscribe("sip:2001@example.invalid", "dialog")
+        val (subscribe, from) = notifier.request("SUBSCRIBE", timeoutMs = 10_000)
+        assertEquals("dialog", header("Event", subscribe))
+        assertNull(watched.dialogs(), "a line nobody has described yet was shown as known")
+
+        notifier.send(answerTo(subscribe, "200 OK", "Expires: 3600\r\n"), from)
+        val (_, notified) = client.events.awaitNext(
+            timeoutMs = 10_000,
+            matches = {
+                it.kind == SipralEventKind.NOTIFIED.value.toLong() && it.payload.subscription.subscription == watched.handle
+            },
+        ) {
+            notifier.send(
+                notifyIn(subscribe, client.bindAddress, notifier.address, "dialog", "application/dialog-info+xml", LINE),
+                parseHostPort(client.bindAddress),
+            )
+        }
+        assertEquals(1L, notified.payload.subscription.hasDialogInfo, "the notification was not read as dialog state")
+
+        val dialogs = assertNotNull(watched.dialogs(), "a live subscription's dialogs were not read")
+        assertEquals(2, dialogs.size)
+        val ringing = dialogs[0]
+        assertEquals(SipralDialogPhase.EARLY, ringing.phase)
+        assertEquals(SipralDialogDirection.REMOTELY, ringing.direction, "`recipient`: the watched line is the one called")
+        assertEquals(SipralDialogEnded.UNKNOWN, ringing.ended)
+        assertEquals("ring-1", ringing.id)
+        assertEquals("ring@192.0.2.7", ringing.callId)
+        assertEquals("sip:0744@example.invalid", ringing.remoteIdentity)
+        assertEquals("Carol", ringing.remoteDisplay)
+        assertEquals("sip:0744@192.0.2.7", ringing.remoteTarget)
+        assertEquals("sip:2001@example.invalid", ringing.localIdentity)
+        assertEquals("Desk 2001", ringing.localDisplay)
+        val talking = dialogs[1]
+        assertEquals(SipralDialogPhase.CONFIRMED, talking.phase)
+        assertEquals(SipralDialogDirection.LOCALLY, talking.direction, "`initiator`: the watched line placed the call")
+        assertEquals("sip:2002@example.invalid", talking.remoteIdentity)
+        assertEquals("", talking.remoteDisplay, "a name the notifier never sent")
+
+        val farewell = notifyIn(subscribe, client.bindAddress, notifier.address, "dialog", "application/dialog-info+xml", LINE)
+            .replace("CSeq: 1 NOTIFY", "CSeq: 2 NOTIFY")
+            .replace("active;expires=3600", "terminated;reason=deactivated")
+        client.events.awaitNext(
+            timeoutMs = 10_000,
+            matches = {
+                it.kind == SipralEventKind.SUBSCRIPTION_CHANGED.value.toLong() &&
+                    it.payload.subscription.subscription == watched.handle &&
+                    it.payload.subscription.state != SipralSubscriptionState.ACTIVE.value.toLong()
+            },
+        ) {
+            notifier.send(farewell, parseHostPort(client.bindAddress))
+        }
+        assertNull(watched.dialogs(), "a subscription that is not live still showed its old dialogs")
+        "a watched line read dialog by dialog (ringing from ${ringing.remoteDisplay}), unknown while not live"
     }
 }
 
@@ -718,6 +802,7 @@ suspend fun protocolsChecks(): String = listOf(
     aCallsOwnCodecsSettleOnPcma(),
     aFocusSaysSoAndTheCallerNamesItsConference(),
     aConferenceIsReadBackWholeFromItsNotifications(),
+    aWatchedLineIsReadDialogByDialogAndIsUnknownWhileNotLive(),
     presenceIsPublishedAndWhatTheCompositorGrantedIsTold(),
     aWatchedPresentityIsToldWithItsActivityAndNote(),
     anUnaskedMessageSummaryIsTakenOnlyByAnAccountThatAllowsIt(),

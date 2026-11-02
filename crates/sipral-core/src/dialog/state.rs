@@ -127,6 +127,31 @@ impl Dialog {
         })
     }
 
+    /// Take the route set from the 2xx to our SUBSCRIBE when the NOTIFY that
+    /// opened this dialog brought none (RFC 6665 §4.3, §4.4.1).
+    ///
+    /// A proxy that record-routed the SUBSCRIBE "MUST" record-route every
+    /// NOTIFY; one that does not leaves this end sending straight to the
+    /// notifier's `Contact`, which often only that proxy can reach. The 2xx
+    /// names the same proxies, reversed as for any answer (§12.1.2). `false`,
+    /// and nothing changed, when the dialog has a route set or the 2xx none.
+    ///
+    /// # Errors
+    /// [`DialogError::Field`] or [`DialogError::Uri`] for a `Record-Route`
+    /// that does not parse.
+    pub fn route_as_answered(&mut self, response: &RawMessage<'_>) -> Result<bool, DialogError> {
+        if !self.route_set.is_empty() {
+            return Ok(false);
+        }
+        let mut answered = record_route(response)?;
+        if answered.is_empty() {
+            return Ok(false);
+        }
+        answered.reverse();
+        self.route_set = answered.into();
+        Ok(true)
+    }
+
     /// The dialog's name.
     #[must_use]
     pub const fn key(&self) -> &DialogKey {
@@ -571,6 +596,33 @@ Content-Length: 0\r\n\
         assert_eq!(dialog.local_seq(), None);
         assert_eq!(dialog.remote_seq(), Some(314_159));
         assert_eq!(dialog.key().local_tag().as_bytes(), b"bob1");
+    }
+
+    #[test]
+    fn a_notify_with_no_record_route_takes_the_route_the_2xx_named() {
+        let notify = in_dialog_request("NOTIFY", 1, "Contact: <sip:bob@192.0.2.4>\r\n");
+        let mut dialog = with(&notify, |request| {
+            Dialog::from_request(
+                request,
+                b"alice1",
+                StatusCode::new(200).expect("200"),
+                false,
+            )
+            .expect("a dialog")
+        });
+        assert!(dialog.route_set().is_empty());
+        let accepted = response(202, "CSeq: 1 SUBSCRIBE\r\n");
+        let taken = with(&accepted, |answer| dialog.route_as_answered(answer));
+        assert_eq!(taken, Ok(true));
+        let hops: Vec<&str> = dialog.route_set().iter().map(Uri::as_str).collect();
+        assert_eq!(hops, ["sip:p1.example.net;lr", "sip:p2.example.net;lr"]);
+
+        // a route set the NOTIFY did bring stands
+        let mut routed = callee_dialog();
+        let again = with(&accepted, |answer| routed.route_as_answered(answer));
+        assert_eq!(again, Ok(false));
+        let hops: Vec<&str> = routed.route_set().iter().map(Uri::as_str).collect();
+        assert_eq!(hops, ["sip:p2.example.net;lr", "sip:p1.example.net;lr"]);
     }
 
     #[test]

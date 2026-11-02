@@ -96,6 +96,11 @@ public final class Call: @unchecked Sendable {
     /// `answering()`; `nil` for a call this end placed.
     private let incoming: CallEventData?
 
+    /// The account this call was placed from or came in on, which
+    /// `consult(target:account:...)` places from; `nil` once that account
+    /// was removed, or when the stack did not say.
+    private let account: Account?
+
     /// The real-time text socket; owned like `mediaSocket`.
     private let textSocket: UDPSocket?
 
@@ -112,13 +117,14 @@ public final class Call: @unchecked Sendable {
 
     init(
         stack: SipralStack, handle: SipralHandle, mediaSocket: UDPSocket, incoming: CallEventData? = nil,
-        textSocket: UDPSocket? = nil
+        textSocket: UDPSocket? = nil, account: Account? = nil
     ) {
         self.stack = stack
         self.handle = handle
         self.mediaSocket = mediaSocket
         self._mediaAddress = mediaSocket.localAddress
         self.incoming = incoming
+        self.account = account
         self.textSocket = textSocket
         self.textAddress = textSocket?.localAddress
     }
@@ -327,6 +333,51 @@ public final class Call: @unchecked Sendable {
     public func transfer(to target: String) throws {
         try retryingBusy {
             try Sipral.callTransfer(stack: stack.handle, call: handle, target: target, nowMs: stack.nowMs())
+        }
+    }
+
+    /// `sipral_call_consult`: the consultation leg of an attended transfer.
+    /// Calls `target` from the account this call was placed from or came in
+    /// on, with this stack running its audio as `SipralStack.placeCall`
+    /// does, and returns that call, `.consulting` once up. `transfer(to:)`
+    /// with it then hands this call over; hanging it up instead leaves this
+    /// call as it was. Holding this call first is the caller's (`hold()`).
+    ///
+    /// `account` names the line when this layer does not know it, for a
+    /// call taken by handle alone; the stack places from the call's own.
+    /// `.wrongState` when neither is known, when this call is not up, or
+    /// when it already has a consultation or is one.
+    public func consult(
+        target: String,
+        account: Account? = nil,
+        mediaHost: String? = nil,
+        destination: String? = nil,
+        srtp: SipralSrtp? = nil,
+        ice: SipralIce? = nil,
+        headers: [SipralHeader] = [],
+        codecs: String? = nil
+    ) throws -> Call {
+        guard let from = account ?? self.account else {
+            throw SipralError(
+                status: .wrongState, message: "the account this call belongs to is not known; name one"
+            )
+        }
+        return try stack.place(
+            account: from, target: target, mediaHost: mediaHost, mediaPort: 0, destination: destination, srtp: srtp,
+            ice: ice, headers: headers, codecs: codecs, text: false, feedback: false, focus: false,
+            followRedirects: false, iceTrickle: nil, consulting: handle
+        )
+    }
+
+    /// `sipral_call_transfer_to`: the attended half of a transfer (RFC
+    /// 3891). The far end of this call is asked to call `other`'s far end
+    /// with `Replaces` naming `other`'s dialog, so that party swaps `other`
+    /// for the new call; `other` is normally `consult(target:...)`'s call,
+    /// and must be up. This end stays until the new call is, as with a
+    /// blind transfer: `.transferProgress` then `.transferDone` report it.
+    public func transfer(to other: Call) throws {
+        try retryingBusy {
+            try Sipral.callTransferTo(stack: stack.handle, call: handle, other: other.handle, nowMs: stack.nowMs())
         }
     }
 

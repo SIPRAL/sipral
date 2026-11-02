@@ -8,10 +8,14 @@
 //! a record-routing proxy. The NOTIFY may also arrive before the 2xx
 //! (§4.1.2.4), so a subscription is matched only on `Call-ID`, our `From` tag
 //! and the `Event`, all known when the SUBSCRIBE leaves. That is why the tag
-//! is chosen here, not by the endpoint.
+//! is chosen here, not by the endpoint. A NOTIFY that brought no
+//! `Record-Route` when the 2xx did, against §4.3, takes the 2xx's route.
 //!
 //! **Timer N** (§4.1.2.4, 64·T1 from SUBSCRIBE to the first NOTIFY): if it
-//! fires there is no subscription, whatever the 200 said.
+//! fires there is no subscription, whatever the 200 said. The notifier still
+//! holds one, so an `Expires: 0` goes out in the dialog the 200 made there,
+//! as when the application gives such an attempt up, and the back-off is not
+//! reset by a 200, only by a NOTIFY.
 //!
 //! **A failure is an event and leaves nothing behind.** The handle is minted
 //! first, so a SUBSCRIBE that never reaches a socket is reported under it and
@@ -31,8 +35,8 @@ use sipral_core::endpoint::{
     Event, FailureReason, OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse, TransportId,
 };
 use sipral_core::msg::{
-    EventRef, HeaderName, Method, OwnedMessage, RawMessage, StatusCode, SubscriptionStateRef,
-    Substate, Uri,
+    Contacts, EventRef, HeaderName, Method, OwnedMessage, RawMessage, StatusCode,
+    SubscriptionStateRef, Substate, Uri,
 };
 use sipral_core::transaction::{AnyTransactionId, DialogId, NonInviteClient, TransactionId};
 
@@ -325,9 +329,17 @@ pub(crate) struct Subscription {
     due: Option<(Instant, Waiting)>,
     /// Until when a NOTIFY may open another forked dialog (§4.1.2.4).
     forks_until: Option<Instant>,
-    /// Consecutive retryable failures, for the back-off.
+    /// Consecutive retryable failures, for the back-off. Only a NOTIFY
+    /// clears them: a notifier that accepts and never notifies is failing.
     failures: u32,
     unsubscribing: bool,
+    /// The 2xx to this attempt's opening SUBSCRIBE: the route a NOTIFY that
+    /// brought none falls back on, and the dialog an attempt no NOTIFY
+    /// opened is closed in at the notifier.
+    answer: Option<OwnedMessage>,
+    /// Until the first SUBSCRIBE inside the dialog, a 2xx answers the one
+    /// that opened the attempt.
+    opening: bool,
     /// A challenge nothing has answered yet, kept for the event.
     pub(crate) unanswered: Option<OwnedMessage>,
     /// A challenged SUBSCRIBE too large for a datagram (§18.1.1), waiting
@@ -361,6 +373,8 @@ impl Subscription {
             forks_until: None,
             failures: 0,
             unsubscribing: false,
+            answer: None,
+            opening: false,
             unanswered: None,
             waiting_for_stream: None,
             table: DialogInfoTable::default(),
@@ -390,6 +404,9 @@ impl Subscription {
             forks_until: None,
             failures: 0,
             unsubscribing: false,
+            // the 2xx names one notifier; the tag check keeps it to that one
+            answer: self.answer.clone(),
+            opening: self.opening,
             unanswered: None,
             waiting_for_stream: None,
             table: DialogInfoTable::default(),
@@ -496,6 +513,8 @@ impl UserAgent {
             .get_mut(&subscription)
             .ok_or(UaError::NoSuchSubscription)?;
         let Some(dialog) = held.dialog else {
+            // accepted but never notified: the notifier holds it all the same
+            self.bid_farewell(subscription, now);
             self.end_subscription(subscription, SubscriptionEnd::Unsubscribed, None, None);
             self.drain(now);
             return Ok(());
@@ -616,6 +635,8 @@ impl UserAgent {
         };
         held.cseq = held.cseq.saturating_add(1);
         held.state = SubscriptionState::Requesting;
+        held.answer = None;
+        held.opening = true;
         // a wake demotes without closing (`distrust` sends nothing), so the
         // dialog of the subscription this one replaces is closed here
         let stale = held.dialog.take();
@@ -693,6 +714,7 @@ impl UserAgent {
             // a refresh restarts Timer N (§4.1.2.2)
             held.due = Some((now + timer_n, Waiting::Notify));
             held.unanswered = None;
+            held.opening = false;
         }
         self.claim_subscribe(subscription, id);
         Ok(())
@@ -750,14 +772,17 @@ impl UserAgent {
             }
             match what {
                 // Timer N expired: the attempt failed (§4.1.2.4)
-                Waiting::Notify => self.retry_subscription(
-                    subscription,
-                    SubscriptionEnd::NoNotify,
-                    None,
-                    None,
-                    None,
-                    now,
-                ),
+                Waiting::Notify => {
+                    self.bid_farewell(subscription, now);
+                    self.retry_subscription(
+                        subscription,
+                        SubscriptionEnd::NoNotify,
+                        None,
+                        None,
+                        None,
+                        now,
+                    );
+                }
                 Waiting::Refresh => self.refresh_subscription(subscription, now),
                 Waiting::Retry => self.start_subscription(subscription, now),
             }
@@ -798,6 +823,44 @@ impl UserAgent {
                 });
             }
             Err(_) => self.unsendable(subscription),
+        }
+    }
+
+    /// Close at the notifier what is being given up here (§4.1.2.3): an
+    /// `Expires: 0` inside the dialog, or, when no NOTIFY ever opened one,
+    /// in the dialog the 2xx made at the notifier (RFC 3261 §12.1.2).
+    ///
+    /// Sent once, its answer swallowed. Otherwise the notifier keeps the
+    /// subscription for all it granted, and a retry under a new `Call-ID`
+    /// adds another beside it each time.
+    fn bid_farewell(&mut self, subscription: SubscriptionHandle, now: Instant) {
+        let Some(held) = self.subscriptions.get(&subscription) else {
+            return;
+        };
+        let Some(account) = self.accounts.get(&held.account) else {
+            return;
+        };
+        let learned = self.learned_for(held.account, held.wanted.destination, now);
+        let inside = held.dialog.map(|dialog| {
+            (
+                dialog,
+                build_refresh(account, held, Duration::ZERO, learned),
+            )
+        });
+        let outside = held
+            .answer
+            .as_ref()
+            .filter(|_| inside.is_none())
+            .and_then(|answer| build_farewell(account, held, &answer.as_raw(), learned));
+        let sent = match (inside, outside) {
+            (Some((dialog, request)), _) => {
+                self.endpoint.request_in_dialog(dialog, &request, now).ok()
+            }
+            (None, Some(request)) => self.endpoint.request(&request, now).ok(),
+            (None, None) => None,
+        };
+        if let Some(id) = sent {
+            self.farewells.insert(AnyTransactionId::NonInviteClient(id));
         }
     }
 }
@@ -887,6 +950,55 @@ fn build_refresh(
     request
 }
 
+/// The `Expires: 0` for a subscription a 2xx made at the notifier and no
+/// NOTIFY made here: its `Call-ID` and tags, the 2xx's `Contact` as target
+/// and its `Record-Route` reversed as route (RFC 3261 §12.1.2, §12.2.1.1).
+fn build_farewell(
+    account: &Account,
+    held: &Subscription,
+    answer: &RawMessage<'_>,
+    learned: Option<&RegistrarInfo>,
+) -> Option<OutgoingRequest> {
+    let to = answer.to().ok()?;
+    let tag = to.tag()?;
+    let Ok(Contacts::Addrs(addrs)) = answer.contact() else {
+        return None;
+    };
+    let target = Uri::parse(addrs.flatten().next()?.uri_bytes()).ok()?;
+    let mut hops = Vec::new();
+    for hop in answer.record_route() {
+        let mut value = vec![b'<'];
+        value.extend_from_slice(hop.ok()?.addr().uri_bytes());
+        value.push(b'>');
+        hops.push(value);
+    }
+    let mut from = account.sender_value().to_vec();
+    from.extend_from_slice(b";tag=");
+    from.extend_from_slice(&held.local_tag);
+    let mut to_value = vec![b'<'];
+    to_value.extend_from_slice(held.wanted.target.as_bytes());
+    to_value.extend_from_slice(b">;tag=");
+    to_value.extend_from_slice(&tag);
+    let (transport, remote) = held.wanted.destination.or_else(|| account.destination())?;
+
+    let mut request = OutgoingRequest::new(Method::Subscribe, target, transport, remote)
+        .to(&to_value)
+        .from(&from)
+        .call_id(held.call_id.clone())
+        .cseq(held.cseq.saturating_add(1))
+        .contact(&dialog_contact(
+            account,
+            learned,
+            anonymous(&held.wanted.extra),
+        ))
+        .header(HeaderName::Event, &held.wanted.package)
+        .header(HeaderName::Expires, b"0");
+    for hop in hops.iter().rev() {
+        request = request.route(hop);
+    }
+    Some(request)
+}
+
 // -- what comes back ---------------------------------------------------------
 
 impl UserAgent {
@@ -896,6 +1008,34 @@ impl UserAgent {
     /// (RFC 3515 §2.4.4).
     pub(crate) fn on_subscription_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
+            // a farewell's answer changes nothing (`bid_farewell`); a
+            // challenge to it ends it too, after the 401 or 407 itself
+            Event::Response {
+                transaction,
+                status,
+                ..
+            } if self
+                .farewells
+                .contains(&AnyTransactionId::NonInviteClient(transaction)) =>
+            {
+                if status.is_final() && !matches!(status.get(), 401 | 407) {
+                    self.farewells
+                        .remove(&AnyTransactionId::NonInviteClient(transaction));
+                }
+                None
+            }
+            Event::RequestFailed { transaction, .. }
+                if self
+                    .farewells
+                    .remove(&AnyTransactionId::NonInviteClient(transaction)) =>
+            {
+                None
+            }
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. }
+                if self.farewells.remove(&transaction) =>
+            {
+                None
+            }
             Event::IncomingOutOfDialog {
                 transaction,
                 ref request,
@@ -1242,7 +1382,31 @@ impl UserAgent {
             held.dialog = Some(dialog);
             held.remote_tag = remote_tag;
         }
+        self.route_as_answered(subscription, dialog);
         true
+    }
+
+    /// A NOTIFY that brought no `Record-Route` routes the dialog as the
+    /// 2xx was routed, when both come from the same notifier
+    /// ([`sipral_core::endpoint::Endpoint::route_dialog_as_answered`]).
+    fn route_as_answered(&mut self, subscription: SubscriptionHandle, dialog: DialogId) {
+        let Some(held) = self.subscriptions.get(&subscription) else {
+            return;
+        };
+        let Some(ref answer) = held.answer else {
+            return;
+        };
+        let raw = answer.as_raw();
+        let same_notifier = raw
+            .to()
+            .ok()
+            .and_then(|to| to.tag())
+            .is_some_and(|tag| held.remote_tag.as_deref() == Some(&*tag));
+        if same_notifier {
+            let answer = answer.clone();
+            self.endpoint
+                .route_dialog_as_answered(dialog, &answer.as_raw());
+        }
     }
 
     /// A notification that says the subscription is running (§4.1.3).
@@ -1549,10 +1713,19 @@ impl UserAgent {
         let Some(held) = self.subscriptions.get_mut(&subscription) else {
             return;
         };
-        held.failures = 0;
+        // failures stand until the NOTIFY: a notifier that accepts and never
+        // notifies would otherwise be retried at the shortest back-off forever
         held.granted = granted.unwrap_or(held.wanted.expires);
         // Timer N keeps running until the NOTIFY (§4.1.2.4)
         held.lapses_at = (!held.granted.is_zero()).then(|| now + held.granted);
+        if !held.opening || held.answer.is_some() {
+            return;
+        }
+        held.answer = Some(response.clone());
+        // the NOTIFY may have come first (§4.1.2.4)
+        if let Some(dialog) = held.dialog {
+            self.route_as_answered(subscription, dialog);
+        }
     }
 
     fn on_subscribe_refused(
@@ -1799,6 +1972,8 @@ impl UserAgent {
         let dialog = held.dialog.take();
         held.state = SubscriptionState::Retrying;
         held.unsubscribing = false;
+        held.answer = None;
+        held.opening = false;
         held.unanswered = None;
         held.remote_tag = None;
         held.lapses_at = None;

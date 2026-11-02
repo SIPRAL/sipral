@@ -29,6 +29,7 @@ import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralHeader
+import org.sipral.SipralIce
 import org.sipral.SipralProgressConfig
 import org.sipral.SipralProgressEvent
 import org.sipral.SipralStatus
@@ -56,6 +57,9 @@ class SipralCall internal constructor(
     /** The real-time text socket, when placed or answered with `text = true`;
      * [SipralMedia] owns it once [media] exists. */
     private val textSocket: DatagramSocket? = null,
+    /** The account the call was placed from or came in on, which [consult]
+     * places from; null for a call answered by handle alone. */
+    private val account: SipralAccount? = null,
 ) : AutoCloseable {
     /** The call's real-time text socket, as `host:port`, when it has one. */
     val textAddress: String? = textSocket?.let { formatAddress(it.localAddress.hostAddress, it.localPort) }
@@ -406,6 +410,50 @@ class SipralCall internal constructor(
     }
 
     /**
+     * `sipral_call_consult`: the consultation leg of an attended transfer.
+     * Calls [target] from the account this call was placed from or came in
+     * on, with this client running its audio as [SipralClient.placeCall]
+     * does, and returns that call, `CONSULTING` once up. [transferTo] with it
+     * then hands this call over; hanging it up instead leaves this call as it
+     * was. Holding this call first is the caller's ([hold]).
+     *
+     * [account] names the line when this layer does not know it, for a call
+     * answered by handle alone; the stack places from the call's own.
+     * `WRONG_STATE` when neither is known, when this call is not up, or when
+     * it already has a consultation or is one.
+     */
+    fun consult(
+        target: String,
+        account: SipralAccount? = null,
+        mediaHost: String? = null,
+        destination: String? = null,
+        srtp: Long = 0,
+        ice: SipralIce? = null,
+        headers: List<SipralHeader> = emptyList(),
+        codecs: String? = null,
+    ): SipralCall {
+        val from = account ?: this.account
+            ?: throw SipralException(SipralStatus.WRONG_STATE, "the account this call belongs to is not known; name one")
+        return client.place(
+            from, target, mediaHost, 0, destination, srtp, ice, headers, codecs, text = false, feedback = false,
+            focus = false, followRedirects = false, iceTrickle = null, consulting = handle,
+        )
+    }
+
+    /**
+     * `sipral_call_transfer_to`: the attended half of a transfer (RFC 3891).
+     * The far end of this call is asked to call [other]'s far end with
+     * `Replaces` naming [other]'s dialog, so that party swaps [other] for the
+     * new call; [other] is normally [consult]'s call, and must be up. This
+     * end stays until the new call is, as with [transfer]:
+     * `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS` then `TRANSFER_DONE` arrive on
+     * [events], read with [transferOf].
+     */
+    fun transferTo(other: SipralCall) {
+        retryBusy { Sipral.callTransferTo(client.handle, handle, other.handle, client.nowMs()) }
+    }
+
+    /**
      * `sipral_call_restart_ice`: re-offer with new ICE credentials (RFC 8445
      * §9) and recheck every pair, while the current path keeps carrying audio.
      * The new path arrives as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`.
@@ -502,7 +550,8 @@ class SipralCall internal constructor(
     suspend fun waitConfirmed(timeoutMs: Long = 30_000) {
         awaitEvent(
             timeoutMs,
-            { ended || state == SipralCallState.CONFIRMED },
+            // a consultation leg that is up is CONSULTING
+            { ended || state == SipralCallState.CONFIRMED || state == SipralCallState.CONSULTING },
             SipralEventKind.CALL_CONFIRMED,
             SipralEventKind.CALL_ENDED,
         )

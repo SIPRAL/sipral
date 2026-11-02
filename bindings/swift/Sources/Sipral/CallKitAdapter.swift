@@ -126,6 +126,50 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
         return (uuid, call)
     }
 
+    /// The consultation leg of an attended transfer, shown as a second call
+    /// while `held` waits on hold: one transaction asks the system to hold
+    /// `held` (`CXSetHeldCallAction`, which comes back through this
+    /// delegate to `CallKitBridge.handleHold(uuid:onHold:)`) and to start a
+    /// call to `callee`. Then `dial` runs, normally `Call.consult(target:)`
+    /// on `held`'s call, and the call it returns is bound with
+    /// `CallKitBridge.bindConsultation(uuid:to:holding:)`: the
+    /// application's transfer button calls `CallKitBridge.handleTransfer`,
+    /// and ending the consultation takes `held` off hold again. Nothing is
+    /// dialled if the system refuses; a `dial` that throws is reported
+    /// failed, and `held` taken off hold, before the error is rethrown.
+    public func startConsultation(
+        holding held: UUID, callee: String, dial: () throws -> Call
+    ) async throws -> (uuid: UUID, call: Call) {
+        guard let bridge else { throw CallKitBridgeError.notAttached }
+        let uuid = UUID()
+        stateQueue.sync { _ = outgoing.insert(uuid) }
+        let hold = CXSetHeldCallAction(call: held, onHold: true)
+        let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: callee))
+        do {
+            try await controller.request(CXTransaction(actions: [hold, start]))
+        } catch {
+            stateQueue.sync { _ = outgoing.remove(uuid) }
+            throw error
+        }
+        let call: Call
+        do {
+            call = try dial()
+        } catch {
+            reportCallEnded(uuid: uuid, reason: .failed)
+            requestUnhold(uuid: held)
+            throw error
+        }
+        reportCallConnecting(uuid: uuid)
+        bridge.bindConsultation(uuid: uuid, to: call, holding: held)
+        return (uuid, call)
+    }
+
+    /// Takes `uuid` off hold as the system's own button would; a refusal
+    /// leaves it held, for the person to resume.
+    public func requestUnhold(uuid: UUID) {
+        controller.request(CXTransaction(action: CXSetHeldCallAction(call: uuid, onHold: false))) { _ in }
+    }
+
     /// Asks the system to perform `action` on a call it shows: a mute, a
     /// hold, digits or the end, from the application's own buttons. The
     /// system's screen and the application's then agree, and the action

@@ -344,6 +344,83 @@ final class ProtocolsTests: XCTestCase {
         XCTAssertFalse(refused.events.contains { $0.kind == .messagesWaiting })
     }
 
+    /// A colleague's line watched with the `dialog` package (RFC 4235):
+    /// unknown until the notifier answers, then every dialog with its state,
+    /// direction and the other end, and unknown again once the notifier
+    /// lets the subscription go, rather than an idle line.
+    func testAWatchedLineIsReadDialogByDialogAndIsUnknownWhileNotLive() async throws {
+        let notifier = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { notifier.close() }
+        let alice = try SipralStack(audio: .application)
+        defer { alice.close() }
+        let account = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: notifier.localAddress)
+        let events = Recorder(alice.events())
+        let watched = try account.subscribe(to: "sip:2001@sipral.invalid", package: "dialog")
+        let subscribed = await FakePeer.request(on: notifier, "SUBSCRIBE", within: 10)
+        let subscribe = try XCTUnwrap(subscribed)
+        XCTAssertEqual(FakePeer.header("Event", in: subscribe.message), "dialog")
+        XCTAssertNil(try watched.dialogs(), "a line nobody has described yet was shown as known")
+
+        notifier.send(FakePeer.answer(subscribe.message, "200 OK", more: "Expires: 3600\r\n"), to: subscribe.from)
+        notifier.send(
+            FakePeer.notify(subscribe.message, to: alice.bindAddress, from: notifier.localAddress,
+                            package: "dialog", type: "application/dialog-info+xml", body: Self.line),
+            to: alice.bindAddress
+        )
+        let notified = await events.first(within: 10) {
+            $0.kind == .notified && $0.subscriptionData?.subscription == watched.handle
+        }
+        XCTAssertEqual(try XCTUnwrap(notified, "no notification was told").subscriptionData?.hasDialogInfo, true)
+
+        let dialogs = try XCTUnwrap(try watched.dialogs(), "a live subscription's dialogs were not read")
+        XCTAssertEqual(dialogs.count, 2)
+        let ringing = dialogs[0]
+        XCTAssertEqual(ringing.phase, .early)
+        XCTAssertEqual(ringing.direction, .remotely, "`recipient`: the watched line is the one called")
+        XCTAssertEqual(ringing.ended, .unknown)
+        XCTAssertEqual(ringing.id, "ring-1")
+        XCTAssertEqual(ringing.callId, "ring@192.0.2.7")
+        XCTAssertEqual(ringing.remoteIdentity, "sip:0744@sipral.invalid")
+        XCTAssertEqual(ringing.remoteDisplay, "Carol")
+        XCTAssertEqual(ringing.remoteTarget, "sip:0744@192.0.2.7")
+        XCTAssertEqual(ringing.localIdentity, "sip:2001@sipral.invalid")
+        XCTAssertEqual(ringing.localDisplay, "Desk 2001")
+        let talking = dialogs[1]
+        XCTAssertEqual(talking.phase, .confirmed)
+        XCTAssertEqual(talking.direction, .locally, "`initiator`: the watched line placed the call")
+        XCTAssertEqual(talking.remoteIdentity, "sip:2002@sipral.invalid")
+        XCTAssertEqual(talking.remoteDisplay, "", "a name the notifier never sent")
+
+        let farewell = String(decoding: FakePeer.notify(
+            subscribe.message, to: alice.bindAddress, from: notifier.localAddress,
+            package: "dialog", type: "application/dialog-info+xml", body: Self.line
+        ), as: UTF8.self)
+            .replacingOccurrences(of: "CSeq: 1 NOTIFY", with: "CSeq: 2 NOTIFY")
+            .replacingOccurrences(of: "active;expires=3600", with: "terminated;reason=deactivated")
+        notifier.send(Array(farewell.utf8), to: alice.bindAddress)
+        let lapsed = await events.first(within: 10) {
+            $0.kind == .subscriptionChanged && $0.subscriptionData?.subscription == watched.handle
+                && $0.subscriptionData?.state != .active
+        }
+        XCTAssertNotNil(lapsed, "the notifier letting go was not told")
+        XCTAssertNil(try watched.dialogs(), "a subscription that is not live still showed its old dialogs")
+    }
+
+    static let line = """
+    <?xml version="1.0"?>
+    <dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info" version="1" state="full" entity="sip:2001@sipral.invalid">
+      <dialog id="ring-1" call-id="ring@192.0.2.7" local-tag="l1" remote-tag="r1" direction="recipient">
+        <state>early</state>
+        <local><identity display="Desk 2001">sip:2001@sipral.invalid</identity></local>
+        <remote><identity display="Carol">sip:0744@sipral.invalid</identity><target uri="sip:0744@192.0.2.7"/></remote>
+      </dialog>
+      <dialog id="talk-1" direction="initiator">
+        <state>confirmed</state>
+        <remote><identity>sip:2002@sipral.invalid</identity></remote>
+      </dialog>
+    </dialog-info>
+    """
+
     static let room = """
     <?xml version="1.0"?>
     <conference-info xmlns="urn:ietf:params:xml:ns:conference-info" entity="sip:room@sipral.invalid" state="full" version="1">

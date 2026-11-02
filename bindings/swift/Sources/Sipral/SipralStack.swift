@@ -1617,6 +1617,32 @@ public final class SipralStack: @unchecked Sendable {
         followRedirects: Bool = false,
         iceTrickle: SipralIceTrickle? = nil
     ) throws -> Call {
+        try place(
+            account: account, target: target, mediaHost: mediaHost, mediaPort: mediaPort, destination: destination,
+            srtp: srtp, ice: ice, headers: headers, codecs: codecs, text: text, feedback: feedback, focus: focus,
+            followRedirects: followRedirects, iceTrickle: iceTrickle, consulting: nil
+        )
+    }
+
+    /// `placeCall`, or with `consulting` the consultation leg of that call
+    /// (`sipral_call_consult`), placed from the same `account`.
+    func place(
+        account: Account,
+        target: String,
+        mediaHost: String?,
+        mediaPort: UInt16,
+        destination: String?,
+        srtp: SipralSrtp?,
+        ice: SipralIce?,
+        headers: [SipralHeader],
+        codecs: String?,
+        text: Bool,
+        feedback: Bool,
+        focus: Bool,
+        followRedirects: Bool,
+        iceTrickle: SipralIceTrickle?,
+        consulting: SipralHandle?
+    ) throws -> Call {
         let mediaHost = self.mediaHost(mediaHost, account: account, destination: destination)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let textSocket: UDPSocket?
@@ -1655,7 +1681,12 @@ public final class SipralStack: @unchecked Sendable {
                 config.focus = focus ? 1 : 0
                 config.follow_redirects = followRedirects ? 1 : 0
                 return try retryingBusy {
-                    try Sipral.callPlace(
+                    if let consulting {
+                        return try Sipral.callConsult(
+                            stack: stackHandle, call: consulting, config: config, configHeaders: headers, nowMs: now
+                        )
+                    }
+                    return try Sipral.callPlace(
                         stack: stackHandle, account: account.handle, config: config, configHeaders: headers, nowMs: now
                     )
                 }
@@ -1666,7 +1697,9 @@ public final class SipralStack: @unchecked Sendable {
             throw error
         }
 
-        let call = Call(stack: self, handle: callHandle, mediaSocket: mediaSocket, textSocket: textSocket)
+        let call = Call(
+            stack: self, handle: callHandle, mediaSocket: mediaSocket, textSocket: textSocket, account: account
+        )
         registerCall(call)
         return call
     }
@@ -1708,7 +1741,8 @@ public final class SipralStack: @unchecked Sendable {
         mediaPort: UInt16 = 0,
         text: Bool = false
     ) throws -> Call {
-        let mediaHost = self.mediaHost(mediaHost, account: account(event.account), destination: nil)
+        let line = account(event.account)
+        let mediaHost = self.mediaHost(mediaHost, account: line, destination: nil)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let textSocket: UDPSocket?
         do {
@@ -1719,7 +1753,8 @@ public final class SipralStack: @unchecked Sendable {
             throw error
         }
         let call = Call(
-            stack: self, handle: event.call, mediaSocket: mediaSocket, incoming: event.callData, textSocket: textSocket
+            stack: self, handle: event.call, mediaSocket: mediaSocket, incoming: event.callData, textSocket: textSocket,
+            account: line
         )
         registerCall(call)
 
@@ -1795,7 +1830,8 @@ public final class SipralStack: @unchecked Sendable {
         srtp: SipralSrtp? = nil,
         ice: SipralIce? = nil
     ) throws -> Call {
-        let mediaHost = self.mediaHost(mediaHost, account: account(event.account), destination: nil)
+        let line = account(event.account)
+        let mediaHost = self.mediaHost(mediaHost, account: line, destination: nil)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let stackHandle = handle
         let placed: SipralHandle
@@ -1818,7 +1854,7 @@ public final class SipralStack: @unchecked Sendable {
             giveBackMediaSocket(mediaSocket)
             throw error
         }
-        let call = Call(stack: self, handle: placed, mediaSocket: mediaSocket)
+        let call = Call(stack: self, handle: placed, mediaSocket: mediaSocket, account: line)
         registerCall(call)
         return call
     }

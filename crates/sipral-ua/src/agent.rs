@@ -11,6 +11,7 @@
 //! randomised back-off.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -106,6 +107,9 @@ pub struct UserAgent {
     pub(crate) subscriptions: HashMap<SubscriptionHandle, Subscription>,
     /// The SUBSCRIBE each one has in flight, one entry per subscription.
     pub(crate) by_subscribe: HashMap<AnyTransactionId, SubscriptionHandle>,
+    /// `Expires: 0` sent for subscriptions already given up here, whose
+    /// answers nobody waits for.
+    pub(crate) farewells: HashSet<AnyTransactionId>,
     /// MESSAGEs sent and not yet reported (RFC 3428). Removed when
     /// `UaEvent::MessageSent` goes out.
     pub(crate) messages: HashMap<MessageHandle, SentMessage>,
@@ -236,6 +240,7 @@ impl UserAgent {
             challenged_offers: HashMap::new(),
             subscriptions: HashMap::new(),
             by_subscribe: HashMap::new(),
+            farewells: HashSet::new(),
             messages: HashMap::new(),
             by_message: HashMap::new(),
             probes: crate::probe::Probes::default(),

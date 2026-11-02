@@ -95,6 +95,8 @@ call.waitConfirmed()        // heard at once: the client is in device mode where
 call.hold(); call.resume()
 call.sendDtmf("123#")
 call.transfer("sip:carol@example.com")   // blind: TRANSFER_DONE, read with transferOf, says how it went
+val toCarol = call.consult("sip:carol@example.com")   // attended: a second call, same line
+call.transferTo(toCarol)                 // REFER with Replaces naming it (RFC 3891), reported the same way
 call.hangup(SipralHangupReason.NORMAL_CLEARING)   // or hangup(), with no Reason
 client.close()
 ```
@@ -738,8 +740,14 @@ client.events.collect { event ->
 ```
 
 `account.subscribe(target, package)` is any RFC 6665 subscription, kept and
-refreshed by the client until `SipralSubscription.end()`;
-`watchPresence(target)` is one to `presence`, told as
+refreshed by the client until `SipralSubscription.end()`. One to `dialog`
+(RFC 4235) is a busy lamp: on each `SIPRAL_EVENT_KIND_NOTIFIED` naming it,
+`SipralSubscription.dialogs()` reads every dialog on the watched line as a
+`SipralLineDialog` -- `phase` (`EARLY` while it rings, `CONFIRMED` once
+answered), `direction` (`LOCALLY` for `initiator`, `REMOTELY` for
+`recipient`) and the other end's `remoteIdentity` and `remoteDisplay` --
+and is null, unknown, while the subscription is not live, never an idle
+line. `watchPresence(target)` is one to `presence`, told as
 `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` and read with `presenceOf`, `kind`
 `WATCHED`. `publishPresence` publishes the account's own (RFC 3903): the
 first call publishes, every later one modifies, the client refreshes it,
@@ -814,7 +822,14 @@ Split in two, so that the part worth testing needs no Android:
   error with the refusal's text as the `DisconnectCause`'s reason, and the
   application hears it as a `TelecomPlaceFailure` through
   `TelecomBridge.placeFailed`: a placed call that only vanished from `calls`
-  would say nothing about why. `endAll` ends every call
+  would say nothing about why. An attended transfer is `consult(id, target)`,
+  which holds the call and asks the framework for a second one on the same
+  account, placed from the first (`SipCalls.consult`) and tied to it in
+  `TelecomCall.consulting`, then `transfer(id)` with either call's id, which
+  sends the REFER with `Replaces` from the held one (`SipCalls.transferTo`);
+  both calls leave the framework as the transfer completes. Ending the
+  consultation instead, or a transfer that fails once the consultation has
+  ended, takes the held call off hold. `endAll` ends every call
   at once, for an application about to close its client: once the client is
   closed nothing would end them, and a connection nobody ends stays up in
   the framework for as long as the process lives. The framework is behind

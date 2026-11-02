@@ -139,6 +139,27 @@ places a call through `CXStartCallAction`, so the system shows it and a
 cellular call holds it, and `request(_:)` sends the application's own mute,
 hold, digits and end through the system.
 
+An attended transfer goes through the same objects.
+`CallKitAdapter.startConsultation(holding:callee:dial:)` holds the call on
+screen and starts a second one in one transaction, dials it (normally
+`Call.consult(target:)` on the held call) and binds it with
+`CallKitBridge.bindConsultation(uuid:to:holding:)`; the application's own
+transfer button calls `CallKitBridge.handleTransfer(uuid:)` with either
+call, which sends the REFER with `Replaces` from the held one. Both calls
+then end as the transfer completes and are reported so. Ending the
+consultation instead, or a transfer that fails after the consultation
+ended, asks the system to take the held call off hold
+(`CallKitProviding.requestUnhold(uuid:)`). CallKit has no transfer action
+of its own; the two calls show as any held call and second call do.
+
+```swift
+let (consultation, toCarol) = try await adapter.startConsultation(holding: uuid, callee: "sip:carol@example.com") {
+    try call.consult(target: "sip:carol@example.com")
+}
+// once Carol agrees:
+try bridge.handleTransfer(uuid: consultation)
+```
+
 The lifecycle calls are on the same objects: `SipralStack.suspending()`,
 `resumed()`, `coldStart()`, `interfaceLost()` and `nameResolutionLost()`,
 and `Account.freeze()`, `thaw(_:asleepMs:)` and `timeToReadyMs()`
@@ -290,6 +311,8 @@ try call.hold()
 try call.resume()
 try call.sendDtmf("123#")
 try call.transfer(to: "sip:carol@example.invalid")   // blind: .transferDone's transferData says how it went
+let toCarol = try call.consult(target: "sip:carol@example.invalid")   // attended: a second call, same line
+try call.transfer(to: toCarol)             // REFER with Replaces naming it (RFC 3891), reported the same way
 try call.hangup(reason: .normalClearing)   // or hangup(), with no Reason
 call.close()
 ```
@@ -928,7 +951,13 @@ for await event in stack.events() {
 ```
 
 `account.subscribe(to:package:)` is any RFC 6665 subscription, kept and
-refreshed by the stack until `SipralSubscription.end()`; `watchPresence(of:)`
+refreshed by the stack until `SipralSubscription.end()`. One to `dialog`
+(RFC 4235) is a busy lamp: on each `.notified` naming it,
+`SipralSubscription.dialogs()` reads every dialog on the watched line --
+`phase` (`.early` while it rings, `.confirmed` once answered), `direction`
+(`.locally` for `initiator`, `.remotely` for `recipient`) and the other
+end's `remoteIdentity` and `remoteDisplay` -- and is `nil`, unknown, while
+the subscription is not live, never an idle line. `watchPresence(of:)`
 is one to `presence`, told as `SipralEventKind.presenceChanged` with
 `presenceData.kind == .watched`. `publishPresence(_:)` publishes the
 account's own (RFC 3903): the first call publishes, every later one

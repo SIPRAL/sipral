@@ -98,6 +98,35 @@ public struct Conference: Sendable, Equatable {
     public let users: [ConferenceUser]
 }
 
+/// One dialog a `dialog` subscription watches (RFC 4235 §4.1), as the
+/// notifier described it. A piece it never sent is an empty string.
+public struct WatchedDialog: Sendable, Equatable {
+    /// `.trying`, `.proceeding`, `.early` (ringing), `.confirmed` or
+    /// `.terminated`; `.unknown` for a state this build has no name for.
+    public let phase: SipralDialogPhase
+    /// `.locally` for RFC 4235's `initiator` (the watched end placed the
+    /// call), `.remotely` for `recipient`, `.unknown` when not said.
+    public let direction: SipralDialogDirection
+    /// How it ended, `.unknown` while it has not.
+    public let ended: SipralDialogEnded
+    /// The SIP status behind how it ended, or zero.
+    public let statusCode: UInt32
+    /// How long it has been up, in milliseconds, or zero.
+    public let durationMs: UInt64
+    /// The notifier's id for it, and its `Call-ID`.
+    public let id: String
+    public let callId: String
+    /// Who the watched end is in it, as a URI, and the name beside it.
+    public let localIdentity: String
+    public let localDisplay: String
+    /// Who the other end is: what a lamp shows for a ringing line.
+    public let remoteIdentity: String
+    public let remoteDisplay: String
+    /// Where each end's requests would be sent.
+    public let localTarget: String
+    public let remoteTarget: String
+}
+
 /// One subscription (RFC 6665).
 ///
 /// The stack refreshes it, and resubscribes after `deactivated`, until
@@ -162,6 +191,66 @@ public final class SipralSubscription: @unchecked Sendable {
             locked: Self.flag(whole.locked),
             users: users
         )
+    }
+
+    /// Every dialog a `dialog` subscription (RFC 4235) has been told about,
+    /// in the order first heard: a busy lamp's detail, such as who rings a
+    /// colleague's line. Read it again on each `.notified` naming
+    /// `handle`, since a notification drops the dialogs that ended.
+    ///
+    /// `nil` while the subscription is not live (not yet answered,
+    /// retrying, or over, its handle gone): what it was told before is no
+    /// evidence then, so `nil` means "unknown" and never "free", which is
+    /// an empty list. `SubscriptionEventData.hasDialogInfo` on a
+    /// `.notified` says whether that notification was readable. A
+    /// subscription to another package has no dialogs to read.
+    public func dialogs() throws -> [WatchedDialog]? {
+        var attempts = 0
+        while true {
+            attempts += 1
+            do {
+                return try readDialogs()
+            } catch let error as SipralError where error.status == .notSupported || error.status == .staleHandle {
+                return nil
+            } catch let error as SipralError where error.status == .invalidArgument && attempts < 3 {
+                // a notification shrank the table between two reads: read it whole again
+                continue
+            }
+        }
+    }
+
+    private func readDialogs() throws -> [WatchedDialog] {
+        let count = try retryingBusy { try Sipral.subscriptionDialogCount(stack: stack.handle, subscription: handle) }
+        return try (0..<count).map { index -> WatchedDialog in
+            let row = try retryingBusy {
+                try Sipral.subscriptionDialogAt(stack: stack.handle, subscription: handle, index: index)
+            }
+            return WatchedDialog(
+                phase: SipralDialogPhase(rawValue: row.phase) ?? .unknown,
+                direction: SipralDialogDirection(rawValue: row.direction) ?? .unknown,
+                ended: SipralDialogEnded(rawValue: row.ended) ?? .unknown,
+                statusCode: row.status_code,
+                durationMs: row.duration_ms,
+                id: try dialogText(.id, index),
+                callId: try dialogText(.callId, index),
+                localIdentity: try dialogText(.localIdentity, index),
+                localDisplay: try dialogText(.localDisplay, index),
+                remoteIdentity: try dialogText(.remoteIdentity, index),
+                remoteDisplay: try dialogText(.remoteDisplay, index),
+                localTarget: try dialogText(.localTarget, index),
+                remoteTarget: try dialogText(.remoteTarget, index)
+            )
+        }
+    }
+
+    private func dialogText(_ which: SipralDialogText, _ index: Int) throws -> String {
+        try ProtocolText.read { buffer in
+            try retryingBusy {
+                try Sipral.subscriptionDialogText(
+                    stack: stack.handle, subscription: handle, index: index, which: which.rawValue, buffer: &buffer
+                )
+            }
+        }
     }
 
     /// `conference-state`'s tri-state: one said yes, two said no.

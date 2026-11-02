@@ -9,6 +9,8 @@
 
 package org.sipral.telecom
 
+import org.sipral.SipralException
+import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
 
 /**
@@ -110,6 +112,18 @@ interface SipCalls {
 
     /** `sipral_call_place`; the new call's handle. */
     fun place(account: Long, target: String): Long
+
+    /** The consultation leg of an attended transfer from [call]: a call to
+     * [target] on [account], which [call] is on; the new call's handle. A
+     * SIP side with nothing more to it places an ordinary call. */
+    fun consult(call: Long, account: Long, target: String): Long = place(account, target)
+
+    /** `sipral_call_transfer_to`: [call]'s far end is asked to take over
+     * [other] (RFC 3891). Progress arrives as `TRANSFER_PROGRESS` and
+     * `TRANSFER_DONE` naming [call]. A SIP side that cannot transfer
+     * refuses with `NOT_SUPPORTED`. */
+    fun transferTo(call: Long, other: Long): Unit =
+        throw SipralException(SipralStatus.NOT_SUPPORTED, "this SIP side does not transfer calls")
     fun hangup(call: Long)
     fun hold(call: Long)
     fun resume(call: Long)

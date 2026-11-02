@@ -11665,6 +11665,201 @@ fn a_subscription_nothing_notifies_is_over_when_timer_n_fires() {
     );
 }
 
+/// A 202 from a notifier that tags its end of the dialog, as every notifier
+/// must (RFC 3261 §8.2.6.2), and may record-route it.
+fn accepted_by(subscribe: &[u8], tag: &str, extra: &str) -> Vec<u8> {
+    let to = format!("{};tag={tag}", text(subscribe, HeaderName::To));
+    format!(
+        "SIP/2.0 202 Accepted\r\n\
+Via: {}\r\n\
+From: {}\r\n\
+To: {to}\r\n\
+Call-ID: {}\r\n\
+CSeq: {}\r\n\
+Expires: 3600\r\n\
+Contact: <sip:notifier@192.0.2.9>\r\n\
+{extra}\
+Content-Length: 0\r\n\r\n",
+        text(subscribe, HeaderName::Via),
+        text(subscribe, HeaderName::From),
+        text(subscribe, HeaderName::CallId),
+        text(subscribe, HeaderName::CSeq),
+    )
+    .into_bytes()
+}
+
+/// The SUBSCRIBEs among what went out, an `Expires: 0` apart.
+fn subscribes_and_farewells(sent: &[Vec<u8>]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    sent.iter()
+        .filter(|bytes| bytes.starts_with(b"SUBSCRIBE "))
+        .cloned()
+        .partition(|bytes| header(bytes, HeaderName::Expires) != b"0")
+}
+
+#[test]
+fn an_attempt_accepted_and_never_notified_is_closed_at_the_notifier() {
+    // §4.1.2.4 cleans up here when Timer N fires; the notifier, which made
+    // its half of the dialog with the 202, would hold the subscription for the
+    // hour it granted, and every retry under a new Call-ID would add another
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &accepted_by(
+            &subscribe,
+            "notifier",
+            "Record-Route: <sip:p2.example.com;lr>, <sip:p1.example.com;lr>\r\n",
+        ),
+        t0,
+    );
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    events(&mut agent);
+    let (again, farewells) = subscribes_and_farewells(&transmits(&mut agent));
+    assert!(again.is_empty(), "the retry waits its back-off");
+    let [farewell] = farewells.as_slice() else {
+        panic!("one Expires: 0, not {}", farewells.len());
+    };
+    assert!(farewell.starts_with(b"SUBSCRIBE sip:notifier@192.0.2.9 SIP/2.0\r\n"));
+    assert_eq!(
+        header(farewell, HeaderName::CallId),
+        header(&subscribe, HeaderName::CallId)
+    );
+    assert!(text(farewell, HeaderName::To).ends_with(";tag=notifier"));
+    assert_eq!(header(farewell, HeaderName::CSeq), b"2 SUBSCRIBE");
+    let route = String::from_utf8_lossy(farewell);
+    let near = route
+        .find("Route: <sip:p1.example.com;lr>")
+        .expect("p1 routed");
+    let far = route.find("<sip:p2.example.com;lr>").expect("p2 routed");
+    assert!(near < far, "the 202's Record-Route reversed: {route}");
+
+    // its answer is nobody's business
+    deliver(
+        &mut agent,
+        &reply(farewell, 200, "OK", ""),
+        t0 + Duration::from_secs(33),
+    );
+    let after = events(&mut agent);
+    assert!(after.is_empty(), "{after:?}");
+}
+
+#[test]
+fn a_notifier_that_accepts_and_never_notifies_is_tried_less_and_less_often() {
+    // the 202 is not a subscription (§4.1.2.4), so it does not forgive the
+    // failures before it: RFC 5626 §4.5's back-off keeps doubling
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let mut subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    let mut now = t0;
+    let mut waits = Vec::new();
+    for _ in 0..4 {
+        deliver(&mut agent, &accepted_by(&subscribe, "notifier", ""), now);
+        events(&mut agent);
+        now += Duration::from_secs(33);
+        agent.handle_timeout(now);
+        transmits(&mut agent);
+        let wait = events(&mut agent)
+            .into_iter()
+            .find_map(|event| match event {
+                UaEvent::SubscriptionEnded {
+                    reason: SubscriptionEnd::NoNotify,
+                    retry_in: Some(wait),
+                    ..
+                } => Some(wait),
+                _ => None,
+            })
+            .expect("Timer N ends the attempt");
+        waits.push(wait.as_secs());
+        now += wait;
+        agent.handle_timeout(now);
+        let (again, _) = subscribes_and_farewells(&transmits(&mut agent));
+        subscribe = again.into_iter().next().expect("tried again");
+    }
+    for (wait, bound) in waits.iter().zip([60, 120, 240, 480]) {
+        assert!(
+            (bound / 2..=bound).contains(wait),
+            "{waits:?}: each wait within half of its doubled bound"
+        );
+    }
+}
+
+#[test]
+fn giving_up_an_attempt_no_notify_opened_still_closes_it_at_the_notifier() {
+    // a phone ending its watches before it sleeps: no NOTIFY came, so there is
+    // no dialog here, but there is one at the notifier
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted_by(&subscribe, "notifier", ""), t0);
+    events(&mut agent);
+
+    agent.unsubscribe(handle, t0).expect("a live handle");
+    let (_, farewells) = subscribes_and_farewells(&transmits(&mut agent));
+    assert_eq!(farewells.len(), 1);
+    assert!(text(&farewells[0], HeaderName::To).ends_with(";tag=notifier"));
+    assert!(events(&mut agent).iter().any(|event| matches!(
+        *event,
+        UaEvent::SubscriptionEnded {
+            reason: SubscriptionEnd::Unsubscribed,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_notify_that_brought_no_route_is_routed_as_the_202_was() {
+    // §4.3: a proxy that record-routed the SUBSCRIBE "MUST" record-route the
+    // NOTIFY. One that does not would leave refreshes going straight to a
+    // notifier only it can reach. Either may arrive first (§4.1.2.4).
+    for notify_first in [false, true] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        agent
+            .subscribe(id, &watching("201"), t0)
+            .expect("the SUBSCRIBE goes");
+        let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+        let accepted = accepted_by(
+            &subscribe,
+            "notifier",
+            "Record-Route: <sip:edge.example.com;lr>\r\n",
+        );
+        let notify = notification(&subscribe, 1, "notifier", "active;expires=3600", None);
+        if notify_first {
+            deliver(&mut agent, &notify, t0);
+            deliver(&mut agent, &accepted, t0);
+        } else {
+            deliver(&mut agent, &accepted, t0);
+            deliver(&mut agent, &notify, t0);
+        }
+        transmits(&mut agent);
+        events(&mut agent);
+
+        agent.handle_timeout(t0 + Duration::from_secs(3_060));
+        let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+        assert_eq!(
+            header(&refresh, HeaderName::Route),
+            b"<sip:edge.example.com;lr>",
+            "NOTIFY first: {notify_first}"
+        );
+    }
+}
+
 #[test]
 fn a_terminated_notification_says_why_and_the_reason_decides_what_follows() {
     // §4.1.3's reason codes, and the three it tells clients not to come back

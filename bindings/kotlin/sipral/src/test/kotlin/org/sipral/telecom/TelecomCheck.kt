@@ -36,11 +36,12 @@ import org.sipral.idiomatic.SipralClient
 fun main() {
     val said = try {
         val fakes = fakeSequences()
+        val consults = consultSequences()
         val audio = callAudioSequences()
         val engine = engineAudioSequences()
         val real = runBlocking { overLoopback() }
         val lifecycle = runBlocking { lifecycleChecks() }
-        "$fakes; $audio; $engine; $real; $lifecycle"
+        "$fakes; $consults; $audio; $engine; $real; $lifecycle"
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
@@ -180,6 +181,12 @@ internal class FakeSip(val log: Log) : SipCalls {
         return nextCall++
     }
 
+    override fun consult(call: Long, account: Long, target: String): Long {
+        log.add("consult $call $account $target")
+        return nextCall++
+    }
+
+    override fun transferTo(call: Long, other: Long) = log.add("transfer $call $other")
     override fun hangup(call: Long) = log.add("hangup $call")
     override fun hold(call: Long) = log.add("hold $call")
     override fun resume(call: Long) = log.add("resume $call")
@@ -204,6 +211,7 @@ internal fun event(
     account: Long = 0,
     message: String? = null,
     announcement: Long = 0,
+    transferStatus: Long = 0,
 ) = SipralEvent(
     size = 0,
     stack = 1,
@@ -211,6 +219,7 @@ internal fun event(
     account = account,
     call = call,
     message = message?.toByteArray(Charsets.UTF_8),
+    payloadTransferNumbers = longArrayOf(transferStatus, 1),
     payloadAnnounceNumbers = longArrayOf(announcement, 0),
 )
 
@@ -710,6 +719,127 @@ private fun fakeSequences(): String {
         "and why, refused, missed, " +
         "a framework that will not take the call, a late confirmation after a hang-up, a call over before its " +
         "connection existed, every call ended at once)"
+}
+
+/** An incoming [call] answered and up, its connection created: the call an
+ * attended transfer starts from. */
+private fun Rig.upCall(call: Long): Pair<String, FakeConnection> {
+    bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = call, account = ACCOUNT, message = invite("<sip:bob@example.invalid>")))
+    val id = bridge.calls.value.single { it.call == call }.id
+    val connection = platform.create(id)
+    bridge.answer(id)
+    bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = call))
+    return id to connection
+}
+
+/** [upCall], held while a consultation with Carol is placed from it and
+ * comes up; the consultation's id, connection and SIP handle. */
+private fun Rig.consulting(id: String): Triple<String, FakeConnection, Long> {
+    val consultation = bridge.consult(id, CAROL)
+    val connection = platform.create(consultation)
+    val call = bridge.callHandleOf(consultation)
+    bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = call))
+    return Triple(consultation, connection, call)
+}
+
+private const val CAROL = "sip:carol@example.invalid"
+
+private fun consultSequences(): String {
+    var ran = 0
+
+    // The consultation: the first call held, a second shown and placed from
+    // it on the same account, tied to it; one at a time, none from a
+    // consultation. Ending it takes the first call off hold.
+    Rig().run {
+        val (id, held) = upCall(950)
+        val consultation = bridge.consult(id, CAROL)
+        assertEquals(1, log.count("hold 950"))
+        assertEquals("held", held.state)
+        assertEquals(1, log.count("place-request $consultation $CAROL"), log.snapshot().toString())
+        assertEquals(id, bridge.calls.value.single { it.id == consultation }.consulting)
+        val second = platform.create(consultation)
+        assertEquals(1, log.count("consult 950 $ACCOUNT $CAROL"), log.snapshot().toString())
+        assertEquals(0, log.count("place $ACCOUNT"), "the consultation was placed as an unrelated call")
+        val call = bridge.callHandleOf(consultation)
+        bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = call))
+        assertEquals("active", second.state)
+        assertFailsWith<IllegalStateException> { bridge.consult(id, "sip:dave@example.invalid") }
+        assertFailsWith<IllegalStateException> { bridge.consult(consultation, "sip:dave@example.invalid") }
+        bridge.disconnect(consultation)
+        assertEquals(1, log.count("hangup $call"))
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = call))
+        assertEquals(1, log.count("resume 950"), log.snapshot().toString())
+        assertEquals("active", held.state, "the first call was left held")
+        assertFailsWith<IllegalStateException> { bridge.transfer(id) }
+        ran++
+    }
+
+    // A transfer that succeeds: the party consulted hangs the consultation
+    // up, the stack the first call, and nothing is taken off hold. The first
+    // call leaves the framework as ended here, by the transfer.
+    Rig().run {
+        val (id, held) = upCall(960)
+        val (consultation, _, call) = consulting(id)
+        bridge.transfer(consultation)
+        assertEquals(1, log.count("transfer 960 $call"))
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = call))
+        bridge.onEvent(event(SipralEventKind.TRANSFER_DONE, call = 960, transferStatus = 200))
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = 960))
+        assertEquals(0, log.count("resume 960"), "a transferred call was taken off hold: ${log.snapshot()}")
+        assertEquals(TelecomDisconnect.LOCAL, held.cause)
+        assertTrue(bridge.calls.value.isEmpty())
+        ran++
+    }
+
+    // The consultation ends while its transfer is under way: nothing comes
+    // off hold until the outcome, which fails, and then the first call does.
+    Rig().run {
+        val (id, held) = upCall(970)
+        val (_, _, call) = consulting(id)
+        bridge.transfer(id)
+        assertEquals(1, log.count("transfer 970 $call"))
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = call))
+        assertEquals(0, log.count("resume 970"), "taken off hold with its transfer still under way")
+        bridge.onEvent(event(SipralEventKind.TRANSFER_DONE, call = 970, transferStatus = 481))
+        assertEquals(1, log.count("resume 970"), log.snapshot().toString())
+        assertEquals("active", held.state)
+        ran++
+    }
+
+    // A transfer refused while the consultation is up leaves both calls as
+    // they were, to try again or to end the consultation.
+    Rig().run {
+        val (id, held) = upCall(980)
+        val (consultation, _, call) = consulting(id)
+        bridge.transfer(consultation)
+        bridge.onEvent(event(SipralEventKind.TRANSFER_DONE, call = 980, transferStatus = 403))
+        assertEquals(0, log.count("resume 980"), "taken off hold with its consultation still up")
+        assertEquals("held", held.state)
+        bridge.transfer(consultation)
+        assertEquals(2, log.count("transfer 980 $call"))
+        bridge.onEvent(event(SipralEventKind.TRANSFER_DONE, call = 980, transferStatus = 403))
+        bridge.disconnect(consultation)
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = call))
+        assertEquals(1, log.count("resume 980"), log.snapshot().toString())
+        ran++
+    }
+
+    // The first call ends while held: its consultation goes on as a call of
+    // its own, and ending it takes nothing off hold.
+    Rig().run {
+        val (id, _) = upCall(990)
+        val (consultation, _, call) = consulting(id)
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = 990))
+        assertEquals(null, bridge.calls.value.single().consulting)
+        assertFailsWith<IllegalStateException> { bridge.transfer(consultation) }
+        bridge.disconnect(consultation)
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = call))
+        assertEquals(0, log.count("resume"), log.snapshot().toString())
+        ran++
+    }
+
+    return "$ran attended-transfer sequences against the fakes (consult and cancel, transferred, " +
+        "the consultation ending mid-transfer, refused and retried, the first call ending first)"
 }
 
 // The real thing, with only the telecom framework faked

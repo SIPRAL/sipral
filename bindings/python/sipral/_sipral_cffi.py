@@ -9735,8 +9735,9 @@ sipral_status_t sipral_call_transfer(sipral_handle_t stack, sipral_handle_t call
  * Call the transfer target, and write the new call's handle to `out_consultation`.
  *
  * The consultation leg of an attended transfer; sipral_call_transfer_to follows.
- * Holding `call` first is the application's choice. `media_address` is
- * `SIPRAL_STATUS_NOT_SUPPORTED` here: place the consultation with `sdp` and run its audio.
+ * Holding `call` first is the application's choice. It goes out from `call`'s account, and
+ * is placed as sipral_call_place places one: with `media_address` the stack runs its
+ * media, otherwise `sdp` is the offer and the audio is the application's.
  *
  * Safety
  *

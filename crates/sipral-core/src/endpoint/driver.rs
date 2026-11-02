@@ -28,8 +28,8 @@ use crate::auth::{Answered, Credentials};
 use crate::diag::{Decision, Direction, Reason, Records};
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
 use crate::msg::{
-    BuildError, HeaderName, Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder,
-    StatusCode,
+    BuildError, HeaderName, Method, OwnedMessage, ParseScratch, RawMessage, RequestBuilder,
+    ResponseBuilder, StatusCode,
 };
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
@@ -1113,6 +1113,20 @@ impl Endpoint {
             state.resume_from(seq);
         }
         Some(dialog)
+    }
+
+    /// Route a dialog [`Endpoint::open_dialog`] opened around a NOTIFY with no `Record-Route` as
+    /// the SUBSCRIBE's 2xx was routed
+    /// ([`Dialog::route_as_answered`](crate::dialog::Dialog::route_as_answered)). `true` when the
+    /// route set changed; the dialog keeps its flow, the one the NOTIFY came in on.
+    pub fn route_dialog_as_answered(
+        &mut self,
+        dialog: DialogId,
+        response: &RawMessage<'_>,
+    ) -> bool {
+        self.dialogs
+            .get_mut(dialog)
+            .is_some_and(|state| state.route_as_answered(response).unwrap_or(false))
     }
 
     /// Open the dialog this end's 2xx to an out-of-dialog REFER creates (RFC 3261 §12.1.1, RFC 3515
