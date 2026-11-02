@@ -140,6 +140,9 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   if (options.unsolicitedMwi().has_value()) {
     put(given, @"unsolicitedMwi", @(options.unsolicitedMwi().value()));
   }
+  if (options.subscriptionRetryMaxSeconds().has_value()) {
+    put(given, @"subscriptionRetryMaxSeconds", @(options.subscriptionRetryMaxSeconds().value()));
+  }
   [_bridge addAccount:given resolve:resolve reject:reject];
 }
 

@@ -196,7 +196,7 @@ _Static_assert(offsetof(sipral_header_t, name_len) == SIPRAL_LAYOUT(8, 4, 4), "s
 _Static_assert(offsetof(sipral_header_t, value) == SIPRAL_LAYOUT(16, 8, 8), "sipral_header_t::value");
 _Static_assert(offsetof(sipral_header_t, value_len) == SIPRAL_LAYOUT(24, 12, 12), "sipral_header_t::value_len");
 
-_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(528, 296, 304), "sipral_account_config_t");
+_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(536, 304, 312), "sipral_account_config_t");
 _Static_assert(offsetof(sipral_account_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_account_config_t::size");
 _Static_assert(offsetof(sipral_account_config_t, aor) == SIPRAL_LAYOUT(8, 4, 4), "sipral_account_config_t::aor");
 _Static_assert(offsetof(sipral_account_config_t, aor_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_account_config_t::aor_len");
@@ -267,6 +267,8 @@ _Static_assert(offsetof(sipral_account_config_t, unsolicited_mwi) == SIPRAL_LAYO
 _Static_assert(offsetof(sipral_account_config_t, reserved_1_10) == SIPRAL_LAYOUT(508, 284, 292), "sipral_account_config_t::reserved_1_10");
 _Static_assert(offsetof(sipral_account_config_t, tls_client_tag) == SIPRAL_LAYOUT(512, 288, 296), "sipral_account_config_t::tls_client_tag");
 _Static_assert(offsetof(sipral_account_config_t, tls_client_tag_len) == SIPRAL_LAYOUT(520, 292, 300), "sipral_account_config_t::tls_client_tag_len");
+_Static_assert(offsetof(sipral_account_config_t, subscription_retry_max_seconds) == SIPRAL_LAYOUT(528, 296, 304), "sipral_account_config_t::subscription_retry_max_seconds");
+_Static_assert(offsetof(sipral_account_config_t, reserved_1_13) == SIPRAL_LAYOUT(532, 300, 308), "sipral_account_config_t::reserved_1_13");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
 _Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(168, 100, 100), "sipral_call_config_t");

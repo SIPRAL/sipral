@@ -4666,6 +4666,20 @@ public struct SipralAccountConfig
     /// How many bytes of it.
     /// </summary>
     public nuint TlsClientTagLen;
+    /// <summary>
+    /// The longest, in seconds, a subscription of this account waits
+    /// before trying again after failing: the wait starts under 30
+    /// seconds and doubles with each failure in a row up to this, for
+    /// a busy-lamp panel that wants its lamps back within minutes. Zero
+    /// for RFC 5626 §4.5's 1800; under 30 is taken as 30. A
+    /// `Retry-After` the notifier sends is still honoured above it.
+    /// ABI 1.13.
+    /// </summary>
+    public uint SubscriptionRetryMaxSeconds;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved113;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -9693,7 +9707,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 12;
+    public const uint AbiVersionMinor = 13;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -10089,7 +10103,7 @@ public static partial class Sipral
         ("sipral_poll_result_t", Marshal.SizeOf<SipralPollResult>(), 48, 28, 32),
         ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 136, 128, 136),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
-        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 528, 296, 304),
+        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 536, 304, 312),
         ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 168, 100, 100),
         ("sipral_codec_info_t", Marshal.SizeOf<SipralCodecInfo>(), 32, 28, 28),
         ("sipral_codec_candidate_t", Marshal.SizeOf<SipralCodecCandidate>(), 24, 20, 20),

@@ -116,6 +116,9 @@ object SipralJava {
      * [unsolicitedMwi] takes message-waiting notifications nobody subscribed
      * to from the registrar's address, departing from RFC 6665 §4.1.3 on
      * purpose, and is off by default ([SipralClient.addAccount]).
+     * [subscriptionRetryMaxSeconds] caps how long a failed subscription of
+     * the account waits before trying again, from 30 seconds; zero keeps RFC
+     * 5626's 1800.
      */
     @JvmStatic
     @JvmOverloads
@@ -135,6 +138,7 @@ object SipralJava {
         instanceId: String? = null,
         headers: List<SipralHeader> = emptyList(),
         unsolicitedMwi: Boolean = false,
+        subscriptionRetryMaxSeconds: Long = 0,
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
@@ -150,6 +154,7 @@ object SipralJava {
         instanceId = instanceId,
         headers = headers,
         unsolicitedMwi = unsolicitedMwi,
+        subscriptionRetryMaxSeconds = subscriptionRetryMaxSeconds,
     )
 
     /** The challenge a `CHALLENGE_DECLINED` [event] reports, or null for

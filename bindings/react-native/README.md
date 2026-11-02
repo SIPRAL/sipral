@@ -207,6 +207,9 @@ mailbox state a PBX that ties it to the extension sends unasked (VitalPBX),
 from the account's `registrarAddress`: answered 200 and raised as
 `messagesWaiting` with `subscription` null. It departs from RFC 6665 §4.1.3
 on purpose and is off by default, when such a NOTIFY is answered 481.
+`subscriptionRetryMaxSeconds: 120` on the account caps how long a failed
+subscription waits before trying again (from 30 seconds; zero keeps RFC
+5626's 1800), for busy lamps back within minutes.
 
 ### A message hook
 

@@ -116,6 +116,9 @@ data class SipralAccountOptions(
     /** Take a `message-summary` NOTIFY no subscription asked for, from the
      * account's server. */
     val unsolicitedMwi: Boolean = false,
+    /** The longest, in seconds, a failed subscription of the account waits
+     * before trying again; zero for RFC 5626's 1800. */
+    val subscriptionRetryMaxSeconds: Long = 0,
 ) {
     /** The header fields, split at each line and at the first colon of each. */
     internal val headerFields: List<SipralHeader>
@@ -298,6 +301,7 @@ class SipralReactCore(
             headers = options.headerFields,
             security = SipralAccountSecurity(webrtc = options.webrtc),
             unsolicitedMwi = options.unsolicitedMwi,
+            subscriptionRetryMaxSeconds = options.subscriptionRetryMaxSeconds,
         )
         val id = account.handle.toString()
         accounts[id] = account

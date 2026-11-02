@@ -419,10 +419,21 @@ let account = try stack.addAccount(..., push: push)
 if !lifecycle.restore(account, key: "main") { // .restored, or nothing usable
     try account.register()
 }
+let lamp = try account.subscribe(to: "sip:2001@pbx.example.com", package: "dialog")
+lifecycle.endInBackground(lamp)               // a watch ended before the suspension
 // scene to background / back
-lifecycle.enteredBackground()                 // freeze into the Keychain, then suspending
-lifecycle.enteredForeground()                 // resumed
+lifecycle.enteredBackground()                 // freeze into the Keychain, end the watches, then suspending
+lifecycle.enteredForeground()                 // resumed; subscribe again to what is watched
 ```
+
+A subscription handed to `endInBackground(_:)` — a busy lamp, a colleague's
+presence — is ended (`Expires: 0`) on the way into the background, after the
+records are written and before the stack is told it is suspending, and the
+poll thread is given a round to send it. Left open, the notifier keeps it for
+all it granted and keeps notifying a phone that is not running, and every
+NOTIFY to it fails; when the application comes back it subscribes again. An
+attempt the notifier accepted and never notified yet is closed there too,
+from its 200 (`04-ua.md`, "Subscriptions").
 
 On the way into the background each kept account is written down
 **before** the stack is told it is suspending, as `SipralAppLifecycle` does

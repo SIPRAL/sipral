@@ -676,6 +676,8 @@ mod tests {
             reserved_1_10: 0,
             tls_client_tag: ptr::null(),
             tls_client_tag_len: 0,
+            subscription_retry_max_seconds: 0,
+            reserved_1_13: 0,
         }
     }
 

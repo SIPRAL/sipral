@@ -11795,6 +11795,48 @@ fn a_notifier_that_accepts_and_never_notifies_is_tried_less_and_less_often() {
 }
 
 #[test]
+fn an_account_that_wants_its_lamps_back_sooner_caps_the_back_off() {
+    // a busy-lamp panel: five minutes at most, not RFC 5626's thirty
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().subscription_retry_max(Duration::from_secs(300)));
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let mut subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    let mut now = t0;
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        deliver(&mut agent, &accepted_by(&subscribe, "notifier", ""), now);
+        events(&mut agent);
+        now += Duration::from_secs(33);
+        agent.handle_timeout(now);
+        transmits(&mut agent);
+        let wait = events(&mut agent)
+            .into_iter()
+            .find_map(|event| match event {
+                UaEvent::SubscriptionEnded {
+                    retry_in: Some(wait),
+                    ..
+                } => Some(wait),
+                _ => None,
+            })
+            .expect("Timer N ends the attempt");
+        waits.push(wait.as_secs());
+        now += wait;
+        agent.handle_timeout(now);
+        let (again, _) = subscribes_and_farewells(&transmits(&mut agent));
+        subscribe = again.into_iter().next().expect("tried again");
+    }
+    for (wait, bound) in waits.iter().zip([60, 120, 240, 300, 300, 300]) {
+        assert!(
+            (bound / 2..=bound).contains(wait),
+            "{waits:?}: each wait within half of its bound, five minutes at most"
+        );
+    }
+}
+
+#[test]
 fn giving_up_an_attempt_no_notify_opened_still_closes_it_at_the_notifier() {
     // a phone ending its watches before it sleeps: no NOTIFY came, so there is
     // no dialog here, but there is one at the notifier

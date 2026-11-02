@@ -887,7 +887,16 @@ public sealed partial class SipralStack : IDisposable
     /// mailbox to the extension, refuses a subscription to it and notifies
     /// unasked, and departs from RFC 6665 §4.1.3 on purpose; off by default,
     /// when such a NOTIFY is answered 481 and nothing is raised
-    /// (<c>sipral_account_config_t::unsolicited_mwi</c>).</summary>
+    /// (<c>sipral_account_config_t::unsolicited_mwi</c>).
+    ///
+    /// <paramref name="subscriptionRetryMaxSeconds"/> is the longest a
+    /// subscription of this account waits before trying again after
+    /// failing: the wait starts under 30 seconds and doubles with each
+    /// failure in a row up to this, for a busy-lamp panel that wants its
+    /// lamps back within minutes. Zero keeps RFC 5626 §4.5's 1800; under 30
+    /// is taken as 30, and a <c>Retry-After</c> from the notifier is still
+    /// honoured above it
+    /// (<c>sipral_account_config_t::subscription_retry_max_seconds</c>).</summary>
     public Account AddAccount(
         string aor,
         string? registrarAddress = null,
@@ -913,7 +922,8 @@ public sealed partial class SipralStack : IDisposable
         SipralClientCertificate? tlsClientCertificate = null,
         string? instanceId = null,
         IEnumerable<(string Name, string Value)>? headers = null,
-        bool unsolicitedMwi = false)
+        bool unsolicitedMwi = false,
+        uint subscriptionRetryMaxSeconds = 0)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
@@ -932,6 +942,7 @@ public sealed partial class SipralStack : IDisposable
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
             sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security, unsolicitedMwi,
+            subscriptionRetryMaxSeconds,
             new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
                 websocketHost, websocketResource, tlsClientCertificate, instanceId, headers?.ToArray()));
         lock (_accounts)

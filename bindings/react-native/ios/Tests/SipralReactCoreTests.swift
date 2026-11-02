@@ -380,6 +380,12 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertTrue(options.manualAudio)
         XCTAssertEqual(options.signalling, "tls")
         XCTAssertEqual(SipralAccountOptions(["aor": "sip:a@b", "registrarAddress": "c:1", "expiresSeconds": NSNumber(value: 300)]).expiresSeconds, 300)
+        XCTAssertEqual(
+            SipralAccountOptions(["aor": "sip:a@b", "registrarAddress": "c:1", "subscriptionRetryMaxSeconds": NSNumber(value: 120)])
+                .subscriptionRetryMaxSeconds,
+            120
+        )
+        XCTAssertEqual(SipralAccountOptions(["aor": "sip:a@b", "registrarAddress": "c:1"]).subscriptionRetryMaxSeconds, 0)
     }
 
     /// No address advertises the route to the server; a URI-named account is

@@ -136,7 +136,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)12)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)13)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5153,6 +5153,20 @@ struct sipral_account_config {
      * How many bytes of it.
      */
     size_t tls_client_tag_len;
+    /**
+     * The longest, in seconds, a subscription of this account waits
+     * before trying again after failing: the wait starts under 30
+     * seconds and doubles with each failure in a row up to this, for
+     * a busy-lamp panel that wants its lamps back within minutes. Zero
+     * for RFC 5626 §4.5's 1800; under 30 is taken as 30. A
+     * `Retry-After` the notifier sends is still honoured above it.
+     * ABI 1.13.
+     */
+    uint32_t subscription_retry_max_seconds;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_1_13;
 };
 
 /**

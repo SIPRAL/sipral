@@ -33,6 +33,18 @@ also its own authentication user name. An optional ``<PREFIX>_CODEC``,
 install allows ``ulaw`` alone) is reached by naming it. Nothing dialled is
 anything but the two extension numbers, 101 and 102.
 
+Three more keys are optional, for a multi-tenant PBX whose tenants are told
+apart by a SIP domain of their own: ``<PREFIX>_REGISTRAR``, the name or
+address the requests go to when the host, kept as the SIP domain, is not
+one that resolves; ``<PREFIX>_<N>_NUMBER``, what is dialled to reach
+extension N when that is not N itself (the labels 101 and 102 stay the
+keys); and ``<PREFIX>_SRTP``, ``offered`` or ``required``, for a tenant
+that takes encrypted media only (SDES, RFC 4568).
+
+The extensions register one after another, a second apart, and unregister
+the same way: a PBX that counts requests per source address bans the whole
+address, every phone behind it included, for a burst of digest exchanges.
+
 Everything this process writes passes through a filter that replaces the
 two secrets, the host name and its addresses with placeholders, whatever
 printed them: the lines below or a traceback. The stack's own log is not
@@ -79,6 +91,13 @@ PATIENCE_S = 8.0
 
 # No call is let run past this.
 LONGEST_CALL_S = 15.0
+
+# Between one extension's REGISTER exchange and the next: Kamailio's pike
+# bans a source past 16 requests in two seconds by default.
+PACE_S = 1.0
+
+# ``<PREFIX>_SRTP``'s words, as the stack's SIPRAL_SRTP_* numbers.
+SRTP = {"offered": 2, "required": 3}
 
 
 class Observed:
@@ -195,6 +214,42 @@ def account_details(values: dict[str, str]) -> tuple[str, dict[str, tuple[str, s
     if codec not in CODECS:
         return f"the codec is {codec}, not one of {', '.join(CODECS)}"
     return host, extensions, codec
+
+
+def reach(host: str, registrar: str | None, extensions) -> tuple[str, int] | str:
+    """The PBX's address, with everything written from now on redacted:
+    the secrets, the host, the registrar and their addresses."""
+    replacements = [(host, "<pbx>")]
+    if registrar:
+        replacements.append((registrar, "<pbx-registrar>"))
+    replacements += [(secret, "<secret>") for _, secret in extensions.values()]
+    try:
+        found = socket.getaddrinfo(registrar or host, 5060, socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        sys.stdout = Redacting(sys.__stdout__, replacements)
+        sys.stderr = Redacting(sys.__stderr__, replacements)
+        return "the PBX's name did not resolve"
+    addresses = sorted({entry[4][0] for entry in found})
+    replacements += [(address, "<pbx-address>") for address in addresses]
+    sys.stdout = Redacting(sys.__stdout__, replacements)
+    sys.stderr = Redacting(sys.__stderr__, replacements)
+    return addresses[0], 5060
+
+
+def site_details(values: dict[str, str]) -> tuple[str | None, dict[str, str], int] | str:
+    """The optional keys: where requests go when not to the host, what is
+    dialled for each extension label that names it, and the SRTP floor."""
+    prefix = next(key for key in values if key.endswith("_HOST"))[: -len("_HOST")]
+    registrar = values.get(f"{prefix}_REGISTRAR", "") or None
+    numbers = {
+        key[len(prefix) + 1 : -len("_NUMBER")]: value
+        for key, value in values.items()
+        if key.startswith(prefix + "_") and key.endswith("_NUMBER") and value
+    }
+    srtp = values.get(f"{prefix}_SRTP", "")
+    if srtp and srtp not in SRTP:
+        return f"the SRTP setting is {srtp}, not one of {', '.join(SRTP)}"
+    return registrar, numbers, SRTP.get(srtp, 0)
 
 
 def route_to(address: tuple[str, int]) -> str:
@@ -331,9 +386,19 @@ async def carry(leg: Leg) -> None:
 class Run:
     """The two stacks, their events in one queue, and the results."""
 
-    def __init__(self, host: str, address: tuple[str, int], extensions, codec: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        address: tuple[str, int],
+        extensions,
+        codec: str,
+        numbers: dict[str, str] | None = None,
+        srtp: int = 0,
+    ) -> None:
         self.host = host
         self.codec = codec
+        self.numbers = numbers or {}
+        self.srtp = srtp
         self.address = address
         self.extensions = extensions
         self.stacks: dict[str, object] = {}
@@ -369,6 +434,7 @@ class Run:
                 bind_host=bind_host,
                 audio=AudioMode.APPLICATION,
                 codecs=self.codec,
+                srtp=self.srtp,
             )
             self.stacks[extension] = stack
             self.accounts[extension] = stack.add_account(
@@ -482,6 +548,22 @@ class Run:
         elif kind == EventKind.CALL_ENDED:
             leg.ended = (CallEndReason(fields["end_reason"]).name, fields["status_code"])
 
+    def uri(self, extension: str) -> str:
+        """What is dialled to reach ``extension``."""
+        return f"sip:{self.numbers.get(extension, extension)}@{self.host}"
+
+    async def register_each(self) -> None:
+        """Each account's REGISTER, waited for, then a pause before the next."""
+        for extension, account in self.accounts.items():
+            account.register()
+            await self.until(
+                lambda extension=extension: self.refused or self.registration.get(extension) == "registered",
+                PATIENCE_S,
+            )
+            if self.refused:
+                return
+            await self.until(lambda: False, PACE_S)
+
     def is_other_stack(self, leg: Leg, far: str) -> bool:
         for (extension, _), other in self.legs.items():
             if extension == leg.other and other.call.media_address == far:
@@ -489,8 +571,7 @@ class Run:
         return False
 
     async def register(self) -> bool:
-        for account in self.accounts.values():
-            account.register()
+        await self.register_each()
         await self.until(
             lambda: self.refused or len([s for s in self.registration.values() if s == "registered"]) == 2,
             PATIENCE_S,
@@ -506,7 +587,7 @@ class Run:
     def place(self, caller: str, callee: str) -> Leg:
         stack = self.stacks[caller]
         # only ever the other extension of the two
-        call = stack.place_call(self.accounts[caller], f"sip:{callee}@{self.host}", codecs=self.codec)
+        call = stack.place_call(self.accounts[caller], self.uri(callee), codecs=self.codec)
         leg = Leg(caller, call, callee)
         leg.placed = True
         self.legs[(caller, call.handle)] = leg
@@ -655,6 +736,7 @@ class Run:
                 asked.append(extension)
             except SipralError:
                 pass
+            await self.until(lambda: False, PACE_S)
         await self.until(
             lambda: all(self.registration.get(e, "").startswith("unregistered") for e in asked),
             5.0,
@@ -687,22 +769,18 @@ async def main() -> int:
         say(f"not run: {details}")
         return NOT_RUN
     host, extensions, codec = details
-
-    replacements = [(host, "<pbx>")]
-    replacements += [(secret, "<secret>") for _, secret in extensions.values()]
-    try:
-        found = socket.getaddrinfo(host, 5060, socket.AF_INET, socket.SOCK_DGRAM)
-    except OSError:
-        sys.stdout = Redacting(sys.__stdout__, replacements)
-        sys.stderr = Redacting(sys.__stderr__, replacements)
-        say("not run: the PBX's name did not resolve")
+    site = site_details(values)
+    if isinstance(site, str):
+        say(f"not run: {site}")
         return NOT_RUN
-    addresses = sorted({entry[4][0] for entry in found})
-    replacements += [(address, "<pbx-address>") for address in addresses]
-    sys.stdout = Redacting(sys.__stdout__, replacements)
-    sys.stderr = Redacting(sys.__stderr__, replacements)
+    registrar, numbers, srtp = site
 
-    run = Run(host, (addresses[0], 5060), extensions, codec)
+    address = reach(host, registrar, extensions)
+    if isinstance(address, str):
+        say(f"not run: {address}")
+        return NOT_RUN
+
+    run = Run(host, address, extensions, codec, numbers, srtp)
     try:
         run.start()
         if await run.register():

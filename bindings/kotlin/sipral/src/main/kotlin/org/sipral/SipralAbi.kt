@@ -6040,6 +6040,20 @@ class SipralAccountConfig(
      * WSS. ABI 1.12.
      */
     val tlsClientTag: String? = null,
+    /**
+     * The longest, in seconds, a subscription of this account waits
+     * before trying again after failing: the wait starts under 30
+     * seconds and doubles with each failure in a row up to this, for
+     * a busy-lamp panel that wants its lamps back within minutes. Zero
+     * for RFC 5626 §4.5's 1800; under 30 is taken as 30. A
+     * `Retry-After` the notifier sends is still honoured above it.
+     * ABI 1.13.
+     */
+    val subscriptionRetryMaxSeconds: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved113: Long = 0,
 )
 
 /**
@@ -9147,7 +9161,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 12)
+        agree(1, 13)
     }
 
     /**
@@ -9194,7 +9208,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, configStreamProtocol: Long, configReserved35: Long, configRealms: ByteArray?, configWebsocketHost: ByteArray?, configWebsocketResource: ByteArray?, configWebrtc: Long, configReserved14: Long, configUnsolicitedMwi: Long, configReserved110: Long, configTlsClientTag: ByteArray?, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, configStreamProtocol: Long, configReserved35: Long, configRealms: ByteArray?, configWebsocketHost: ByteArray?, configWebsocketResource: ByteArray?, configWebrtc: Long, configReserved14: Long, configUnsolicitedMwi: Long, configReserved110: Long, configTlsClientTag: ByteArray?, configSubscriptionRetryMaxSeconds: Long, configReserved113: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -9395,7 +9409,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 12
+    const val ABI_VERSION_MINOR: Long = 13
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9793,7 +9807,7 @@ object Sipral {
         "sipral_poll_result_t" to intArrayOf(48, 28, 32),
         "sipral_stack_settings_t" to intArrayOf(136, 128, 136),
         "sipral_header_t" to intArrayOf(32, 16, 16),
-        "sipral_account_config_t" to intArrayOf(528, 296, 304),
+        "sipral_account_config_t" to intArrayOf(536, 304, 312),
         "sipral_call_config_t" to intArrayOf(168, 100, 100),
         "sipral_codec_info_t" to intArrayOf(32, 28, 28),
         "sipral_codec_candidate_t" to intArrayOf(24, 20, 20),
@@ -10533,7 +10547,7 @@ object Sipral {
         val configWebsocketResource = config.websocketResource?.toByteArray(Charsets.UTF_8)
         val configTlsClientTag = config.tlsClientTag?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, config.streamProtocol, config.reserved35, configRealms, configWebsocketHost, configWebsocketResource, config.webrtc, config.reserved14, config.unsolicitedMwi, config.reserved110, configTlsClientTag, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, config.streamProtocol, config.reserved35, configRealms, configWebsocketHost, configWebsocketResource, config.webrtc, config.reserved14, config.unsolicitedMwi, config.reserved110, configTlsClientTag, config.subscriptionRetryMaxSeconds, config.reserved113, accountSlot))
         return accountSlot[0]
     }
 

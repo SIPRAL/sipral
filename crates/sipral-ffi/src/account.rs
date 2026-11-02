@@ -327,6 +327,16 @@ record! {
         pub tls_client_tag: *const c_char,
         /// How many bytes of it.
         pub tls_client_tag_len: usize,
+        /// The longest, in seconds, a subscription of this account waits
+        /// before trying again after failing: the wait starts under 30
+        /// seconds and doubles with each failure in a row up to this, for
+        /// a busy-lamp panel that wants its lamps back within minutes. Zero
+        /// for RFC 5626 §4.5's 1800; under 30 is taken as 30. A
+        /// `Retry-After` the notifier sends is still honoured above it.
+        /// ABI 1.13.
+        pub subscription_retry_max_seconds: u32,
+        /// Zero.
+        pub reserved_1_13: u32,
     }
 }
 
@@ -728,6 +738,23 @@ unsafe fn password_of(config: &SipralAccountConfig) -> Result<Option<&str>, Fail
     }
 }
 
+/// The account's notifications: unsolicited message summaries, and how long a
+/// lapsed subscription may wait at most before it asks again.
+fn with_subscription_options(
+    mut account: Account,
+    config: &SipralAccountConfig,
+) -> Result<Account, Fail> {
+    if crate::media::toggled(config.unsolicited_mwi, "unsolicited_mwi", false)? {
+        account = account.accepts_unsolicited_message_summary();
+    }
+    if config.subscription_retry_max_seconds != 0 {
+        account = account.subscription_retry_max(Duration::from_secs(u64::from(
+            config.subscription_retry_max_seconds,
+        )));
+    }
+    Ok(account)
+}
+
 /// Turn what crossed the boundary into an account, or say what was wrong.
 ///
 /// # Safety
@@ -822,9 +849,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     }
     account = unsafe { with_call_options(account, config) }?;
     account = unsafe { crate::security::with_stir(state, account, config) }?;
-    if crate::media::toggled(config.unsolicited_mwi, "unsolicited_mwi", false)? {
-        account = account.accepts_unsolicited_message_summary();
-    }
+    account = with_subscription_options(account, config)?;
     if config.expires_seconds != 0 {
         account = account.expires(expiry(config.expires_seconds)?);
     }
@@ -1044,13 +1069,14 @@ pub(crate) mod tests {
     use crate::event::{SipralEventKind, SipralRegistrationState};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags};
     use crate::media::SIPRAL_ADDRESS_BYTES;
-    use crate::stack::sipral_stack_destroy;
     use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
+    use crate::stack::{handle_failed, sipral_stack_destroy, with_stack};
     use crate::status::SipralStatus;
     use crate::transport::tests::drain;
     use crate::transport::{SIPRAL_MESSAGE_BYTES, SipralTransmit, sipral_stack_poll_transmit};
     use std::ffi::{CStr, c_char};
     use std::ptr;
+    use std::time::Duration;
 
     const AOR: &str = "sip:alice@example.com";
     const REGISTRAR: &str = "sip:example.com";
@@ -1137,6 +1163,8 @@ pub(crate) mod tests {
             reserved_1_10: 0,
             tls_client_tag: ptr::null(),
             tls_client_tag_len: 0,
+            subscription_retry_max_seconds: 0,
+            reserved_1_13: 0,
         }
     }
 
@@ -1194,6 +1222,36 @@ pub(crate) mod tests {
         let status = unsafe { sipral_account_registration_state(stack, account, &raw mut state) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         state
+    }
+
+    #[test]
+    fn a_subscription_retry_max_reaches_the_account() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let limit = |config: &SipralAccountConfig| {
+            let (status, account) = add(handle, config);
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            with_stack(handle, |state| {
+                let id = state.accounts.get(account).map_err(handle_failed)?;
+                Ok(state
+                    .agent
+                    .account(id)
+                    .and_then(sipral::Account::subscription_retry_limit))
+            })
+            .expect("a live account")
+        };
+        assert_eq!(limit(&account_config()), None, "zero keeps RFC 5626's");
+        let five_minutes = SipralAccountConfig {
+            subscription_retry_max_seconds: 300,
+            ..account_config()
+        };
+        assert_eq!(limit(&five_minutes), Some(Duration::from_secs(300)));
+        let too_short = SipralAccountConfig {
+            subscription_retry_max_seconds: 5,
+            ..account_config()
+        };
+        assert_eq!(limit(&too_short), Some(Duration::from_secs(30)));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     #[test]

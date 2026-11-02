@@ -50,7 +50,8 @@ use crate::mwi::MessageSummary;
 use crate::parked::{Parked, call_needs_a_stream};
 use crate::presence::Presence;
 use crate::registration::{
-    RegistrarInfo, anonymous, backoff_delay, dialog_contact, refresh_after, retry_after,
+    BACKOFF_LIMIT, RegistrarInfo, anonymous, backoff_delay_within, dialog_contact, refresh_after,
+    retry_after,
 };
 
 /// How long a subscription asks for when nothing says otherwise.
@@ -1951,6 +1952,7 @@ impl UserAgent {
         let entropy = self.endpoint.token();
         let call_id = CallId::new(&self.endpoint.token());
         let local_tag = self.endpoint.token();
+        let max = self.retry_limit(subscription);
         let Some(held) = self.subscriptions.get_mut(&subscription) else {
             return;
         };
@@ -1965,7 +1967,7 @@ impl UserAgent {
         let wait = if immediate {
             Duration::ZERO
         } else {
-            backoff_delay(held.failures, &entropy)
+            backoff_delay_within(held.failures, max, &entropy)
         }
         .max(asked_for.unwrap_or(Duration::ZERO));
 
@@ -2008,12 +2010,25 @@ impl UserAgent {
         now: Instant,
     ) {
         let entropy = self.endpoint.token();
+        let max = self.retry_limit(subscription);
         let Some(held) = self.subscriptions.get_mut(&subscription) else {
             return;
         };
         held.failures = held.failures.saturating_add(1);
-        let wait = backoff_delay(held.failures, &entropy).max(asked_for.unwrap_or(Duration::ZERO));
+        let wait = backoff_delay_within(held.failures, max, &entropy)
+            .max(asked_for.unwrap_or(Duration::ZERO));
         held.due = Some((now + wait, Waiting::Refresh));
+    }
+
+    /// The longest `subscription`'s back-off waits: its account's
+    /// [`Account::subscription_retry_max`](crate::account::Account::subscription_retry_max),
+    /// or RFC 5626 §4.5's default.
+    fn retry_limit(&self, subscription: SubscriptionHandle) -> Duration {
+        self.subscriptions
+            .get(&subscription)
+            .and_then(|held| self.accounts.get(&held.account))
+            .and_then(|account| account.subscription_retry_max)
+            .unwrap_or(BACKOFF_LIMIT)
     }
 
     /// Something trying again cannot fix. The record goes with the event.

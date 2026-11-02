@@ -794,6 +794,22 @@ private suspend fun anUnaskedMessageSummaryIsTakenOnlyByAnAccountThatAllowsIt():
     return "an unasked message summary taken ($taken) only by an account that allows it, refused 481 otherwise"
 }
 
+private fun aSubscriptionRetryLimitIsTakenWithinThirtyTwoBits(): String =
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+        client.addAccount(
+            aor = "sip:alice@example.invalid", registrarAddress = "127.0.0.1:5060", subscriptionRetryMaxSeconds = 120,
+        )
+        for (wrong in listOf(-1L, 0x1_0000_0000L)) {
+            assertFailsWith<IllegalArgumentException> {
+                client.addAccount(
+                    aor = "sip:bob@example.invalid", registrarAddress = "127.0.0.1:5060",
+                    subscriptionRetryMaxSeconds = wrong,
+                )
+            }
+        }
+        "a subscription retry limit of 120 s taken, past 32 bits refused"
+    }
+
 suspend fun protocolsChecks(): String = listOf(
     realTimeTextIsTypedAndReadBothWays(),
     aFarEndThatTookNoTextLeavesNoneToSend(),
@@ -806,6 +822,7 @@ suspend fun protocolsChecks(): String = listOf(
     presenceIsPublishedAndWhatTheCompositorGrantedIsTold(),
     aWatchedPresentityIsToldWithItsActivityAndNote(),
     anUnaskedMessageSummaryIsTakenOnlyByAnAccountThatAllowsIt(),
+    aSubscriptionRetryLimitIsTakenWithinThirtyTwoBits(),
     aCallIsRecordedToARecordingServerOverItsOwnConnection(),
     anEncryptedCallIsOfferedToItsRecorderAsSrtp(),
     anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(),

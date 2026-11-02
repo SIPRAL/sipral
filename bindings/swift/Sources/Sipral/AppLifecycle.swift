@@ -76,9 +76,12 @@ public final class KeychainSnapshotStore: SipralSnapshotStore, @unchecked Sendab
 /// Into the background with no call up, every kept account's registration
 /// is written down (`Account.freeze()`) into the store, **then** the stack
 /// is told it is suspending: once told, a binding no longer counts as
-/// bound and there would be nothing to write. With a call up, iOS keeps the
+/// bound and there would be nothing to write. Subscriptions handed to
+/// `endInBackground(_:)` are ended first (`Expires: 0`), while the process
+/// can still send, so the notifier does not keep them, and keep notifying a
+/// phone that sleeps, until they lapse. With a call up, iOS keeps the
 /// process running and nothing is done. Back in the foreground, the stack
-/// is told it resumed.
+/// is told it resumed; the application subscribes again to what it watches.
 ///
 /// A launch, a push's included, calls `launched(_:)` as soon as the stack
 /// exists, then adds each account and `restore(_:key:)`s it before deciding
@@ -91,11 +94,12 @@ public final class SipralAppLifecycle: @unchecked Sendable {
     private let clock: @Sendable () -> UInt64
     private let stateQueue = DispatchQueue(label: "org.sipral.lifecycle.state")
     private var kept: [String: Account] = [:]
+    private var watched: [SipralHandle: SipralSubscription] = [:]
     private var _stack: SipralStack?
     private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
 
-    /// A snapshot that could not be written, read or used; the stack
-    /// carries on either way.
+    /// A snapshot that could not be written, read or used, or a
+    /// subscription that could not be ended; the stack carries on either way.
     public var storageFailed: (@Sendable (Error) -> Void)?
 
     /// `clock` is the wall clock in Unix milliseconds: how long a snapshot
@@ -135,6 +139,14 @@ public final class SipralAppLifecycle: @unchecked Sendable {
         try? store.write(nil, for: Self.storeKey(key))
     }
 
+    /// Ends `subscription` on the next move to the background with no call
+    /// up, before the stack is told it is suspending: a busy lamp or a
+    /// presence watch the application subscribes to again in the
+    /// foreground. Ended once; a new subscription is handed over anew.
+    public func endInBackground(_ subscription: SipralSubscription) {
+        stateQueue.sync { watched[subscription.handle] = subscription }
+    }
+
     /// Reads back what was written under `key` onto `account`, added and
     /// not yet registered, and keeps it from now on. `false` when nothing
     /// usable was there; the application then calls `register()`.
@@ -172,6 +184,23 @@ public final class SipralAppLifecycle: @unchecked Sendable {
         let now = clock()
         for (key, account) in accounts {
             write(key: key, account: account, now: now)
+        }
+        let ending = stateQueue.sync { () -> [SipralSubscription] in
+            defer { watched = [:] }
+            return Array(watched.values)
+        }
+        for subscription in ending {
+            do {
+                try subscription.end()
+            } catch let gone as SipralError where gone.status == .invalidHandle {
+                // already ended, by the notifier or the application
+            } catch {
+                storageFailed?(error)
+            }
+        }
+        if !ending.isEmpty {
+            // one round of the poll thread sends them before the suspension
+            usleep(200_000)
         }
         do {
             return try stack.suspending()

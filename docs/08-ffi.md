@@ -4588,3 +4588,41 @@ connection that presented its own. React Native rides on the Swift and
 Kotlin layers. C++'s `AccountOptions` does not take the tag: its connections
 are the networking component's. `bindings/c/smoke.c` hands
 `sipral_stream_opening_t` over at both lengths, with a tag.
+
+## What ABI 1.13 added
+
+### How long a failed subscription waits at most
+
+Two members appended to `sipral_account_config_t`, no entry point, no event
+kind and no status code. The pin stays where 1.0 put it, at
+`recording_in_clear`.
+
+| Struct | Member | Offset: 64-bit, i386, ARM and Windows x86 | Length: 64-bit, i386, ARM and Windows x86 |
+|---|---|---|---|
+| `sipral_account_config_t` | `subscription_retry_max_seconds` | 528, 296, 304 | 536, 304, 312 (528, 296, 304 at 1.12) |
+| | `reserved_1_13` | 532, 300, 308 | |
+
+A binding printed at 1.12 loads against a 1.13 library and works as it did:
+its shorter struct is read as far as it declared it, and its subscriptions
+wait as long as before. One printed at 1.13 is refused by a 1.12 library,
+with both versions named.
+
+- `sipral_account_config_t::subscription_retry_max_seconds`: the longest a
+  subscription of the account waits before trying again after failing. The
+  wait starts under 30 seconds and its bound doubles with each failure in a
+  row, up to RFC 5626 §4.5's 1800 seconds, which zero keeps; anything under
+  30 is taken as 30, and a `Retry-After` the notifier sent still wins over
+  it (`04-ua.md`, "Subscriptions"). For a busy-lamp panel that would rather
+  ask a failing notifier again within minutes than leave a lamp dark for
+  half an hour.
+- `sipral_account_config_t::reserved_1_13`: zero.
+
+**In the layers.** Each takes it on the account in whole seconds, as it takes
+`expires_seconds`, zero when left out: Swift `subscriptionRetryMaxSeconds`
+on `addAccount`, Kotlin and the JVM jar `subscriptionRetryMaxSeconds`, .NET
+`subscriptionRetryMaxSeconds` on `AddAccount`, Python
+`subscription_retry_max_seconds`, Dart `subscriptionRetryMaxSeconds`, Node
+`AccountOptions.subscriptionRetryMaxSeconds`, C++
+`AccountOptions::subscription_retry_max_seconds`, React Native
+`subscriptionRetryMaxSeconds`. Kotlin, Dart and React Native refuse a value
+outside 0 to 4294967295 rather than cut it to 32 bits.

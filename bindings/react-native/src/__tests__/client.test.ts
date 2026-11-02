@@ -513,6 +513,18 @@ describe('a mailbox', () => {
     expect((native.calls[2].args[0] as {unsolicitedMwi?: boolean}).unsolicitedMwi).toBeUndefined();
   });
 
+  it('crosses subscriptionRetryMaxSeconds, and refuses one that is not a whole number of 32 bits before crossing', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({...line, subscriptionRetryMaxSeconds: 120});
+    expect(native.calls[1].args[0]).toMatchObject({subscriptionRetryMaxSeconds: 120});
+    await client.addAccount(line);
+    expect((native.calls[2].args[0] as {subscriptionRetryMaxSeconds?: number}).subscriptionRetryMaxSeconds).toBeUndefined();
+    for (const wrong of [-1, 1.5, 0x100000000]) {
+      expect((await refusal(client.addAccount({...line, subscriptionRetryMaxSeconds: wrong}))).code).toBe('invalidArgument');
+    }
+    expect(native.calls).toHaveLength(3);
+  });
+
   it('is subscribed to as the account\'s own unless another is named, and refused before crossing when it cannot be', async () => {
     const {client, native} = await opened();
     const account = await client.addAccount(line);

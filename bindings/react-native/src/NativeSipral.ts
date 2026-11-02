@@ -77,6 +77,8 @@ export type NativeAccountOptions = {
   headers?: string;
   /** Take a `message-summary` NOTIFY no subscription asked for, from the account's server. */
   unsolicitedMwi?: boolean;
+  /** The longest a failed subscription waits before trying again, 0 to 4 294 967 295 seconds; left out or 0, 1800. */
+  subscriptionRetryMaxSeconds?: CodegenTypes.Double;
 };
 
 export type NativeSubscribeOptions = {

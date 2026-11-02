@@ -206,6 +206,9 @@ pub struct Account {
     /// A `message-summary` NOTIFY from the account's server outside any
     /// subscription is taken rather than refused 481.
     pub(crate) unsolicited_summary: bool,
+    /// The longest a subscription's back-off waits, where set; RFC 5626
+    /// §4.5's 1800 seconds otherwise.
+    pub(crate) subscription_retry_max: Option<Duration>,
 }
 
 impl Account {
@@ -283,6 +286,7 @@ impl Account {
             websocket_host: None,
             websocket_resource: None,
             unsolicited_summary: false,
+            subscription_retry_max: None,
         }
     }
 
@@ -632,6 +636,26 @@ impl Account {
     #[must_use]
     pub const fn takes_unsolicited_message_summary(&self) -> bool {
         self.unsolicited_summary
+    }
+
+    /// The longest a subscription of this account waits before trying again.
+    ///
+    /// A failed subscription waits a random time below a bound that starts at
+    /// 30 seconds and doubles with each failure in a row, up to RFC 5626
+    /// §4.5's 1800 seconds unless this sets another; a busy-lamp panel may
+    /// want a lamp back within minutes. A `Retry-After` the notifier sent is
+    /// still honoured above it. Anything under the 30-second start is taken
+    /// as 30 seconds.
+    #[must_use]
+    pub fn subscription_retry_max(mut self, max: Duration) -> Self {
+        self.subscription_retry_max = Some(max.max(crate::registration::BACKOFF_START));
+        self
+    }
+
+    /// What [`Account::subscription_retry_max`] set, if anything.
+    #[must_use]
+    pub const fn subscription_retry_limit(&self) -> Option<Duration> {
+        self.subscription_retry_max
     }
 
     /// Accept MESSAGE bodies of `media_type`, besides `text/plain` (always

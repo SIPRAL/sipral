@@ -47,6 +47,10 @@ const REFRESH_MARGIN: u64 = 30;
 const BACKOFF_BASE: u64 = 30;
 /// "max-time with a default of 1800 seconds".
 const BACKOFF_MAX: u64 = 1_800;
+/// The first bound, below which no maximum goes.
+pub(crate) const BACKOFF_START: Duration = Duration::from_secs(BACKOFF_BASE);
+/// The maximum where nothing sets another.
+pub(crate) const BACKOFF_LIMIT: Duration = Duration::from_secs(BACKOFF_MAX);
 /// Past this the doubling no longer matters; higher only risks the shift.
 const BACKOFF_CEILING: u32 = 16;
 const MAGIC: &[u8; 4] = b"SPRG";
@@ -634,13 +638,14 @@ fn refresh_within(granted: Duration, lead: u64) -> Duration {
     Duration::from_secs(fraction.min(margin).max(floor))
 }
 
-/// RFC 5626 §4.5's upper bound after `failures` consecutive failures.
+/// RFC 5626 §4.5's upper bound after `failures` consecutive failures, with
+/// `max` as max-time ([`BACKOFF_LIMIT`] by default).
 ///
 /// `W = min(max-time, base-time · 2^consecutive-failures)`.
-pub(crate) fn backoff_bound(failures: u32) -> Duration {
+pub(crate) fn backoff_bound_within(failures: u32, max: Duration) -> Duration {
     let doublings = failures.min(BACKOFF_CEILING);
     let scaled = BACKOFF_BASE.saturating_mul(1_u64 << doublings);
-    Duration::from_secs(scaled.min(BACKOFF_MAX))
+    Duration::from_secs(scaled.min(max.as_secs().max(BACKOFF_BASE)))
 }
 
 /// "a uniform random time between 50 and 100% of the upper-bound wait time",
@@ -649,7 +654,12 @@ pub(crate) fn backoff_bound(failures: u32) -> Duration {
 /// `entropy` is a hex token; its first 32 bits are used. The modulo bias is
 /// negligible at these ranges.
 pub(crate) fn backoff_delay(failures: u32, entropy: &[u8]) -> Duration {
-    let bound = backoff_bound(failures).as_secs();
+    backoff_delay_within(failures, BACKOFF_LIMIT, entropy)
+}
+
+/// The same wait with `max` as max-time.
+pub(crate) fn backoff_delay_within(failures: u32, max: Duration, entropy: &[u8]) -> Duration {
+    let bound = backoff_bound_within(failures, max).as_secs();
     let half = bound / 2;
     let span = bound - half;
     if span == 0 {
@@ -1059,8 +1069,9 @@ impl UserAgent {
 #[cfg(test)]
 mod tests {
     use super::{
-        BACKOFF_MAX, MAGIC, Registration, SNAPSHOT_VERSION, SnapshotError, backoff_bound,
-        backoff_delay, freeze, refresh_after, refresh_within, spread, thaw,
+        BACKOFF_LIMIT, BACKOFF_MAX, MAGIC, Registration, SNAPSHOT_VERSION, SnapshotError,
+        backoff_bound_within, backoff_delay, backoff_delay_within, freeze, refresh_after,
+        refresh_within, spread, thaw,
     };
     use crate::event::RegistrationState;
     use sipral_core::dialog::CallId;
@@ -1191,14 +1202,37 @@ mod tests {
     #[test]
     fn the_backoff_doubles_and_then_stops() {
         // RFC 5626 4.5's worked example: base 30, three failures, 240 seconds
-        assert_eq!(backoff_bound(0), Duration::from_secs(30));
-        assert_eq!(backoff_bound(3), Duration::from_secs(240));
-        assert_eq!(backoff_bound(6), Duration::from_secs(1_800));
+        let bound = |failures| backoff_bound_within(failures, BACKOFF_LIMIT);
+        assert_eq!(bound(0), Duration::from_secs(30));
+        assert_eq!(bound(3), Duration::from_secs(240));
+        assert_eq!(bound(6), Duration::from_secs(1_800));
         assert_eq!(
-            backoff_bound(u32::MAX),
+            bound(u32::MAX),
             Duration::from_secs(BACKOFF_MAX),
             "no shift overflow, however long the outage"
         );
+    }
+
+    #[test]
+    fn a_lower_max_time_stops_the_doubling_sooner() {
+        let five_minutes = Duration::from_secs(300);
+        assert_eq!(
+            backoff_bound_within(3, five_minutes),
+            Duration::from_secs(240)
+        );
+        assert_eq!(backoff_bound_within(4, five_minutes), five_minutes);
+        assert_eq!(backoff_bound_within(u32::MAX, five_minutes), five_minutes);
+        assert_eq!(
+            backoff_bound_within(3, Duration::from_secs(5)),
+            Duration::from_secs(30),
+            "never under base-time"
+        );
+        for nonce in 0_u32..200 {
+            let token = format!("{nonce:016x}").into_bytes();
+            let delay = backoff_delay_within(9, five_minutes, &token);
+            assert!(delay >= Duration::from_secs(150), "{delay:?}");
+            assert!(delay <= five_minutes, "{delay:?}");
+        }
     }
 
     #[test]

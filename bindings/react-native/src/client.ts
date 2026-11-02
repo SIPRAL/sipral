@@ -881,6 +881,10 @@ export class SipralClient {
         ) {
           throw new SipralError('invalidArgument', 'a header field is a name without a colon and a value on one line');
         }
+        const retry = options.subscriptionRetryMaxSeconds;
+        if (retry !== undefined && !(Number.isInteger(retry) && retry >= 0 && retry <= 0xffffffff)) {
+          throw new SipralError('invalidArgument', 'subscriptionRetryMaxSeconds is a whole number from 0 to 4294967295');
+        }
       },
       (native) =>
         native.addAccount({

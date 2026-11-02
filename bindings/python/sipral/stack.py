@@ -852,6 +852,7 @@ class Stack:
         websocket_resource: str | None = None,
         webrtc: bool = False,
         unsolicited_mwi: bool = False,
+        subscription_retry_max_seconds: int = 0,
         instance_id: str | None = None,
         headers=None,
     ) -> Account:
@@ -894,6 +895,12 @@ class Stack:
         departure from RFC 6665 Section 4.1.3 (off, such a NOTIFY is answered
         481 and raises nothing), for a PBX that refuses a subscription to the
         mailbox and notifies unasked.
+        ``subscription_retry_max_seconds`` is the longest a subscription of
+        the account waits before trying again after failing: the wait starts
+        under 30 seconds and doubles with each failure in a row up to this,
+        for a busy-lamp panel that wants its lamps back within minutes.
+        ``0`` keeps RFC 5626 Section 4.5's 1800, under 30 is taken as 30, and
+        a `Retry-After` from the notifier is still honoured above it.
 
         ``session_timer`` (:class:`sipral.enums.SessionTimer`): ``0`` default,
         ``OFF``, or ``INTERVAL`` with ``session_interval_seconds`` (90+,
@@ -992,6 +999,7 @@ class Stack:
             realms=realms,
             webrtc=webrtc,
             unsolicited_mwi=unsolicited_mwi,
+            subscription_retry_max_seconds=subscription_retry_max_seconds,
             instance_id=instance_id,
             headers=headers,
         )

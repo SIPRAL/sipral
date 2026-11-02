@@ -203,5 +203,44 @@ final class LifecycleTests: XCTestCase {
         XCTAssertTrue(ended)
         XCTAssertNotNil(lifecycle.enteredBackground(), "not suspended once the call had ended")
     }
+
+    /// A busy lamp the notifier accepted, and never notified yet, is ended
+    /// there on the way into the background, before the stack is told it
+    /// is suspending; only once.
+    func testAWatchEndedInTheBackgroundIsClosedAtTheNotifier() async throws {
+        let notifier = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { notifier.close() }
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: notifier.localAddress)
+        let watched = try account.subscribe(to: "sip:2001@sipral.invalid", package: "dialog")
+        let subscribed = await FakePeer.request(on: notifier, "SUBSCRIBE", within: 10)
+        let subscribe = try XCTUnwrap(subscribed)
+        notifier.send(
+            FakePeer.answer(
+                subscribe.message, "202 Accepted",
+                more: "Expires: 3600\r\nContact: <sip:peer@\(notifier.localAddress)>\r\n"
+            ),
+            to: subscribe.from
+        )
+        // a 202 changes no state the application reads: given time to land
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let lifecycle = SipralAppLifecycle(store: MemorySnapshotStore())
+        lifecycle.stack = stack
+        lifecycle.endInBackground(watched)
+        let suspended = try XCTUnwrap(lifecycle.enteredBackground(), "not suspended with no call up")
+        XCTAssertEqual(suspended.calls, 0)
+        let ending = await FakePeer.request(on: notifier, "SUBSCRIBE", after: subscribe.message, within: 5)
+        let farewell = try XCTUnwrap(ending, "the watch was left open at the notifier")
+        XCTAssertEqual(FakePeer.header("Expires", in: farewell.message), "0")
+        XCTAssertEqual(FakePeer.header("Call-ID", in: farewell.message), FakePeer.header("Call-ID", in: subscribe.message))
+        XCTAssertTrue(FakePeer.header("To", in: farewell.message)?.hasSuffix(";tag=peer") == true, "not in the 202's dialog")
+
+        try stack.resumed()
+        XCTAssertNotNil(lifecycle.enteredBackground())
+        let again = await FakePeer.request(on: notifier, "SUBSCRIBE", after: farewell.message, within: 1)
+        XCTAssertNil(again, "ended a second time")
+    }
 }
 #endif

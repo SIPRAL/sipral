@@ -148,6 +148,7 @@ class Account:
         realms: Sequence[str] | None = None,
         webrtc: bool = False,
         unsolicited_mwi: bool = False,
+        subscription_retry_max_seconds: int = 0,
         instance_id: str | None = None,
         headers=None,
     ) -> "Account":
@@ -259,6 +260,7 @@ class Account:
         config.recording_in_clear = 1 if recording_in_clear else 0
         config.webrtc = 1 if webrtc else 0
         config.unsolicited_mwi = lib.SIPRAL_TOGGLE_ON if unsolicited_mwi else 0
+        config.subscription_retry_max_seconds = subscription_retry_max_seconds
         realms_bytes = "\n".join(realms or ()).encode("utf-8")
         realms_buf = ffi.new("char[]", realms_bytes) if realms_bytes else None
         if realms_buf is not None:

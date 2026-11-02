@@ -334,6 +334,9 @@ notifies unasked and refuses the subscription: answered 200 and raised as
 `MESSAGES_WAITING` with the event's `account` set and no subscription. It
 departs from RFC 6665 §4.1.3 on purpose and is off by default, when such a
 NOTIFY is answered 481 (`ProtocolsCheck.kt` shows both).
+`addAccount(..., subscriptionRetryMaxSeconds = 120)` (ABI 1.13) caps how long
+a failed subscription of the account waits before trying again (from 30
+seconds; zero keeps RFC 5626's 1800), for busy lamps back within minutes.
 
 `SipralClient.events` and `SipralCall.events` (and `SipralCall.digits`,
 derived from it) are a `kotlinx.coroutines.flow.SharedFlow` with `replay =

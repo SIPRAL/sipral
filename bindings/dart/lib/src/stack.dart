@@ -389,6 +389,13 @@ final class SipralStack {
   /// the mailbox to the extension and notify unasked. Off by default, and
   /// off it is answered 481 and nothing is raised.
   ///
+  /// [subscriptionRetryMaxSeconds] is the longest a subscription of this
+  /// account waits before trying again after failing: the wait starts under
+  /// 30 seconds and doubles with each failure in a row up to this, for a
+  /// busy-lamp panel that wants its lamps back within minutes. Zero keeps
+  /// RFC 5626 §4.5's 1800, under 30 is taken as 30, and a `Retry-After` from
+  /// the notifier is still honoured above it; 0 to 4294967295.
+  ///
   /// [clientCertificate] is what its TLS or WSS connection presents when the
   /// server asks for one; the stack's `clientCertificate` when null.
   /// Accounts given different [SipralClientCertificate] objects never share
@@ -419,6 +426,7 @@ final class SipralStack {
     String? websocketResource,
     bool webrtc = false,
     bool unsolicitedMwi = false,
+    int subscriptionRetryMaxSeconds = 0,
     SipralClientCertificate? clientCertificate,
     String? instanceId,
     List<(String, String)> headers = const [],
@@ -428,6 +436,14 @@ final class SipralStack {
       throw ArgumentError(
         'an account names its server by registrarAddress or by serverUri, '
         'one of the two',
+      );
+    }
+    if (subscriptionRetryMaxSeconds < 0 ||
+        subscriptionRetryMaxSeconds > 0xFFFFFFFF) {
+      throw ArgumentError.value(
+        subscriptionRetryMaxSeconds,
+        'subscriptionRetryMaxSeconds',
+        'is 0 to 4294967295',
       );
     }
     if (streamProtocol != null && !_ownStreams.contains(streamProtocol)) {
@@ -523,6 +539,7 @@ final class SipralStack {
         ..websocketResourceLen = websocketResourceText.$2
         ..webrtc = webrtc ? SipralToggle.on : 0
         ..unsolicitedMwi = unsolicitedMwi ? SipralToggle.on : 0
+        ..subscriptionRetryMaxSeconds = subscriptionRetryMaxSeconds
         ..instanceId = instanceText.$1
         ..instanceIdLen = instanceText.$2
         ..headers = headers.isEmpty ? ffi.nullptr : fields

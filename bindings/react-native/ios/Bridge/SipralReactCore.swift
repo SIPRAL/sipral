@@ -114,6 +114,9 @@ public struct SipralAccountOptions {
     /// Take a `message-summary` NOTIFY no subscription asked for, from the
     /// account's server.
     public var unsolicitedMwi = false
+    /// The longest, in seconds, a failed subscription of the account waits
+    /// before trying again; zero for RFC 5626's 1800.
+    public var subscriptionRetryMaxSeconds: UInt32 = 0
 
     public init(aor: String, registrarAddress: String? = nil, serverUri: String? = nil) {
         self.aor = aor
@@ -142,6 +145,8 @@ public struct SipralAccountOptions {
         instanceId = options["instanceId"] as? String
         headers = options["headers"] as? String
         unsolicitedMwi = (options["unsolicitedMwi"] as? NSNumber)?.boolValue ?? false
+        let retry = (options["subscriptionRetryMaxSeconds"] as? NSNumber)?.doubleValue ?? 0
+        subscriptionRetryMaxSeconds = UInt32(min(Double(UInt32.max), max(0, retry)))
     }
 
     /// The header fields, split at each line and at the first colon of each.
@@ -351,7 +356,8 @@ public final class SipralReactCore: @unchecked Sendable {
                 headers: options.headerFields,
                 realms: options.realms.map { $0.split(separator: "\n").map(String.init) } ?? [],
                 security: AccountSecurity(webrtc: options.webrtc),
-                unsolicitedMwi: options.unsolicitedMwi
+                unsolicitedMwi: options.unsolicitedMwi,
+                subscriptionRetryMaxSeconds: options.subscriptionRetryMaxSeconds
             )
             let id = String(account.handle)
             locked { accounts[id] = account }

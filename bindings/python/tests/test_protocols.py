@@ -14,7 +14,9 @@ import queue
 import socket
 import threading
 import unittest
+from unittest import mock
 
+import sipral.account
 from sipral import (
     ConferencePicture,
     Participant,
@@ -516,6 +518,26 @@ class Protocols(unittest.IsolatedAsyncioTestCase):
             except TimeoutError:
                 continue
             self.assertNotEqual(event.kind, EventKind.MESSAGES_WAITING)
+
+    async def test_a_subscription_retry_limit_reaches_the_account_config(self) -> None:
+        stack = self.stack()
+        pbx = self.peer()
+        given: list[int] = []
+
+        class Recording:
+            def __getattr__(self, name: str):
+                return getattr(lib, name)
+
+            def sipral_account_add(self, handle, config, out):
+                given.append(config.subscription_retry_max_seconds)
+                return lib.sipral_account_add(handle, config, out)
+
+        with mock.patch.object(sipral.account, "lib", Recording()):
+            stack.add_account(
+                "sip:alice@example.invalid", registrar_address=pbx.address, subscription_retry_max_seconds=120
+            )
+            stack.add_account("sip:bob@example.invalid", registrar_address=pbx.address)
+        self.assertEqual(given, [120, 0])
 
     # -- a recording server ------------------------------------------------
 

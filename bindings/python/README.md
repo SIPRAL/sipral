@@ -213,6 +213,9 @@ identity the account believes and toward which alone it asserts its own.
 `unsolicited_mwi=True` (off by default, against RFC 6665 §4.1.3 on purpose)
 accepts the `message-summary` NOTIFY a PBX sends from the account's server
 without a subscription, as `EventKind.MESSAGES_WAITING` with no subscription.
+`subscription_retry_max_seconds=120` caps how long a failed subscription of
+the account waits before trying again (from 30 seconds; `0` keeps RFC 5626's
+1800), for busy lamps back within minutes.
 
 ## STIR/SHAKEN, SRTP per account and the encryption report
 

@@ -1215,6 +1215,28 @@ that extension is a setting of the PBX's, not tried here. SDES, DTLS-SRTP and
 G.729 are not tried: the tenant's extensions offer PCMA alone and no media
 encryption.
 
+`scripts/lab.sh pbx-live` runs the same two scripts against any other live
+PBX, from the file `PBX_LIVE_ENV` names, by hand only for the same reason.
+Three keys of that file are optional and made for a multi-tenant PBX:
+`<PREFIX>_REGISTRAR` when the SIP domain is not a name that resolves,
+`<PREFIX>_<N>_NUMBER` when the number dialled is not the label (a user name
+such as `tenant.1010` reached by dialling `1010`), and `<PREFIX>_SRTP`,
+`offered` or `required`, for a tenant that takes encrypted media only. Both
+scripts register and unregister the extensions one at a time, a second
+apart: a Kamailio in front of a PBX commonly bans a source address past
+sixteen requests in two seconds (its `pike` module's default), and the ban
+falls on every phone behind that address.
+
+On 2 November 2026 it ran against a multi-tenant PBX, Kamailio in front of
+FreeSWITCH, on four extensions of a demonstration tenant with SDES offered.
+Registration, both calls with the tones heard both ways, the RFC 4733 and the
+INFO digits, hold and resume, and both transfers passed. The blind transfer
+first failed in the script, not the stack: FreeSWITCH reports a REFER's
+outcome as 200 as soon as it takes it, before the target rings, and the
+script stopped waiting for the target there; it now waits for the target
+while the outcome is a success. MESSAGE and message waiting depend on that
+tenant's settings, which carried neither.
+
 ### FreePBX 17
 
 On 16 October 2026 the FreePBX step also ran against a FreePBX 17 (Asterisk

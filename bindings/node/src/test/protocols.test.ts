@@ -13,6 +13,7 @@ import { type AddressInfo, createServer } from 'node:net';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 
 import {
+  type AccountOptions,
   type Call,
   SipralActivity,
   SipralBasic,
@@ -38,6 +39,7 @@ import {
   Stack,
   type StackOptions,
 } from '../index.js';
+import { config, plain } from '../internal.js';
 import { Peer, StunServer, answer, header, kind, notify, registered, udpRegistrar } from './helpers.js';
 
 const ROOM =
@@ -286,6 +288,20 @@ describe('a message-summary NOTIFY no subscription asked for', () => {
     assert.ok((await answered).startsWith('SIP/2.0 481'));
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.deepEqual(raised, []);
+  });
+});
+
+describe('a subscription retry limit', () => {
+  test('reaches the account record as given, zero when left out, and is taken by the library', async () => {
+    const stack = await open();
+    const server = await peer();
+    const options: AccountOptions = { registrarAddress: server.address, subscriptionRetryMaxSeconds: 120 };
+    const given = plain(config('sipral_account_config_t', options), 'sipral_account_config_t');
+    assert.equal(given.subscriptionRetryMaxSeconds, 120);
+    const left = plain(config('sipral_account_config_t', { registrarAddress: server.address }), 'sipral_account_config_t');
+    assert.equal(left.subscriptionRetryMaxSeconds, 0);
+    const account = stack.addAccount('sip:alice@example.invalid', options);
+    assert.notEqual(account.handle, 0n);
   });
 });
 

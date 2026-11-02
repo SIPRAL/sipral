@@ -77,6 +77,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 instanceId = options.text("instanceId"),
                 headers = options.text("headers"),
                 unsolicitedMwi = options.flag("unsolicitedMwi") ?: false,
+                subscriptionRetryMaxSeconds = options.number("subscriptionRetryMaxSeconds")?.toLong() ?: 0,
             ),
         )
     }

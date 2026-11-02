@@ -278,6 +278,15 @@ export interface AccountOptions {
    * by default, when such a NOTIFY is answered 481 and raises nothing.
    */
   unsolicitedMwi?: boolean;
+  /**
+   * The longest, in seconds, a subscription of the account waits before
+   * trying again after failing: the wait starts under 30 seconds and doubles
+   * with each failure in a row up to this, for a busy-lamp panel that wants
+   * its lamps back within minutes. Left out or zero, RFC 5626 §4.5's 1800;
+   * under 30 is taken as 30, and a `Retry-After` from the notifier is still
+   * honoured above it. A whole number from 0 to 4 294 967 295.
+   */
+  subscriptionRetryMaxSeconds?: number;
 }
 
 export interface SubscribeMailboxOptions {

@@ -318,6 +318,10 @@ struct AccountOptions {
      * this account and no subscription) rather than refusing it 481; for a PBX that ties the mailbox to the
      * extension. */
     bool unsolicited_mwi = false;
+    /** The longest, in seconds, a failed subscription of this account waits before trying again: the wait
+     * starts under 30 and doubles per failure up to this. Zero keeps RFC 5626's 1800; under 30 is taken as
+     * 30, and the notifier's Retry-After is still honoured above it. */
+    std::uint32_t subscription_retry_max_seconds = 0;
     std::string auth_user;
     std::string auth_password;
 };
@@ -556,6 +560,7 @@ public:
         config.srtp = options.srtp;
         config.webrtc = options.webrtc ? SIPRAL_TOGGLE_ON : SIPRAL_TOGGLE_DEFAULT;
         config.unsolicited_mwi = options.unsolicited_mwi ? SIPRAL_TOGGLE_ON : SIPRAL_TOGGLE_DEFAULT;
+        config.subscription_retry_max_seconds = options.subscription_retry_max_seconds;
         config.auth_user = text(options.auth_user);
         config.auth_user_len = options.auth_user.size();
         config.auth_password = text(options.auth_password);

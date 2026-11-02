@@ -383,6 +383,15 @@ export interface AccountOptions {
    * NOTIFY is refused 481 and nothing is raised.
    */
   unsolicitedMwi?: boolean;
+  /**
+   * The longest, in seconds, a subscription of this account waits before
+   * trying again after failing: the wait starts under 30 seconds and doubles
+   * with each failure in a row up to this, for a busy-lamp panel that wants
+   * its lamps back within minutes. Left out or zero, RFC 5626 §4.5's 1800;
+   * under 30 is taken as 30, and a `Retry-After` from the notifier is still
+   * honoured above it.
+   */
+  subscriptionRetryMaxSeconds?: number;
 }
 
 /** How a call is placed or answered. */

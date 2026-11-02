@@ -195,7 +195,8 @@ public final class Account: @unchecked Sendable {
         realms: [String],
         security: AccountSecurity,
         push: SipralPush? = nil,
-        unsolicitedMwi: Bool = false
+        unsolicitedMwi: Bool = false,
+        subscriptionRetryMaxSeconds: UInt32 = 0
     ) throws -> Account {
         let given = contact
         let contact = contact ?? defaultContact(
@@ -314,6 +315,7 @@ public final class Account: @unchecked Sendable {
             config.recording_in_clear = security.recordingInClear ? UInt64(SipralToggle.on.rawValue) : 0
             config.webrtc = security.webrtc ? SipralToggle.on.rawValue : 0
             config.unsolicited_mwi = unsolicitedMwi ? SipralToggle.on.rawValue : 0
+            config.subscription_retry_max_seconds = subscriptionRetryMaxSeconds
             return try key.withUnsafeBufferPointer { keyBytes in
                 if !keyBytes.isEmpty {
                     config.stir_key = keyBytes.baseAddress

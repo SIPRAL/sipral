@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-#define SIPRAL_ABI_VERSION_MINOR 12
+#define SIPRAL_ABI_VERSION_MINOR 13
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5075,6 +5075,20 @@ struct sipral_account_config {
      * How many bytes of it.
      */
     size_t tls_client_tag_len;
+    /**
+     * The longest, in seconds, a subscription of this account waits
+     * before trying again after failing: the wait starts under 30
+     * seconds and doubles with each failure in a row up to this, for
+     * a busy-lamp panel that wants its lamps back within minutes. Zero
+     * for RFC 5626 §4.5's 1800; under 30 is taken as 30. A
+     * `Retry-After` the notifier sends is still honoured above it.
+     * ABI 1.13.
+     */
+    uint32_t subscription_retry_max_seconds;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_1_13;
 };
 
 /**
@@ -12165,7 +12179,7 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_poll_result_t": (48, 28, 32),
     "sipral_stack_settings_t": (136, 128, 136),
     "sipral_header_t": (32, 16, 16),
-    "sipral_account_config_t": (528, 296, 304),
+    "sipral_account_config_t": (536, 304, 312),
     "sipral_call_config_t": (168, 100, 100),
     "sipral_codec_info_t": (32, 28, 28),
     "sipral_codec_candidate_t": (24, 20, 20),

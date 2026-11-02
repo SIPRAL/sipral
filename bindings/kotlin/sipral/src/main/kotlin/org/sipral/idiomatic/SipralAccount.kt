@@ -144,6 +144,7 @@ class SipralAccount internal constructor(
             instanceId: String?,
             headers: List<SipralHeader>,
             unsolicitedMwi: Boolean,
+            subscriptionRetryMaxSeconds: Long,
         ): SipralAccount {
             val written = contact ?: if (location.advertised != null) {
                 client.defaultContact(aor, location.advertised, location.streamProtocol)
@@ -192,6 +193,7 @@ class SipralAccount internal constructor(
                 // a connection presents one certificate, so the stack keeps
                 // accounts whose certificates differ on connections apart
                 tlsClientTag = location.clientCertificate?.tag,
+                subscriptionRetryMaxSeconds = subscriptionRetryMaxSeconds,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(

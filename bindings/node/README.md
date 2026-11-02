@@ -181,6 +181,9 @@ application's thread.
   registrar address, as `MessagesWaiting` with the account and no
   subscription, for a PBX that notifies voicemail unasked; off by default,
   when it is refused 481 as RFC 6665 §4.1.3 asks.
+  `subscriptionRetryMaxSeconds: 120` caps how long a failed subscription of
+  the account waits before trying again (from 30 seconds; zero keeps RFC
+  5626's 1800), for busy lamps back within minutes.
 - **Calls:** `hold`, `resume`, `transfer`, `transferTo`, `join` (a three-way
   call mixed here), `hangupFor` (a `Reason`), `setHeaders`, `sendText` (RFC
   4103), `setFocus`, `conferenceUri`, `subscribeConference`, `recordTo` (RFC

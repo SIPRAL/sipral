@@ -1109,6 +1109,13 @@ class SipralClient private constructor(
      * §4.1.3 on purpose, so it is off by default, and such a `NOTIFY` is then
      * answered 481 and raises nothing. A subscribed `message-summary` works
      * the same either way.
+     *
+     * [subscriptionRetryMaxSeconds] is the longest a subscription of this
+     * account waits before trying again after failing: the wait starts under
+     * 30 seconds and doubles with each failure in a row up to this, for a
+     * busy-lamp panel that wants its lamps back within minutes. Zero keeps
+     * RFC 5626 §4.5's 1800, under 30 is taken as 30, and a `Retry-After`
+     * from the notifier is still honoured above it; 0 to 4 294 967 295.
      */
     fun addAccount(
         aor: String,
@@ -1136,9 +1143,13 @@ class SipralClient private constructor(
         instanceId: String? = null,
         headers: List<SipralHeader> = emptyList(),
         unsolicitedMwi: Boolean = false,
+        subscriptionRetryMaxSeconds: Long = 0,
     ): SipralAccount {
         require((registrarAddress == null) != (serverUri == null)) {
             "an account names its server by registrarAddress or by serverUri, one of the two"
+        }
+        require(subscriptionRetryMaxSeconds in 0..0xFFFF_FFFFL) {
+            "subscriptionRetryMaxSeconds is 0 to 4294967295"
         }
         require(streamProtocol == null || (streamProtocol in STREAMS && link == null)) {
             "streamProtocol is TCP, TLS, WS or WSS, on a client that signals over UDP"
@@ -1170,6 +1181,7 @@ class SipralClient private constructor(
             instanceId = instanceId,
             headers = headers,
             unsolicitedMwi = unsolicitedMwi,
+            subscriptionRetryMaxSeconds = subscriptionRetryMaxSeconds,
         )
         synchronized(movingLock) { accounts[account.handle] = account }
         return account

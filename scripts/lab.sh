@@ -395,6 +395,13 @@
 #                               no container of the lab's, only Docker for
 #                               the one it runs the layer in, and takes no
 #                               lab lock, having nothing of the lab's to race
+#   scripts/lab.sh pbx-live     the same two scripts against any other live
+#                               PBX, by hand only like vitalpbx-live:
+#                               PBX_LIVE_ENV names the account file, in the
+#                               format vitalpbx.py reads, with its optional
+#                               keys for a tenant told apart by its own SIP
+#                               domain, numbers that are not the labels, and
+#                               media that has to be encrypted. No lab lock
 #   scripts/lab.sh vicidial-live
 #                               a ViciBox 12 (VICIdial, Asterisk 18) on the
 #                               LAN, by hand only like vitalpbx-live: the
@@ -490,11 +497,11 @@ ROOT="$PWD"
 # SIPRAL_LAB_LOCK_HELD=1 is for: set once the lock is taken, inherited by any
 # child this process starts, and checked here so a nested run skips locking
 # instead of deadlocking against its own parent.
-# `vitalpbx-live`, `vicidial-live` and `freepbx-live` take no lock: they start no Compose service and
-# reaches no container of the lab's, so it has nothing to race, and an hour
+# `vitalpbx-live`, `pbx-live`, `vicidial-live` and `freepbx-live` take no lock: they start no Compose
+# service and reach no container of the lab's, so they have nothing to race, and an hour
 # of somebody else's run holding the lock is no reason for it to wait.
 LAB_LOCK_WANTED=1
-case " $* " in *" vitalpbx-live "* | *" vicidial-live "* | *" freepbx-live "*) LAB_LOCK_WANTED=0 ;; esac
+case " $* " in *" vitalpbx-live "* | *" pbx-live "* | *" vicidial-live "* | *" freepbx-live "*) LAB_LOCK_WANTED=0 ;; esac
 if [ -z "${SIPRAL_LAB_LOCK_HELD:-}" ] && [ "$LAB_LOCK_WANTED" -eq 1 ]; then
     LOCK="/var/lock/sipral-lab.lock"
     [ -e "$LOCK" ] || LOCK="$ROOT/.sipral-lab.lock"
@@ -711,7 +718,7 @@ if [ "$WANT" = pipewire ]; then
 elif [ "$WANT" = compare ]; then
     HARNESS=""
     printf '  note  not used by the comparison, which runs the headless agent\n'
-elif [ "$WANT" = vitalpbx-live ]; then
+elif [ "$WANT" = vitalpbx-live ] || [ "$WANT" = pbx-live ]; then
     HARNESS=""
     printf '  note  not used by the %s step, which runs the Python layer\n' "$WANT"
 elif [ "$WANT" = bridge ]; then
@@ -797,7 +804,7 @@ fi
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
 if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ] \
-    || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = vicidial-live ] \
+    || [ "$WANT" = vitalpbx-live ] || [ "$WANT" = pbx-live ] || [ "$WANT" = vicidial-live ] \
     || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ] || [ "$WANT" = network ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
@@ -836,8 +843,8 @@ elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
 elif [ "$WANT" = security ] || [ "$WANT" = bridge ] || [ "$WANT" = vitalpbx-live ] \
-    || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ] || [ "$WANT" = push ] \
-    || [ "$WANT" = network ]; then
+    || [ "$WANT" = pbx-live ] || [ "$WANT" = vicidial-live ] || [ "$WANT" = freepbx-live ] \
+    || [ "$WANT" = push ] || [ "$WANT" = network ]; then
     SWIFT_AGENT=""
     printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
@@ -998,6 +1005,12 @@ live_pbx_step() {
 if [ "$WANT" = vitalpbx-live ]; then
     step "a live VitalPBX 4.5 -- two extensions of a test tenant, over the internet"
     live_pbx_step "the live VitalPBX" VITALPBX_LIVE_ENV $((LAB_START_APT_S + 8 * LAB_CALL_S)) \
+        vitalpbx.py pbx_features.py
+fi
+
+if [ "$WANT" = pbx-live ]; then
+    step "a live PBX -- extensions of a test tenant, over the internet"
+    live_pbx_step "the live PBX" PBX_LIVE_ENV $((LAB_START_APT_S + 8 * LAB_CALL_S)) \
         vitalpbx.py pbx_features.py
 fi
 

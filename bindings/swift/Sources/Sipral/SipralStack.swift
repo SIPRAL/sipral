@@ -1351,6 +1351,14 @@ public final class SipralStack: @unchecked Sendable {
     /// it and notify unasked. Off by default: such a NOTIFY is answered 481
     /// and nothing is raised (`sipral_account_config_t::unsolicited_mwi`).
     ///
+    /// `subscriptionRetryMaxSeconds` is the longest a subscription of this
+    /// account waits before trying again after failing: the wait starts
+    /// under 30 seconds and doubles with each failure in a row up to this,
+    /// for a busy-lamp panel that wants its lamps back within minutes. Zero
+    /// keeps RFC 5626 §4.5's 1800; under 30 is taken as 30, and a
+    /// `Retry-After` from the notifier is still honoured above it
+    /// (`sipral_account_config_t::subscription_retry_max_seconds`).
+    ///
     /// `instanceId` is the `+sip.instance` URN of RFC 5626 §4.1
     /// (`urn:uuid:...`, angle brackets optional), on the `Contact` of every
     /// REGISTER, de-registration included: kept across launches, it lets the
@@ -1388,7 +1396,8 @@ public final class SipralStack: @unchecked Sendable {
         realms: [String] = [],
         security: AccountSecurity = AccountSecurity(),
         push: SipralPush? = nil,
-        unsolicitedMwi: Bool = false
+        unsolicitedMwi: Bool = false,
+        subscriptionRetryMaxSeconds: UInt32 = 0
     ) throws -> Account {
         guard (registrarAddress == nil) != (serverUri == nil) else {
             throw SipralError(
@@ -1435,7 +1444,8 @@ public final class SipralStack: @unchecked Sendable {
             realms: realms,
             security: security,
             push: push,
-            unsolicitedMwi: unsolicitedMwi
+            unsolicitedMwi: unsolicitedMwi,
+            subscriptionRetryMaxSeconds: subscriptionRetryMaxSeconds
         )
         movingQueue.sync { accounts[account.handle] = account }
         return account

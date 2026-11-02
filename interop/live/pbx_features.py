@@ -39,12 +39,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import socket
 import sys
 import time
 
 import vitalpbx as base
-from vitalpbx import HEARD_FRAMES, NOT_RUN, PATIENCE_S, WINDOW_S, Leg, Redacting, say
+from vitalpbx import HEARD_FRAMES, NOT_RUN, PATIENCE_S, WINDOW_S, Leg, say
 
 # whole cycles in 20 ms, and away from every DTMF frequency
 FOUR_TONES = (400.0, 1000.0, 2200.0, 600.0)
@@ -85,8 +84,8 @@ def account_details(values: dict[str, str]):
 class Features(base.Run):
     """`vitalpbx.Run` with four extensions, and the events it ignores."""
 
-    def __init__(self, host, address, extensions, codec) -> None:
-        super().__init__(host, address, extensions, codec)
+    def __init__(self, host, address, extensions, codec, numbers=None, srtp=0) -> None:
+        super().__init__(host, address, extensions, codec, numbers, srtp)
         self.x, self.y, self.a, self.b = extensions
         self.peer: dict[str, str] = {}
         self.refuse: set[str] = set()
@@ -133,8 +132,7 @@ class Features(base.Run):
         super().handle(extension, event)
 
     async def register(self) -> bool:
-        for account in self.accounts.values():
-            account.register()
+        await self.register_each()
         everyone = list(self.extensions)
         await self.until(
             lambda: self.refused or all(self.registration.get(e) == "registered" for e in everyone),
@@ -183,9 +181,13 @@ class Features(base.Run):
             self.result(False, label, f"{self.x} to {self.y} never answered ({first.ended or 'no answer'})")
             return await self.hang_up_all()
         self.peer[self.a] = self.y
-        first.call.transfer(f"sip:{self.a}@{self.host}")
+        first.call.transfer(self.uri(self.a))
+        # a 2xx outcome is no reason to stop waiting for the target: a PBX
+        # that transfers the call itself (FreeSWITCH) reports 200 as soon as
+        # it takes the REFER, before the target rings (RFC 3515 §2.4.5 lets it)
         await self.until(
-            lambda: self.answered(self.a) is not None or first.call.handle in self.transfers,
+            lambda: self.answered(self.a) is not None
+            or not 200 <= self.transfers.get(first.call.handle, (200, False))[0] < 300,
             PATIENCE_S,
         )
         target = self.answered(self.a)
@@ -272,7 +274,7 @@ class Features(base.Run):
         label = "MESSAGE between two extensions"
         stack = self.stacks[self.x]
         account = self.accounts[self.x]
-        target = f"sip:{self.y}@{self.host}".encode()
+        target = self.uri(self.y).encode()
         kind = b"text/plain"
         body = b"sipral live check"
         out = ffi.new("sipral_handle_t *")
@@ -355,22 +357,18 @@ async def main() -> int:
     host, extensions, codec = details
     for number, hz in zip(extensions, FOUR_TONES):
         base.TONES[number] = hz
-
-    replacements = [(host, "<pbx>")]
-    replacements += [(secret, "<secret>") for _, secret in extensions.values()]
-    try:
-        found = socket.getaddrinfo(host, 5060, socket.AF_INET, socket.SOCK_DGRAM)
-    except OSError:
-        sys.stdout = Redacting(sys.__stdout__, replacements)
-        sys.stderr = Redacting(sys.__stderr__, replacements)
-        say("not run: the PBX's name did not resolve")
+    site = base.site_details(values)
+    if isinstance(site, str):
+        say(f"not run: {site}")
         return NOT_RUN
-    addresses = sorted({entry[4][0] for entry in found})
-    replacements += [(address, "<pbx-address>") for address in addresses]
-    sys.stdout = Redacting(sys.__stdout__, replacements)
-    sys.stderr = Redacting(sys.__stderr__, replacements)
+    registrar, numbers, srtp = site
 
-    run = Features(host, (addresses[0], 5060), extensions, codec)
+    address = base.reach(host, registrar, extensions)
+    if isinstance(address, str):
+        say(f"not run: {address}")
+        return NOT_RUN
+
+    run = Features(host, address, extensions, codec, numbers, srtp)
     try:
         run.start()
         if await run.register():

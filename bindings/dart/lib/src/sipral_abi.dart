@@ -3603,6 +3603,20 @@ final class SipralAccountConfig extends ffi.Struct {
   /// How many bytes of it.
   @ffi.Size()
   external int tlsClientTagLen;
+
+  /// The longest, in seconds, a subscription of this account waits
+  /// before trying again after failing: the wait starts under 30
+  /// seconds and doubles with each failure in a row up to this, for
+  /// a busy-lamp panel that wants its lamps back within minutes. Zero
+  /// for RFC 5626 §4.5's 1800; under 30 is taken as 30. A
+  /// `Retry-After` the notifier sends is still honoured above it.
+  /// ABI 1.13.
+  @ffi.Uint32()
+  external int subscriptionRetryMaxSeconds;
+
+  /// Zero.
+  @ffi.Uint32()
+  external int reserved113;
 }
 
 /// What a call is placed with.
@@ -7054,7 +7068,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 12;
+  static const int abiVersionMinor = 13;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7339,7 +7353,7 @@ final class Sipral {
         'sipral_poll_result_t': [ffi.sizeOf<SipralPollResult>(), 48, 28, 32],
         'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 136, 128, 136],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
-        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 528, 296, 304],
+        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 536, 304, 312],
         'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 168, 100, 100],
         'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
         'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],

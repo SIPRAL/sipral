@@ -147,6 +147,7 @@ public sealed class Account
         IEnumerable<string>? trustedPeers,
         AccountSecurity? security,
         bool unsolicitedMwi,
+        uint subscriptionRetryMaxSeconds,
         AccountLocation location)
     {
         security ??= new AccountSecurity();
@@ -293,6 +294,7 @@ public sealed class Account
             config.RecordingInClear = security.RecordingInClear ? (uint)SipralToggle.On : 0;
             config.Webrtc = security.Webrtc ? (uint)SipralToggle.On : 0;
             config.UnsolicitedMwi = unsolicitedMwi ? (uint)SipralToggle.On : 0;
+            config.SubscriptionRetryMaxSeconds = subscriptionRetryMaxSeconds;
             if (instanceBytes is not null)
             {
                 config.InstanceId = instancePin.Pointer;

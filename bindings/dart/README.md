@@ -196,6 +196,9 @@ subscription asked for, from the account's registrar address, as
 `SipralEventKind.messagesWaiting` with the account named and no subscription,
 for a PBX that notifies voicemail unasked; off by default, when it is refused
 481 as RFC 6665 §4.1.3 asks (`test/unsolicited_mwi_test.dart`).
+`addAccount(..., subscriptionRetryMaxSeconds: 120)` caps how long a failed
+subscription of the account waits before trying again (from 30 seconds; zero
+keeps RFC 5626's 1800), for busy lamps back within minutes.
 
 `SipralStack.open()` with no `bindHost` listens on every interface and
 advertises the address of the operating system's route toward the server of
