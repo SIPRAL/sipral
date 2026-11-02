@@ -818,7 +818,7 @@ impl core::error::Error for SnapshotError {}
 /// | 4 | `SPRG` |
 /// | 2 | version |
 /// | 4 | the sequence number the next REGISTER continues from |
-/// | 4 | seconds the registrar granted |
+/// | 4 | seconds the REGISTER asked for (kept for the layout; a reader takes the account's own) |
 /// | 4 | seconds the binding still had when this was written |
 /// | 2 + n | the `Call-ID`, and its length |
 /// | 2 + m | the address of record, and its length |
@@ -846,10 +846,10 @@ fn freeze(reg: &Registration, aor: &Uri, now: Instant) -> Vec<u8> {
     out
 }
 
-/// What one holds, checked as far as the bytes go.
+/// What one holds, checked as far as the bytes go. The interval asked for is
+/// written and read past, never used: the account being restored says it.
 struct Thawed {
     cseq: u32,
-    granted: Duration,
     left: Duration,
     call_id: CallId,
     aor: Uri,
@@ -867,7 +867,6 @@ fn thaw(snapshot: &[u8]) -> Result<Thawed, SnapshotError> {
         return Err(SnapshotError::FromTheFuture { version });
     }
     let cseq = be32(head, 6).ok_or(SnapshotError::Malformed)?;
-    let granted = be32(head, 10).ok_or(SnapshotError::Malformed)?;
     let left = be32(head, 14).ok_or(SnapshotError::Malformed)?;
     let call_id_len = usize::from(be16(head, 18).ok_or(SnapshotError::Malformed)?);
 
@@ -884,7 +883,6 @@ fn thaw(snapshot: &[u8]) -> Result<Thawed, SnapshotError> {
     }
     Ok(Thawed {
         cseq,
-        granted: Duration::from_secs(u64::from(granted)),
         left: Duration::from_secs(u64::from(left)),
         call_id: CallId::new(call_id),
         aor: Uri::parse(aor).map_err(|_| SnapshotError::Malformed)?,
@@ -941,7 +939,10 @@ impl UserAgent {
     /// The `Call-ID` and CSeq come back, so the next REGISTER refreshes the
     /// binding the registrar still holds. The remaining life comes back as a
     /// schedule only: the refresh is booked where it would have fallen, or
-    /// now if that has passed.
+    /// now if that has passed. The interval the next REGISTER asks for is the
+    /// account's [`Account::expires`](crate::Account::expires) as added now,
+    /// so a setting changed between the two processes holds from the first
+    /// refresh.
     ///
     /// Reachability does not come back. The account is
     /// [`RegistrationState::Restored`], never `Registered`, until a registrar
@@ -975,7 +976,10 @@ impl UserAgent {
         };
         reg.call_id = thawed.call_id;
         reg.cseq = thawed.cseq;
-        reg.asking = thawed.granted;
+        // the interval asked for is the account's as added now, not the one
+        // written down: a changed setting would otherwise wait for an
+        // unregistration to take effect
+        reg.asking = config.expires;
         reg.state = RegistrationState::Restored;
         reg.failures = 0;
         reg.raised = false;
@@ -1097,7 +1101,6 @@ mod tests {
         let back = thaw(&bytes).expect("a snapshot this build wrote");
         assert_eq!(back.call_id.as_bytes(), b"boot-cycle-1");
         assert_eq!(back.cseq, 7);
-        assert_eq!(back.granted, Duration::from_hours(1));
         assert_eq!(back.left, Duration::from_secs(3_000));
         assert_eq!(back.aor.as_bytes(), b"sip:alice@example.com");
     }

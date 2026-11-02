@@ -1621,6 +1621,26 @@ Content-Length: 0\r\n\r\n"
     }
 
     #[test]
+    fn a_thawed_binding_asks_for_the_interval_the_account_is_added_with_now() {
+        let t0 = Instant::now();
+        let (agent, id) = registered(t0);
+        let snapshot = agent.freeze_registration(id, t0).expect("a binding");
+
+        let t1 = t0 + Duration::from_secs(60);
+        let mut woken = awake(t1);
+        let restored = woken.add_account(account().expires(Duration::from_secs(604_800)));
+        woken
+            .thaw_registration(restored, &snapshot, Duration::from_secs(60), t1)
+            .expect("a snapshot this build wrote");
+        woken.register(restored, t1).expect("a REGISTER goes");
+        assert_eq!(
+            text(&sent(&mut woken), HeaderName::Expires),
+            "604800",
+            "the setting changed between the two processes, and the refresh carries the new one"
+        );
+    }
+
+    #[test]
     fn a_snapshot_of_another_address_of_record_is_not_restored_onto_this_one() {
         let t0 = Instant::now();
         let (agent, id) = registered(t0);

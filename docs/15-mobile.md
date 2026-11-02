@@ -297,10 +297,14 @@ not registered. One layout, version 1, every number big-endian:
 | 4 | `SPRG` |
 | 2 | version |
 | 4 | the sequence number the next REGISTER continues from |
-| 4 | seconds the registrar granted |
+| 4 | seconds the REGISTER asked for, kept for the layout and not read back |
 | 4 | seconds the binding still had when this was written |
 | 2 + n | the `Call-ID`, and its length |
 | 2 + m | the address of record, and its length |
+
+The next REGISTER asks for the `expires` of the account as it was added in
+this process, not the one in the snapshot, so an interval changed between two
+launches holds from the first refresh.
 
 It is parsed and written by hand, with no dependency and no schema language,
 because the compatibility rule is the whole reason there is a version and it
