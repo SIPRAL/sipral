@@ -274,7 +274,8 @@ elif case "$UNAME_S" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; then
     esac
     NATIVE="sipral_ffi.dll"
     PY=python
-    command -v python3 >/dev/null 2>&1 && PY=python3
+    # the Microsoft Store's python3 alias is found on PATH and runs nothing
+    python3 -c '' >/dev/null 2>&1 && PY=python3
     pass "Windows $UNAME_M ($UNAME_S): tag $TAG"
 else
     fail "unsupported host: $UNAME_S"; printf '\nwheels.sh: failed\n'; exit 1
