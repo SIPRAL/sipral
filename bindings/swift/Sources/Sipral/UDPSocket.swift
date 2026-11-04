@@ -66,17 +66,44 @@ public final class UDPSocket: @unchecked Sendable {
         self.localAddress = "\(host):\(UInt16(bigEndian: actual.sin_port))"
     }
 
-    /// One datagram, non-blocking. `nil` when nothing is waiting.
+    /// Whether a read has failed for a reason other than there being nothing
+    /// to read. Such a socket is never read from successfully again: on iOS,
+    /// one the system took back while the application was suspended (a
+    /// defunct socket) still polls readable and fails every read, so a loop
+    /// that only polls and reads it spins.
+    public private(set) var failed = false
+
+    /// Read errors that say nothing about the socket itself: nothing waiting,
+    /// a signal, and what an ICMP error or a busy interface reports for one
+    /// datagram.
+    private static let passing: Set<Int32> = [
+        EAGAIN, EWOULDBLOCK, EINTR, ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, EHOSTDOWN, EMSGSIZE, ENOBUFS,
+    ]
+
+    /// Say the socket is beyond use when `poll` reports its descriptor
+    /// invalid (`POLLNVAL`), which it does at once on every call.
+    func markFailed() {
+        failed = true
+    }
+
+    /// One datagram, non-blocking. `nil` when nothing is waiting, or when the
+    /// read failed (`failed`).
     public func receive(capacity: Int = 65536) -> (data: [UInt8], from: String)? {
         var buffer = [UInt8](repeating: 0, count: capacity)
         var fromAddress = sockaddr_in()
         var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        var error: Int32 = 0
         let received = buffer.withUnsafeMutableBytes { raw -> Int in
             withUnsafeMutablePointer(to: &fromAddress) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    recvfrom(fd, raw.baseAddress, capacity, 0, sockaddrPtr, &fromLen)
+                    let count = recvfrom(fd, raw.baseAddress, capacity, 0, sockaddrPtr, &fromLen)
+                    error = errno
+                    return count
                 }
             }
+        }
+        if received < 0, !Self.passing.contains(error) {
+            failed = true
         }
         guard received > 0 else { return nil }
         let host = Self.text(of: fromAddress.sin_addr)

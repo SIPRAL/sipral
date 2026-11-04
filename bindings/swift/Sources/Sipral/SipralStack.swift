@@ -156,6 +156,9 @@ public final class SipralStack: @unchecked Sendable {
     /// Accounts move before any call is re-offered, so each re-INVITE carries
     /// the new `Contact`. Also guards `accounts`.
     private let movingQueue = DispatchQueue(label: "org.sipral.stack.moving")
+    /// When the poll thread last tried to replace a failed signalling socket;
+    /// that thread alone reads and writes it.
+    private var replacementTriedMs: UInt64 = 0
     /// The network the stack was last told it is on, guarded by `stateQueue`.
     private var network: Network
 
@@ -2425,12 +2428,20 @@ public final class SipralStack: @unchecked Sendable {
         while !isClosed {
             // Signalling socket first (absent over TCP/TLS: -1 is ignored by
             // poll), then media sockets awaiting their call's media handle.
-            let signalling = signallingQueue.sync { socket }
+            var signalling = signallingQueue.sync { socket }
+            if let dead = signalling, signallingQueue.sync(execute: { dead.failed }) {
+                // left out of the poll until a replacement is made, so the
+                // loop waits rather than spins on it
+                signalling = replaceFailedSignalling(dead) ? signallingQueue.sync { socket } : nil
+            }
             var pfds = [pollfd(fd: signalling?.fd ?? -1, events: Int16(POLLIN), revents: 0)]
             pfds += stunDescriptors.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
             _ = pfds.withUnsafeMutableBufferPointer { poll($0.baseAddress, nfds_t($0.count), 50) }
             if pfds.dropFirst().contains(where: { $0.revents & Int16(POLLIN) != 0 }) {
                 receiveStun()
+            }
+            if let signalling, pfds[0].revents & Int16(POLLNVAL) != 0 {
+                signallingQueue.sync { signalling.markFailed() }
             }
             if let signalling, pfds[0].revents & Int16(POLLIN) != 0 {
                 let local = bindAddress
@@ -2459,6 +2470,60 @@ public final class SipralStack: @unchecked Sendable {
             actOnMainLetGo()
         }
         closedSemaphore.signal()
+    }
+
+    /// Replace a signalling socket that fails every read (`UDPSocket.failed`)
+    /// with a fresh one at its address, on its port when that can be had, at
+    /// most once a second. The accounts register again from a new port; on
+    /// the same one the registrar's binding still holds. `false` while no
+    /// replacement could be made.
+    private func replaceFailedSignalling(_ dead: UDPSocket) -> Bool {
+        let now = nowMs()
+        guard now >= replacementTriedMs + 1000 else { return false }
+        replacementTriedMs = now
+        do {
+            return try movingQueue.sync {
+                guard signallingQueue.sync(execute: { socket === dead }) else { return true }
+                let before = UDPSocket.parse(dead.localAddress)
+                let fresh = try signallingSocket(at: before.host)
+                do {
+                    // Called directly, as in networkChanged(to:)
+                    let local = fresh.localAddress
+                    try retryingBusy {
+                        var bound: UInt32 = 0
+                        let status = local.withCString {
+                            sipral_stack_transport_bind(
+                                handle, Sipral.transportMain, 0, $0, local.utf8.count, nil, 0, nowMs(), &bound
+                            )
+                        }
+                        try Sipral.check(status)
+                    }
+                } catch {
+                    fresh.close()
+                    throw error
+                }
+                let old = signallingQueue.sync { () -> UDPSocket? in
+                    let old = socket
+                    socket = fresh
+                    return old
+                }
+                signallingQueue.sync { old?.close() }
+                guard UDPSocket.parse(fresh.localAddress).port != before.port else { return true }
+                let picksRoutes = routes && signalling == .udp
+                let rebound = picksRoutes ? try advertiseAgain(after: nil) : fresh.localAddress
+                for account in accounts.values {
+                    let server = account.registrarAddress
+                    var local = rebound
+                    if picksRoutes, account.derivesContact, Self.isAddress(server) {
+                        local = try advertise(toward: server)
+                    }
+                    try account.rebind(local: local, previous: nil)
+                }
+                return true
+            }
+        } catch {
+            return false
+        }
     }
 
     private var isClosed: Bool { stateQueue.sync { closed } }
