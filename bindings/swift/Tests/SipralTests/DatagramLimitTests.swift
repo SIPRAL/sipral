@@ -71,7 +71,7 @@ final class ChallengingPbx: @unchecked Sendable {
                 continue
             }
             let message = String(decoding: data, as: UTF8.self)
-            if message.hasPrefix("INVITE "), FakeRegistrar.header("Authorization", message) == nil {
+            if message.hasPrefix("INVITE "), FakeRegistrarHeader.header("Authorization", message) == nil {
                 let challenge = "WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"\(nonce)\", qop=\"auth\"\r\n"
                 udp.send(Array(Self.response(message, "401 Unauthorized", challenge).utf8), to: from)
             } else if message.hasPrefix("INVITE ") {
@@ -94,7 +94,7 @@ final class ChallengingPbx: @unchecked Sendable {
             var held = held + (data.map { String(decoding: $0, as: UTF8.self) } ?? "")
             while let end = held.range(of: "\r\n\r\n") {
                 let head = String(held[..<end.lowerBound]) + "\r\n"
-                let length = Int(FakeRegistrar.header("Content-Length", head) ?? "0") ?? 0
+                let length = Int(FakeRegistrarHeader.header("Content-Length", head) ?? "0") ?? 0
                 let body = held[end.upperBound...]
                 guard body.utf8.count >= length else { break }
                 held = String(body.dropFirst(length))
@@ -200,8 +200,8 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(pbx.connections, 1)
         let invites = pbx.overTcp.filter { $0.hasPrefix("INVITE ") }
         XCTAssertEqual(invites.count, 1)
-        XCTAssertNotNil(FakeRegistrar.header("Authorization", invites[0]))
-        XCTAssertTrue(FakeRegistrar.header("Via", invites[0])?.hasPrefix("SIP/2.0/TCP ") == true)
+        XCTAssertNotNil(FakeRegistrarHeader.header("Authorization", invites[0]))
+        XCTAssertTrue(FakeRegistrarHeader.header("Via", invites[0])?.hasPrefix("SIP/2.0/TCP ") == true)
         // the dialog carries on over the connection: the 486 is acknowledged
         // on it (RFC 3261 §17.1.1.3)
         for _ in 0..<100 where !pbx.overTcp.contains(where: { $0.hasPrefix("ACK ") }) {
@@ -247,7 +247,7 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(seen.last?.callData?.statusCode, 486, "the PBX's own answer, over UDP")
         let answered = pbx.answeredOverUdp
         XCTAssertEqual(answered.count, 1)
-        XCTAssertNotNil(FakeRegistrar.header("Authorization", answered.first?.message ?? ""))
+        XCTAssertNotNil(FakeRegistrarHeader.header("Authorization", answered.first?.message ?? ""))
         XCTAssertGreaterThan(answered.first?.bytes ?? 0, 1300)
         let diagnostics = try stack.diagnosticsJson()
         XCTAssertTrue(diagnostics.contains("transport.kept.datagram"))
@@ -276,7 +276,7 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(pbx.connections, 1)
         let invites = pbx.overTcp.filter { $0.hasPrefix("INVITE ") }
         XCTAssertEqual(invites.count, 1)
-        XCTAssertNotNil(FakeRegistrar.header("Authorization", invites.first ?? ""))
+        XCTAssertNotNil(FakeRegistrarHeader.header("Authorization", invites.first ?? ""))
     }
 
     func testAStackToldToOpenNoStreamEndsTheCallWithoutTrying() async throws {

@@ -528,6 +528,28 @@ private fun fakeSequences(): String {
         ran++
     }
 
+    // Declined as busy, for do-not-disturb or a call past the ones the
+    // phone takes: 486 on the wire, whether the INVITE was there or came
+    // after; a code that is no refusal is refused itself.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 906, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val ringing = bridge.calls.value.single().id
+        val conn = platform.create(ringing)
+        assertFailsWith<IllegalArgumentException> { bridge.reject(ringing, 200) }
+        assertEquals(0, log.count("reject 906"), log.snapshot().toString())
+        bridge.reject(ringing, 486)
+        assertEquals(1, log.count("reject 906 486"), log.snapshot().toString())
+        assertEquals(TelecomDisconnect.REJECTED, conn.cause)
+
+        sip.forgetCrosses = true
+        val pushed = bridge.pushArrived(ACCOUNT, "sip:carol@example.invalid")
+        platform.create(pushed)
+        bridge.reject(pushed, 486)
+        announcedInvite(bridge, 907, "<sip:carol@example.invalid>")
+        assertEquals(1, log.count("reject 907 486"), log.snapshot().toString())
+        ran++
+    }
+
     // Outgoing: nothing is sent until the framework allows it, and a busy
     // far end says busy.
     Rig().run {
@@ -715,7 +737,7 @@ private fun fakeSequences(): String {
         "kept through a refused re-INVITE, answer before INVITE, a 180 once the framework shows the call and " +
         "none for a call answered, declined or refused first, " +
         "two callers out of order, INVITE before push both ways, a push past the window, the missing announcement " +
-        "by name, a match no screen holds, decline crossing a match, busy, a call the library would not place " +
+        "by name, a match no screen holds, decline crossing a match, declined as busy, busy, a call the library would not place " +
         "and why, refused, missed, " +
         "a framework that will not take the call, a late confirmation after a hang-up, a call over before its " +
         "connection existed, every call ended at once)"

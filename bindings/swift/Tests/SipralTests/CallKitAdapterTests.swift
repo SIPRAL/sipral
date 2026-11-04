@@ -174,5 +174,35 @@ final class CallKitAdapterTests: XCTestCase {
         XCTAssertEqual(end.outcome, .failed)
         XCTAssertEqual(mute.outcome, .failed)
     }
+
+    func testARingtonePickedLaterReplacesOnlyTheRingtone() {
+        let configuration = CXProviderConfiguration()
+        configuration.maximumCallsPerCallGroup = 2
+        configuration.supportsVideo = false
+        let adapter = CallKitAdapter(configuration: configuration)
+        XCTAssertNil(adapter.configuration.ringtoneSound)
+
+        let copy = adapter.configuration
+        copy.ringtoneSound = "Untouched.caf"
+        XCTAssertNil(adapter.configuration.ringtoneSound, "a copy changed the provider without update(configuration:)")
+
+        // CallKit itself keeps a ringtone only when the file is in the
+        // application's bundle, which a test bundle's is not: the adapter
+        // holds what CallKit holds for the name
+        let reference = CXProviderConfiguration()
+        reference.ringtoneSound = "Picked.caf"
+        adapter.updateRingtone("Picked.caf")
+        XCTAssertEqual(adapter.configuration.ringtoneSound, reference.ringtoneSound)
+        XCTAssertEqual(adapter.configuration.maximumCallsPerCallGroup, 2, "the rest of the configuration was lost")
+
+        let wider = adapter.configuration
+        wider.maximumCallsPerCallGroup = 3
+        adapter.update(configuration: wider)
+        XCTAssertEqual(adapter.configuration.maximumCallsPerCallGroup, 3, "the new configuration was not taken")
+
+        adapter.updateRingtone(nil)
+        XCTAssertNil(adapter.configuration.ringtoneSound, "nil is the phone's own ringtone again")
+        XCTAssertEqual(adapter.configuration.maximumCallsPerCallGroup, 3)
+    }
 }
 #endif

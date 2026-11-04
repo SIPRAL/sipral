@@ -137,7 +137,11 @@ the `Call` `takeIncomingCall` gives, and ends the screen of an
 `announcedCallMissing` as unanswered. `CallKitAdapter.startOutgoingCall(callee:dial:)`
 places a call through `CXStartCallAction`, so the system shows it and a
 cellular call holds it, and `request(_:)` sends the application's own mute,
-hold, digits and end through the system.
+hold, digits and end through the system. `CallKitAdapter.updateRingtone(_:)`
+rings the next incoming call with a sound file the user has just picked
+(`nil` for the phone's own), and `update(configuration:)` replaces the whole
+`CXProviderConfiguration`, read back as a copy from `configuration`, with the
+adapter and both bridges kept as they are.
 
 An attended transfer goes through the same objects.
 `CallKitAdapter.startConsultation(holding:callee:dial:)` holds the call on

@@ -490,10 +490,19 @@ class TelecomBridge(
         }
     }
 
-    /** The user declined a ringing call: 603, RFC 3261 §21.6.2. */
-    fun reject(id: String): Unit = settle {
-        val entry = entries[id] ?: return@settle
-        decline(entry)
+    /**
+     * The user declined a ringing call: 603 Decline by default (RFC 3261
+     * §21.6.2), or the final status [code] names, such as 486 Busy Here for
+     * do-not-disturb or a call past the ones this phone takes, which a PBX
+     * routes as busy (voicemail, another member). A call whose INVITE has not
+     * come yet is refused with [code] when it does.
+     */
+    fun reject(id: String, code: Int = 603) {
+        require(code in 400..699) { "a refusal is a 4xx, 5xx or 6xx final status, not $code" }
+        settle {
+            val entry = entries[id] ?: return@settle
+            decline(entry, code.toLong())
+        }
     }
 
     /** The user hung up (app screen, headset, watch). A ringing call is
@@ -713,12 +722,12 @@ class TelecomBridge(
         }
     }
 
-    private fun decline(entry: Entry) {
+    private fun decline(entry: Entry, code: Long = 603) {
         entry.endedLocally = true
         tellClosed(entry, TelecomDisconnect.REJECTED)
         when {
-            entry.call != 0L -> quietly { sip.reject(entry.call, 603) }
-            entry.announcement != 0L -> withdraw(entry, 603)
+            entry.call != 0L -> quietly { sip.reject(entry.call, code) }
+            entry.announcement != 0L -> withdraw(entry, code)
             else -> forget(entry)
         }
     }

@@ -39,7 +39,7 @@ private final class BusyPbx: @unchecked Sendable {
             guard message.hasPrefix("INVITE ") else { continue }
             var lines = ["SIP/2.0 486 Busy Here"]
             for name in ["Via", "From", "To", "Call-ID", "CSeq"] {
-                var value = FakeRegistrar.header(name, message) ?? ""
+                var value = FakeRegistrarHeader.header(name, message) ?? ""
                 if name == "To", !value.contains(";tag=") {
                     value += ";tag=pbx"
                 }
@@ -116,7 +116,7 @@ final class MessageHookTests: XCTestCase {
         XCTAssertEqual(status, 486)
 
         XCTAssertEqual(pbx.invites.count, 1, "\(pbx.received)")
-        XCTAssertEqual(FakeRegistrar.header("X-Tenant", pbx.invites[0]), "blue")
+        XCTAssertEqual(FakeRegistrarHeader.header("X-Tenant", pbx.invites[0]), "blue")
         XCTAssertTrue(seen.all.contains { !$0.outgoing && $0.message.contains("X-Carrier-Route: trunk-7") })
         XCTAssertTrue(seen.all.allSatisfy { $0.remote == pbx.address })
     }

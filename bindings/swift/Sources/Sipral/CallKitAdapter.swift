@@ -22,11 +22,48 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
     /// reported connected; guarded by `stateQueue`.
     private var outgoing: Set<UUID> = []
     private var connected: Set<UUID> = []
+    /// The configuration last given to the provider; guarded by `stateQueue`.
+    private var current: CXProviderConfiguration
 
     public init(configuration: CXProviderConfiguration) {
+        current = Self.copied(configuration)
         provider = CXProvider(configuration: configuration)
         super.init()
         provider.setDelegate(self, queue: nil)
+    }
+
+    /// What the provider shows calls with now: a copy, so changing it changes
+    /// nothing until it is given to `update(configuration:)`. Kept here, since
+    /// a `CXProvider` the system refuses (the Simulator's) does not give its
+    /// configuration back.
+    public var configuration: CXProviderConfiguration {
+        stateQueue.sync { Self.copied(current) }
+    }
+
+    /// Show calls with `configuration` from the next one iOS is told of,
+    /// such as a ringtone the user has just picked in the application's
+    /// settings. The provider, its delegate and the CallKit and PushKit
+    /// bridges over it stay as they are; a call already on screen keeps what
+    /// it was reported with.
+    public func update(configuration: CXProviderConfiguration) {
+        let kept = Self.copied(configuration)
+        stateQueue.sync { current = kept }
+        provider.configuration = kept
+    }
+
+    private static func copied(_ configuration: CXProviderConfiguration) -> CXProviderConfiguration {
+        // NSCopying hands back the same class
+        configuration.copy() as? CXProviderConfiguration ?? configuration
+    }
+
+    /// Ring with `sound`, a file in the application's main bundle (as
+    /// `CXProviderConfiguration.ringtoneSound`), or with the phone's own
+    /// ringtone when it is `nil`, from the next incoming call; the rest of the
+    /// configuration is kept.
+    public func updateRingtone(_ sound: String?) {
+        let changed = configuration
+        changed.ringtoneSound = sound
+        update(configuration: changed)
     }
 
     public func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void) {

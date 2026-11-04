@@ -815,7 +815,9 @@ Split in two, so that the part worth testing needs no Android:
   screen already up rather than reported again -- rings an incoming call
   (180, `SipCalls.ring`) once the framework has created its connection and
   the INVITE is here, unless the user answered first, maps the framework's
-  answer, reject, hold, unhold, DTMF and disconnect onto the call, and the
+  answer, reject, hold, unhold, DTMF and disconnect onto the call (a reject
+  is 603, or the code `reject(id, code)` names: 486 for do-not-disturb, so a
+  PBX routes the call as busy), and the
   call's progress, hold (both ends'), and end back onto the framework, with a
   `DisconnectCause` for each way a call ends -- including a call that ended
   while the framework was still creating its connection, whose connection is
