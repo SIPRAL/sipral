@@ -111,6 +111,7 @@ October 2026, released.
 November 2026, released.
 
 - An incoming call that wakes a sleeping phone, end to end through a push gateway (RFC 8599) *(done)*
+- A registered phone with no call: battery and background behaviour measured on both platforms *(done)*
 - A cold start after a push in Swift and Kotlin, as in .NET MAUI: the woken app resumes its account rather than registering from scratch *(done)*
 - Android transactional Telecom API (API 34 and later) beside the self-managed ConnectionService *(done)*
 - Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH *(done)*
@@ -132,7 +133,6 @@ December 2026, planned.
 
 - iOS and Android proven on real phones: the system call screen, a cellular call interrupting, earpiece, speaker, wired and Bluetooth headsets, the car
 - Wi-Fi to mobile data on a phone, the time until audio returns measured and published
-- A registered phone with no call: battery and background behaviour measured on both platforms
 - Test builds accepted through TestFlight and Google Play internal testing *(in progress)*
 
 ### 2.0 — Beyond audio

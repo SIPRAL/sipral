@@ -2157,6 +2157,20 @@ on the phone.
     the REGISTER that proved the binding. Send: the log and both
     percentages.
 
+**Idle, registered, measured for 1.3.** With the phone on a cable, its
+percentage says nothing, so each platform's own accounting was read
+instead, the sample registered over UDP with no call. On Android, the
+system's battery statistics with the phone counted as unplugged: about
+1.3 mAh in thirty minutes with the screen off, a few hundredths of a
+percent of the battery. On iOS, Instruments' Power Profiler attached to
+the application: 0.2% of one core on average over ten minutes, the phone
+locking itself part of the way. The first iOS run found the Swift layer's
+poll loop spinning on a socket iOS had taken back from the suspended
+application, a whole core for half an hour; the loop now replaces such a
+socket, and the figure above is from after that fix. Wired and Bluetooth
+headsets, the car, a cellular call over ours and Wi-Fi to mobile data
+remain for 1.4 (`10-roadmap.md`).
+
 ## A client certificate whose key never leaves the phone
 
 Some PBXs and SBCs admit a phone only when it presents a certificate their
