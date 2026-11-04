@@ -106,15 +106,11 @@ October 2026, released.
 - LiveCommunicationKit on iOS *(done)*
 - The Rust API promised between releases and published on crates.io, checked on every change *(done)*
 
-### 1.3 — Real phones, browsers and carrier trunks, ahead of schedule
+### 1.3 — Real phones, browsers, carrier trunks and embedding, ahead of schedule
 
-November 2026, planned.
+November 2026, released.
 
-- iOS and Android proven on real phones: the system call screen, a cellular call interrupting, earpiece, speaker, wired and Bluetooth headsets, the car
-- An incoming call that wakes a sleeping phone, end to end through a push gateway (RFC 8599) *(in progress)*
-- Wi-Fi to mobile data on a phone, the time until audio returns measured and published
-- A registered phone with no call: battery and background behaviour measured on both platforms
-- Test builds accepted through TestFlight and Google Play internal testing *(in progress)*
+- An incoming call that wakes a sleeping phone, end to end through a push gateway (RFC 8599) *(done)*
 - A cold start after a push in Swift and Kotlin, as in .NET MAUI: the woken app resumes its account rather than registering from scratch *(done)*
 - Android transactional Telecom API (API 34 and later) beside the self-managed ConnectionService *(done)*
 - Calls on a PBX WebRTC line: BUNDLE (RFC 8843) and the UDP/TLS/RTP/SAVPF profile, proven against Asterisk and FreeSWITCH *(done)*
@@ -126,14 +122,18 @@ November 2026, planned.
 - A client certificate on SIP over TLS, signed by the platform: Secure Enclave on iOS, Android Keystore, the Keychain on macOS, CNG on Windows *(done)*
 - The same certificate in the C ABI and in the Swift, Kotlin, .NET, Python, Dart and Node bindings *(done)*
 - Proven against an Asterisk that requires a client certificate, at TLS 1.3 and 1.2, in the lab *(done)*
-
-### 1.4 — Embedding without a binding
-
-December 2026, planned.
-
 - Networking ready to use from Rust and C: sockets, TLS, NAPTR/SRV lookups, and the STUN and TURN of every call over UDP, TCP or TLS in one optional component, so an application without a binding no longer writes its own *(done)*
 - A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller *(done)*
 - A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding *(done)*
+
+### 1.4 — Real phones in every situation, and the stores’ test tracks
+
+December 2026, planned.
+
+- iOS and Android proven on real phones: the system call screen, a cellular call interrupting, earpiece, speaker, wired and Bluetooth headsets, the car
+- Wi-Fi to mobile data on a phone, the time until audio returns measured and published
+- A registered phone with no call: battery and background behaviour measured on both platforms
+- Test builds accepted through TestFlight and Google Play internal testing *(in progress)*
 
 ### 2.0 — Beyond audio
 

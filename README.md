@@ -103,8 +103,8 @@ Node.js layer runs device or application mode, signalling over UDP, TCP or TLS.
 
 ## Status
 
-**1.2.3, at C ABI 1.2.** These are two numbers on purpose: 1.2.3 is the
-release every package ships under, and 1.2 is the version of the C
+**1.3.0, at C ABI 1.13.** These are two numbers on purpose: 1.3.0 is the
+release every package ships under, and 1.13 is the version of the C
 interface, which `sipral_abi_check` compares when a binding loads
 ([`docs/08-ffi.md`, "Versioning"](docs/08-ffi.md#versioning)).
 

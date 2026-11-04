@@ -11,6 +11,8 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-04
+
 ### Added
 
 - **Sipral from C++.** `bindings/cpp/include/sipral.hpp`, header only and C++17, puts the stack, its accounts and calls, its events, the message hook and the networking component in classes over the C ABI: a stack destroyed and an account removed with its object, a failed call a `sipral::Error` with its status and the library's sentence, handlers as `std::function` whose exceptions never cross into the library (`docs/27-cpp.md`). `bindings/cpp/smoke.cpp` runs in the gate, and `scripts/lab.sh network` runs `interop/network/register-and-hold.cpp` after its C twin.
@@ -102,7 +104,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 - **The release build is made for size where speed does not matter.** `libsipral_ffi.dylib` is 5.25 MB instead of 5.47 MB on macOS: the C ABI's own layer, NAT traversal, the DTLS handshake, STIR, the diagnostics and the device code are built with `opt-level = "s"`, and everything a frame, a packet or a SIP message goes through keeps full speed, since built all for size SIP ran up to 76 % slower per transaction (`docs/19-numbers.md`, 27 October 2026).
 - The iPhone sample is shown as "Sipral sample" and identified as `org.sipral.sample`, as the Android sample is (`SIPRAL_PHONE_BUNDLE_ID` still replaces it).
 - The gate's `windows` area also builds the WPF sample (`net10.0-windows`) on its Windows machine, with `-warnaserror` against the .NET layer as the tree has it.
-- The roadmap plans 1.3 for November 2026: iOS and Android on real phones, a PBX WebRTC line, and, built ahead of the 1.4 and 1.5 they were planned for, trickle ICE, a browser at the other end, SIP-T and SIP-I and a client certificate on SIP over TLS, its key held by the platform (`docs/10-roadmap.md`, "Phase 7"). 1.4, in December, brings networking ready to use from Rust and C, a C++ API and a hook that rewrites SIP messages in and out (`docs/10-roadmap.md`, "Phase 8"); there is no 1.5 any more.
+- The roadmap: 1.3 brings, beside real phones and a PBX WebRTC line, everything built ahead of the releases it was planned for: trickle ICE, a browser at the other end, SIP-T and SIP-I, a client certificate on SIP over TLS whose key the platform holds, networking ready to use from Rust and C, a C++ API and a hook that rewrites SIP messages in and out (`docs/10-roadmap.md`, "Releases"). 1.4, in December, measures a phone in every situation (a cellular call over ours, wired and Bluetooth headsets, the car, Wi-Fi to mobile data, battery) and takes the sample apps through the stores' test tracks; there is no 1.5 any more.
 - The README and the documentation say what is not there yet, video and a WebRTC peer, instead of listing what Sipral leaves out; `docs/09-rfc-index.md`'s "Deliberately not implemented" table is gone, and `docs/07-headless.md` says where the agent's work happens. The README and `docs/01-architecture.md` say that the bindings open TLS and run NAPTR and SRV lookups with the platform's APIs, and that only the optional Rust reference loop lacks them.
 
 ## [1.2.3] - 2026-10-21
