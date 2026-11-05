@@ -763,7 +763,7 @@ body, reads the IAM into the caller and a REL into the call's end
 its BYE's REL reported, a call placed through ACM, CPG and ANM and one
 refused with a REL (`11-testing.md`). No carrier's trunk has been called.
 
-## Phase 8 — embedding without a binding, 1.4
+## Phase 8 — embedding without a binding, 1.3 (planned for 1.4)
 
 Decided on 22 October 2026. The Swift, Kotlin, .NET, Python, Dart and Node
 bindings open their own sockets, TLS connections and NAPTR/SRV lookups with
