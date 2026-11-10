@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Changed
+
+- **The `Sipral` NuGet package targets .NET 10.** .NET 8 and .NET 9 left Microsoft's support on 10 November 2026, so the package moves from `net8.0` to `net10.0`, the one runtime still receiving security fixes; an application on .NET 8 or 9 keeps 1.3.0.
+
 ## [1.3.0] - 2026-11-04
 
 ### Added

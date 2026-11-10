@@ -872,8 +872,7 @@ $ dotnet run -- $LAB 5349 3478 other.lab.sipral.test sipral "$TURN_PASSWORD" tur
 no relay: the connection to the server closed (code 0)
 ```
 
-These runs were on macOS (.NET 10, the project rolled forward from
-`net8.0`), where `SslStream` sits on Apple's TLS rather than SChannel; the
+These runs were on macOS (.NET 10), where `SslStream` sits on Apple's TLS rather than SChannel; the
 code and its outcome are the same, and only the store the default trust
 reads differs.
 

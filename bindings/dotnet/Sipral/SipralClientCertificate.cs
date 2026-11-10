@@ -76,7 +76,7 @@ public sealed class SipralClientCertificate
         if (OperatingSystem.IsWindows())
         {
             using var ephemeral = leaf;
-            leaf = new X509Certificate2(ephemeral.Export(X509ContentType.Pkcs12));
+            leaf = X509CertificateLoader.LoadPkcs12(ephemeral.Export(X509ContentType.Pkcs12), null);
         }
         return new SipralClientCertificate(leaf, intermediates);
     }
