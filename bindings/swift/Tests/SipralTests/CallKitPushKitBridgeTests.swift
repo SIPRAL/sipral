@@ -18,6 +18,9 @@ final actor RecordingProvider: CallKitProviding {
     /// The calls the system was asked to take off hold.
     private(set) var unheld: [UUID] = []
     var failNextReport = false
+    /// What the next failed report is refused with, CallKit's own error in
+    /// place of an unknown call.
+    var refusal: Error?
 
     nonisolated func reportIncomingCall(uuid: UUID, callerId: String, completion: @Sendable @escaping (Error?) -> Void) {
         reportIncomingCall(uuid: uuid, callerId: callerId, displayName: nil, completion: completion)
@@ -28,8 +31,9 @@ final actor RecordingProvider: CallKitProviding {
     ) {
         Task {
             let shouldFail = await self.consumeFailNextReport()
+            let refusal = await self.refusal
             await self.record(uuid: uuid, callerId: callerId, displayName: displayName)
-            completion(shouldFail ? CallKitBridgeError.unknownCall(uuid) : nil)
+            completion(shouldFail ? refusal ?? CallKitBridgeError.unknownCall(uuid) : nil)
         }
     }
 
@@ -521,6 +525,48 @@ final class CallKitBridgeTests: XCTestCase {
 
 private extension RecordingProvider {
     func setFailNextReport(_ value: Bool) { failNextReport = value }
+    /// The next report refused as CallKit refuses it under a Focus.
+    func refuseNextReport(with error: Error) {
+        failNextReport = true
+        refusal = error
+    }
+}
+
+/// CallKit's refusal of a screen under a Focus:
+/// `CXErrorCodeIncomingCallError.filteredByDoNotDisturb`, spelled out, since
+/// CallKit is absent where these tests run.
+let refusedByFocus = NSError(domain: "com.apple.CallKit.error.incomingcall", code: 3)
+
+/// Counts the binding refreshes a push asks of its account.
+final class CountingAnnouncer: PushAnnouncing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var announces = 0
+    private var refreshes = 0
+
+    var announced: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return announces
+    }
+
+    var refreshed: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return refreshes
+    }
+
+    func announce(caller: String?, callId: String?) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+        lock.lock()
+        defer { lock.unlock() }
+        announces += 1
+        return (717172, nil)
+    }
+
+    func refreshBinding() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        refreshes += 1
+    }
 }
 
 /// `PushKitBridge` against a real loopback stack, with `RecordingProvider`
@@ -697,6 +743,50 @@ final class PushKitBridgeTests: XCTestCase {
         XCTAssertTrue(ended)
         let reason = await provider.ended.first?.reason
         XCTAssertEqual(reason, .failed)
+    }
+
+    /// A screen the system refuses under a Focus is told apart from an
+    /// unusable push, with CallKit's reason, and nothing is announced or
+    /// taken down: there is no screen, and the INVITE comes as an ordinary
+    /// call for the application to refuse.
+    func testAPushWhoseScreenTheSystemRefusesSaysWhy() async throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
+        let provider = RecordingProvider()
+        await provider.refuseNextReport(with: refusedByFocus)
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+
+        let outcome = await pushKit.receive(VoipPushFields(callerId: "sip:alice@sipral.invalid"), account: account)
+        guard case .refused(let named, let error) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(named?.callerId, "sip:alice@sipral.invalid")
+        XCTAssertEqual((error as NSError).domain, refusedByFocus.domain)
+        XCTAssertEqual((error as NSError).code, refusedByFocus.code)
+        let ended = await provider.ended
+        XCTAssertTrue(ended.isEmpty, "a screen never shown was taken down")
+
+        await provider.refuseNextReport(with: refusedByFocus)
+        let nobody = await pushKit.receive(VoipPushFields(), account: account)
+        guard case .refused(nil, _) = nobody else { return XCTFail("\(nobody)") }
+    }
+
+    /// The woken UA refreshes its binding (RFC 8599 §4.1.3) even when the
+    /// system refuses the screen: otherwise the PBX has nowhere to send the
+    /// INVITE the application means to refuse, and waits out its timer.
+    func testAScreenTheSystemRefusesStillHasTheBindingRefreshed() async throws {
+        let provider = RecordingProvider()
+        await provider.refuseNextReport(with: refusedByFocus)
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let announcer = CountingAnnouncer()
+
+        do {
+            _ = try await pushKit.handle(push: VoipPush(callerId: "sip:alice@sipral.invalid"), announcer: announcer)
+            XCTFail("a refused screen was handled as shown")
+        } catch {
+            XCTAssertEqual((error as NSError).code, refusedByFocus.code, "CallKit's reason was lost")
+        }
+        XCTAssertEqual(announcer.refreshed, 1)
+        XCTAssertEqual(announcer.announced, 0, "a call with no screen was announced")
     }
 
     /// A push read, but naming nobody (RFC 8599 asks for no payload, and a

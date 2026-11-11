@@ -3591,7 +3591,8 @@ public enum Sipral {
 
     /// Forget an account and everything scheduled for it. Nothing is sent: its
     /// registrar may be unreachable. Call sipral_account_unregister first
-    /// to give the binding up.
+    /// to give the binding up. The account's subscriptions go with it, with no
+    /// event; end one at the notifier first with `sipral_subscription_end`.
     ///
     /// Safety
     ///

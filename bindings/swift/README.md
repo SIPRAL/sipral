@@ -91,7 +91,19 @@ which the adapter implements beside the older one, under
 `@available(iOS 26.4, *)`: a push whose `mustReport` is false — the
 application in the foreground or already in a call, or a push delivered
 late — is not shown; the binding is refreshed, `notShown` is told what it
-named, and its INVITE, if one comes, is an ordinary incoming call.
+named, and its INVITE, if one comes, is an ordinary incoming call. A push
+whose screen the system refuses (a Focus, a blocked caller) has its binding
+refreshed too, and `refused` is told what it named and CallKit's error
+(`CXErrorCodeIncomingCallError`), so its INVITE can be refused as the
+application decides, such as busy (486) under a Focus:
+
+```swift
+push.refused = { _, error in
+    if (error as NSError).code == CXErrorCodeIncomingCallError.filteredByDoNotDisturb.rawValue {
+        refuseNextInviteAsBusy()  // the application's own: Call.reject(code: 486) on its INVITE
+    }
+}
+```
 
 ```swift
 let push = PushKitAdapter(bridge: pushBridge, decoder: { payload in

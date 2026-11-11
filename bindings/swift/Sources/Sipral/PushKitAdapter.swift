@@ -46,6 +46,14 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
     /// comes, is an ordinary incoming call.
     public var notShown: (@Sendable (VoipPush?) -> Void)?
 
+    /// Every push whose screen the system refused (a Focus, a blocked
+    /// caller), after `received` was told `nil`: what it named, or `nil`
+    /// when it named no caller, and CallKit's reason
+    /// (`CXErrorCodeIncomingCallError`). The binding was refreshed; its
+    /// INVITE, if one comes, is an ordinary incoming call, to refuse or
+    /// show.
+    public var refused: (@Sendable (VoipPush?, Error) -> Void)?
+
     /// The account is looked up on every push, so one added after launch,
     /// or none at all, is what the push meets. `decoder` reads each payload
     /// on `queue`, before the push is reported.
@@ -115,6 +123,7 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
         let fields = try? decoder(payload.dictionaryPayload)
         let received = self.received
         let notShown = self.notShown
+        let refused = self.refused
         // Reported to CallKit before this returns: iOS checks for the report
         // as the delegate method returns, and ends the application if a push
         // that must be reported has none.
@@ -123,6 +132,9 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
             case .shown(let pending): received?(pending)
             case .unusable: received?(nil)
             case .notShown(let push): notShown?(push)
+            case .refused(let push, let error):
+                received?(nil)
+                refused?(push, error)
             }
             completion()
         }

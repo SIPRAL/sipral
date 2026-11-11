@@ -620,7 +620,9 @@ impl UserAgent {
     /// Forget an account, and everything scheduled for it.
     ///
     /// No de-registration goes out, since the registrar may be unreachable.
-    /// Call [`UserAgent::unregister`] first to give the binding up.
+    /// Call [`UserAgent::unregister`] first to give the binding up, and
+    /// [`UserAgent::unsubscribe`] for a subscription to end at the notifier
+    /// now; the account's subscriptions are dropped with it, with no event.
     pub fn remove_account(&mut self, account: AccountId) {
         self.accounts.remove(&account);
         self.registrations.remove(&account);
@@ -630,6 +632,7 @@ impl UserAgent {
         self.flows_wanted.remove(&account);
         self.flows_asked.remove(&account);
         self.forget_publications(account);
+        self.forget_subscriptions(account);
     }
 
     /// What was configured, read back.

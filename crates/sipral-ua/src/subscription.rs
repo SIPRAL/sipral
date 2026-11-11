@@ -2031,6 +2031,27 @@ impl UserAgent {
             .unwrap_or(BACKOFF_LIMIT)
     }
 
+    /// Drops an account's subscriptions without sending: the account and its
+    /// credentials are gone, so no `Expires: 0` can go out, and the
+    /// subscriptions lapse at the notifier (RFC 6665 §4.1.2.3). Left in
+    /// place, each would fire at its next refresh with no account and end as
+    /// unreachable, long after the application removed it.
+    pub(crate) fn forget_subscriptions(&mut self, account: AccountId) {
+        let gone: Vec<SubscriptionHandle> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, held)| held.account == account)
+            .map(|(handle, _)| *handle)
+            .collect();
+        for subscription in gone {
+            let Some(held) = self.subscriptions.remove(&subscription) else {
+                continue;
+            };
+            self.by_subscribe.retain(|_, owner| *owner != subscription);
+            self.forget_subscription_dialog(subscription, held.dialog);
+        }
+    }
+
     /// Something trying again cannot fix. The record goes with the event.
     fn end_subscription(
         &mut self,

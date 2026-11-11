@@ -11537,31 +11537,29 @@ fn a_subscription_that_cannot_be_sent_is_an_event_and_leaves_nothing_behind() {
 }
 
 #[test]
-fn a_refresh_that_cannot_be_sent_is_the_same_event_on_a_live_subscription() {
+fn a_live_subscription_goes_with_its_removed_account_and_never_ends_later() {
+    // an application that removes and adds its account on every
+    // configuration change: the old account's settled subscription must not
+    // fire its refresh an hour on and end as unreachable with no status
     let t0 = Instant::now();
     let mut agent = agent(t0);
     let id = agent.add_account(account());
     let (handle, _) = subscribed(&mut agent, id, t0);
 
-    // the transport goes while the subscription is settled and its refresh is
-    // most of an hour out
     agent.remove_account(id);
-    agent.handle_timeout(t0 + Duration::from_secs(3_060));
-
-    assert!(
-        events(&mut agent).iter().any(|event| matches!(
-            *event,
-            UaEvent::SubscriptionEnded {
-                subscription,
-                reason: SubscriptionEnd::Unreachable,
-                ..
-            } if subscription == handle
-        )),
-        "a refresh that cannot go is reported the same way"
-    );
     assert_eq!(agent.subscription_state(handle), None);
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
     agent.handle_timeout(t0 + Duration::from_secs(31_536_000));
-    assert!(transmits(&mut agent).is_empty());
+
+    let ended: Vec<UaEvent> = events(&mut agent)
+        .into_iter()
+        .filter(|event| matches!(*event, UaEvent::SubscriptionEnded { .. }))
+        .collect();
+    assert!(ended.is_empty(), "{ended:?}");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a removed account's subscription was refreshed"
+    );
 }
 
 #[test]

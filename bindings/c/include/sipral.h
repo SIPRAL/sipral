@@ -9357,7 +9357,8 @@ sipral_status_t sipral_account_add(sipral_handle_t stack, const sipral_account_c
 /**
  * Forget an account and everything scheduled for it. Nothing is sent: its
  * registrar may be unreachable. Call sipral_account_unregister first
- * to give the binding up.
+ * to give the binding up. The account's subscriptions go with it, with no
+ * event; end one at the notifier first with `sipral_subscription_end`.
  *
  * Safety
  *

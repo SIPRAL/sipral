@@ -218,7 +218,13 @@ the decoder the application gives `PushKitAdapter`, which returns the same
 three fields. From iOS 26.4 PushKit says with each push whether a call must
 be reported for it (`PKVoIPPushMetadata.mustReport`); the adapter takes that
 delivery too, and a push that need not be reported is not shown: the binding
-is refreshed, and its INVITE is shown as any other incoming call. The name
+is refreshed, and its INVITE is shown as any other incoming call. A screen
+the system refuses (a Focus, `filteredByDoNotDisturb`; a blocked caller) is
+told apart from an unusable push: the outcome is `refused`, with CallKit's
+error, and the adapter's `refused` is called. The binding is refreshed all
+the same (RFC 8599 §4.1.3), so the INVITE still arrives, as an ordinary
+incoming call the application can refuse, busy (486) for a Focus, instead of
+leaving the PBX to wait out its timer with no answer at all. The name
 reaches the call screen as `CXCallUpdate.localizedCallerName`, from the push
 or, when it carried none, from the INVITE once matched; and
 `CallKitBridge.endShown(uuid:reason:)` takes down a screen the application

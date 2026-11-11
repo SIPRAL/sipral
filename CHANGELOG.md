@@ -11,6 +11,14 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **A push whose call screen iOS refuses says so, and why.** Under a Focus (`filteredByDoNotDisturb`) or for a blocked caller CallKit refuses the report; `PushKitBridge.receive` now answers `PushOutcome.refused(VoipPush?, Error)` with CallKit's error instead of `unusable`, `PushKitAdapter.refused` is told the same, and the binding is refreshed (RFC 8599 §4.1.3), so the INVITE still arrives for the application to refuse, busy (486) under a Focus, rather than the PBX waiting out its timer with no answer. A `switch` over `PushOutcome` that lists every case needs the new one.
+
+### Fixed
+
+- **A removed account's subscriptions go with it.** `remove_account` (`sipral_account_remove`) dropped the account's registration and publications but kept its subscriptions, which went on firing their refreshes with no account to send from and ended, one by one, as `unreachable` with no status, long after the application had removed the account; an application that removes and adds its account on every configuration change saw its presence and dialog subscriptions die that way. They are now dropped with the account, with no event, and lapse at the notifier.
+
 ### Changed
 
 - **The `Sipral` NuGet package targets .NET 10.** .NET 8 and .NET 9 left Microsoft's support on 10 November 2026, so the package moves from `net8.0` to `net10.0`, the one runtime still receiving security fixes; an application on .NET 8 or 9 keeps 1.3.0.

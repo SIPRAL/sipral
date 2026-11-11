@@ -83,9 +83,17 @@ public enum PushOutcome: Sendable {
     /// Shown, announced and waiting for its INVITE.
     case shown(PendingCall)
     /// Shown and ended at once, since its payload could not be read, it met
-    /// no account or had its announcement refused; or never shown, the
-    /// system refusing the screen (Do Not Disturb, a blocked caller).
+    /// no account or had its announcement refused.
     case unusable
+    /// Never shown, the system refusing the screen, with CallKit's reason:
+    /// a `CXErrorCodeIncomingCallError` such as `filteredByDoNotDisturb`
+    /// (a Focus) or `filteredByBlockList`. Carries what the push named, or
+    /// `nil` when it named no caller. The binding was refreshed, so the
+    /// INVITE still comes, as an ordinary incoming call
+    /// (`matchIncomingCall` finds no push for it) for the application to
+    /// refuse, such as busy (486) for a Focus, or to show as it would any
+    /// call.
+    case refused(VoipPush?, Error)
     /// Not shown, since the system said this push need not be
     /// (`PKVoIPPushMetadata.mustReport` false); the binding was refreshed,
     /// and the INVITE, if one comes, is an ordinary incoming call. Carries
@@ -139,7 +147,9 @@ public final class PushKitBridge: @unchecked Sendable {
     /// `IncomingCall` arrives (or at once, if the INVITE came first).
     ///
     /// An announcement the stack refuses ends the call just shown, as
-    /// failed, before the error is rethrown. A push for a call that is
+    /// failed, before the error is rethrown. A screen the system refuses (a
+    /// Focus, a blocked caller) throws CallKit's error, the binding
+    /// refreshed all the same so the INVITE still comes. A push for a call that is
     /// already on screen, because its INVITE came first and was shown, or
     /// was handed back by `matchIncomingCall` for the application to show,
     /// ends the second screen at once.
@@ -188,10 +198,29 @@ public final class PushKitBridge: @unchecked Sendable {
         push: VoipPush, announcer account: some PushAnnouncing,
         outcome: @escaping @Sendable (Result<PendingCall, Error>) -> Void
     ) -> UUID {
+        show(push, on: account, shown: outcome) { outcome(.failure($0)) }
+    }
+
+    /// Reports `push` to CallKit, then announces it once shown (`shown`);
+    /// a screen the system refuses still has the binding refreshed, the
+    /// woken UA's MUST (RFC 8599 §4.1.3), before `refused` hears CallKit's
+    /// reason.
+    @discardableResult
+    private func show(
+        _ push: VoipPush, on account: some PushAnnouncing,
+        shown: @escaping @Sendable (Result<PendingCall, Error>) -> Void,
+        refused: @escaping @Sendable (Error) -> Void
+    ) -> UUID {
         callKit.reportIncomingCall(
             callerId: push.namesCaller ? push.callerId : Self.unknownCaller, displayName: push.displayName
         ) { [self] reported in
-            outcome(reported.flatMap { uuid in Result { try announce(push, shownAs: uuid, on: account) } })
+            switch reported {
+            case .success(let uuid):
+                shown(Result { try announce(push, shownAs: uuid, on: account) })
+            case .failure(let error):
+                try? account.refreshBinding()
+                refused(error)
+            }
         }
     }
 
@@ -264,7 +293,9 @@ public final class PushKitBridge: @unchecked Sendable {
     /// were read and that meets an account runs `handle(push:account:)`,
     /// on its caller, or on the account alone when it named none (RFC 8599
     /// asks a push for no payload, §13); any other is shown and ended at
-    /// once (`reportUnusable(callerId:)`), so iOS keeps delivering. Without
+    /// once (`reportUnusable(callerId:)`), so iOS keeps delivering. One whose
+    /// screen the system refuses is `refused`, with CallKit's reason, and
+    /// its binding refreshed. Without
     /// it nothing is shown or announced: the binding is refreshed (§4.1.3),
     /// and the INVITE, if one comes, arrives as an ordinary incoming call
     /// for the application to show, as one does while the application runs.
@@ -296,12 +327,12 @@ public final class PushKitBridge: @unchecked Sendable {
             return
         }
         let push = fields.push ?? VoipPush(callId: fields.callId, displayName: fields.displayName)
-        handle(push: push, account: account) { result in
+        show(push, on: account, shown: { result in
             switch result {
             case .success(let pending): outcome(.shown(pending))
             case .failure: outcome(.unusable)
             }
-        }
+        }, refused: { outcome(.refused(fields.push, $0)) })
     }
 
     /// Hand every event from `SipralStack.events()` here; three matter.
