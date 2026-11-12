@@ -67,6 +67,10 @@ final class PhoneModel: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var serverAddress = ""
     private var voipToken: [UInt8]?
+    /// The system refused a push's call screen (a Focus, a blocked caller)
+    /// this recently: the INVITE that follows is refused busy rather than
+    /// rung, since nobody is shown it.
+    private var refusedBySystemAt: Date?
     private var inBackground = false
     /// The account was added with push parameters, so the registrar's
     /// answer about them is worth reading.
@@ -157,7 +161,12 @@ final class PhoneModel: ObservableObject {
             Task { @MainActor in self?.tokenChanged(token) }
         }
         push.received = { pending in
-            log.note("push received: \(pending.map { "call shown as \($0.uuid), caller \($0.callerId)" } ?? "nothing usable; shown and ended")")
+            log.note("push received: \(pending.map { "call shown as \($0.uuid), caller \($0.callerId)" } ?? "nothing usable, or refused by the system")")
+        }
+        push.refused = { [weak self] named, error in
+            let reason = error as NSError
+            log.note("push refused by the system: \(reason.domain) code \(reason.code), caller \(named?.callerId ?? "none"); binding refreshed, its INVITE will be refused busy")
+            Task { @MainActor in self?.refusedBySystemAt = Date() }
         }
         callKit = adapter
         self.bridge = bridge
@@ -477,6 +486,12 @@ final class PhoneModel: ObservableObject {
         guard let stack else { return }
         let caller = event.callData?.fromUri ?? "unknown"
         let pending = pushBridge?.matchIncomingCall(event, on: stack)
+        if pending == nil, let refused = refusedBySystemAt, Date().timeIntervalSince(refused) < 20 {
+            refusedBySystemAt = nil
+            note("busy: \(caller) refused with 486, its push's screen refused by the system")
+            try? stack.rejectCall(event, code: 486)
+            return
+        }
         guard session == nil else {
             note("busy: \(caller) refused with 486")
             try? stack.rejectCall(event, code: 486)
