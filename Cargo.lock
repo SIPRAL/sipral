@@ -1520,7 +1520,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sipral"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "getrandom 0.2.17",
  "rcgen",
@@ -1542,14 +1542,14 @@ dependencies = [
 
 [[package]]
 name = "sipral-abi-gen"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-ffi",
 ]
 
 [[package]]
 name = "sipral-audio"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral",
  "sipral-io-aaudio",
@@ -1561,11 +1561,11 @@ dependencies = [
 
 [[package]]
 name = "sipral-core"
-version = "1.3.0"
+version = "1.3.1"
 
 [[package]]
 name = "sipral-diag"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "hmac",
  "sha2",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-diag-export"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-core",
  "sipral-diag",
@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-dtls"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "aes-gcm",
  "hmac",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-ffi"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "hickory-proto",
  "rcgen",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-fuzz-seeds"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "p256",
  "sipral",
@@ -1632,11 +1632,11 @@ dependencies = [
 
 [[package]]
 name = "sipral-headless"
-version = "1.3.0"
+version = "1.3.1"
 
 [[package]]
 name = "sipral-interop"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "getrandom 0.2.17",
  "sipral",
@@ -1651,57 +1651,57 @@ dependencies = [
 
 [[package]]
 name = "sipral-io-aaudio"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-io-common",
 ]
 
 [[package]]
 name = "sipral-io-common"
-version = "1.3.0"
+version = "1.3.1"
 
 [[package]]
 name = "sipral-io-coreaudio"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-io-common",
 ]
 
 [[package]]
 name = "sipral-io-pipewire"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-io-common",
 ]
 
 [[package]]
 name = "sipral-io-wasapi"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-io-common",
 ]
 
 [[package]]
 name = "sipral-license-gen"
-version = "1.3.0"
+version = "1.3.1"
 
 [[package]]
 name = "sipral-media"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "opus",
 ]
 
 [[package]]
 name = "sipral-nat"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sipral-core",
 ]
 
 [[package]]
 name = "sipral-net"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "hickory-proto",
  "hickory-resolver",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-push-gateway"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "ring",
  "rustls",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-rtp"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1738,11 +1738,11 @@ dependencies = [
 
 [[package]]
 name = "sipral-sbom-gen"
-version = "1.3.0"
+version = "1.3.1"
 
 [[package]]
 name = "sipral-stir"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "p256",
  "x509-cert",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-ua"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "sha1",
  "sipral-core",

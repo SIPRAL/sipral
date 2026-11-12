@@ -11,6 +11,8 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-12
+
 ### Added
 
 - **A push whose call screen iOS refuses says so, and why.** Under a Focus (`filteredByDoNotDisturb`) or for a blocked caller CallKit refuses the report; `PushKitBridge.receive` now answers `PushOutcome.refused(VoipPush?, Error)` with CallKit's error instead of `unusable`, `PushKitAdapter.refused` is told the same, and the binding is refreshed (RFC 8599 §4.1.3), so the INVITE still arrives for the application to refuse, busy (486) under a Focus, rather than the PBX waiting out its timer with no answer. A `switch` over `PushOutcome` that lists every case needs the new one.
