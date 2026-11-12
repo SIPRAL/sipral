@@ -2348,18 +2348,18 @@ other two.
 
 ## Consuming the packages
 
-What is published, read from the registries on 21 October 2026, and what
-was built and launched from them that day, each in a project outside the
-repository.
+What is published, read from the registries on 12 November 2026; what was
+built and launched from them on 21 October 2026, each in a project outside
+the repository, is below.
 
 | Artefact | Where | Versions there |
 |---|---|---|
 | Swift package, default (no Opus) | this repository, root `Package.swift`, over `CSipral.xcframework.zip` among the release's assets | 1.2.0 on, by tag |
-| `CSipral-opus.xcframework.zip` | an asset of the releases v1.2.1 and v1.2.3; from 1.3 the root `Package.swift`'s trait `Opus` names it | - |
-| `org.sipral:sipral`, `org.sipral:sipral-opus` (AAR) | Maven Central | 1.1.0, 1.2.0 |
-| `org.sipral:sipral-jvm`, `org.sipral:sipral-jvm-opus` | Maven Central | 1.1.0, 1.2.0 |
-| `org.sipral:sipral-telecom` (the telecom helper) | not published yet; `scripts/package/android.sh` builds it with its POM and sources jar, for Maven Central from 1.3 | - |
-| `Sipral.Maui` | NuGet | 1.2.0 |
+| `CSipral-opus.xcframework.zip` | an asset of the releases v1.2.1, v1.2.3, and v1.3.0 on, where the root `Package.swift`'s trait `Opus` names it | - |
+| `org.sipral:sipral`, `org.sipral:sipral-opus` (AAR) | Maven Central | 1.1.0, 1.2.0, 1.3.0, 1.3.1 |
+| `org.sipral:sipral-jvm`, `org.sipral:sipral-jvm-opus` | Maven Central | 1.1.0, 1.2.0, 1.3.0, 1.3.1 |
+| `org.sipral:sipral-telecom` (the telecom helper) | Maven Central | 1.3.0, 1.3.1 |
+| `Sipral.Maui` | NuGet | 1.2.0, 1.3.0, 1.3.1 |
 
 Opus stays out of the default artefacts on purpose (`docs/05-media.md`,
 THIRD-PARTY-NOTICES.md); an application that wants it names the variant.
@@ -2377,7 +2377,7 @@ THIRD-PARTY-NOTICES.md); an application that wants it names the variant.
 library is linked; it needs Swift 6.1 (Xcode 16.3) or later:
 
 ```swift
-.package(url: "https://github.com/SIPRAL/sipral", exact: "1.3.0", traits: ["Opus"]),
+.package(url: "https://github.com/SIPRAL/sipral", exact: "1.3.1", traits: ["Opus"]),
 // target: .product(name: "Sipral", package: "sipral")
 ```
 
@@ -2403,11 +2403,11 @@ targets: [
 ]
 ```
 
-**Gradle.** From Maven Central, 1.2.0 being the newest there:
+**Gradle.** From Maven Central, 1.3.1 being the newest there:
 
 ```kotlin
 dependencies {
-    implementation("org.sipral:sipral:1.2.0")        // or org.sipral:sipral-opus:1.2.0
+    implementation("org.sipral:sipral:1.3.1")        // or org.sipral:sipral-opus:1.3.1
 }
 ```
 
@@ -2421,10 +2421,10 @@ whose POM names `org.sipral:sipral`, `kotlinx-coroutines-android` and
 default one out:
 
 ```kotlin
-implementation("org.sipral:sipral-telecom:1.3.0")
+implementation("org.sipral:sipral-telecom:1.3.1")
 // with Opus instead:
-implementation("org.sipral:sipral-opus:1.3.0")
-implementation("org.sipral:sipral-telecom:1.3.0") { exclude(group = "org.sipral", module = "sipral") }
+implementation("org.sipral:sipral-opus:1.3.1")
+implementation("org.sipral:sipral-telecom:1.3.1") { exclude(group = "org.sipral", module = "sipral") }
 ```
 
 Its classes are compiled as Kotlin 2.2, like `sipral.aar`'s, so an

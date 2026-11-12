@@ -45,7 +45,13 @@ the Node.js and .NET MAUI packages, SIP over a WebSocket the stack opens,
 the Rust API promised between releases and published on crates.io, a week of
 calls with no error, and the fixes `CHANGELOG.md` lists.
 
-**1.2.3 is released** (21 October 2026), at ABI 1.2 unchanged: a move behind
+**1.3.1 is released** (12 November 2026), at ABI 1.13 unchanged since 1.3.0:
+an incoming call's screen that iOS refuses to show, under a Focus for
+instance, is reported to the application with CallKit's reason; a removed
+account's subscriptions go with it rather than ending later as unreachable;
+the .NET package targets .NET 10.
+
+**1.2.3 was released** (21 October 2026), at ABI 1.2 unchanged: a move behind
 a NAT keeps the account registered at an Asterisk that rewrites the
 `Contact`, the old address withdrawn in a REGISTER of its own before the new
 one is added, and a 200 that lists no binding asked again.

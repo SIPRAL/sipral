@@ -723,7 +723,7 @@ the Android NDK and the `maui-ios` and `maui-android` workloads (.NET MAUI
 
 ```sh
 dotnet workload install maui-ios maui-android
-scripts/package/maui.sh            # target/maui/Sipral.Maui.1.2.3.nupkg
+scripts/package/maui.sh            # target/maui/Sipral.Maui.1.3.1.nupkg
 scripts/package/maui.sh --natives-only   # only target/maui/natives
 ```
 
@@ -798,7 +798,7 @@ background with `SipralAppLifecycle`. `net10.0-ios` and `net10.0-android`,
 after `scripts/package/maui.sh --natives-only`:
 `dotnet build -f net10.0-ios -p:RuntimeIdentifier=iossimulator-arm64` or
 `dotnet build -c Release -f net10.0-android`; with
-`-p:SipralMauiVersion=1.2.3` it takes the `Sipral.Maui` package of that
+`-p:SipralMauiVersion=1.3.1` it takes the `Sipral.Maui` package of that
 version, from whatever feed restore is given, instead of the project. Its
 fields can be filled at launch and its buttons pressed in order from
 `SIPRAL_SAMPLE_*` (the environment on iOS, the intent's extras on Android),

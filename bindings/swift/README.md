@@ -288,7 +288,7 @@ the lab's Asterisk.
 
 That package carries the library without Opus by default. From 1.3 on, the
 variant with it, `CSipral-opus.xcframework.zip`, is the package trait
-`Opus`: `.package(url: "https://github.com/SIPRAL/sipral", exact: "1.3.0",
+`Opus`: `.package(url: "https://github.com/SIPRAL/sipral", exact: "1.3.1",
 traits: ["Opus"])`, which needs Swift 6.1 (Xcode 16.3) or later. For v1.2.1
 to v1.2.3 that zip is an asset no `Package.swift` names, and an application
 keeps the `Sipral` module's sources from the same tag in a package of its
