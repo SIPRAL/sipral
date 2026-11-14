@@ -18,7 +18,7 @@ phone line inside a voice agent without a media server in between.**
 
 ## What sets it apart
 
-- **Memory-safe, and built for hostile input.** Rust throughout; `unsafe` is denied everywhere but the C boundary and the device crates; `unwrap`, `panic` and unchecked indexing fail the gate; 36 `cargo-fuzz` targets, thirty of them run 24 CPU-hours each (about 61 billion executions, nothing found); the RFC 4475 torture corpus asserted message by message.
+- **Memory-safe, and built for hostile input.** Rust throughout; `unsafe` is denied everywhere but the C boundary and the device crates; `unwrap`, `panic` and unchecked indexing fail the gate; 38 `cargo-fuzz` targets, thirty of them run 24 CPU-hours each (about 61 billion executions, nothing found); the RFC 4475 torture corpus asserted message by message.
 - **A sans-I/O core.** It opens no socket, starts no thread, reads no clock and draws no random number: the RFC 3261 §17 timer diagrams are ordinary unit tests, and a recorded field session replays deterministically ([`docs/18-replay.md`](docs/18-replay.md)).
 - **No GPL or LGPL code in it.** Written clean-room from the RFCs and ITU Recommendations, permissive dependencies only (`cargo deny` fails on anything else), offered under AGPL-3.0 or a commercial licence that ships in closed apps and app stores.
 - **One C ABI, every language printed from one declaration.** The header and the Swift, Kotlin, .NET, Python, Dart and Node.js bindings come out of `tools/abi-gen`; struct layouts are checked on 64-bit and both 32-bit ABIs and compiled for six targets, and every member keeps its offset across minors.
