@@ -298,6 +298,10 @@ rm -rf "$SPM"
 mkdir -p "$SPM/Sources/Sipral" "$SPM/Tests/SipralTests"
 cp "$ROOT"/bindings/swift/Sources/Sipral/*.swift "$SPM/Sources/Sipral/"
 cp "$ROOT"/bindings/swift/Tests/SipralTests/*.swift "$SPM/Tests/SipralTests/"
+# the suite reads its credentials three levels above its own file, which
+# from spm/Tests/SipralTests is $OUT, as bindings/ is in the tree
+rm -rf "$OUT/fixtures"
+cp -R "$ROOT/bindings/fixtures" "$OUT/fixtures"
 copied=$(find "$SPM/Sources/Sipral" -name '*.swift' | wc -l | tr -d ' ')
 expected=$(find "$ROOT/bindings/swift/Sources/Sipral" -name '*.swift' | wc -l | tr -d ' ')
 if [ "$copied" -eq "$expected" ] && [ "$copied" -gt 0 ]; then

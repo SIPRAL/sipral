@@ -87,6 +87,12 @@ final class AudioDeviceModeTests: XCTestCase {
         let audio = try XCTUnwrap(stack.audio)
         let first = try audio.refresh()
         let second = try audio.refresh()
+        #if os(iOS)
+        // the route is the application's, through its AVAudioSession: the
+        // library lists nothing there, and listing still opens nothing
+        XCTAssertEqual(first, [])
+        XCTAssertEqual(second, [])
+        #else
         XCTAssertFalse(first.isEmpty, "no device listed")
         XCTAssertEqual(first.map(\.id), second.map(\.id))
         XCTAssertTrue(first.allSatisfy { $0.id != 0 && !$0.name.isEmpty })
@@ -94,6 +100,7 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertTrue(first.allSatisfy { !$0.name.contains("\0") }, "\(first.map(\.name))")
         XCTAssertEqual(try audio.devices(), second)
         XCTAssertTrue(first.contains { $0.outputChannels > 0 }, "no device can play")
+        #endif
         XCTAssertFalse(try audio.status().isActive, "listing opened the devices")
     }
 
@@ -102,11 +109,17 @@ final class AudioDeviceModeTests: XCTestCase {
         defer { stack.close() }
         let audio = try XCTUnwrap(stack.audio)
         let devices = try audio.refresh()
-        let speaker = try XCTUnwrap(devices.first { $0.isPresent && $0.canServe(.speaker) })
 
         XCTAssertThrowsError(try audio.select(UInt32.max, for: .speaker)) {
             XCTAssertEqual(($0 as? SipralError)?.status, .noSuchDevice)
         }
+        #if os(iOS)
+        // nothing is listed on iOS (the route is the application's), so there
+        // is no device to choose and none chosen
+        XCTAssertEqual(devices, [])
+        XCTAssertNil(try audio.selection(for: .speaker).selected)
+        #else
+        let speaker = try XCTUnwrap(devices.first { $0.isPresent && $0.canServe(.speaker) })
         if let microphoneOnly = devices.first(where: { $0.isPresent && $0.outputChannels == 0 }) {
             XCTAssertThrowsError(try audio.select(microphoneOnly, for: .speaker)) {
                 XCTAssertEqual(($0 as? SipralError)?.status, .deviceUnusable)
@@ -126,6 +139,7 @@ final class AudioDeviceModeTests: XCTestCase {
         try audio.select(nil as SipralAudioDevice?, for: .microphone)
         XCTAssertNil(try audio.selection(for: .microphone).selected)
         #endif
+        #endif
     }
 
     func testGainAndMuteBelongToTheDirectionAndSurviveAChangeOfDevice() throws {
@@ -137,8 +151,12 @@ final class AudioDeviceModeTests: XCTestCase {
         try audio.setGain(2, for: .output)
         try audio.setMuted(true, for: .output)
 
+        // a change of device where there are devices to choose; on iOS the
+        // route is the application's and the gains only have to hold
+        #if os(macOS)
         let speaker = try XCTUnwrap(try audio.refresh().first { $0.isPresent && $0.canServe(.speaker) })
         try audio.select(speaker, for: .speaker)
+        #endif
         XCTAssertEqual(try audio.gain(for: .input), 0.5)
         XCTAssertEqual(try audio.gain(for: .output), 2)
         XCTAssertTrue(try audio.isMuted(.output))
