@@ -45,7 +45,11 @@ the Node.js and .NET MAUI packages, SIP over a WebSocket the stack opens,
 the Rust API promised between releases and published on crates.io, a week of
 calls with no error, and the fixes `CHANGELOG.md` lists.
 
-**1.3.1 is released** (12 November 2026), at ABI 1.13 unchanged since 1.3.0:
+**1.3.2 is released** (16 November 2026), at ABI 1.13 unchanged: on iOS, an
+application that replaces its stack no longer crashes on its next move to the
+background.
+
+**1.3.1 was released** (12 November 2026), at ABI 1.13 unchanged since 1.3.0:
 an incoming call's screen that iOS refuses to show, under a Focus for
 instance, is reported to the application with CallKit's reason; a removed
 account's subscriptions go with it rather than ending later as unreachable;
