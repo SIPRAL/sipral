@@ -2281,8 +2281,9 @@ step_swift() {
         # carried through Call/Media/Account, plus CallKitBridge/PushKitBridge's
         # own sequence against a recording CallKitProviding.
         if [ -s "$ROOT/$DYLIB" ]; then
-            (cd "$ROOT/bindings" && xcrun --toolchain default swift test) >/dev/null 2>&1 \
-                && pass "swift test" || fail "swift test, in bindings/"
+            mkdir -p "$TEST_LOGS"
+            (cd "$ROOT/bindings" && xcrun --toolchain default swift test) >"$(test_log "swift test")" 2>&1 \
+                && pass "swift test" || fail "swift test, in bindings/ (log: $(test_log "swift test"))"
         else
             fail "swift test: $DYLIB is not there to link against (the build of the library, above, says why)"
         fi
