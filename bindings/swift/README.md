@@ -401,6 +401,9 @@ ringer, and `status()` says whether the devices are open, the render delay
 and whether the system cancels the echo. `SipralEventKind.audioDevicesChanged`
 carries `event.audioData`: what changed, and whether the `.system` or the
 `.engine` changed it -- an application re-applies nothing on the second.
+On iOS the route belongs to the application, through its `AVAudioSession`,
+so `refresh()` and `devices()` list nothing and no device is selected; gain,
+mute and the meter still hold.
 
 Each call has a gain, a mute and a meter of its own on top of the
 direction's: `setGain(_:for:of:)`, `setMuted(_:for:of:)`, `gain(for:of:)`,

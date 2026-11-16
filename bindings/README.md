@@ -31,7 +31,7 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `c/abi-layout.c` | Every length, offset and pin on the three layouts, as assertions a C compiler checks against the header for six targets |
 
 Everything else under `bindings/` is written by hand: `Package.swift`,
-`c/sipral.c` and `c/smoke.c`; every other source file of each package — the
+`c/sipral.c` and `c/smoke.c`; `cpp/` (the header-only C++ API and its smoke test); every other source file of each package — the
 idiomatic layer each language's application uses, written against its
 printed file (`swift/Sources/Sipral/`, `dotnet/Sipral/`,
 `kotlin/sipral/src/main/kotlin/org/sipral/{idiomatic,telecom}/` with the JNI
@@ -47,9 +47,10 @@ than write themselves is generated.
 | Binding | Readme | Where it runs | Audio |
 |---|---|---|---|
 | C | `c/include/sipral.h` | anywhere the library builds | device or application mode |
+| C++ | [`../docs/27-cpp.md`](../docs/27-cpp.md), `cpp/include/sipral.hpp` | anywhere the library builds, C++17 | device or application mode |
 | Swift | [`swift/README.md`](swift/README.md) | macOS, iOS | device or application mode; CallKit and PushKit helpers |
 | Kotlin and Java | [`kotlin/README.md`](kotlin/README.md), [`jvm/README.md`](jvm/README.md) | Android (AAR), a JVM (jar for linux-x64 and linux-arm64) | device mode on Android from API level 28, application mode anywhere; a `ConnectionService` helper |
-| .NET | [`dotnet/README.md`](dotnet/README.md) | Windows, macOS, Linux | device or application mode |
+| .NET | [`dotnet/README.md`](dotnet/README.md) | Windows, macOS, Linux; iOS and Android through `Sipral.Maui` | device or application mode |
 | Python | [`python/README.md`](python/README.md) | macOS, Windows, Linux | device or application mode |
 | Dart and Flutter | [`dart/README.md`](dart/README.md) | wherever `dart:ffi` loads the library | application mode, signalling over UDP with an account's own TCP or TLS connection beside it |
 | Node.js and TypeScript | [`node/README.md`](node/README.md) | wherever Node.js 20 or later and koffi load the library | device or application mode, signalling over UDP, TCP or TLS |

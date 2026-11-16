@@ -414,7 +414,7 @@ These are single samples on a loaded machine and the difference between the
 two is a few milliseconds either way; the agent measured here read its socket
 in a loop that slept 5 ms when there was nothing to read, which is where most
 of its extra answering time went. It has since stopped sleeping and waits on
-the socket instead (unreleased, for 1.1). The same flow run again for Sipral
+the socket instead (since 1.1.0). The same flow run again for Sipral
 alone on 3 October, with that agent against the same Asterisk 22.10.1, read
 registration 3.5 ms, the outgoing call 5.5 ms, the incoming call answered in
 0.7 ms, no measurable processor time idle, and 0.90, 1.70, 3.05 and 26.30 % of

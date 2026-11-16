@@ -1640,6 +1640,9 @@ one to one, for the reason the Android section above gives. On the account with 
 routable from the lab, so the `c=` Asterisk sends to reaches it, where the
 emulator's does not.
 
+On 15 November 2026 the whole suite, 245 tests, passed on the iOS 26.5
+simulator, run from the distribution package `xcframework.sh` prints.
+
 **What ran, on the iOS 26.5 simulator (iPhone 17, arm64) under Xcode 26.6.**
 With `SIPRAL_PEER` naming `SipralLabAgent` on the Mac, thirty-one tests
 ran: thirty passed — the in-process loopback calls (two readers of one call
@@ -2087,8 +2090,10 @@ the export for App Store Connect succeeded, signed "Apple Distribution",
 `beta-reports-active`, with the privacy manifest and the icon in the bundle.
 The App ID `org.sipral.phone` (the sample's identifier until 1 November
 2026, `org.sipral.sample` since, as on Android) and the distribution
-certificate are what `-allowProvisioningUpdates` made in the account. The upload to App Store
-Connect was not run.
+certificate are what `-allowProvisioningUpdates` made in the account. The
+build was later uploaded to App Store Connect and accepted into TestFlight's
+internal testing on 16 November 2026, and the Android bundle into Google
+Play internal testing the same day; neither is public in a store.
 
 ## On a real iPhone
 

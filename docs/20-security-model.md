@@ -123,7 +123,7 @@ reason phrase names the field (`Bad <field>`, RFC 3261 §8.2.x), and the
 refusal is noted in the diagnostic record. An ACK that fails it is dropped,
 since nothing answers an ACK.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Thirty-seven
+**Fuzzing covers the doors an attacker's bytes come through.** Thirty-eight
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
@@ -145,9 +145,11 @@ feedback: an `Identity` header and a certificate chain through the whole of
 STIR verification (`stir_identity`), multipart bodies with recording
 metadata (`multipart`), real-time text (`rtt`) and the RTCP feedback readers
 (`rtcp_fb`), and one for the ISUP a carrier gateway carries beside the
-offer (`isup`). The exit gate is 24 hours per target with no crash and no hang,
-and every target before those four has had it run (theirs is not recorded
-yet): the first eighteen on 21 and 22 September 2026, about 37 billion
+offer (`isup`), and two for what came with the browser and the WebSocket
+line: trickle ICE's INFO bodies (`sdpfrag`) and the WebSocket framing
+(`websocket`). The exit gate is 24 hours per target with no crash and no hang,
+and every target before those four has had it run (theirs, and the later
+targets', is not recorded yet): the first eighteen on 21 and 22 September 2026, about 37 billion
 executions, the eight media ones before `media_g729` on 23 September, about
 24 billion, `headless_media`, `media_g729` and `turn_client` on 25
 September, about 273 million, and `ice_lite` on 27 September, about 254

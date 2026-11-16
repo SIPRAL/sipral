@@ -988,8 +988,9 @@ logs, the decision records, the state snapshot and the application's
 logcat, with no password in it.
 
 `org.sipral:sipral` and `org.sipral:sipral-opus`, the AAR without and with
-Opus, are on Maven Central up to 1.2.0; a later version is taken from the
-local Maven repository `android.sh` writes. The telecom helper is
+Opus, are on Maven Central, 1.3.1 the newest there (1.3.2 changed only the
+iOS layer); a version built from this tree is taken from the local Maven
+repository `android.sh` writes. The telecom helper is
 `org.sipral:sipral-telecom` from 1.3 on, with its POM and sources jar,
 compiled as Kotlin 2.2 like the AAR; `android.sh` puts it in the same local
 Maven repository. `docs/15-mobile.md`, "Consuming the packages", has the
@@ -1019,7 +1020,9 @@ with the lab's Asterisk, a call placed through it and an incoming INVITE
 from it rung, answered in the sample and hung up, a GSM call answered over a
 live call holding it and the call resumed with media both ways, and the
 audio server stopped mid-call and the device rebuilt --
-`docs/15-mobile.md` says what was seen and how to run it again. Not provable
-without a phone: switching between real audio routes (the emulator offers
-only its speaker), a Bluetooth headset or a car, a carrier's call, and push
-delivery.
+`docs/15-mobile.md` says what was seen and how to run it again. On a real
+Android phone since: registration, calls with digits, and a real push waking
+the sample through the lab's push gateway (`docs/15-mobile.md`, "On a real
+Android phone" and "Device day"). Still to run on a phone, for 1.4:
+switching between real audio routes, a Bluetooth headset or a car, and a
+carrier's call over ours.

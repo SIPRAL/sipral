@@ -137,13 +137,14 @@ November 2026, released.
 - A C++ API over the C ABI: accounts, calls and events as classes, their lifetimes handled for the caller *(done)*
 - A hook that reads and rewrites any SIP message just before it is sent and just after it arrives, from Rust, C and every binding *(done)*
 
-### 1.4 — Real phones in every situation, and the stores’ test tracks
+### 1.4 — Real phones in every situation, and several accounts on one phone
 
 December 2026, planned.
 
 - iOS and Android proven on real phones: the system call screen, a cellular call interrupting, earpiece, speaker, wired and Bluetooth headsets, the car
 - Wi-Fi to mobile data on a phone, the time until audio returns measured and published
-- Test builds accepted through TestFlight and Google Play internal testing *(in progress)*
+- A push that wakes a phone with several accounts: every account ready for the call, or only the one the push names, and the call shown under the account it came to, on iOS and Android
+- Test builds accepted through TestFlight and Google Play internal testing *(done)*
 
 ### 2.0 — Beyond audio
 
@@ -256,8 +257,8 @@ and every one of them is something a client is entitled to assume:
 
 - **B7** — one source of truth for the ABI, with the bindings generated from
   it and `scripts/check.sh` failing when one is missing. It was cheapest before
-  three bindings existed; there are now five (Swift, .NET, Kotlin, Python,
-  Dart), all printed from the one source, with a React Native package over
+  three bindings existed; there are now six (Swift, .NET, Kotlin, Python,
+  Dart, Node.js), all printed from the one source, with a React Native package over
   the Swift and Kotlin layers, and the C ABI has more than doubled since this
   line was written.
 - **D1** — the call's diagnostic record. *Built.* The argument for doing it
@@ -592,9 +593,13 @@ after it. What is left is platform work, and platform work needs the platform.
 
 - **C2** — a call announced out of band: the engine pre-warms, matches the
   INVITE that follows to the announcement, and reports an announced call that
-  never arrived. *Built*, three races included. A push carries no `Call-ID` and
-  cannot be made to, so the match is on the account plus the caller's user and
-  host; the reasoning is in `docs/15-mobile.md`.
+  never arrived. *Built*, three races included. A push may carry the INVITE's
+  `Call-ID` (ABI 1.3, `sipral_account_announce_call`), and the match is on it;
+  without one, on the account plus the caller's user and host, or on the
+  account alone for a push that names no caller (ABI 1.7,
+  `sipral_account_announce_any`); the reasoning is in `docs/15-mobile.md`.
+  An announcement is made on one account; a push that wakes a phone with
+  several is planned for 1.4.
 - **C3** — registration that can be frozen and thawed, time-to-ready measured
   by the stack, and RFC 8599 push parameters. *Built.*
 - **C5** — an idle cost that is explicit, measurable, and reducible to nothing.
@@ -638,8 +643,9 @@ after it. What is left is platform work, and platform work needs the platform.
   (`SipralLifecycle`, `wakeForPush`), and the sample registered with a live
   FreePBX from an emulator, called both ways, moved calls across Wi-Fi,
   mobile data and airplane mode, and carried its registration across a
-  killed process woken by a push. Real audio devices and routes, push
-  delivery, and a night in Doze wait for a phone; `docs/15-mobile.md` lists
+  killed process woken by a push. Push delivery has since run on a phone
+  through the lab's push gateway (`docs/15-mobile.md`, "Device day"); real
+  audio routes and a night in Doze are for 1.4, and `docs/15-mobile.md` lists
   the steps.
 - **ICE in the full role** (RFC 8445) with TURN, on top of the STUN, TURN and
   ICE-lite in `sipral-nat`: gathering, pairing, checks, nomination, role
@@ -660,8 +666,11 @@ after it. What is left is platform work, and platform work needs the platform.
 
 **Exit:** applications accepted in both stores, incoming calls waking the app
 reliably from the background, and Bluetooth hands-free transitions surviving a
-call. Planned for 1.3, November 2026: the simulator and the emulator have
-carried everything they can (`15-mobile.md`), and what is left needs phones.
+call. The sample applications are in both stores' test tracks (TestFlight
+and Google Play internal testing, 16 November 2026); the rest is planned for
+1.4, December 2026: the simulator and the emulator have carried everything
+they can (`15-mobile.md`), and what is left needs phones in every
+situation.
 
 ## Phase 5 — headless and SDK
 
@@ -681,8 +690,8 @@ in-process session. *Built* (`docs/07-headless.md#real-media`).
   the C ABI (a fifth generated back end, not a second binding of the Rust API),
   with an idiomatic asynchronous layer, PCM as bytes, and a one-file agent
   as the example. *Built* (`bindings/python`), with wheels for the host,
-  manylinux x86-64 and aarch64 (`scripts/package/wheels.sh`); `pip install`
-  from a registry waits for 1.0;
+  manylinux x86-64 and aarch64 (`scripts/package/wheels.sh`); `pip install sipral`
+  from PyPI since 1.0;
 - **a call in sixty seconds with no account**: `cargo run --example call`
   dials a public test IVR, plays the menu through the device crate or into a
   file, presses a digit and hears it read back; the other examples register,
@@ -740,7 +749,7 @@ reason that did not exist when they went in.
   the answer to any offer that bundles, a call each way on Asterisk's
   `webrtc=yes` over UDP and over a WebSocket and one to FreeSWITCH in the lab
   (`docs/05-media.md`, "A WebRTC line").
-- **A browser at the other end (1.3, planned for 1.4).** A browser's SIP client registers over
+- **A browser at the other end (1.3).** A browser's SIP client registers over
   a WebSocket and offers its candidates as it finds them; a call to it has to
   take trickled candidates (RFC 8838, carried in SIP by RFC 8840's INFO
   package) and can send its own the same way, so the call is up before the
@@ -752,7 +761,7 @@ reason that did not exist when they went in.
   and through Kamailio's, media end to end and trickled both ways there
   (`scripts/lab.sh browser`, `docs/11-testing.md`), passed in the full lab
   on 23 October 2026.
-- **SIP-T and SIP-I (1.3, planned for 1.4).** A carrier gateway carries the ISUP of the call
+- **SIP-T and SIP-I (1.3).** A carrier gateway carries the ISUP of the call
   inside SIP (RFC 3204's `application/ISUP` body, RFC 3372's SIP-T, ITU-T
   Q.1912.5's SIP-I). An endpoint on such a trunk reads the calling number,
   the redirection and the release cause from it when the SIP headers say
@@ -773,7 +782,7 @@ body, reads the IAM into the caller and a REL into the call's end
 its BYE's REL reported, a call placed through ACM, CPG and ANM and one
 refused with a REL (`11-testing.md`). No carrier's trunk has been called.
 
-## Phase 8 — embedding without a binding, 1.3 (planned for 1.4)
+## Phase 8 — embedding without a binding, 1.3
 
 Decided on 22 October 2026. The Swift, Kotlin, .NET, Python, Dart and Node
 bindings open their own sockets, TLS connections and NAPTR/SRV lookups with

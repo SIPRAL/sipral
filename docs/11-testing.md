@@ -1862,8 +1862,8 @@ The Swift suite also runs on the iOS Simulator, outside the gate: against
 the XCFramework's simulator slice, from the distribution package
 `scripts/package/xcframework.sh` prints, with `xcodebuild test` on a
 simulator device made for the run. `docs/15-mobile.md`, "The Swift package on
-iOS", has the commands and what the last runs showed: thirty-one tests on
-iOS 26.5, and the two that need a peer outside the process run on their own —
+iOS", has the commands and what the runs showed: the whole suite, 245 tests,
+passed with no failure on iOS 26.5 on 15 November 2026, and the two that need a peer outside the process run on their own —
 a call from the simulator to `SipralLabAgent` on the Mac, and, through the
 lab's Asterisk published by `scripts/lab.sh wasapi up`, a registration and
 a call both ways, with REGISTER, INVITE, ACK, BYE and RTP seen at the
@@ -1957,7 +1957,7 @@ uploads anything.
 | `sipral-react-native` | npm | `npm.sh` | any host with npm |
 | `sipral` (Node.js) | npm | `node.sh` | any host with npm and `bindings/node/node_modules` |
 
-The two Maven artefacts take one group id, `org.sipral`: the property
+The Maven artefacts take one group id, `org.sipral`: the property
 `sipral.groupId` in `bindings/jvm/pom.xml`, which `aar.sh` reads for the
 AAR's POM as well (`SIPRAL_GROUP_ID` names another for one run). The React
 Native package's Android half and the telecom helper depend on the AAR as
@@ -2014,7 +2014,7 @@ live, so that no package is ever published naming one that is not there yet:
    Sipral package: NuGet (`dotnet nuget push`), PyPI (`twine upload` of
    every wheel), the tag pushed with the release `vX.Y.Z` made on it and
    `CSipral.xcframework.zip` attached to it (and the `--with-opus` zip
-   beside it), and the two Maven artefacts, signed.
+   beside it), and the Maven artefacts, signed.
 2. What resolves those by name: `sipral-react-native` on npm, whose Android
    half asks Maven for the AAR and whose iOS half asks for the Swift
    package; and the Dart package on pub.dev and `sipral` for Node.js on npm,
@@ -2024,12 +2024,5 @@ What a registry will not take back -- a version, once uploaded, can be
 yanked or unlisted but never replaced -- is why the gate, the lab and every
 script's own checks come first and the uploads last.
 
-What is open, and stops the steps it names until it is settled:
-
-- **The repository's visibility.** The Swift package, its release asset and
-  every package's repository link are read from this repository, which is
-  private until the visibility is flipped (`10-roadmap.md`, "Ordering
-  constraints"); a private release asset is not one SwiftPM can download.
-- **Maven Central.** Every Maven artefact needs a signature per file and a javadoc
-  jar beside the sources jar; the Kotlin sources have no Javadoc of their
-  own to put in it.
+Maven Central asks for a signature on every file and a javadoc jar beside
+each sources jar; both are made when the bundle for it is assembled.
