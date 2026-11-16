@@ -242,5 +242,35 @@ final class LifecycleTests: XCTestCase {
         let again = await FakePeer.request(on: notifier, "SUBSCRIBE", after: farewell.message, within: 1)
         XCTAssertNil(again, "ended a second time")
     }
+
+    /// An application that closes its stack and opens another, on a new
+    /// configuration, leaves a watch and an account handed over on the old
+    /// one: the next move to the background touches neither, since what
+    /// they hold of their stack is gone with it, and works on the new one.
+    func testWhatAClosedStackHandedOverIsLeftAloneInTheBackground() throws {
+        let store = MemorySnapshotStore()
+        let lifecycle = SipralAppLifecycle(store: store)
+        do {
+            let old = try SipralStack(audio: .application)
+            try lifecycle.launched(old)
+            let account = try old.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: "127.0.0.1:9")
+            lifecycle.keep(account, key: "alice")
+            lifecycle.endInBackground(try account.subscribe(to: "sip:2001@sipral.invalid", package: "dialog"))
+            old.close()
+        }
+        let new = try SipralStack(audio: .application)
+        defer { new.close() }
+        try lifecycle.launched(new)
+        XCTAssertNotNil(lifecycle.enteredBackground(), "the new stack was not suspended")
+        XCTAssertEqual(store.keys, [], "an account of the closed stack was written down")
+
+        // handed to `stack` rather than `launched(_:)`, the same holds
+        let other = try SipralStack(audio: .application)
+        defer { other.close() }
+        let account = try new.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: "127.0.0.1:9")
+        lifecycle.endInBackground(try account.subscribe(to: "sip:2002@sipral.invalid", package: "dialog"))
+        lifecycle.stack = other
+        XCTAssertNotNil(lifecycle.enteredBackground())
+    }
 }
 #endif

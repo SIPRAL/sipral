@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- **iOS: the move to the background no longer crashes after the stack was replaced.** `SipralAppLifecycle` kept the accounts given to `keep(_:key:)` and the subscriptions given to `endInBackground(_:)` across a stack's close, and on the next move to the background wrote down or ended them through the closed stack, which their `unowned` reference had already lost: the runtime stopped the process. What was handed over on another stack is now let go by `launched(_:)` and skipped in the background; only the applied stack's own are written down and ended.
+
 ## [1.3.1] - 2026-11-12
 
 ### Added

@@ -93,8 +93,8 @@ public final class SipralAppLifecycle: @unchecked Sendable {
     private let store: SipralSnapshotStore
     private let clock: @Sendable () -> UInt64
     private let stateQueue = DispatchQueue(label: "org.sipral.lifecycle.state")
-    private var kept: [String: Account] = [:]
-    private var watched: [SipralHandle: SipralSubscription] = [:]
+    private var kept: [String: Handed<Account>] = [:]
+    private var watched: [SipralHandle: Handed<SipralSubscription>] = [:]
     private var _stack: SipralStack?
     private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
 
@@ -120,16 +120,22 @@ public final class SipralAppLifecycle: @unchecked Sendable {
     }
 
     /// The process started, a push's launch included: `stack` is applied
-    /// to and its cold start declared, the zero of `timeToReadyMs()`.
+    /// to and its cold start declared, the zero of `timeToReadyMs()`. What
+    /// was kept or handed to `endInBackground(_:)` on another stack is let
+    /// go: it is that stack's, and goes with it.
     public func launched(_ stack: SipralStack) throws {
-        self.stack = stack
+        stateQueue.sync {
+            _stack = stack
+            kept = kept.filter { $0.value.on(stack) }
+            watched = watched.filter { $0.value.on(stack) }
+        }
         try stack.coldStart()
     }
 
     /// Writes `account`'s registration down under `key` on every move to
     /// the background. The key names the account across processes.
     public func keep(_ account: Account, key: String) {
-        stateQueue.sync { kept[key] = account }
+        stateQueue.sync { kept[key] = Handed(account, on: account.stack) }
     }
 
     /// Stops keeping `key` and removes what was written: for an account the
@@ -144,7 +150,7 @@ public final class SipralAppLifecycle: @unchecked Sendable {
     /// presence watch the application subscribes to again in the
     /// foreground. Ended once; a new subscription is handed over anew.
     public func endInBackground(_ subscription: SipralSubscription) {
-        stateQueue.sync { watched[subscription.handle] = subscription }
+        stateQueue.sync { watched[subscription.handle] = Handed(subscription, on: subscription.stack) }
     }
 
     /// Reads back what was written under `key` onto `account`, added and
@@ -181,13 +187,16 @@ public final class SipralAppLifecycle: @unchecked Sendable {
         if stack.callsUp > 0 {
             return nil
         }
+        // an account or a watch of a stack since closed holds that stack
+        // unowned: touching it would read a freed object, so only the
+        // applied stack's own are written down and ended
         let now = clock()
-        for (key, account) in accounts {
-            write(key: key, account: account, now: now)
+        for (key, account) in accounts where account.on(stack) {
+            write(key: key, account: account.value, now: now)
         }
         let ending = stateQueue.sync { () -> [SipralSubscription] in
             defer { watched = [:] }
-            return Array(watched.values)
+            return watched.values.filter { $0.on(stack) }.map(\.value)
         }
         for subscription in ending {
             do {
@@ -267,5 +276,23 @@ public final class SipralAppLifecycle: @unchecked Sendable {
         guard bytes.count > 8 else { return nil }
         let writtenAt = bytes.prefix(8).reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
         return (writtenAt, Array(bytes.dropFirst(8)))
+    }
+}
+
+/// Something handed to the lifecycle, beside the stack it was handed on,
+/// held weakly: the value's own reference to that stack is unowned, so
+/// whether the stack is still the one applied has to be asked here.
+private struct Handed<Value> {
+    let value: Value
+    private weak var stack: SipralStack?
+
+    init(_ value: Value, on stack: SipralStack) {
+        self.value = value
+        self.stack = stack
+    }
+
+    /// `true` while that stack is alive and is `current`.
+    func on(_ current: SipralStack) -> Bool {
+        stack === current
     }
 }
