@@ -214,6 +214,13 @@ impl Message {
             .map(|tag| String::from_utf8_lossy(&tag).into_owned())
     }
 
+    /// The `To` URI: the address of record the request is for.
+    pub(crate) fn called_uri(&self) -> Option<String> {
+        let to = self.first("To")?;
+        let parsed = NameAddrRef::parse(to.as_bytes()).ok()?;
+        String::from_utf8(parsed.uri_bytes().to_vec()).ok()
+    }
+
     /// The `From` URI.
     pub(crate) fn caller_uri(&self) -> Option<String> {
         let from = self.first("From")?;

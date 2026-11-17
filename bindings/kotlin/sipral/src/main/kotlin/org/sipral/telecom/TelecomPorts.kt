@@ -100,6 +100,12 @@ interface SipCalls {
      * push's [callId]; `sipral_account_announce_any` when [caller] is null. */
     fun announce(account: Long, caller: String?, callId: String? = null): SipralAnnounced
 
+    /** `sipral_stack_announce`: [announce] on every account, or on those
+     * whose address of record is [target]. A SIP side with one account at a
+     * time refuses with `NOT_SUPPORTED`. */
+    fun announceOnEveryAccount(target: String?, caller: String?, callId: String? = null): SipralAnnounced =
+        throw SipralException(SipralStatus.NOT_SUPPORTED, "this SIP side announces on one account at a time")
+
     /** `sipral_announcement_forget`. Throws `SipralException` with
      * `WRONG_STATE` when the announcement was already fulfilled or had
      * expired. */

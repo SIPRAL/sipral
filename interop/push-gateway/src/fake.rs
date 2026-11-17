@@ -152,6 +152,7 @@ mod tests {
             caller: Some("sip:bob@example.com".into()),
             name: None,
             call_id: None,
+            to: None,
         };
         assert!(matches!(send(address, &push), PushOutcome::Accepted(_)));
         // A SUBSCRIBE resent while the first one's answer was on its way is

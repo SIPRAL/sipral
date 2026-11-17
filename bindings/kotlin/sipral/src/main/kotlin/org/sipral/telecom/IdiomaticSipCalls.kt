@@ -56,6 +56,9 @@ class IdiomaticSipCalls(
     override fun announce(account: Long, caller: String?, callId: String?): SipralAnnounced =
         account(account).announce(caller, callId)
 
+    override fun announceOnEveryAccount(target: String?, caller: String?, callId: String?): SipralAnnounced =
+        client.announce(caller, callId, target)
+
     override fun forgetAnnouncement(announcement: Long) {
         client.forgetAnnouncement(announcement)
     }

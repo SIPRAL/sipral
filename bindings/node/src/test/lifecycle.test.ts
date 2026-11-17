@@ -85,6 +85,10 @@ describe('an account across the life of the process', () => {
     assert.notEqual(named.announcement, nobody.announcement);
     stack.forgetAnnouncement(named.announcement);
     stack.forgetAnnouncement(nobody.announcement);
+    // on every account of the stack, or the one a push's address of record names
+    const shared = stack.announce('sip:bob@sipral.test', undefined, 'sip:alice@sipral.test');
+    assert.ok(shared.announcement > 0n);
+    stack.forgetAnnouncement(shared.announcement);
     assert.throws(
       () => stack.forgetAnnouncement(nobody.announcement),
       (error: { status?: number }) => error.status === SipralStatus.WrongState,

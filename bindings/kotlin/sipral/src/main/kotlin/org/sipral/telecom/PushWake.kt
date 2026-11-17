@@ -54,6 +54,38 @@ fun wakeForPush(
     return PushWake(id, restored)
 }
 
+/**
+ * [wakeForPush] for a push to a token several accounts share: every account
+ * in [accounts], each just added under its key, has its registration read
+ * back, the call is shown ringing and announced on every account, or on the
+ * one whose address of record is [target] when the push carried it
+ * ([TelecomBridge.pushArrivedOnEveryAccount]), and an account with nothing to
+ * carry on registers from the beginning unless the announce began it.
+ * [PushWake.restored] is true when every account carried on its
+ * registration. The INVITE on any of them is matched to the ringing call,
+ * whose [TelecomCall.account] then names the account it came to.
+ */
+fun wakeForPush(
+    client: SipralClient,
+    accounts: Map<String, SipralAccount>,
+    bridge: TelecomBridge,
+    lifecycle: SipralLifecycle,
+    caller: String?,
+    displayName: String? = null,
+    callId: String? = null,
+    target: String? = null,
+): PushWake {
+    client.coldStart()
+    val restored = accounts.mapValues { (key, account) -> lifecycle.restore(account, key) }
+    val id = bridge.pushArrivedOnEveryAccount(caller, displayName, callId, target)
+    for ((key, account) in accounts) {
+        if (restored[key] != true && account.registrationState !in UNDER_WAY) {
+            account.register()
+        }
+    }
+    return PushWake(id, restored.values.all { it })
+}
+
 private val UNDER_WAY = setOf(
     SipralRegistrationState.REGISTERING,
     SipralRegistrationState.REFRESHING,

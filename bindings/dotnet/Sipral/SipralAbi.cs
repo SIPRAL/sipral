@@ -9103,6 +9103,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_account_announce_any(ulong stack, ulong account, sbyte[] callId, nuint callIdLen, out ulong announcement, out ulong call, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_announce(ulong stack, sbyte[] target, nuint targetLen, sbyte[] caller, nuint callerLen, sbyte[] callId, nuint callIdLen, out ulong announcement, out ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_refresh_binding(ulong stack, ulong account, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -9707,7 +9710,7 @@ public static partial class Sipral
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
     /// </summary>
-    public const uint AbiVersionMinor = 13;
+    public const uint AbiVersionMinor = 14;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -10739,6 +10742,48 @@ public static partial class Sipral
         var callIdSigned = new sbyte[callIdBytes.Length];
         Buffer.BlockCopy(callIdBytes, 0, callIdSigned, 0, callIdBytes.Length);
         Check(NativeMethods.sipral_account_announce_any(stack, account, callIdSigned, (nuint)callIdSigned.Length, out var announcement, out var call, nowMs));
+        return (announcement, call);
+    }
+
+    /// <summary>
+    /// A call is expected on any of this stack's accounts, announced by a
+    /// push (ABI 1.14): one push token shared by several accounts, which
+    /// cannot say which of them the call is for, or says so only by the
+    /// address of record the proxy saw in the INVITE's `To`.
+    ///
+    /// `target` is that address of record when the push carried one. It
+    /// narrows the wait to the accounts with that address of record, user
+    /// and host compared as a caller's are; when none has it, or
+    /// `target_len` is zero, the call is expected on every account. Each
+    /// account it is expected on has its binding refreshed.
+    ///
+    /// `caller` and `call_id` are those of `sipral_account_announce_call`;
+    /// a `caller_len` of zero means the push named nobody, as
+    /// `sipral_account_announce_any`. The INVITE on any of the accounts
+    /// fulfils the one announcement: `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` comes
+    /// once, right before its `SIPRAL_EVENT_KIND_INCOMING_CALL`, which names
+    /// the account it came to, and `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING`
+    /// at most once. The two outputs are those of `sipral_account_announce`.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` on a stack with no account.
+    ///
+    /// Safety
+    ///
+    /// `target`, `caller` and `call_id` must each be readable for the length
+    /// beside it or be null with a length of zero, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static (ulong Announcement, ulong Call) StackAnnounce(ulong stack, string target, string caller, string callId, ulong nowMs)
+    {
+        var targetBytes = Encoding.UTF8.GetBytes(target);
+        var targetSigned = new sbyte[targetBytes.Length];
+        Buffer.BlockCopy(targetBytes, 0, targetSigned, 0, targetBytes.Length);
+        var callerBytes = Encoding.UTF8.GetBytes(caller);
+        var callerSigned = new sbyte[callerBytes.Length];
+        Buffer.BlockCopy(callerBytes, 0, callerSigned, 0, callerBytes.Length);
+        var callIdBytes = Encoding.UTF8.GetBytes(callId);
+        var callIdSigned = new sbyte[callIdBytes.Length];
+        Buffer.BlockCopy(callIdBytes, 0, callIdSigned, 0, callIdBytes.Length);
+        Check(NativeMethods.sipral_stack_announce(stack, targetSigned, (nuint)targetSigned.Length, callerSigned, (nuint)callerSigned.Length, callIdSigned, (nuint)callIdSigned.Length, out var announcement, out var call, nowMs));
         return (announcement, call);
     }
 

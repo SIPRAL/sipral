@@ -939,6 +939,18 @@ INVITE is matched the connection is told who is calling
 connection's address and name; Core-Telecom keeps the address a call was
 added with, so there the call goes on showing the anonymous caller.
 
+Several accounts behind one push token are
+`pushArrivedOnEveryAccount(caller, displayName, callId, target)` (or
+`wakeForPush(client, accounts = mapOf(key to account, ...), bridge,
+lifecycle, caller, target = ...)`, which restores every account): the call
+is announced on every account of the client, or on the one whose address of
+record is `target`, the held INVITE's `To` when the push carries it
+(`SipralClient.announce`, `sipral_stack_announce`), and each is refreshed.
+The INVITE on any of them takes the one screen, and its `TelecomCall.account`
+is then the account it came to (zero until then). One `PhoneAccount` serves
+them all; an application that wants the account seen on the system's screen
+puts it in the caller's name.
+
 A phone's lifecycle (`docs/15-mobile.md`, "Lifecycle on Android"):
 `client.suspending()`, `resumed()`, `interfaceLost()`,
 `nameResolutionLost()` and `coldStart()`; `account.freeze()`,

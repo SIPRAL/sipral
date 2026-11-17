@@ -337,6 +337,7 @@ fn probe(args: &Args, service: &str) -> Result<(), String> {
                 caller: Some("sip:probe@sipral.invalid".into()),
                 name: None,
                 call_id: Some("probe@sipral.invalid".into()),
+                to: None,
             };
             println!(
                 "apns probe: {} with {which}, topic {topic}: {}",
@@ -357,6 +358,7 @@ fn probe(args: &Args, service: &str) -> Result<(), String> {
                 caller: Some("sip:probe@sipral.invalid".into()),
                 name: None,
                 call_id: Some("probe@sipral.invalid".into()),
+                to: None,
             };
             if let Some((mut sender, project)) = fcm_from(args, Duration::from_secs(20))? {
                 push.param = Some(project.clone());

@@ -14,10 +14,11 @@ import Foundation
 /// clear `caller`, `call-id` and `name` (`VoipPushFields(clear:)`); an
 /// application whose push carries a sealed box opens it there. Every push
 /// the system says must be reported is reported to CallKit, as iOS requires
-/// of an application that wants to keep receiving them: one whose fields name
-/// a caller runs the "C2" sequence on the account `account` returns, and
-/// any other, or one that arrives with no account, is reported and ended at
-/// once (`PushKitBridge.receive(_:mustReport:account:)`).
+/// of an application that wants to keep receiving them: one whose fields
+/// were read runs the "C2" sequence on the account `account` returns, or,
+/// for accounts that share the token, on the stack `stack` returns, and one
+/// that could not be read, or arrives with nothing to announce it on, is
+/// reported and ended at once (`PushKitBridge.receive(_:mustReport:account:)`).
 ///
 /// From iOS 26.4 PushKit also hands over a push with `PKVoIPPushMetadata`
 /// (`pushRegistry(_:didReceiveIncomingVoIPPushWith:metadata:withCompletionHandler:)`),
@@ -28,7 +29,7 @@ import Foundation
 public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked Sendable {
     private let registry: PKPushRegistry
     private let bridge: PushKitBridge
-    private let account: @Sendable () -> Account?
+    private let account: @Sendable () -> (any PushAnnouncing)?
     private let decoder: VoipPushDecoder
 
     /// The VoIP token, as bytes, each time PushKit issues one, and `nil`
@@ -63,7 +64,7 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
         account: @escaping @Sendable () -> Account?
     ) {
         self.bridge = bridge
-        self.account = account
+        self.account = { account() }
         self.decoder = decoder
         self.registry = PKPushRegistry(queue: queue)
         super.init()
@@ -76,6 +77,24 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
         decoder: @escaping VoipPushDecoder = { VoipPushFields(clear: $0) }
     ) {
         self.init(bridge: bridge, queue: queue, decoder: decoder) { account }
+    }
+
+    /// For accounts that share the token: every push is announced on the
+    /// stack `stack` returns (`PushKitBridge.receive(_:mustReport:stack:)`),
+    /// on the account the push's `to` names or on every account, looked up
+    /// on every push as `account` is.
+    public init(
+        bridge: PushKitBridge, queue: DispatchQueue = .main,
+        decoder: @escaping VoipPushDecoder = { VoipPushFields(clear: $0) },
+        stack: @escaping @Sendable () -> SipralStack?
+    ) {
+        self.bridge = bridge
+        self.account = { stack() }
+        self.decoder = decoder
+        self.registry = PKPushRegistry(queue: queue)
+        super.init()
+        registry.delegate = self
+        registry.desiredPushTypes = [.voIP]
     }
 
     /// The current VoIP token, if PushKit has issued one.
@@ -127,7 +146,7 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
         // Reported to CallKit before this returns: iOS checks for the report
         // as the delegate method returns, and ends the application if a push
         // that must be reported has none.
-        bridge.receive(fields, mustReport: mustReport, account: account()) { outcome in
+        bridge.receive(fields, mustReport: mustReport, announcer: account()) { outcome in
             switch outcome {
             case .shown(let pending): received?(pending)
             case .unusable: received?(nil)

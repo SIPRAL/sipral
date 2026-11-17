@@ -10,8 +10,10 @@
 //! `sipral_account_announce` matches the INVITE by, and the INVITE's
 //! `Call-ID`, which `sipral_account_announce_call` matches it by first
 //! (docs/15-mobile.md, "The matching rule"). So a push carries `kind`, then
-//! `caller`, `name` when the caller gave one, and `call-id`, for whatever is
-//! held; a refresh, with nothing held, carries `kind` alone.
+//! `caller`, `name` when the caller gave one, `call-id`, and `to`, the
+//! address of record called, which `sipral_stack_announce` narrows a token
+//! several accounts share by, for whatever is held; a refresh, with nothing
+//! held, carries `kind` alone.
 
 use crate::json;
 
@@ -75,12 +77,15 @@ pub(crate) struct PushRequest {
     pub(crate) name: Option<String>,
     /// The `Call-ID` of the request that is held, when one is.
     pub(crate) call_id: Option<String>,
+    /// The `To` URI of the request that is held, when one is: the address
+    /// of record called, which tells apart accounts sharing one token.
+    pub(crate) to: Option<String>,
 }
 
 impl PushRequest {
-    /// The payload as a JSON object: `kind`, then `caller`, `name` and
-    /// `call-id` when there are any. Every value a string, which FCM's `data`
-    /// requires and APNs does not mind.
+    /// The payload as a JSON object: `kind`, then `caller`, `name`,
+    /// `call-id` and `to` when there are any. Every value a string, which
+    /// FCM's `data` requires and APNs does not mind.
     pub(crate) fn payload(&self) -> String {
         let mut fields = vec![("kind", self.kind.word().to_owned())];
         if let Some(caller) = &self.caller {
@@ -91,6 +96,9 @@ impl PushRequest {
         }
         if let Some(call_id) = &self.call_id {
             fields.push(("call-id", call_id.clone()));
+        }
+        if let Some(to) = &self.to {
+            fields.push(("to", to.clone()));
         }
         json::object(&fields)
     }
@@ -120,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_names_the_caller_and_the_call() {
+    fn the_payload_names_the_caller_the_call_and_the_line_called() {
         let request = PushRequest {
             id: 1,
             provider: "apns".into(),
@@ -130,16 +138,18 @@ mod tests {
             caller: Some("sip:alice@example.com".into()),
             name: Some("Alice \"A\"".into()),
             call_id: Some("a84b4c76e66710@pc33.example.com".into()),
+            to: Some("sip:205@example.com".into()),
         };
         assert_eq!(
             request.payload(),
-            r#"{"kind":"call","caller":"sip:alice@example.com","name":"Alice \"A\"","call-id":"a84b4c76e66710@pc33.example.com"}"#
+            r#"{"kind":"call","caller":"sip:alice@example.com","name":"Alice \"A\"","call-id":"a84b4c76e66710@pc33.example.com","to":"sip:205@example.com"}"#
         );
         let refresh = PushRequest {
             kind: PushKind::Refresh,
             caller: None,
             name: None,
             call_id: None,
+            to: None,
             ..request
         };
         assert_eq!(refresh.payload(), r#"{"kind":"refresh"}"#);

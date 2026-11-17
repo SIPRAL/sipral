@@ -79,7 +79,15 @@ the call's `Call-ID` first, else the oldest INVITE on the account no push
 naming its caller takes, and the screen then given the INVITE's `From` URI
 and name through `CallKitProviding.reportCaller`), and one the decoder could
 not read, or that meets no account, is shown and ended at once
-(`PushKitBridge.reportUnusable`).
+(`PushKitBridge.reportUnusable`). Accounts that share one token are
+`PushKitAdapter(bridge:stack:)`, or `PushKitBridge.handle(push:stack:)` and
+`receive(_:mustReport:stack:)`: the push is announced on every account of
+the stack, or on the one whose address of record is the push's `target`
+(`to` in the clear payload, the held INVITE's `To`), through
+`SipralStack.announce(caller:callId:target:)`, and the INVITE on any of them
+takes the one screen, `PendingCall.account` then naming the account it came
+to. CallKit shows the application, not an account: put the account in the
+caller's name (`CallKitBridge.nameCaller`) to show it there.
 What it reads from a payload is its `decoder`'s to say: by default the
 clear `caller`, `call-id` and `name` (`VoipPushFields(clear:)`); an
 application whose push carries only a sealed box opens the box there and

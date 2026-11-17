@@ -24,7 +24,7 @@
 use std::ffi::c_char;
 
 use sipral_core::msg::Uri;
-use sipral_ua::{Announced, AnnouncementId};
+use sipral_ua::{Announced, AnnouncementId, UaError};
 
 use crate::abi::record;
 use crate::call::ua_failed;
@@ -103,7 +103,7 @@ entry! {
         unsafe {
             announced(
                 stack,
-                account,
+                Among::Account(account),
                 Some(caller),
                 None,
                 out_announcement,
@@ -147,7 +147,7 @@ entry! {
         unsafe {
             announced(
                 stack,
-                account,
+                Among::Account(account),
                 Some(caller),
                 call_id,
                 out_announcement,
@@ -191,7 +191,7 @@ entry! {
         unsafe {
             announced(
                 stack,
-                account,
+                Among::Account(account),
                 None,
                 call_id,
                 out_announcement,
@@ -200,6 +200,80 @@ entry! {
             )
         }
     }
+}
+
+entry! {
+    /// A call is expected on any of this stack's accounts, announced by a
+    /// push (ABI 1.14): one push token shared by several accounts, which
+    /// cannot say which of them the call is for, or says so only by the
+    /// address of record the proxy saw in the INVITE's `To`.
+    ///
+    /// `target` is that address of record when the push carried one. It
+    /// narrows the wait to the accounts with that address of record, user
+    /// and host compared as a caller's are; when none has it, or
+    /// `target_len` is zero, the call is expected on every account. Each
+    /// account it is expected on has its binding refreshed.
+    ///
+    /// `caller` and `call_id` are those of `sipral_account_announce_call`;
+    /// a `caller_len` of zero means the push named nobody, as
+    /// `sipral_account_announce_any`. The INVITE on any of the accounts
+    /// fulfils the one announcement: `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` comes
+    /// once, right before its `SIPRAL_EVENT_KIND_INCOMING_CALL`, which names
+    /// the account it came to, and `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING`
+    /// at most once. The two outputs are those of `sipral_account_announce`.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` on a stack with no account.
+    ///
+    /// # Safety
+    ///
+    /// `target`, `caller` and `call_id` must each be readable for the length
+    /// beside it or be null with a length of zero, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    fn sipral_stack_announce(
+        stack: SipralHandle,
+        target: *const c_char,
+        target_len: usize,
+        caller: *const c_char,
+        caller_len: usize,
+        call_id: *const c_char,
+        call_id_len: usize,
+        out_announcement: *mut SipralHandle,
+        out_call: *mut SipralHandle,
+        now_ms: u64,
+    ) {
+        let target = unsafe { text(target, target_len, "target") }?;
+        let caller = unsafe { text(caller, caller_len, "caller") }?;
+        let call_id = unsafe { text(call_id, call_id_len, "call_id") }?;
+        let target = target.map(|target| uri_named("target", target)).transpose()?;
+        unsafe {
+            announced(
+                stack,
+                Among::Every(target),
+                caller,
+                call_id,
+                out_announcement,
+                out_call,
+                now_ms,
+            )
+        }
+    }
+}
+
+/// Where an announced call is expected.
+enum Among {
+    /// On this account.
+    Account(SipralHandle),
+    /// On every account of the stack, or on those this address of record
+    /// names.
+    Every(Option<Uri>),
+}
+
+fn uri_named(what: &str, text: &str) -> Result<Uri, Fail> {
+    Uri::parse(text.as_bytes()).map_err(|_| {
+        fail(
+            SipralStatus::InvalidArgument,
+            format!("{what} is {text:?}, which is not a URI"),
+        )
+    })
 }
 
 /// What every announcing entry point does once its text is read; `caller`
@@ -211,7 +285,7 @@ entry! {
 /// or be null.
 unsafe fn announced(
     stack: SipralHandle,
-    account: SipralHandle,
+    among: Among,
     caller: Option<&str>,
     call_id: Option<&str>,
     out_announcement: *mut SipralHandle,
@@ -225,22 +299,29 @@ unsafe fn announced(
         ));
     }
     let caller = caller
-        .map(|caller| {
-            Uri::parse(caller.as_bytes()).map_err(|_| {
-                fail(
-                    SipralStatus::InvalidArgument,
-                    format!("caller is {caller:?}, which is not a URI"),
-                )
-            })
-        })
+        .map(|caller| uri_named("caller", caller))
         .transpose()?;
     with_stack_at(stack, now_ms, |state, now| {
-        let named = state.accounts.get(account).map_err(handle_failed)?;
-        let found = match caller {
-            Some(uri) => state.agent.announce_call(named, uri, call_id, now),
-            None => state.agent.announce_any(named, call_id, now),
-        }
-        .map_err(|error| ua_failed(&error))?;
+        let found = match among {
+            Among::Account(account) => {
+                let named = state.accounts.get(account).map_err(handle_failed)?;
+                match caller {
+                    Some(uri) => state.agent.announce_call(named, uri, call_id, now),
+                    None => state.agent.announce_any(named, call_id, now),
+                }
+                .map_err(|error| ua_failed(&error))?
+            }
+            Among::Every(target) => state
+                .agent
+                .announce_among(&[], target.as_ref(), caller, call_id, now)
+                .map_err(|error| match error {
+                    UaError::NoSuchAccount => fail(
+                        SipralStatus::InvalidArgument,
+                        "this stack has no account to expect a call on",
+                    ),
+                    other => ua_failed(&other),
+                })?,
+        };
         let (announcement, call) = match found {
             Announced::Waiting(id) => {
                 let handle = state.announcements.insert(id).map_err(|status| {
@@ -355,7 +436,7 @@ mod tests {
     use super::{
         SipralPushEcho, sipral_account_announce, sipral_account_announce_any,
         sipral_account_announce_call, sipral_account_push_echo, sipral_account_refresh_binding,
-        sipral_announcement_forget,
+        sipral_announcement_forget, sipral_stack_announce,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
     use crate::call::tests::{deliver, sent};
@@ -669,6 +750,80 @@ mod tests {
             .position(|kind| *kind == SipralEventKind::IncomingCall)
             .unwrap_or_else(|| panic!("no call came in, in {kinds:?}"));
         assert!(announced < incoming, "{kinds:?}");
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_push_to_the_stack_is_matched_on_any_of_its_accounts() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let mut announcement = SIPRAL_HANDLE_NONE;
+        let mut call = SIPRAL_HANDLE_NONE;
+        let announce = |target: &str, announcement: &mut SipralHandle, call: &mut SipralHandle| {
+            let (target, target_len) = as_text(target);
+            unsafe {
+                sipral_stack_announce(
+                    handle,
+                    target,
+                    target_len,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    0,
+                    announcement,
+                    call,
+                    31_000,
+                )
+            }
+        };
+        assert_eq!(
+            announce("", &mut announcement, &mut call),
+            SipralStatus::InvalidArgument,
+            "a stack with no account took an announcement"
+        );
+
+        let account = woken(handle, true);
+        bound(handle, account);
+        assert_eq!(
+            announce("not a uri", &mut announcement, &mut call),
+            SipralStatus::InvalidArgument,
+            "a target that is no URI was taken"
+        );
+        assert_eq!(
+            announce("sip:nobody@example.org", &mut announcement, &mut call),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_ne!(announcement, SIPRAL_HANDLE_NONE, "nothing was announced");
+        assert_eq!(call, SIPRAL_HANDLE_NONE, "a call arrived before the push");
+        assert!(
+            sent(handle)
+                .iter()
+                .any(|message| message.starts_with(b"REGISTER ")),
+            "a target no account has still refreshes every account"
+        );
+
+        deliver(handle, &invitation("sip:carol@example.com"), 31_100);
+        poll(handle, 31_100);
+        poll(handle, 31_000 + 21_000);
+        let kinds = observed.kinds();
+        let announced = kinds
+            .iter()
+            .position(|kind| *kind == SipralEventKind::CallAnnounced)
+            .unwrap_or_else(|| panic!("the call was not matched, in {kinds:?}"));
+        let incoming = kinds
+            .iter()
+            .position(|kind| *kind == SipralEventKind::IncomingCall)
+            .unwrap_or_else(|| panic!("no call came in, in {kinds:?}"));
+        assert!(announced < incoming, "{kinds:?}");
+        assert!(
+            !kinds.contains(&SipralEventKind::AnnouncedCallMissing),
+            "{kinds:?}"
+        );
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(handle) },
             SipralStatus::Ok

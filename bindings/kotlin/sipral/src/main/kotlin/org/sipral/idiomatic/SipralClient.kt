@@ -1506,6 +1506,22 @@ class SipralClient private constructor(
         retryBusy { Sipral.callRejectTransfer(handle, event.call, code, nowMs()) }
     }
 
+    /**
+     * `sipral_stack_announce` (ABI 1.14): a call announced by a push to a
+     * token this client's accounts share, expected on every account, or on
+     * those whose address of record is [target] when one has it, each
+     * refreshed. A null [caller] is a push that named nobody, as
+     * [SipralAccount.announce] takes it. The INVITE on any of the accounts
+     * fulfils it; its `INCOMING_CALL` names the account. `INVALID_ARGUMENT`
+     * on a client with no account.
+     */
+    fun announce(caller: String?, callId: String? = null, target: String? = null): SipralAnnounced {
+        val (announcement, call) = retryBusy {
+            Sipral.stackAnnounce(handle, target ?: "", caller ?: "", callId ?: "", nowMs())
+        }
+        return if (call != 0L) SipralAnnounced.Arrived(call) else SipralAnnounced.Waiting(announcement)
+    }
+
     /** `sipral_announcement_forget`: the user dismissed a screen a push raised
      * before its INVITE came. `SIPRAL_STATUS_WRONG_STATE` when it was already
      * fulfilled or expired, since that event and this call can cross. */

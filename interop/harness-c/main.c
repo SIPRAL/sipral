@@ -5356,6 +5356,9 @@ static int run_listen(const char *server, uint16_t port, const char *user, const
  *             Asterisk's BYE ends it
  *   fallback  the same with no Call-ID and the caller the push named
  *             (`sipral_account_announce`), matched by the caller
+ *   shared    the `call` case announced on the stack rather than the
+ *             account (`sipral_stack_announce`), as for accounts sharing one
+ *             token, with the address of record the push's `to` names
  *   message   on FCM's terms, which carry a MESSAGE wake-up and APNs' do
  *             not: woken for a MESSAGE, the binding refreshed with nothing
  *             announced, and the MESSAGE has to arrive
@@ -5471,6 +5474,7 @@ static int run_push(const char *gateway, uint16_t port, const char *user, const 
     char kind[32];
     char caller[256];
     char call_id[256];
+    char to[256];
     uint8_t snapshot[PUSH_SNAPSHOT];
     size_t snapshot_len = 0;
     uint64_t asleep_at;
@@ -5489,8 +5493,8 @@ static int run_push(const char *gateway, uint16_t port, const char *user, const 
     message = strcmp(which, "message") == 0;
     late = strcmp(which, "late") == 0;
     if (!lost && !message && !late && strcmp(which, "call") != 0
-        && strcmp(which, "fallback") != 0) {
-        return push_says("SIPRAL_PUSH_CASE is call, fallback, message, lost or late");
+        && strcmp(which, "fallback") != 0 && strcmp(which, "shared") != 0) {
+        return push_says("SIPRAL_PUSH_CASE is call, fallback, shared, message, lost or late");
     }
     if (pns_text == NULL || (colon = strrchr(pns_text, ':')) == NULL
         || (size_t)(colon - pns_text) >= sizeof pns_host) {
@@ -5577,6 +5581,7 @@ static int run_push(const char *gateway, uint16_t port, const char *user, const 
     push_field(payload + 5, "kind", kind, sizeof kind);
     push_field(payload + 5, "caller", caller, sizeof caller);
     push_field(payload + 5, "call-id", call_id, sizeof call_id);
+    push_field(payload + 5, "to", to, sizeof to);
     printf("  push  woken %u ms after falling asleep: %s\n",
            (unsigned)(now_ms() - asleep_at), payload + 5);
     if (late) {
@@ -5620,23 +5625,34 @@ static int run_push(const char *gateway, uint16_t port, const char *user, const 
         sipral_handle_t announcement = SIPRAL_HANDLE_NONE;
         sipral_handle_t arrived = SIPRAL_HANDLE_NONE;
         int by_call_id = strcmp(which, "fallback") != 0;
-        const char *announced_caller = strcmp(which, "call") == 0 ? PUSH_DECOY_CALLER : caller;
+        int shared = strcmp(which, "shared") == 0;
+        const char *announced_caller = strcmp(which, "fallback") != 0 ? PUSH_DECOY_CALLER : caller;
         uint32_t has_ready = 0;
         uint64_t ready_ms = 0;
-        if (strcmp(kind, "call") != 0 || caller[0] == '\0' || (by_call_id && call_id[0] == '\0')) {
+        if (strcmp(kind, "call") != 0 || caller[0] == '\0' || (by_call_id && call_id[0] == '\0')
+            || (shared && to[0] == '\0')) {
             close_endpoint(&end);
-            return push_says("the push named no call: kind, caller and call-id are wanted");
+            return push_says("the push named no call: kind, caller, call-id and to are wanted");
         }
-        status = sipral_account_announce_call(end.stack, end.account, announced_caller,
-                                              strlen(announced_caller),
-                                              by_call_id ? call_id : NULL,
-                                              by_call_id ? strlen(call_id) : 0u, &announcement,
-                                              &arrived, now_ms());
+        if (shared) {
+            status = sipral_stack_announce(end.stack, to, strlen(to), announced_caller,
+                                           strlen(announced_caller), call_id, strlen(call_id),
+                                           &announcement, &arrived, now_ms());
+        } else {
+            status = sipral_account_announce_call(end.stack, end.account, announced_caller,
+                                                  strlen(announced_caller),
+                                                  by_call_id ? call_id : NULL,
+                                                  by_call_id ? strlen(call_id) : 0u,
+                                                  &announcement, &arrived, now_ms());
+        }
         if (status != SIPRAL_STATUS_OK || announcement == SIPRAL_HANDLE_NONE) {
             close_endpoint(&end);
             return push_says("the call could not be announced");
         }
-        if (by_call_id) {
+        if (shared) {
+            printf("  push  announced on the stack for %s, by Call-ID %s, as %s\n", to, call_id,
+                   announced_caller);
+        } else if (by_call_id) {
             printf("  push  announced by Call-ID %s, as %s\n", call_id, announced_caller);
         } else {
             printf("  push  announced by caller alone, as %s\n", announced_caller);

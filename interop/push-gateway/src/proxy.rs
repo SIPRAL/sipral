@@ -382,6 +382,7 @@ impl Gateway {
                 caller: None,
                 name: None,
                 call_id: None,
+                to: None,
             }));
         }
         out
@@ -944,6 +945,7 @@ impl Gateway {
             caller: request.caller_uri(),
             name: request.caller_name(),
             call_id: request.first("Call-ID").map(str::to_owned),
+            to: request.called_uri(),
         }));
         // §6.2.2: this proxy minted a PURR for the binding, so it stays on
         // the route of a dialog the request opens

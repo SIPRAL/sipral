@@ -109,6 +109,22 @@ matched, and then the INVITE's `From` URI and name (Swift's
 `CallKitProviding.reportCaller`, Kotlin's `TelecomConnection.setCaller`; a
 Core-Telecom call keeps the address it was added with).
 
+A phone may hold several accounts, at one PBX or at several, behind one push
+token: the same `pn-prid` and `pn-param` on every account's `Contact`. A push
+to that token cannot say which account the call is for, or says it only by
+the address of record the proxy saw in the held INVITE's `To`.
+`announce_among` (`sipral_stack_announce` through `sipral.h`, ABI 1.14)
+expects the call on every account of the stack, or, when the push named an
+address of record that one of them has (user and host, as a caller is
+compared), on that account alone, and refreshes the binding of each account
+it is expected on. The INVITE on any of them fulfils the one announcement:
+one screen, one `CALL_ANNOUNCED` before its `INCOMING_CALL`, which names the
+account the call came to, and at most one `ANNOUNCED_CALL_MISSING`. One
+announcement per account would leave every account the call did not come to
+reporting a missed call twenty seconds later, and take down the screen of a
+call that did come. The caller, `Call-ID` and account-alone rules above
+apply across the accounts as they do on one.
+
 A proxy that holds the INVITE while it pushes has the INVITE in hand, and
 nothing stops it putting the `Call-ID` in the push; `interop/push-gateway`
 does (below). `announce_call` (`sipral_account_announce_call` through
@@ -183,7 +199,16 @@ harmlessly.
 came first and `out_announcement` otherwise; `sipral_account_announce_call`
 is `announce_call`, the same with the push's `Call-ID`, and
 `sipral_account_announce_any` is `announce_any`, for a push that named
-nobody. `sipral_account_refresh_binding`
+nobody, and `sipral_stack_announce` is `announce_among` on every account,
+with the address of record the push named, if any. In the layers that is
+Swift's `PushKitBridge.handle(push:stack:)` and
+`receive(_:mustReport:stack:)`, with `VoipPush.target` (`to` in the clear
+payload) and `PushKitAdapter(bridge:stack:)`, the matched call's account in
+`PendingCall.account`; Kotlin's `TelecomBridge.pushArrivedOnEveryAccount`
+and `wakeForPush(client, accounts, ...)`, the account in
+`TelecomCall.account` once the INVITE names it; and
+`SipralStack.announce(caller:callId:target:)`, `SipralClient.announce` and
+Node's `Stack.announce` underneath. `sipral_account_refresh_binding`
 is `refresh_binding`, and `sipral_announcement_forget` is
 `forget_announcement`. The events are `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` (31),
 then `SIPRAL_EVENT_KIND_INCOMING_CALL`; a miss is

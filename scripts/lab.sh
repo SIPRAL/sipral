@@ -32,8 +32,10 @@
 #                               the gateway, the lab's notification service
 #                               waking the harness, which thaws, announces
 #                               and refreshes, and the call delivered and
-#                               answered -- matched by its Call-ID, then by
-#                               its caller -- then a MESSAGE held the same
+#                               answered -- matched by its Call-ID, then on
+#                               the stack for the address of record the push
+#                               named, then by its caller -- then a MESSAGE
+#                               held the same
 #                               way, a push lost (480 at the bucket timer)
 #                               and a phone that answers late (480, and its
 #                               announced call reported missing). About two
@@ -4378,6 +4380,10 @@ if [ "$WANT" = all ] || [ "$WANT" = push ]; then
             push_case call "the held INVITE goes to" \
                 && pass "asleep, pushed, refreshed, and the held INVITE was the call announced by its Call-ID alone, answered and heard" \
                 || fail "woken by a push, matched by Call-ID"
+            step "the same, announced on the stack for the address of record the push named"
+            push_case shared "the held INVITE goes to" \
+                && pass "announced on every account the push's address of record names, the held INVITE took the announcement" \
+                || fail "woken by a push, announced on the stack"
             step "the same, announced by the caller alone"
             push_case fallback "the held INVITE goes to" \
                 && pass "with no Call-ID the caller matched the INVITE to the announcement" \

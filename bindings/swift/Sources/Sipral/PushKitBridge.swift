@@ -17,11 +17,17 @@ public struct VoipPush: Sendable {
     /// The name the call screen shows for the caller
     /// (`CXCallUpdate.localizedCallerName`), when the push carried one.
     public let displayName: String?
+    /// The address of record the call is for, as the held INVITE's `To`
+    /// names it, when the push carried one: on a stack whose accounts share
+    /// the token, the call is expected on that account alone
+    /// (`SipralStack.announce(caller:callId:target:)`).
+    public let target: String?
 
-    public init(callerId: String = "", callId: String? = nil, displayName: String? = nil) {
+    public init(callerId: String = "", callId: String? = nil, displayName: String? = nil, target: String? = nil) {
         self.callerId = callerId
         self.callId = callId
         self.displayName = displayName
+        self.target = target
     }
 
     /// Whether the push named the caller.
@@ -29,35 +35,39 @@ public struct VoipPush: Sendable {
 }
 
 /// What one push's payload says, as `PushKitAdapter` reads it: who is
-/// calling, the held INVITE's `Call-ID`, and the caller's name. Any of them
-/// may be missing; a push with no caller is expected on its account alone.
+/// calling, the held INVITE's `Call-ID`, the caller's name, and the address
+/// of record called. Any of them may be missing; a push with no caller is
+/// expected on its account alone, and one with no address of record on
+/// every account of a stack.
 public struct VoipPushFields: Sendable, Equatable {
     public var callerId: String?
     public var callId: String?
     public var displayName: String?
+    public var target: String?
 
-    public init(callerId: String? = nil, callId: String? = nil, displayName: String? = nil) {
+    public init(callerId: String? = nil, callId: String? = nil, displayName: String? = nil, target: String? = nil) {
         self.callerId = callerId
         self.callId = callId
         self.displayName = displayName
+        self.target = target
     }
 
     /// The fields a push gateway writes in the clear part of the payload
-    /// (`docs/15-mobile.md`, "The lab's push gateway"): `caller`, `call-id`
-    /// and `name`, each a string. What `PushKitAdapter` reads when the
+    /// (`docs/15-mobile.md`, "The lab's push gateway"): `caller`, `call-id`,
+    /// `name` and `to`, each a string. What `PushKitAdapter` reads when the
     /// application gives it no decoder.
     public init(clear payload: [AnyHashable: Any]) {
         func text(_ key: String) -> String? {
             guard let value = payload[key] as? String, !value.isEmpty else { return nil }
             return value
         }
-        self.init(callerId: text("caller"), callId: text("call-id"), displayName: text("name"))
+        self.init(callerId: text("caller"), callId: text("call-id"), displayName: text("name"), target: text("to"))
     }
 
     /// The push to announce, when there is a caller to announce it by.
     public var push: VoipPush? {
         guard let callerId, !callerId.isEmpty else { return nil }
-        return VoipPush(callerId: callerId, callId: callId, displayName: displayName)
+        return VoipPush(callerId: callerId, callId: callId, displayName: displayName, target: target)
     }
 }
 
@@ -69,14 +79,36 @@ public struct VoipPushFields: Sendable, Equatable {
 /// the call is expected on the account alone.
 public typealias VoipPushDecoder = @Sendable (_ payload: [AnyHashable: Any]) throws -> VoipPushFields
 
-/// What `PushKitBridge` asks of the account a push woke: the announcement
-/// and the binding refresh `Account` makes.
+/// What `PushKitBridge` asks of what a push woke, an account or a stack
+/// whose accounts share the token: the announcement and the binding refresh.
 protocol PushAnnouncing: Sendable {
     func announce(caller: String?, callId: String?) throws -> (announcement: SipralHandle?, call: SipralHandle?)
+    /// With the address of record the push named, which only a stack reads.
+    func announce(
+        caller: String?, callId: String?, target: String?
+    ) throws -> (announcement: SipralHandle?, call: SipralHandle?)
     func refreshBinding() throws
 }
 
+extension PushAnnouncing {
+    func announce(
+        caller: String?, callId: String?, target: String?
+    ) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+        try announce(caller: caller, callId: callId)
+    }
+}
+
 extension Account: PushAnnouncing {}
+
+extension SipralStack: PushAnnouncing {
+    func announce(caller: String?, callId: String?) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+        try announce(caller: caller, callId: callId, target: nil)
+    }
+
+    func refreshBinding() throws {
+        refreshBindings()
+    }
+}
 
 /// What became of one push handed to `PushKitBridge.receive(_:mustReport:account:)`.
 public enum PushOutcome: Sendable {
@@ -172,6 +204,28 @@ public final class PushKitBridge: @unchecked Sendable {
         try await handle(push: push, announcer: account)
     }
 
+    /// `handle(push:account:)` for a push to a token several accounts of
+    /// `stack` share: the call is expected on every account, or on the one
+    /// whose address of record is the push's `target`, and each it is
+    /// expected on has its binding refreshed
+    /// (`SipralStack.announce(caller:callId:target:)`). The INVITE on any
+    /// of them fulfils the one screen, and `PendingCall.account` then says
+    /// which account the call came to. A stack with one account is
+    /// `handle(push:account:)` on it.
+    @discardableResult
+    public func handle(push: VoipPush, stack: SipralStack) async throws -> PendingCall {
+        try await handle(push: push, announcer: stack)
+    }
+
+    /// `handle(push:stack:)` from a `PKPushRegistryDelegate`, as
+    /// `handle(push:account:outcome:)` is.
+    @discardableResult
+    public func handle(
+        push: VoipPush, stack: SipralStack, outcome: @escaping @Sendable (Result<PendingCall, Error>) -> Void
+    ) -> UUID {
+        handle(push: push, announcer: stack, outcome: outcome)
+    }
+
     /// `handle(push:account:)`, on whatever announces for the account.
     @discardableResult
     func handle(push: VoipPush, announcer account: some PushAnnouncing) async throws -> PendingCall {
@@ -233,7 +287,9 @@ public final class PushKitBridge: @unchecked Sendable {
         let recorded: (pendingCall: PendingCall, shownAlready: Bool)
         do {
             recorded = try stateQueue.sync { () throws -> (pendingCall: PendingCall, shownAlready: Bool) in
-                let announced = try account.announce(caller: push.namesCaller ? push.callerId : nil, callId: push.callId)
+                let announced = try account.announce(
+                    caller: push.namesCaller ? push.callerId : nil, callId: push.callId, target: push.target
+                )
                 let pendingCall = PendingCall(
                     uuid: uuid, callerId: push.callerId, displayName: push.displayName,
                     announcement: announced.announcement, callKit: callKit
@@ -317,6 +373,32 @@ public final class PushKitBridge: @unchecked Sendable {
         _ fields: VoipPushFields?, mustReport: Bool = true, account: Account?,
         outcome: @escaping @Sendable (PushOutcome) -> Void
     ) {
+        receive(fields, mustReport: mustReport, announcer: account, outcome: outcome)
+    }
+
+    /// `receive(_:mustReport:account:)` for a push to a token several
+    /// accounts of `stack` share, announced as `handle(push:stack:)` does;
+    /// one the system need not see shown has every account refreshed.
+    public func receive(_ fields: VoipPushFields?, mustReport: Bool = true, stack: SipralStack?) async -> PushOutcome {
+        await withCheckedContinuation { continuation in
+            receive(fields, mustReport: mustReport, stack: stack) { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// `receive(_:mustReport:stack:)` from a `PKPushRegistryDelegate`, as
+    /// `receive(_:mustReport:account:outcome:)` is.
+    public func receive(
+        _ fields: VoipPushFields?, mustReport: Bool = true, stack: SipralStack?,
+        outcome: @escaping @Sendable (PushOutcome) -> Void
+    ) {
+        receive(fields, mustReport: mustReport, announcer: stack, outcome: outcome)
+    }
+
+    /// What every `receive` does, on whatever announces for the push.
+    func receive(
+        _ fields: VoipPushFields?, mustReport: Bool, announcer account: (any PushAnnouncing)?,
+        outcome: @escaping @Sendable (PushOutcome) -> Void
+    ) {
         guard mustReport else {
             try? account?.refreshBinding()
             outcome(.notShown(fields?.push))
@@ -326,7 +408,8 @@ public final class PushKitBridge: @unchecked Sendable {
             reportUnusable(callerId: fields?.callerId) { outcome(.unusable) }
             return
         }
-        let push = fields.push ?? VoipPush(callId: fields.callId, displayName: fields.displayName)
+        let push = fields.push
+            ?? VoipPush(callId: fields.callId, displayName: fields.displayName, target: fields.target)
         show(push, on: account, shown: { result in
             switch result {
             case .success(let pending): outcome(.shown(pending))
@@ -373,7 +456,7 @@ public final class PushKitBridge: @unchecked Sendable {
                 }
                 return pending.remove(at: index)
             }
-            found?.resolveLater(callHandle: event.call)
+            found?.resolveLater(callHandle: event.call, account: stack.account(event.account))
             if let found {
                 let name = found.displayName ?? event.callData?.callerName
                 if found.callerId.isEmpty, let from = event.callData?.fromUri {
@@ -412,6 +495,7 @@ public final class PendingCall: @unchecked Sendable {
     private let callKit: CallKitBridge
     private let stateQueue = DispatchQueue(label: "org.sipral.pushkit.pending")
     private var resolvedHandle: SipralHandle?
+    private var resolvedAccount: Account?
 
     init(uuid: UUID, callerId: String, displayName: String?, announcement: SipralHandle?, callKit: CallKitBridge) {
         self.uuid = uuid
@@ -421,13 +505,27 @@ public final class PendingCall: @unchecked Sendable {
         self.callKit = callKit
     }
 
-    /// The matched call handle, bound later by `resolve(with:)`.
-    func resolveLater(callHandle: SipralHandle) {
-        stateQueue.sync { resolvedHandle = callHandle }
+    /// The matched call handle, bound later by `resolve(with:)`, and the
+    /// account its `incomingCall` named, once that has come.
+    func resolveLater(callHandle: SipralHandle, account: Account? = nil) {
+        stateQueue.sync {
+            resolvedHandle = callHandle
+            if let account {
+                resolvedAccount = account
+            }
+        }
     }
 
     public var matchedCallHandle: SipralHandle? {
         stateQueue.sync { resolvedHandle }
+    }
+
+    /// The account the call came to, once its `incomingCall` has gone
+    /// through `PushKitBridge.matchIncomingCall`: for a push announced on
+    /// several accounts, the one to show on the call screen and in the
+    /// history.
+    public var account: Account? {
+        stateQueue.sync { resolvedAccount }
     }
 
     public func resolve(with call: Call) {

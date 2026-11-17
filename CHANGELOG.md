@@ -13,6 +13,8 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Added
 
+- **A push to a token several accounts share rings one screen, on whichever account the call comes to.** A phone with several accounts, at one PBX or several, behind one push token could only announce a push on one of them: a call to another arrived as a second call while the first screen waited, and twenty seconds later was taken down as missed. `sipral_stack_announce` (ABI 1.14) expects the call on every account of the stack, or on the one whose address of record the push named (the held INVITE's `To`), refreshes each, and is fulfilled once by the INVITE on any of them, whose `INCOMING_CALL` names the account. In the layers: Swift `PushKitBridge.handle(push:stack:)`, `receive(_:mustReport:stack:)`, `PushKitAdapter(bridge:stack:)`, `VoipPush.target` (`to` in the clear payload) and `PendingCall.account`; Kotlin `TelecomBridge.pushArrivedOnEveryAccount`, `wakeForPush(client, accounts, ...)` and `TelecomCall.account`; `SipralStack.announce`, `SipralClient.announce` and Node `Stack.announce` underneath. The lab's push gateway writes `to`. One account is unchanged.
+
 - **Headers on a placed call's INVITE from .NET and from Android's Telecom path.** `SipralStack.PlaceCall(..., headers:)` in .NET and `TelecomBridge.placeCall(account, target, headers)` on Android put header fields on the INVITE as written, checked as `sipral_call_config_t::headers` is, as Swift's `placeCall(headers:)` and `SipralClient.placeCall(headers = ...)` already did. A `SipCalls` of the application's own that cannot add them refuses with `NOT_SUPPORTED` rather than dropping them.
 
 ## [1.3.2] - 2026-11-16

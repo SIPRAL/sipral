@@ -9161,7 +9161,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 13)
+        agree(1, 14)
     }
 
     /**
@@ -9205,6 +9205,7 @@ internal object SipralNative {
     external fun sipral_account_announce(stack: Long, account: Long, caller: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
     external fun sipral_account_announce_call(stack: Long, account: Long, caller: ByteArray, callId: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
     external fun sipral_account_announce_any(stack: Long, account: Long, callId: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
+    external fun sipral_stack_announce(stack: Long, target: ByteArray, caller: ByteArray, callId: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
@@ -9409,7 +9410,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 13
+    const val ABI_VERSION_MINOR: Long = 14
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -10460,6 +10461,43 @@ object Sipral {
         val announcementSlot = LongArray(1)
         val callSlot = LongArray(1)
         check(SipralNative.sipral_account_announce_any(stack, account, callIdBytes, announcementSlot, callSlot, nowMs))
+        return Pair(announcementSlot[0], callSlot[0])
+    }
+
+    /**
+     * A call is expected on any of this stack's accounts, announced by a
+     * push (ABI 1.14): one push token shared by several accounts, which
+     * cannot say which of them the call is for, or says so only by the
+     * address of record the proxy saw in the INVITE's `To`.
+     *
+     * `target` is that address of record when the push carried one. It
+     * narrows the wait to the accounts with that address of record, user
+     * and host compared as a caller's are; when none has it, or
+     * `target_len` is zero, the call is expected on every account. Each
+     * account it is expected on has its binding refreshed.
+     *
+     * `caller` and `call_id` are those of `sipral_account_announce_call`;
+     * a `caller_len` of zero means the push named nobody, as
+     * `sipral_account_announce_any`. The INVITE on any of the accounts
+     * fulfils the one announcement: `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` comes
+     * once, right before its `SIPRAL_EVENT_KIND_INCOMING_CALL`, which names
+     * the account it came to, and `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING`
+     * at most once. The two outputs are those of `sipral_account_announce`.
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` on a stack with no account.
+     *
+     * Safety
+     *
+     * `target`, `caller` and `call_id` must each be readable for the length
+     * beside it or be null with a length of zero, and each of
+     * `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+     */
+    fun stackAnnounce(stack: Long, target: String, caller: String, callId: String, nowMs: Long): Pair<Long, Long> {
+        val targetBytes = target.toByteArray(Charsets.UTF_8)
+        val callerBytes = caller.toByteArray(Charsets.UTF_8)
+        val callIdBytes = callId.toByteArray(Charsets.UTF_8)
+        val announcementSlot = LongArray(1)
+        val callSlot = LongArray(1)
+        check(SipralNative.sipral_stack_announce(stack, targetBytes, callerBytes, callIdBytes, announcementSlot, callSlot, nowMs))
         return Pair(announcementSlot[0], callSlot[0])
     }
 

@@ -2564,7 +2564,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 13
+    public static let abiVersionMinor: UInt32 = 14
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3513,6 +3513,53 @@ public enum Sipral {
             Array(callId.utf8).withUnsafeBufferPointer { raw2 in
                 raw2.withMemoryRebound(to: CChar.self) { p2 in
                     sipral_account_announce_any(stack, account, p2.baseAddress, p2.count, &announcement, &call, nowMs)
+                }
+            }
+        try check(status)
+        return (announcement: announcement, call: call)
+    }
+
+    /// A call is expected on any of this stack's accounts, announced by a
+    /// push (ABI 1.14): one push token shared by several accounts, which
+    /// cannot say which of them the call is for, or says so only by the
+    /// address of record the proxy saw in the INVITE's `To`.
+    ///
+    /// `target` is that address of record when the push carried one. It
+    /// narrows the wait to the accounts with that address of record, user
+    /// and host compared as a caller's are; when none has it, or
+    /// `target_len` is zero, the call is expected on every account. Each
+    /// account it is expected on has its binding refreshed.
+    ///
+    /// `caller` and `call_id` are those of `sipral_account_announce_call`;
+    /// a `caller_len` of zero means the push named nobody, as
+    /// `sipral_account_announce_any`. The INVITE on any of the accounts
+    /// fulfils the one announcement: `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` comes
+    /// once, right before its `SIPRAL_EVENT_KIND_INCOMING_CALL`, which names
+    /// the account it came to, and `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING`
+    /// at most once. The two outputs are those of `sipral_account_announce`.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` on a stack with no account.
+    ///
+    /// Safety
+    ///
+    /// `target`, `caller` and `call_id` must each be readable for the length
+    /// beside it or be null with a length of zero, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    public static func stackAnnounce(stack: SipralHandle, target: String, caller: String, callId: String, nowMs: UInt64) throws -> (announcement: SipralHandle, call: SipralHandle) {
+        try ensureAbi()
+        var announcement = SipralHandle()
+        var call = SipralHandle()
+        let status =
+            Array(target.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    Array(caller.utf8).withUnsafeBufferPointer { raw2 in
+                        raw2.withMemoryRebound(to: CChar.self) { p2 in
+                            Array(callId.utf8).withUnsafeBufferPointer { raw3 in
+                                raw3.withMemoryRebound(to: CChar.self) { p3 in
+                                    sipral_stack_announce(stack, p1.baseAddress, p1.count, p2.baseAddress, p2.count, p3.baseAddress, p3.count, &announcement, &call, nowMs)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         try check(status)

@@ -164,6 +164,7 @@ mod tests {
             caller: Some("sip:bob@example.com".into()),
             name: None,
             call_id: Some("a84b4c76e66710@pc33.example.com".into()),
+            to: None,
         }
     }
 

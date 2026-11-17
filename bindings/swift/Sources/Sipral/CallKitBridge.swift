@@ -358,8 +358,12 @@ public final class CallKitBridge: @unchecked Sendable {
         unbind(uuid: uuid)
     }
 
-    /// Shows `displayName` for a call already on screen without one.
-    func nameCaller(uuid: UUID, displayName: String) {
+    /// Shows `displayName` for a call already on screen: the INVITE's name
+    /// for one raised before anything named the caller, or, for a push
+    /// announced on several accounts, the caller's name with the account
+    /// the call came to (`PendingCall.account`), CallKit having no place
+    /// of its own for an account.
+    public func nameCaller(uuid: UUID, displayName: String) {
         provider.reportCallerName(uuid: uuid, displayName: displayName)
     }
 

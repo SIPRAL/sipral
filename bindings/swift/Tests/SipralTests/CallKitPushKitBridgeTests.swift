@@ -656,6 +656,48 @@ final class PushKitBridgeTests: XCTestCase {
         XCTAssertEqual(pending.matchedCallHandle, 424243)
     }
 
+    /// A push to a token two accounts share is one screen, announced on the
+    /// stack; the INVITE the stack matched to it takes that screen whichever
+    /// account it came to, and the screen learns which. A stack with no
+    /// account has nothing to expect the call on.
+    func testAPushToAStackTakesTheCallOnWhicheverAccountItComesTo() async throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        _ = try stack.addAccount(aor: "sip:101@pbx-a.invalid", registrarAddress: "127.0.0.1:5060")
+        let second = try stack.addAccount(aor: "sip:205@pbx-b.invalid", registrarAddress: "127.0.0.1:5060")
+
+        let provider = RecordingProvider()
+        let pushKit = PushKitBridge(callKit: CallKitBridge(provider: provider))
+        let outcome = await pushKit.receive(
+            VoipPushFields(callerId: "sip:alice@sipral.invalid", target: "sip:205@pbx-b.invalid"), stack: stack
+        )
+        guard case .shown(let pending) = outcome else {
+            return XCTFail("the push was not shown and announced: \(outcome)")
+        }
+        let announcement = try XCTUnwrap(pending.announcement)
+        XCTAssertNil(pending.account, "no call has come yet")
+
+        let announced = SipralEvent(
+            kindRaw: SipralEventKind.callAnnounced.rawValue, kind: .callAnnounced, kindName: "call announced",
+            stack: stack.handle, account: second.handle, call: 424245, message: nil, callData: nil,
+            mediaData: nil, registrationData: nil,
+            announceData: AnnounceEventData(announcement: announcement, waitedMs: 0), natData: nil,
+            relayData: nil, referralData: nil, turnStreamData: nil, audioData: nil, stunServerData: nil,
+            verificationData: nil
+        )
+        XCTAssertNil(pushKit.matchIncomingCall(announced, on: stack))
+        let invite = incomingCall(424245, from: "sip:alice@sipral.invalid", on: stack, account: second)
+        XCTAssertEqual(pushKit.matchIncomingCall(invite, on: stack)?.uuid, pending.uuid)
+        XCTAssertEqual(pending.account?.handle, second.handle, "the screen was not told the account called")
+
+        let empty = try SipralStack(audio: .application)
+        defer { empty.close() }
+        let nowhere = await pushKit.receive(VoipPushFields(callerId: "sip:alice@sipral.invalid"), stack: empty)
+        guard case .unusable = nowhere else {
+            return XCTFail("a stack with no account took a push: \(nowhere)")
+        }
+    }
+
     /// The stack's events run on their own thread and may pair the INVITE
     /// with the announcement before `announce` has even returned. That
     /// INVITE must still find the push pending, not be handed to the
@@ -697,12 +739,17 @@ final class PushKitBridgeTests: XCTestCase {
     func testTheClearPayloadIsReadAndAnythingElseIsNothing() {
         let fields = VoipPushFields(clear: [
             "caller": "sip:alice@sipral.invalid", "call-id": "a84b4c76e66710", "name": "Alice Liddell", "kind": "call",
+            "to": "sip:205@pbx-b.invalid",
         ])
         XCTAssertEqual(
             fields,
-            VoipPushFields(callerId: "sip:alice@sipral.invalid", callId: "a84b4c76e66710", displayName: "Alice Liddell")
+            VoipPushFields(
+                callerId: "sip:alice@sipral.invalid", callId: "a84b4c76e66710", displayName: "Alice Liddell",
+                target: "sip:205@pbx-b.invalid"
+            )
         )
         XCTAssertEqual(fields.push?.displayName, "Alice Liddell")
+        XCTAssertEqual(fields.push?.target, "sip:205@pbx-b.invalid")
         let sealed = VoipPushFields(clear: ["box": "q9cXg2A=", "caller": "", "name": 7])
         XCTAssertEqual(sealed, VoipPushFields())
         XCTAssertNil(sealed.push, "no caller to announce it by")

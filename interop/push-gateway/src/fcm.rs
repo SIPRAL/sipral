@@ -349,6 +349,7 @@ mod tests {
             caller: Some("sip:bob@example.com".into()),
             name: Some("Bob".into()),
             call_id: Some("a84b4c76e66710@pc33.example.com".into()),
+            to: None,
         };
         let request = fcm.request(&push, "ya29.token");
         assert_eq!(request.authority, "fcm.googleapis.com");

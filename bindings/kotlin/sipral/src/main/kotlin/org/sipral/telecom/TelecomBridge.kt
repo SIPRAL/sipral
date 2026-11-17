@@ -108,12 +108,16 @@ class TelecomBridge(
     private class Entry(
         val id: String,
         val direction: TelecomDirection,
-        val account: Long,
+        var account: Long,
         var caller: String,
         var displayName: String?,
         var phase: TelecomPhase,
     ) {
         var call: Long = 0
+
+        /** Announced on every account: [account] is zero until the INVITE
+         * names the one it came to. */
+        var everyAccount = false
         var connection: TelecomConnection? = null
 
         /** An outgoing call's headers for its INVITE. */
@@ -227,9 +231,34 @@ class TelecomBridge(
      * ([TelecomConnection.setCaller]). The oldest call already ringing on the
      * account unannounced is taken as this one.
      */
-    fun pushArrived(account: Long, caller: String?, displayName: String? = null, callId: String? = null): String = settle {
+    fun pushArrived(account: Long, caller: String?, displayName: String? = null, callId: String? = null): String =
+        arrived(account, null, caller, displayName, callId)
+
+    /**
+     * [pushArrived] for a push to a token several accounts share
+     * ([SipCalls.announceOnEveryAccount]): the call is expected on every
+     * account, or on the one whose address of record is [target], the `To`
+     * of the INVITE the proxy holds, when the push carried it and an account
+     * has it. Each account it is expected on has its binding refreshed. The
+     * call's [TelecomCall.account] is zero until its INVITE arrives, and then
+     * the account it came to; a call already ringing unannounced on any
+     * account is taken as this one, as [pushArrived] takes one on its
+     * account.
+     */
+    fun pushArrivedOnEveryAccount(
+        caller: String?,
+        displayName: String? = null,
+        callId: String? = null,
+        target: String? = null,
+    ): String = arrived(null, target, caller, displayName, callId)
+
+    /** [pushArrived] on [account], or, when it is null, on every account. */
+    private fun arrived(account: Long?, target: String?, caller: String?, displayName: String?, callId: String?): String = settle {
+        val announce = {
+            if (account == null) sip.announceOnEveryAccount(target, caller, callId) else sip.announce(account, caller, callId)
+        }
         val existing = entries.values.firstOrNull {
-            it.direction == TelecomDirection.INCOMING && it.account == account && it.call != 0L &&
+            it.direction == TelecomDirection.INCOMING && (account == null || it.account == account) && it.call != 0L &&
                 !it.announced && !it.closedForTelecom && it.phase == TelecomPhase.RINGING &&
                 (caller == null || sameCaller(caller, it.caller))
         }
@@ -240,7 +269,7 @@ class TelecomBridge(
             // past it the answer is an announcement no screen waits for, which
             // would catch a redial or run out as some other push's "missing"
             val answer = try {
-                sip.announce(account, caller, callId)
+                announce()
             } catch (_: SipralException) {
                 null
             }
@@ -250,7 +279,8 @@ class TelecomBridge(
             return@settle existing.id
         }
 
-        val entry = Entry(newId(), TelecomDirection.INCOMING, account, caller ?: "", displayName, TelecomPhase.RINGING)
+        val entry = Entry(newId(), TelecomDirection.INCOMING, account ?: 0L, caller ?: "", displayName, TelecomPhase.RINGING)
+        entry.everyAccount = account == null
         entry.announced = true
         entries[entry.id] = entry
         entry.awaitingConnection = true
@@ -265,7 +295,7 @@ class TelecomBridge(
         }
 
         val answer = try {
-            sip.announce(account, caller, callId)
+            announce()
         } catch (_: Exception) {
             end(entry, TelecomDisconnect.ERROR)
             return@settle entry.id
@@ -624,12 +654,13 @@ class TelecomBridge(
         val known = byCall[event.call]
         if (known != null) {
             // bound already, by an announce that answered Arrived
+            arrivedOn(known, event.account)
             learn(known, caller, who.displayName)
             return
         }
         if (announcement != null) {
             val waiting = entries.values
-                .filter { it.announcement != 0L && it.account == event.account }
+                .filter { it.announcement != 0L && (it.everyAccount || it.account == event.account) }
                 .sortedBy { it.announcedAt }
             // an announcement the event names is the library's pairing, and one no
             // screen holds was not this bridge's: its call is shown as a call of its
@@ -642,6 +673,7 @@ class TelecomBridge(
             }
             if (entry != null) {
                 entry.announcement = 0L
+                arrivedOn(entry, event.account)
                 learn(entry, caller, who.displayName)
                 bind(entry, event.call)
                 return
@@ -664,6 +696,14 @@ class TelecomBridge(
             entry.endedLocally = true
             entry.phase = TelecomPhase.ENDED
             quietly { sip.reject(event.call, 486) }
+        }
+    }
+
+    /** A call announced on every account came to [account]. */
+    private fun arrivedOn(entry: Entry, account: Long) {
+        if (entry.everyAccount) {
+            entry.account = account
+            entry.everyAccount = false
         }
     }
 

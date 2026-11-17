@@ -4626,3 +4626,38 @@ on `addAccount`, Kotlin and the JVM jar `subscriptionRetryMaxSeconds`, .NET
 `AccountOptions::subscription_retry_max_seconds`, React Native
 `subscriptionRetryMaxSeconds`. Kotlin, Dart and React Native refuse a value
 outside 0 to 4294967295 rather than cut it to 32 bits.
+
+## What ABI 1.14 added
+
+### A push to a token several accounts share
+
+One entry point, no struct member, no event kind and no status code. Every
+pin stays where it was.
+
+`sipral_stack_announce(stack, target, target_len, caller, caller_len,
+call_id, call_id_len, out_announcement, out_call, now_ms)` expects a call on
+every account of the stack, for a push to a token the accounts share
+(`15-mobile.md`, "The matching rule"). `target` is the address of record the
+push named, the `To` of the INVITE the proxy holds: an account with that
+address of record, user and host compared as a caller's are, narrows the
+wait to itself, and with none, or a `target_len` of zero, every account
+waits. Each account waited on has its binding refreshed. `caller` and
+`call_id` are those of `sipral_account_announce_call`, a `caller_len` of zero
+being a push that named nobody, as `sipral_account_announce_any` takes it;
+the two outputs are those of `sipral_account_announce`. The INVITE on any of
+the accounts fulfils the one announcement, so the events are those of one
+account: `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` once, before the
+`SIPRAL_EVENT_KIND_INCOMING_CALL` whose `account` names where the call came,
+and `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` at most once.
+`SIPRAL_STATUS_INVALID_ARGUMENT` on a stack with no account, or for a
+`target` or `caller` that is no URI.
+
+A binding printed at 1.13 loads against a 1.14 library and works as it did.
+One printed at 1.14 is refused by a 1.13 library, with both versions named.
+
+**In the layers.** Swift `SipralStack.announce(caller:callId:target:)`,
+under `PushKitBridge.handle(push:stack:)` and
+`receive(_:mustReport:stack:)`; Kotlin `SipralClient.announce(caller,
+callId, target)`, under `TelecomBridge.pushArrivedOnEveryAccount` and
+`wakeForPush(client, accounts, ...)`; Node `Stack.announce(caller, callId,
+target)`. The other layers announce nothing, on one account or several.

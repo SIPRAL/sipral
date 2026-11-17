@@ -166,6 +166,15 @@ internal class FakeSip(val log: Log) : SipCalls {
         return answer
     }
 
+    override fun announceOnEveryAccount(target: String?, caller: String?, callId: String?): SipralAnnounced {
+        log.add("announce every ${target ?: "-"} ${caller ?: "anybody"}")
+        val answer = nextAnnounce
+        if (answer is SipralAnnounced.Waiting) {
+            nextAnnounce = SipralAnnounced.Waiting(answer.announcement + 1)
+        }
+        return answer
+    }
+
     override fun forgetAnnouncement(announcement: Long) {
         log.add("forget $announcement")
         if (forgetCrosses) {
@@ -236,9 +245,9 @@ internal fun invite(from: String) =
 /** The INVITE for [call], as the library queues it when it matched an
  * announcement: CALL_ANNOUNCED first, INCOMING_CALL straight after. With no
  * [announcement] the event names none, and the bridge's own rule decides. */
-private fun announcedInvite(bridge: TelecomBridge, call: Long, from: String, announcement: Long = 0) {
+private fun announcedInvite(bridge: TelecomBridge, call: Long, from: String, announcement: Long = 0, account: Long = ACCOUNT) {
     bridge.onEvent(event(SipralEventKind.CALL_ANNOUNCED, call = call, announcement = announcement))
-    bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = call, account = ACCOUNT, message = invite(from)))
+    bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = call, account = account, message = invite(from)))
 }
 
 private fun fakeSequences(): String {
@@ -285,6 +294,25 @@ private fun fakeSequences(): String {
         assertEquals(1, log.count("release 900"))
         assertEquals(1, log.count("conn $id disconnected"), "the framework was told twice")
         assertTrue(bridge.calls.value.isEmpty())
+        ran++
+    }
+
+    // A push to a token two accounts share: one screen, announced on every
+    // account with the address of record it named; the INVITE the library
+    // matched to it on the second account takes the screen and names that
+    // account, and an INVITE matched to nothing on the first is a call of
+    // its own.
+    Rig().run {
+        val id = bridge.pushArrivedOnEveryAccount("sip:alice@example.invalid", target = "sip:205@example.invalid")
+        assertEquals(1, log.count("announce every sip:205@example.invalid sip:alice@example.invalid"), log.snapshot().toString())
+        platform.create(id)
+        assertEquals(0L, bridge.calls.value.single().account, "an account named before any INVITE did")
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 930, account = ACCOUNT, message = invite("<sip:bob@example.invalid>")))
+        assertEquals(2, log.count("report"), "a call the library matched to nothing took the push's screen")
+        announcedInvite(bridge, 931, "<sip:alice@example.invalid>", announcement = 100, account = ACCOUNT + 1)
+        assertEquals(2, log.count("report"), "the matched INVITE was reported again: ${log.snapshot()}")
+        assertEquals(931, bridge.callHandleOf(id))
+        assertEquals(ACCOUNT + 1, bridge.calls.value.single { it.id == id }.account)
         ran++
     }
 

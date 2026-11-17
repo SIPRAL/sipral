@@ -41,6 +41,16 @@
 //! one account may be swapped; nothing in the push tells them apart.
 //!
 //! An announcement is used once. Two calls need two pushes.
+//!
+//! **Several accounts.** A phone may hold several accounts behind one push
+//! token, and a push then says nothing about which of them the call is for,
+//! or names it by the address of record the proxy saw in the INVITE's `To`.
+//! [`UserAgent::announce_among`] expects the call on a set of accounts: the
+//! one the push names, when one of the set has that address of record, else
+//! all of them, each refreshed. The INVITE on any of them fulfils the one
+//! announcement, so one push is one ringing screen and at most one
+//! [`UaEvent::AnnouncedCallMissing`], and [`Announcement::account`] then says
+//! which account the call came to.
 
 use std::time::{Duration, Instant};
 
@@ -67,6 +77,8 @@ pub struct AnnouncementId(pub(crate) u32);
 pub struct Announcement {
     pub(crate) id: AnnouncementId,
     pub(crate) account: AccountId,
+    /// Every account the call is expected on; `account` is one of them.
+    pub(crate) accounts: Vec<AccountId>,
     pub(crate) caller: Uri,
     /// Whether the push named `caller`, or it stands for nobody.
     pub(crate) named: bool,
@@ -81,10 +93,19 @@ impl Announcement {
         self.id
     }
 
-    /// The account the call was announced on.
+    /// The account the call was announced on. Expected on several
+    /// ([`UserAgent::announce_among`]), the one its INVITE came to once one
+    /// did, and the first of [`Announcement::accounts`] until then.
     #[must_use]
     pub const fn account(&self) -> AccountId {
         self.account
+    }
+
+    /// Every account the call is expected on, in the order given; one for
+    /// every entry point but [`UserAgent::announce_among`].
+    #[must_use]
+    pub fn accounts(&self) -> &[AccountId] {
+        &self.accounts
     }
 
     /// Who the push said is calling. RFC 3323's
@@ -206,24 +227,75 @@ impl UserAgent {
         self.announce_by(account, None, call_id, now)
     }
 
-    /// What every announcing entry point does; `caller` is `None` when the
-    /// push named nobody.
-    fn announce_by(
+    /// A call is expected on one of several `accounts`, announced now: a
+    /// push to a token the accounts share (module documentation, "Several
+    /// accounts").
+    ///
+    /// `target` is the address of record the push named, when it named one:
+    /// the `To` of the INVITE the proxy holds. Matched on user and host as a
+    /// caller is, it narrows `accounts` to those with that address of record;
+    /// when none has it, or there is none, the call is expected on all of
+    /// them. Every account it is expected on has its binding refreshed, as
+    /// [`UserAgent::announce`] refreshes one.
+    ///
+    /// `caller` and `call_id` are those of [`UserAgent::announce_call`], and
+    /// `caller` `None` is [`UserAgent::announce_any`]: the INVITE fulfils
+    /// the announcement on whichever of the accounts it arrives. An empty
+    /// `accounts` is every account this agent has.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchAccount`] for an account this agent does not have,
+    /// or for none given to an agent that has none.
+    pub fn announce_among(
         &mut self,
-        account: AccountId,
+        accounts: &[AccountId],
+        target: Option<&Uri>,
         caller: Option<Uri>,
         call_id: Option<&str>,
         now: Instant,
     ) -> Result<Announced, UaError> {
-        if !self.accounts.contains_key(&account) {
-            return Err(UaError::NoSuchAccount);
+        let mut among: Vec<AccountId> = if accounts.is_empty() {
+            let mut every: Vec<AccountId> = self.accounts.keys().copied().collect();
+            every.sort_unstable();
+            every
+        } else {
+            let mut given = Vec::with_capacity(accounts.len());
+            for account in accounts {
+                if !self.accounts.contains_key(account) {
+                    return Err(UaError::NoSuchAccount);
+                }
+                if !given.contains(account) {
+                    given.push(*account);
+                }
+            }
+            given
+        };
+        if let Some(target) = target {
+            let named: Vec<AccountId> = among
+                .iter()
+                .copied()
+                .filter(|account| {
+                    self.accounts
+                        .get(account)
+                        .is_some_and(|config| same_caller(target, &config.aor))
+                })
+                .collect();
+            if !named.is_empty() {
+                among = named;
+            }
         }
+        let Some(&first) = among.first() else {
+            return Err(UaError::NoSuchAccount);
+        };
         let call_id = call_id.filter(|id| !id.is_empty()).map(str::to_owned);
-        let already = self.ringing_already(account, caller.as_ref(), call_id.as_deref(), now);
-        let announcement = self.mint(account, caller, call_id, now);
+        let already = self.ringing_already(&among, caller.as_ref(), call_id.as_deref(), now);
+        let mut announcement = self.mint(first, among.clone(), caller, call_id, now);
         let answer = if let Some(call) = already {
             if let Some(arrival) = self.arrivals.get_mut(&call) {
                 arrival.matched = true;
+                if let Some(account) = arrival.account {
+                    announcement.account = account;
+                }
             }
             self.attach(call, announcement);
             Announced::Arrived(call)
@@ -232,10 +304,24 @@ impl UserAgent {
             self.announcements.push(announcement);
             Announced::Waiting(id)
         };
-        // no transport yet is normal on wake-up: the REGISTER is owed and
-        // goes when one is bound
-        self.refresh_binding(account, now).ok();
+        for account in among {
+            // no transport yet is normal on wake-up: the REGISTER is owed and
+            // goes when one is bound
+            self.refresh_binding(account, now).ok();
+        }
         Ok(answer)
+    }
+
+    /// What every single-account entry point does; `caller` is `None` when
+    /// the push named nobody.
+    fn announce_by(
+        &mut self,
+        account: AccountId,
+        caller: Option<Uri>,
+        call_id: Option<&str>,
+        now: Instant,
+    ) -> Result<Announced, UaError> {
+        self.announce_among(&[account], None, caller, call_id, now)
     }
 
     /// Send a binding-refresh REGISTER now, without waiting for the scheduled
@@ -301,9 +387,11 @@ impl UserAgent {
         self.announce_window = window;
     }
 
+    /// `account` is the first of `accounts`.
     fn mint(
         &mut self,
         account: AccountId,
+        accounts: Vec<AccountId>,
         caller: Option<Uri>,
         call_id: Option<String>,
         at: Instant,
@@ -314,6 +402,7 @@ impl UserAgent {
         Announcement {
             id,
             account,
+            accounts,
             caller: caller.unwrap_or_else(Uri::anonymous),
             named,
             call_id,
@@ -321,12 +410,12 @@ impl UserAgent {
         }
     }
 
-    /// An unclaimed call ringing within the window: the one with this
-    /// `Call-ID` when one is given and rings, otherwise the oldest from this
-    /// caller, or from anybody when `caller` is `None`.
+    /// An unclaimed call ringing within the window on one of `accounts`: the
+    /// one with this `Call-ID` when one is given and rings, otherwise the
+    /// oldest from this caller, or from anybody when `caller` is `None`.
     fn ringing_already(
         &self,
-        account: AccountId,
+        accounts: &[AccountId],
         caller: Option<&Uri>,
         call_id: Option<&str>,
         now: Instant,
@@ -335,7 +424,9 @@ impl UserAgent {
         if let Some(call_id) = call_id {
             let named = self.arrivals.iter().find(|(_, arrival)| {
                 !arrival.matched
-                    && arrival.account == Some(account)
+                    && arrival
+                        .account
+                        .is_some_and(|account| accounts.contains(&account))
                     && arrival.at + window >= now
                     && arrival.call_id.as_deref() == Some(call_id)
             });
@@ -352,7 +443,9 @@ impl UserAgent {
                     .is_some_and(|from| same_caller(caller, from))
             });
             if arrival.matched
-                || arrival.account != Some(account)
+                || !arrival
+                    .account
+                    .is_some_and(|account| accounts.contains(&account))
                 || arrival.at + window < now
                 || !from_caller
             {
@@ -438,7 +531,8 @@ impl UserAgent {
 
     /// The announcement an INVITE on `account` fulfils: the one naming its
     /// `Call-ID`, or else the oldest naming its caller, or else the oldest
-    /// that named nobody.
+    /// that named nobody. Taken from among several accounts, it now names
+    /// `account`.
     fn claim(
         &mut self,
         account: AccountId,
@@ -448,14 +542,16 @@ impl UserAgent {
     ) -> Option<Announcement> {
         let window = self.announce_window;
         let open = |announcement: &Announcement| {
-            announcement.account == account && announcement.at + window >= now
+            announcement.accounts.contains(&account) && announcement.at + window >= now
         };
         if let Some(call_id) = call_id {
             let named = self.announcements.iter().position(|announcement| {
                 open(announcement) && announcement.call_id.as_deref() == Some(call_id)
             });
             if let Some(at) = named {
-                return Some(self.announcements.remove(at));
+                let mut taken = self.announcements.remove(at);
+                taken.account = account;
+                return Some(taken);
             }
         }
         let by_caller = caller.and_then(|caller| {
@@ -469,7 +565,11 @@ impl UserAgent {
             .or_else(|| {
                 self.oldest_announcement(|announcement| open(announcement) && !announcement.named)
             })
-            .map(|at| self.announcements.remove(at))
+            .map(|at| {
+                let mut taken = self.announcements.remove(at);
+                taken.account = account;
+                taken
+            })
     }
 
     /// Where the oldest announcement that `fits` sits; the first of equals.
@@ -1341,6 +1441,239 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(
             agent.announce(AccountId(7), uri("sip:bob@example.com"), t0),
             Err(UaError::NoSuchAccount)
+        );
+    }
+
+    /// Alice's account from [`registered`] and Carol's beside it, at another
+    /// domain, both registered, a minute on so a refresh may go.
+    fn two_lines(t0: Instant) -> (UserAgent, AccountId, AccountId, Instant) {
+        let (mut agent, alice) = registered(t0);
+        let carol = agent.add_account(Account::new(
+            uri("sip:carol@pbx-b.invalid"),
+            uri("sip:pbx-b.invalid"),
+            uri("sip:carol@192.0.2.1"),
+            UDP,
+            registrar(),
+        ));
+        agent.register(carol, t0).expect("a REGISTER goes");
+        let request = sent(&mut agent);
+        deliver(
+            &mut agent,
+            &reply(
+                &request,
+                200,
+                "OK",
+                "Contact: <sip:carol@192.0.2.1>;expires=3600\r\n",
+            ),
+            t0,
+        );
+        let t1 = t0 + Duration::from_secs(60);
+        agent.handle_timeout(t1);
+        transmits(&mut agent);
+        events(&mut agent);
+        (agent, alice, carol, t1)
+    }
+
+    /// An INVITE from `from` to Carol's line.
+    fn invite_to_carol(from: &str, branch: &str) -> Vec<u8> {
+        String::from_utf8(invite_from(from, branch))
+            .expect("text")
+            .replace("INVITE sip:alice@192.0.2.1", "INVITE sip:carol@192.0.2.1")
+            .replace(
+                "To: Alice <sip:alice@example.com>",
+                "To: <sip:carol@pbx-b.invalid>",
+            )
+            .into_bytes()
+    }
+
+    fn registers(out: &[Vec<u8>]) -> Vec<String> {
+        out.iter()
+            .filter(|message| message.starts_with(b"REGISTER "))
+            .map(|message| text(message, HeaderName::To))
+            .collect()
+    }
+
+    #[test]
+    fn a_push_to_a_shared_token_readies_every_line_and_names_the_one_called() {
+        let t0 = Instant::now();
+        let (mut agent, alice, carol, t1) = two_lines(t0);
+        let announcement = waiting(
+            agent
+                .announce_among(&[], None, Some(uri("sip:bob@example.com")), None, t1)
+                .expect("an announcement"),
+        );
+        assert_eq!(
+            agent
+                .announcement(announcement)
+                .map(|held| held.accounts().to_vec()),
+            Some(vec![alice, carol]),
+            "no accounts given is every account"
+        );
+        let refreshed = registers(&transmits(&mut agent));
+        assert_eq!(refreshed.len(), 2, "both bindings refreshed: {refreshed:?}");
+        events(&mut agent);
+
+        deliver(
+            &mut agent,
+            &invite_to_carol("sip:bob@example.com", "c1"),
+            t1,
+        );
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        let call = *incoming(&seen).first().expect("Bob is calling Carol");
+        assert_eq!(announced(&seen), vec![(call, announcement.0)]);
+        let on = seen.iter().find_map(|event| match *event {
+            UaEvent::CallAnnounced {
+                ref announcement, ..
+            } => Some(announcement.account()),
+            _ => None,
+        });
+        assert_eq!(
+            on,
+            Some(carol),
+            "the screen learns the line the call came to"
+        );
+
+        agent.handle_timeout(t1 + WINDOW);
+        assert!(
+            !events(&mut agent)
+                .iter()
+                .any(|event| matches!(*event, UaEvent::AnnouncedCallMissing { .. })),
+            "Alice's line waiting too does not make the push a missed call"
+        );
+    }
+
+    #[test]
+    fn a_push_naming_a_line_waits_on_that_line_alone() {
+        let t0 = Instant::now();
+        let (mut agent, _alice, carol, t1) = two_lines(t0);
+        let announcement = waiting(
+            agent
+                .announce_among(
+                    &[],
+                    Some(&uri("sip:carol@PBX-B.invalid;user=phone")),
+                    None,
+                    None,
+                    t1,
+                )
+                .expect("an announcement"),
+        );
+        assert_eq!(
+            agent
+                .announcement(announcement)
+                .map(|held| held.accounts().to_vec()),
+            Some(vec![carol])
+        );
+        let refreshed = registers(&transmits(&mut agent));
+        assert_eq!(refreshed.len(), 1, "only Carol's binding: {refreshed:?}");
+        assert!(refreshed[0].contains("carol@pbx-b.invalid"));
+        events(&mut agent);
+
+        deliver(&mut agent, &invite_from("sip:bob@example.com", "a1"), t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        assert_eq!(incoming(&seen).len(), 1, "Alice's call still arrives");
+        assert!(
+            announced(&seen).is_empty(),
+            "but it is not the call the push named"
+        );
+
+        deliver(
+            &mut agent,
+            &invite_to_carol("sip:dave@example.com", "c2"),
+            t1,
+        );
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        assert_eq!(announced(&seen).len(), 1, "Carol's call is");
+    }
+
+    #[test]
+    fn a_push_naming_a_line_nobody_has_waits_on_every_line() {
+        let t0 = Instant::now();
+        let (mut agent, alice, carol, t1) = two_lines(t0);
+        let announcement = waiting(
+            agent
+                .announce_among(
+                    &[alice, carol],
+                    Some(&uri("sip:zed@example.org")),
+                    None,
+                    None,
+                    t1,
+                )
+                .expect("an announcement"),
+        );
+        assert_eq!(
+            agent
+                .announcement(announcement)
+                .map(|held| held.accounts().to_vec()),
+            Some(vec![alice, carol])
+        );
+        assert_eq!(registers(&transmits(&mut agent)).len(), 2);
+    }
+
+    #[test]
+    fn a_push_to_several_lines_that_brings_nothing_is_one_missed_call() {
+        let t0 = Instant::now();
+        let (mut agent, alice, carol, t1) = two_lines(t0);
+        agent
+            .announce_among(&[carol, alice, carol], None, None, None, t1)
+            .expect("an announcement");
+        transmits(&mut agent);
+        events(&mut agent);
+        agent.handle_timeout(t1 + WINDOW);
+        let missing: Vec<Vec<AccountId>> = events(&mut agent)
+            .into_iter()
+            .filter_map(|event| match event {
+                UaEvent::AnnouncedCallMissing { announcement, .. } => {
+                    Some(announcement.accounts().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            missing,
+            vec![vec![carol, alice]],
+            "once, each line once, in the order given"
+        );
+    }
+
+    #[test]
+    fn an_invite_that_beat_a_push_to_several_lines_is_found_on_any_of_them() {
+        let t0 = Instant::now();
+        let (mut agent, alice, carol, t1) = two_lines(t0);
+        deliver(
+            &mut agent,
+            &invite_to_carol("sip:bob@example.com", "c3"),
+            t1,
+        );
+        transmits(&mut agent);
+        let call = *incoming(&events(&mut agent))
+            .first()
+            .expect("Bob is calling Carol");
+        assert_eq!(
+            agent.announce_among(&[alice, carol], None, None, None, t1),
+            Ok(Announced::Arrived(call))
+        );
+    }
+
+    #[test]
+    fn a_push_to_several_lines_naming_one_never_added_is_refused() {
+        let t0 = Instant::now();
+        let (mut agent, alice, _carol, t1) = two_lines(t0);
+        assert_eq!(
+            agent.announce_among(&[alice, AccountId(77)], None, None, None, t1),
+            Err(UaError::NoSuchAccount)
+        );
+        assert!(
+            registers(&transmits(&mut agent)).is_empty(),
+            "nothing refreshed"
+        );
+        let mut bare = awake(t0);
+        assert_eq!(
+            bare.announce_among(&[], None, None, None, t0),
+            Err(UaError::NoSuchAccount),
+            "every account of an agent with none is none"
         );
     }
 

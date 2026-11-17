@@ -1553,6 +1553,35 @@ public final class SipralStack: @unchecked Sendable {
         movingQueue.sync { accounts[handle] }
     }
 
+    /// `sipral_stack_announce` (ABI 1.14): a call announced by a push to a
+    /// token this stack's accounts share, expected on every account, or on
+    /// those whose address of record is `target` when one has it, each
+    /// refreshed. `caller` `nil` is a push that named nobody, as
+    /// `Account.announce(caller:callId:)` takes it. The INVITE on any of
+    /// the accounts fulfils it; its `incomingCall` names the account.
+    public func announce(
+        caller: String?, callId: String? = nil, target: String? = nil
+    ) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
+        let result = try retryingBusy {
+            try Sipral.stackAnnounce(
+                stack: handle, target: target ?? "", caller: caller ?? "", callId: callId ?? "", nowMs: nowMs()
+            )
+        }
+        if result.call != Sipral.handleNone {
+            return (nil, result.call)
+        }
+        return (result.announcement, nil)
+    }
+
+    /// `Account.refreshBinding()` on every account; one that cannot
+    /// refresh (no registrar, or no transport yet, when it goes once one is)
+    /// is passed over.
+    public func refreshBindings() {
+        for account in movingQueue.sync(execute: { Array(accounts.values) }) {
+            try? account.refreshBinding()
+        }
+    }
+
     /// Whether `.trace` logs whole SIP messages with their peers or
     /// pseudonymised (default); credentials and keys are removed either way
     /// (`sipral_stack_diagnostic_trace`).

@@ -1056,6 +1056,31 @@ export class Stack extends EventEmitter<StackEvents> {
     return new LocalConference(this, options);
   }
 
+  /**
+   * `sipral_stack_announce` (ABI 1.14): a push to a token this stack's
+   * accounts share said a call is on its way, expected on every account, or
+   * on those whose address of record is `target` when one has it, each
+   * refreshed. `caller` and `callId` are those of {@link Account.announce};
+   * the INVITE on any of the accounts fulfils it, and its `IncomingCall`
+   * names the account. Returns the announcement's handle, or the call's
+   * when its INVITE came first.
+   */
+  announce(caller: string | null, callId?: string, target?: string): { announcement: bigint; call: bigint } {
+    this.ensureOpen();
+    const announcement = new BigUint64Array(1);
+    const call = new BigUint64Array(1);
+    const [to, toLength] = text(target);
+    const [who, whoLength] = text(caller);
+    const [id, idLength] = text(callId);
+    checkNow(this.sipral, 'sipral_stack_announce', () =>
+      this.sipral.sipral_stack_announce(
+        this.stackHandle, to, toLength, who, whoLength, id, idLength, announcement, call, this.nowMs(),
+      ),
+    );
+    this.poll();
+    return { announcement: announcement[0] ?? 0n, call: call[0] ?? 0n };
+  }
+
   /** `sipral_announcement_forget`: an announcement ({@link Account.announce}) no longer waited for. */
   forgetAnnouncement(announcement: bigint): void {
     check(this.sipral, 'sipral_announcement_forget', this.sipral.sipral_announcement_forget(this.stackHandle, announcement));

@@ -55,7 +55,7 @@ export const SIPRAL_ABI_VERSION_MAJOR = 1;
  * The ABI's minor version, raised by anything the header gains. Rules:
  * Versioning section of `docs/08-ffi.md`.
  */
-export const SIPRAL_ABI_VERSION_MINOR = 13;
+export const SIPRAL_ABI_VERSION_MINOR = 14;
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -10290,6 +10290,35 @@ export class Sipral {
   readonly sipral_account_announce_any: (stack: Wide, account: Wide, call_id: Pointer, call_id_len: number, out_announcement: Pointer, out_call: Pointer, now_ms: Wide) => number;
 
   /**
+   * A call is expected on any of this stack's accounts, announced by a
+   * push (ABI 1.14): one push token shared by several accounts, which
+   * cannot say which of them the call is for, or says so only by the
+   * address of record the proxy saw in the INVITE's `To`.
+   *
+   * `target` is that address of record when the push carried one. It
+   * narrows the wait to the accounts with that address of record, user
+   * and host compared as a caller's are; when none has it, or
+   * `target_len` is zero, the call is expected on every account. Each
+   * account it is expected on has its binding refreshed.
+   *
+   * `caller` and `call_id` are those of `sipral_account_announce_call`;
+   * a `caller_len` of zero means the push named nobody, as
+   * `sipral_account_announce_any`. The INVITE on any of the accounts
+   * fulfils the one announcement: `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` comes
+   * once, right before its `SIPRAL_EVENT_KIND_INCOMING_CALL`, which names
+   * the account it came to, and `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING`
+   * at most once. The two outputs are those of `sipral_account_announce`.
+   * `SIPRAL_STATUS_INVALID_ARGUMENT` on a stack with no account.
+   *
+   * Safety
+   *
+   * `target`, `caller` and `call_id` must each be readable for the length
+   * beside it or be null with a length of zero, and each of
+   * `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+   */
+  readonly sipral_stack_announce: (stack: Wide, target: Pointer, target_len: number, caller: Pointer, caller_len: number, call_id: Pointer, call_id_len: number, out_announcement: Pointer, out_call: Pointer, now_ms: Wide) => number;
+
+  /**
    * Refresh the binding now, without announcing anything (C3).
    *
    * For a proxy's periodic wake-up (RFC 8599 §5.5). A push proves the path
@@ -13188,6 +13217,7 @@ export class Sipral {
     this.sipral_account_announce = library.func('sipral_status_t sipral_account_announce(sipral_handle_t stack, sipral_handle_t account, const char *caller, size_t caller_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
     this.sipral_account_announce_call = library.func('sipral_status_t sipral_account_announce_call(sipral_handle_t stack, sipral_handle_t account, const char *caller, size_t caller_len, const char *call_id, size_t call_id_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
     this.sipral_account_announce_any = library.func('sipral_status_t sipral_account_announce_any(sipral_handle_t stack, sipral_handle_t account, const char *call_id, size_t call_id_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
+    this.sipral_stack_announce = library.func('sipral_status_t sipral_stack_announce(sipral_handle_t stack, const char *target, size_t target_len, const char *caller, size_t caller_len, const char *call_id, size_t call_id_len, sipral_handle_t *out_announcement, sipral_handle_t *out_call, uint64_t now_ms)');
     this.sipral_account_refresh_binding = library.func('sipral_status_t sipral_account_refresh_binding(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms)');
     this.sipral_announcement_forget = library.func('sipral_status_t sipral_announcement_forget(sipral_handle_t stack, sipral_handle_t announcement)');
     this.sipral_account_push_echo = library.func('sipral_status_t sipral_account_push_echo(sipral_handle_t stack, sipral_handle_t account, sipral_push_echo_t *out_echo)');
