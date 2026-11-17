@@ -827,7 +827,10 @@ Split in two, so that the part worth testing needs no Android:
   error with the refusal's text as the `DisconnectCause`'s reason, and the
   application hears it as a `TelecomPlaceFailure` through
   `TelecomBridge.placeFailed`: a placed call that only vanished from `calls`
-  would say nothing about why. An attended transfer is `consult(id, target)`,
+  would say nothing about why. `placeCall(account, target, headers)` puts
+  the headers on the INVITE that goes once the framework allows the call,
+  as `SipralClient.placeCall(..., headers = ...)` does. An attended
+  transfer is `consult(id, target)`,
   which holds the call and asks the framework for a second one on the same
   account, placed from the first (`SipCalls.consult`) and tied to it in
   `TelecomCall.consulting`, then `transfer(id)` with either call's id, which

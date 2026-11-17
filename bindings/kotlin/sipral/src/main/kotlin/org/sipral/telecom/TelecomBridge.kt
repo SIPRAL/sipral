@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralHeader
 import org.sipral.SipralException
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
@@ -114,6 +115,9 @@ class TelecomBridge(
     ) {
         var call: Long = 0
         var connection: TelecomConnection? = null
+
+        /** An outgoing call's headers for its INVITE. */
+        var headers: List<SipralHeader> = emptyList()
 
         /** The push named nobody and the INVITE since has: the connection is
          * told who is calling, now or once it is created. */
@@ -289,9 +293,11 @@ class TelecomBridge(
     // An outgoing call
 
     /** Ask the framework for a call to [target] on [account]; the INVITE
-     * goes out once it has created the connection. */
-    fun placeCall(account: Long, target: String): String = settle {
+     * goes out once it has created the connection, with [headers] on it as
+     * written ([SipCalls.place]). */
+    fun placeCall(account: Long, target: String, headers: List<SipralHeader> = emptyList()): String = settle {
         val entry = Entry(newId(), TelecomDirection.OUTGOING, account, target, null, TelecomPhase.REQUESTED)
+        entry.headers = headers
         entries[entry.id] = entry
         entry.awaitingConnection = true
         try {
@@ -442,7 +448,11 @@ class TelecomBridge(
             // a consultation whose held call is still there leaves from it
             val held = entry.consultFor?.let { entries[it] }?.takeIf { it.call != 0L && !it.closedForTelecom }
             val handle = try {
-                if (held != null) sip.consult(held.call, entry.account, entry.caller) else sip.place(entry.account, entry.caller)
+                if (held != null) {
+                    sip.consult(held.call, entry.account, entry.caller)
+                } else {
+                    sip.place(entry.account, entry.caller, entry.headers)
+                }
             } catch (refused: Exception) {
                 val reason = refused.message ?: refused.toString()
                 end(entry, TelecomDisconnect.ERROR, reason)

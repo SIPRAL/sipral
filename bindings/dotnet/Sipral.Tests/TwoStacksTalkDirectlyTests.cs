@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Sipral;
@@ -45,6 +46,31 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         Assert.NotNull(await bobCall.WaitForMediaAsync(cts.Token));
 
         return (aliceCall, bobCall);
+    }
+
+    /// <summary>A placed call's headers go on its INVITE as written; one
+    /// the stack writes itself is refused before any call.</summary>
+    [Fact]
+    public async Task PlacedCallCarriesItsHeadersOnTheInvite()
+    {
+        var aliceAccount = _alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: _bob.BindAddress);
+        _bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: _alice.BindAddress);
+
+        var refused = Assert.Throws<SipralException>(
+            () => _alice.PlaceCall(aliceAccount, $"sip:bob@{_bob.BindAddress}", headers: [("Via", "SIP/2.0/UDP x")]));
+        Assert.Equal(SipralStatus.InvalidArgument, refused.Status);
+
+        var aliceCall = _alice.PlaceCall(aliceAccount, $"sip:bob@{_bob.BindAddress}", headers: [("X-Line", "7")]);
+        try
+        {
+            var incoming = await FirstMatchingAsync(_bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
+            var message = Encoding.UTF8.GetString(incoming.Message ?? Array.Empty<byte>());
+            Assert.Equal("7", SignallingTests.Header("X-Line", message));
+        }
+        finally
+        {
+            aliceCall.Close();
+        }
     }
 
     [Fact]

@@ -963,8 +963,10 @@ public sealed partial class SipralStack : IDisposable
     /// <summary>
     /// <c>sipral_call_place</c>. A media socket is opened first and offered
     /// as <c>media_address</c>. See <see cref="SipralCallOptions"/>.
+    /// <paramref name="headers"/> go on the INVITE as written
+    /// (<c>Alert-Info</c>, <c>Answer-Mode</c>).
     /// </summary>
-    public Call PlaceCall(Account account, string target, string? mediaHost = null, int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
+    public Call PlaceCall(Account account, string target, string? mediaHost = null, int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null, IEnumerable<(string Name, string Value)>? headers = null)
     {
         mediaHost = MediaHostFor(mediaHost, account, destination);
         var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
@@ -984,6 +986,7 @@ public sealed partial class SipralStack : IDisposable
         using (var destPin = Pin(destinationBytes))
         using (var textPin = Pin(textAddressBytes))
         using (var codecsPin = Pin(codecsBytes))
+        using (var headersArray = new SipralHeaderArray(headers?.ToArray()))
         {
             var config = SipralCallConfig.Sized();
             config.Target = targetPin.Pointer;
@@ -1005,6 +1008,8 @@ public sealed partial class SipralStack : IDisposable
             config.IceTrickle = (uint)(options?.IceTrickle ?? 0);
             config.Codecs = codecsPin.Pointer;
             config.CodecsLen = (nuint)(codecsBytes?.Length ?? 0);
+            config.Headers = headersArray.Address;
+            config.HeadersLen = headersArray.Count;
 
             try
             {

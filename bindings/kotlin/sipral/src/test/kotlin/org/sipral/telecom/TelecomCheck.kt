@@ -28,6 +28,7 @@ import kotlin.test.assertTrue
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
+import org.sipral.SipralHeader
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
 import org.sipral.idiomatic.SipralAudioMode
@@ -175,8 +176,10 @@ internal class FakeSip(val log: Log) : SipCalls {
     override fun ring(call: Long) = log.add("ring $call")
     override fun answer(call: Long) = log.add("answer $call")
     override fun reject(call: Long, code: Long) = log.add("reject $call $code")
-    override fun place(account: Long, target: String): Long {
-        log.add("place $account $target")
+    override fun place(account: Long, target: String): Long = place(account, target, emptyList())
+
+    override fun place(account: Long, target: String, headers: List<SipralHeader>): Long {
+        log.add("place $account $target" + headers.joinToString("") { " ${it.name}: ${it.value}" })
         placeRefusal?.let { throw it }
         return nextCall++
     }
@@ -561,6 +564,15 @@ private fun fakeSequences(): String {
         val call = bridge.callHandleOf(id)
         bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = call, message = "SIP/2.0 486 Busy Here\r\nContent-Length: 0\r\n\r\n"))
         assertEquals(TelecomDisconnect.BUSY, conn.cause)
+        ran++
+    }
+
+    // Outgoing with headers: they wait with the call for the framework and
+    // reach the SIP side with it.
+    Rig().run {
+        val id = bridge.placeCall(ACCOUNT, "sip:dave@example.invalid", listOf(SipralHeader("X-Line", "7")))
+        platform.create(id)
+        assertEquals(1, log.count("place $ACCOUNT sip:dave@example.invalid X-Line: 7"), log.snapshot().toString())
         ran++
     }
 
@@ -951,8 +963,20 @@ private suspend fun overLoopback(): String {
         assertEquals(1, log.count("conn $id disconnected"))
         placed.close()
 
+        // An outgoing call's headers reach the far end on its INVITE.
+        val invited = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            withTimeout(15_000) { caller.events.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() } }
+        }
+        val outgoing = bridge.placeCall(bob.handle, "sip:alice@example.invalid", listOf(SipralHeader("X-Line", "7")))
+        platform.create(outgoing)
+        val invite = invited.await()
+        val text = invite.message?.decodeToString().orEmpty()
+        assertTrue(text.contains("\r\nX-Line: 7\r\n"), "the INVITE lost its header: $text")
+        caller.rejectCall(invite)
+        log.waitFor("the refused call to be let go") { bridge.calls.value.isEmpty() }
+
         return "over loopback, a push announced and its INVITE matched to the same screen, rung, answered, " +
-            "held and resumed from each end, a digit sent, hung up and let go"
+            "held and resumed from each end, a digit sent, hung up and let go; a call placed with a header on its INVITE"
     } finally {
         scope.cancel()
         try {

@@ -2004,7 +2004,7 @@ compile_kotlin() {
     mkdir -p "$out/classes"
     if ! kotlinc -cp "$lib/kotlin-test.jar:$COROUTINES_JAR" "${kotlin_sources[@]}" \
         -d "$out/classes" >"$out/kotlinc.log" 2>&1; then
-        printf 'kotlinc, over bindings/kotlin\n'
+        printf 'kotlinc, over bindings/kotlin (log: %s)\n' "$out/kotlinc.log"
         return 1
     fi
 }

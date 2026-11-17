@@ -5,6 +5,7 @@ package org.sipral.telecom
 
 import java.util.concurrent.ConcurrentHashMap
 import org.sipral.SipralException
+import org.sipral.SipralHeader
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAnnounced
@@ -71,8 +72,10 @@ class IdiomaticSipCalls(
         client.rejectCall(call, code)
     }
 
-    override fun place(account: Long, target: String): Long {
-        val call = client.placeCall(account(account), target, mediaHost = mediaHost)
+    override fun place(account: Long, target: String): Long = place(account, target, emptyList())
+
+    override fun place(account: Long, target: String, headers: List<SipralHeader>): Long {
+        val call = client.placeCall(account(account), target, mediaHost = mediaHost, headers = headers)
         calls[call.handle] = call
         return call.handle
     }

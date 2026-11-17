@@ -102,6 +102,7 @@ account.Register();
 
 var call = stack.PlaceCall(account, "sip:bob@example.invalid", mediaHost: "192.0.2.10");
 await call.WaitForMediaAsync();
+// headers: new[] { ("X-Key", "v") } puts fields on the INVITE as written
 
 call.Hold();
 call.Resume();

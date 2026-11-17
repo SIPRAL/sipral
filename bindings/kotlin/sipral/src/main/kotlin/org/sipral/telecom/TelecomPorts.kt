@@ -10,6 +10,7 @@
 package org.sipral.telecom
 
 import org.sipral.SipralException
+import org.sipral.SipralHeader
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
 
@@ -112,6 +113,16 @@ interface SipCalls {
 
     /** `sipral_call_place`; the new call's handle. */
     fun place(account: Long, target: String): Long
+
+    /** [place], with [headers] on the INVITE as written
+     * (`sipral_call_config_t::headers`). A SIP side that cannot add them
+     * refuses with `NOT_SUPPORTED`. */
+    fun place(account: Long, target: String, headers: List<SipralHeader>): Long =
+        if (headers.isEmpty()) {
+            place(account, target)
+        } else {
+            throw SipralException(SipralStatus.NOT_SUPPORTED, "this SIP side does not add headers to an INVITE")
+        }
 
     /** The consultation leg of an attended transfer from [call]: a call to
      * [target] on [account], which [call] is on; the new call's handle. A

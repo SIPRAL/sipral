@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **Headers on a placed call's INVITE from .NET and from Android's Telecom path.** `SipralStack.PlaceCall(..., headers:)` in .NET and `TelecomBridge.placeCall(account, target, headers)` on Android put header fields on the INVITE as written, checked as `sipral_call_config_t::headers` is, as Swift's `placeCall(headers:)` and `SipralClient.placeCall(headers = ...)` already did. A `SipCalls` of the application's own that cannot add them refuses with `NOT_SUPPORTED` rather than dropping them.
+
 ## [1.3.2] - 2026-11-16
 
 ### Fixed
