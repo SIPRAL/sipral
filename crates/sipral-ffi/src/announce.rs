@@ -29,7 +29,7 @@ use sipral_ua::{Announced, AnnouncementId, UaError};
 use crate::abi::record;
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
-use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+use crate::handle::{Refused, SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::stack::{handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{required_text, text};
@@ -67,7 +67,22 @@ fn announcement_of(
     state: &crate::stack::StackState,
     announcement: SipralHandle,
 ) -> Result<AnnouncementId, Fail> {
-    state.announcements.get(announcement).map_err(handle_failed)
+    state
+        .announcements
+        .get(announcement)
+        .map_err(|refused| match refused {
+            // retired with the event that settled it
+            Refused::Gone => settled_already(),
+            other => handle_failed(other),
+        })
+}
+
+/// What forgetting an announcement a call or the window already settled says.
+fn settled_already() -> Fail {
+    fail(
+        SipralStatus::WrongState,
+        "this announcement had already been answered by a call or had already run out of time",
+    )
 }
 
 entry! {
@@ -382,13 +397,10 @@ entry! {
         with_stack(stack, |state| {
             let named = announcement_of(state, announcement)?;
             if state.agent.forget_announcement(named) {
+                let _ = state.announcements.remove(announcement);
                 Ok(())
             } else {
-                Err(fail(
-                    SipralStatus::WrongState,
-                    "this announcement had already been answered by a call or had already run \
-                     out of time",
-                ))
+                Err(settled_already())
             }
         })
     }
@@ -824,6 +836,74 @@ mod tests {
             !kinds.contains(&SipralEventKind::AnnouncedCallMissing),
             "{kinds:?}"
         );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn an_announcement_handle_is_retired_once_its_event_is_read() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = woken(handle, true);
+        bound(handle, account);
+        let (text, len) = as_text("sip:carol@example.com");
+        let announce = |at: u64| {
+            let mut announcement = SIPRAL_HANDLE_NONE;
+            let mut call = SIPRAL_HANDLE_NONE;
+            let status = unsafe {
+                sipral_account_announce(
+                    handle,
+                    account,
+                    text,
+                    len,
+                    &raw mut announcement,
+                    &raw mut call,
+                    at,
+                )
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            announcement
+        };
+        let named = || {
+            crate::stack::with_stack(handle, |state| Ok(state.announcements.named()))
+                .unwrap_or_else(|failure| panic!("{failure:?}"))
+        };
+
+        // one answered by its call
+        let answered = announce(31_000);
+        deliver(handle, &invitation("sip:carol@example.com"), 31_100);
+        poll(handle, 31_100);
+        assert!(observed.kinds().contains(&SipralEventKind::CallAnnounced));
+        assert_eq!(
+            unsafe { sipral_announcement_forget(handle, answered) },
+            SipralStatus::WrongState,
+            "an answered announcement still reads as one that was answered"
+        );
+        assert_eq!(named(), 0, "the answered announcement's handle was kept");
+
+        // many that ran out of time
+        for at in 0..50 {
+            announce(32_000 + at);
+        }
+        assert_eq!(named(), 50);
+        poll(handle, 32_000 + 50 + 21_000);
+        let missing = observed
+            .kinds()
+            .iter()
+            .filter(|kind| **kind == SipralEventKind::AnnouncedCallMissing)
+            .count();
+        assert_eq!(missing, 50);
+        assert_eq!(named(), 0, "every handle outlived its announcement");
+
+        // and one the application let go of
+        let dismissed = announce(60_000);
+        assert_eq!(
+            unsafe { sipral_announcement_forget(handle, dismissed) },
+            SipralStatus::Ok
+        );
+        assert_eq!(named(), 0);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(handle) },
             SipralStatus::Ok

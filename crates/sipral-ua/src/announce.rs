@@ -421,9 +421,11 @@ impl UserAgent {
         now: Instant,
     ) -> Option<CallHandle> {
         let window = self.announce_window;
+        // an arrival is kept past its call's end, and an ended call rings no more
         if let Some(call_id) = call_id {
-            let named = self.arrivals.iter().find(|(_, arrival)| {
+            let named = self.arrivals.iter().find(|&(call, arrival)| {
                 !arrival.matched
+                    && self.calls.contains_key(call)
                     && arrival
                         .account
                         .is_some_and(|account| accounts.contains(&account))
@@ -443,6 +445,7 @@ impl UserAgent {
                     .is_some_and(|from| same_caller(caller, from))
             });
             if arrival.matched
+                || !self.calls.contains_key(call)
                 || !arrival
                     .account
                     .is_some_and(|account| accounts.contains(&account))
@@ -475,10 +478,11 @@ impl UserAgent {
     /// Match newly reported incoming calls to announcements. Done once per
     /// drain so the result does not depend on INVITE parse order.
     pub(crate) fn settle_announcements(&mut self, now: Instant) {
-        // keep arrivals only while a push could still be late
+        // keep arrivals only while a push could still be late, ended calls
+        // too: an IncomingCall still unread is not to be matched again
         let window = self.announce_window;
         self.arrivals
-            .retain(|call, arrival| arrival.at + window >= now && self.calls.contains_key(call));
+            .retain(|_, arrival| arrival.at + window >= now);
 
         let fresh: Vec<Fresh> = self
             .events
@@ -501,14 +505,15 @@ impl UserAgent {
             })
             .collect();
 
-        // back to front so insertions do not shift pending indices
+        // matched in the order the INVITEs came, so the older takes the older
+        let mut taken = Vec::new();
         for Fresh {
             at,
             call,
             account,
             caller,
             call_id,
-        } in fresh.into_iter().rev()
+        } in fresh
         {
             let matched = account
                 .and_then(|account| self.claim(account, caller.as_ref(), call_id.as_deref(), now));
@@ -523,9 +528,13 @@ impl UserAgent {
                 },
             );
             if let Some(announcement) = matched {
-                self.events
-                    .insert(at, UaEvent::CallAnnounced { call, announcement });
+                taken.push((at, call, announcement));
             }
+        }
+        // back to front so insertions do not shift pending indices
+        for (at, call, announcement) in taken.into_iter().rev() {
+            self.events
+                .insert(at, UaEvent::CallAnnounced { call, announcement });
         }
     }
 
@@ -1248,6 +1257,121 @@ Content-Length: 0\r\n\r\n"
             "the older one goes first"
         );
         assert!(agent.announcement(second).is_some(), "the other one stands");
+    }
+
+    /// The CANCEL of [`invite_from`]'s INVITE.
+    fn cancel_of(from: &str, branch: &str) -> Vec<u8> {
+        format!(
+            "CANCEL sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <{from}>;tag=tag{branch}\r\n\
+To: Alice <sip:alice@example.com>\r\n\
+Call-ID: incoming-{branch}\r\n\
+CSeq: 1 CANCEL\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_call_cancelled_before_it_was_read_takes_one_announcement_only() {
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        let first = waiting(
+            agent
+                .announce(id, uri("sip:bob@example.com"), t0)
+                .expect("the first"),
+        );
+        let second = waiting(
+            agent
+                .announce(
+                    id,
+                    uri("sip:bob@example.com"),
+                    t0 + Duration::from_millis(200),
+                )
+                .expect("the second"),
+        );
+        transmits(&mut agent);
+        events(&mut agent);
+
+        // the INVITE and its CANCEL both in before the application reads anything
+        let t1 = t0 + Duration::from_secs(1);
+        deliver(&mut agent, &invite_from("sip:bob@example.com", "b1"), t1);
+        deliver(&mut agent, &cancel_of("sip:bob@example.com", "b1"), t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        assert_eq!(incoming(&seen).len(), 1);
+        assert_eq!(
+            announced(&seen)
+                .iter()
+                .map(|(_, id)| *id)
+                .collect::<Vec<_>>(),
+            vec![first.0],
+            "one call, one announcement"
+        );
+        assert!(
+            agent.announcement(second).is_some(),
+            "the other one still waits"
+        );
+
+        agent.handle_timeout(t0 + Duration::from_millis(200) + WINDOW);
+        assert!(
+            events(&mut agent).iter().any(|event| matches!(
+                *event,
+                UaEvent::AnnouncedCallMissing { ref announcement, .. } if announcement.id() == second
+            )),
+            "and is reported missing in its time"
+        );
+    }
+
+    #[test]
+    fn two_invites_read_together_take_the_announcements_oldest_first() {
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        let first = waiting(
+            agent
+                .announce(id, uri("sip:bob@example.com"), t0)
+                .expect("the first"),
+        );
+        let second = waiting(
+            agent
+                .announce(
+                    id,
+                    uri("sip:bob@example.com"),
+                    t0 + Duration::from_millis(200),
+                )
+                .expect("the second"),
+        );
+        transmits(&mut agent);
+        events(&mut agent);
+
+        // both INVITEs in before one drain, as one read of a stream brings them
+        let t1 = t0 + Duration::from_secs(1);
+        for branch in ["b1", "b2"] {
+            let invite = invite_from("sip:bob@example.com", branch);
+            agent
+                .take(
+                    Input::Datagram {
+                        transport: UDP,
+                        remote: registrar(),
+                        local: local(),
+                        data: &invite,
+                    },
+                    t1,
+                )
+                .expect("a well formed datagram");
+        }
+        agent.drain(t1);
+        transmits(&mut agent);
+        let seen = events(&mut agent);
+        let calls = incoming(&seen);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            announced(&seen),
+            vec![(calls[0], first.0), (calls[1], second.0)],
+            "the older INVITE takes the older announcement"
+        );
     }
 
     #[test]

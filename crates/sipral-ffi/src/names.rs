@@ -122,6 +122,15 @@ impl<T: Copy + PartialEq> Names<T> {
             self.free.push(index);
         }
     }
+
+    /// How many handles name something now.
+    #[cfg(test)]
+    pub(crate) fn named(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.value.is_some())
+            .count()
+    }
 }
 
 #[cfg(test)]

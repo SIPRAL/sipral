@@ -2021,10 +2021,7 @@ fn about_an_announcement(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<
             call,
             ref announcement,
         } => {
-            let named = known
-                .announcements
-                .name_of(announcement.id())
-                .unwrap_or(SIPRAL_HANDLE_NONE);
+            let named = settled(known, announcement.id());
             let payload = SipralAnnounceEvent {
                 announcement: named,
                 waited_ms: 0,
@@ -2042,10 +2039,7 @@ fn about_an_announcement(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<
             ref announcement,
             waited,
         } => {
-            let named = known
-                .announcements
-                .name_of(announcement.id())
-                .unwrap_or(SIPRAL_HANDLE_NONE);
+            let named = settled(known, announcement.id());
             let payload = SipralAnnounceEvent {
                 announcement: named,
                 waited_ms: millis(waited),
@@ -2058,6 +2052,19 @@ fn about_an_announcement(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<
         }
         _ => None,
     }
+}
+
+/// The handle an event about a settled announcement names, retired as it is
+/// said: nothing more can happen to the announcement, and a handle kept for
+/// every push would grow the stack for as long as it lives.
+/// `sipral_announcement_forget` reads a retired one as settled.
+fn settled(known: &mut Vocabulary<'_>, id: sipral_ua::AnnouncementId) -> SipralHandle {
+    let named = known
+        .announcements
+        .name_of(id)
+        .unwrap_or(SIPRAL_HANDLE_NONE);
+    known.announcements.forget(id);
+    named
 }
 
 /// An event with nothing in it but the subscription it is about.
