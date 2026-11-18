@@ -508,6 +508,72 @@ private suspend fun aSipUriTheIntermediateMayNotNameIsRefused(directory: File): 
     return "a sip: URI the intermediate may not name is refused, and one it may is trusted"
 }
 
+/**
+ * A registrar's credential signed by a root that may name `corp.test` and
+ * the names under it alone, made with keytool in [directory], with [names]
+ * as its `subjectAltName`. The registrar sends its own certificate alone, as
+ * a server under a customer's own authority may: the root, for the client to
+ * trust, is never among what it sends.
+ */
+private fun rootConstrained(directory: File, name: String, names: String): Pair<Credential, X509Certificate> {
+    val password = "changeit"
+    val root = "$name-root.p12"
+    keytool(
+        directory, "-genkeypair", "-alias", "authority", "-keyalg", "EC", "-groupname", "secp256r1",
+        "-dname", "CN=Sipral $name constrained root", "-ext", "bc:c=ca:true", "-ext", "ku:c=keyCertSign,cRLSign",
+        // nameConstraints (RFC 5280 §4.2.1.10): permittedSubtrees, one dNSName, corp.test
+        "-ext", "2.5.29.30:c=300fa00d300b8209636f72702e74657374",
+        "-validity", "1", "-storetype", "PKCS12", "-keystore", root, "-storepass", password, "-keypass", password,
+    )
+    val server = "$name-server.p12"
+    keytool(
+        directory, "-genkeypair", "-alias", "registrar", "-keyalg", "EC", "-groupname", "secp256r1",
+        "-dname", "CN=pbx.corp.test", "-validity", "1", "-storetype", "PKCS12", "-keystore", server,
+        "-storepass", password, "-keypass", password,
+    )
+    keytool(directory, "-certreq", "-alias", "registrar", "-keystore", server, "-storepass", password, "-file", "$name-server.csr")
+    keytool(
+        directory, "-gencert", "-rfc", "-alias", "authority", "-keystore", root, "-storepass", password,
+        "-infile", "$name-server.csr", "-outfile", "$name-server.pem", "-ext", "SAN=$names", "-ext", "EKU=serverAuth",
+        "-validity", "1",
+    )
+    fun opened(file: String) =
+        KeyStore.getInstance("PKCS12").apply { File(directory, file).inputStream().use { load(it, password.toCharArray()) } }
+    val leaf = File(directory, "$name-server.pem").inputStream().use {
+        java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(it)
+    }
+    val alone = KeyStore.getInstance("PKCS12").apply {
+        load(null, null)
+        setKeyEntry("registrar", opened(server).getKey("registrar", password.toCharArray()), password.toCharArray(), arrayOf(leaf))
+    }
+    return Credential(alone) to opened(root).getCertificate("authority") as X509Certificate
+}
+
+/** A `sip:` URI is held to the name constraints of the root the chain ends
+ * at, which the server never sends: PKIX checks the registrar's `dNSName`
+ * against them and skips its URI, so a root constrained to `corp.test`
+ * vouches for `sip:pbx.corp.test` and never for `sip:`[SERVER_NAME]. */
+private suspend fun aSipUriTheRootMayNotNameIsRefused(directory: File): String {
+    val (outside, outsideRoot) = rootConstrained(directory, "rooted-outside", "dns:pbx.corp.test,uri:sip:$SERVER_NAME")
+    Registrar(outside).use { registrar ->
+        for (rules in SipralDomainRules.entries) {
+            over(registrar.address, trust = SipralTlsTrust.OnlyAuthority(outsideRoot), rules = rules).use {
+                val failed = refusal(it)
+                assertEquals(SipralTlsFailure.NAME_MISMATCH.value.toLong(), failed.tls, "$rules: ${failed.detail}")
+            }
+        }
+    }
+    val (inside, insideRoot) = rootConstrained(directory, "rooted-inside", "uri:sip:pbx.corp.test")
+    Registrar(inside).use { registrar ->
+        for (rules in SipralDomainRules.entries) {
+            over(registrar.address, name = "pbx.corp.test", trust = SipralTlsTrust.OnlyAuthority(insideRoot), rules = rules).use {
+                assertTrue(it.connected, "$rules refused a sip: URI inside the root's constraint")
+            }
+        }
+    }
+    return "a sip: URI the root may not name is refused, and one it may is trusted"
+}
+
 private suspend fun aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(): String {
     Registrar().use { registrar ->
         over(registrar.address, signalling = SipralTransport.TCP, name = null).use { client ->
@@ -1135,6 +1201,7 @@ internal suspend fun tlsSignallingChecks(): String {
             eachRefusalSaysWhy(good, expired),
             aSipUriNamesTheDomainAndRfc5922AloneRefusesAWildcard(directory),
             aSipUriTheIntermediateMayNotNameIsRefused(directory),
+            aSipUriTheRootMayNotNameIsRefused(directory),
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
             aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),

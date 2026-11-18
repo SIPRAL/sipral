@@ -203,7 +203,56 @@ where
     Ok(identity)
 }
 
+/// Whether `authority` could have signed `certificate`, as a path is built
+/// (RFC 5280 §6.1): its `subject` is the certificate's `issuer`, byte for
+/// byte, as `webpki` matches a trust anchor. A verifier that is handed only
+/// the certificates a server sent finds by it the anchor the path ended at,
+/// whose name constraints [`domain_identity_in_chain`] needs as much as the
+/// others'. `false` when either cannot be read.
+#[must_use]
+pub fn issued_by(certificate: &[u8], authority: &[u8]) -> bool {
+    match (names(certificate), names(authority)) {
+        (Some((issuer, _)), Some((_, subject))) => issuer == subject,
+        _ => false,
+    }
+}
+
+/// The certificate's `issuer` and `subject` names, each the DER of its
+/// `Name` as written. `None` when the DER cannot be read.
+fn names(certificate: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (SEQUENCE, certificate, _) = element(certificate)? else {
+        return None;
+    };
+    let (SEQUENCE, tbs, _) = element(certificate)? else {
+        return None;
+    };
+    // `version [0] EXPLICIT` comes first when it is written, then `serialNumber`
+    let (mut tag, _, mut rest) = element(tbs)?;
+    if tag == VERSION {
+        (tag, _, rest) = element(rest)?;
+    }
+    if tag != INTEGER {
+        return None;
+    }
+    let (SEQUENCE, _, rest) = element(rest)? else {
+        return None;
+    };
+    let (SEQUENCE, issuer, rest) = element(rest)? else {
+        return None;
+    };
+    let (SEQUENCE, _, rest) = element(rest)? else {
+        return None;
+    };
+    let (SEQUENCE, subject, _) = element(rest)? else {
+        return None;
+    };
+    Some((issuer, subject))
+}
+
 const SEQUENCE: u8 = 0x30;
+const INTEGER: u8 = 0x02;
+/// `TBSCertificate`'s `version [0] EXPLICIT Version`.
+const VERSION: u8 = 0xa0;
 const OID: u8 = 0x06;
 const BOOLEAN: u8 = 0x01;
 const OCTET_STRING: u8 = 0x04;
@@ -426,7 +475,9 @@ fn wildcard_covers(pattern: &str, domain: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::DomainRules::{Platform, Rfc5922};
-    use super::{DomainIdentity, NotACertificate, domain_identity, domain_identity_in_chain};
+    use super::{
+        DomainIdentity, NotACertificate, domain_identity, domain_identity_in_chain, issued_by,
+    };
 
     /// One DER element.
     fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
@@ -504,6 +555,49 @@ mod tests {
         whole.extend_from_slice(&empty);
         whole.extend(tlv(0x03, &[0]));
         tlv(0x30, &whole)
+    }
+
+    /// A certificate `issuer` signed for `subject`, each a `commonName`,
+    /// with its `version` written or left to its default.
+    fn between(issuer: &str, subject: &str, version: bool) -> Vec<u8> {
+        let name = |common: &str| {
+            let attribute = [tlv(0x06, &[0x55, 0x04, 0x03]), tlv(0x0c, common.as_bytes())].concat();
+            tlv(0x30, &tlv(0x31, &tlv(0x30, &attribute)))
+        };
+        let empty = tlv(0x30, &[]);
+        let mut tbs = if version {
+            tlv(0xa0, &tlv(0x02, &[2]))
+        } else {
+            Vec::new()
+        };
+        tbs.extend(tlv(0x02, &[1]));
+        tbs.extend_from_slice(&empty);
+        tbs.extend(name(issuer));
+        tbs.extend_from_slice(&empty);
+        tbs.extend(name(subject));
+        tbs.extend_from_slice(&empty);
+        let mut whole = tlv(0x30, &tbs);
+        whole.extend_from_slice(&empty);
+        whole.extend(tlv(0x03, &[0]));
+        tlv(0x30, &whole)
+    }
+
+    #[test]
+    fn an_authority_is_found_by_its_subject_as_a_path_finds_it() {
+        let root = between("Corp root", "Corp root", true);
+        let intermediate = between("Corp root", "Corp issuing", true);
+        let leaf = between("Corp issuing", "pbx.corp.example", false);
+        assert!(issued_by(&leaf, &intermediate));
+        assert!(issued_by(&intermediate, &root));
+        assert!(issued_by(&root, &root), "a root is its own issuer");
+        assert!(!issued_by(&leaf, &root));
+        // compared as written: a name spelled with other case is another name
+        assert!(!issued_by(
+            &leaf,
+            &between("Corp root", "corp issuing", true)
+        ));
+        assert!(!issued_by(&leaf, b"not a certificate"));
+        assert!(!issued_by(b"not a certificate", &root));
     }
 
     const URI: u8 = 0x86;

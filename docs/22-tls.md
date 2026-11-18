@@ -122,18 +122,28 @@ authorities above the certificate and skips a URI, so a `sip:` URI counts
 only where every one of those constraints allows its host, read as the
 `dNSName` or address it stands for: an intermediate constrained to
 `corp.example` vouches for `sip:pbx.corp.example`, never for
-`sip:example.com`. The networking component reads the constraints in the
-chain the server sent, and on iOS in the chain the Security framework built.
-A layer that runs its own TLS hands `sipral_certificate_check_domain_in_chain`
-the chain its platform gives: Swift the chain `SecTrust` built, the anchor
-included; Kotlin and the JVM jar the `X509Certificate[]` the server sent;
-.NET the elements of the `X509Chain` built; Python the verified chain
+`sip:example.com`. The anchor's constraints count as an intermediate's: a
+root constrained to `corp.example` that signs the server's certificate
+itself vouches for no other domain either. The networking component reads
+the constraints in the chain the server sent and in every trusted root that
+could have signed one of its certificates, and on iOS in the chain the
+Security framework built. A layer that runs its own TLS hands
+`sipral_certificate_check_domain_in_chain` the chain its platform gives, the
+anchor included: Swift the chain `SecTrust` built; Kotlin and the JVM jar the
+`X509Certificate[]` the server sent and every accepted issuer of its trust
+managers that could have signed one of them; .NET the elements of the
+`X509Chain` built; Python the verified chain
 `SSLSocket.get_verified_chain` returns from 3.13 on, and the leaf alone
 before it, which holds a `sip:` URI to no constraint; Node.js the issuer
-certificates of the verified peer certificate, the anchor included. Each
+certificates of the peer certificate and every trusted authority that could
+have signed one of them, since Node links that chain from what the server
+sent and a server can send a certificate under a trusted root's name. Each
 layer's tests serve a certificate naming the domain only by a `sip:` URI
 under an intermediate constrained to `corp.test`, and the connection is
-refused as a name mismatch, while a URI inside `corp.test` is taken.
+refused as a name mismatch, while a URI inside `corp.test` is taken; the
+networking component, Kotlin and Node.js also serve one signed by a root so
+constrained, which the server never sends, and the networking component and
+Node.js one sent beside a look-alike of that root.
 `sipral_certificate_check_domain` still takes the leaf alone, for a caller
 that has no chain. An address is named by a `sip:` URI alone, never by a
 `dNSName` that spells it, as the HTTPS rules read it.

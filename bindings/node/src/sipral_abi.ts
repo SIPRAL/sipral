@@ -12865,9 +12865,12 @@ export class Sipral {
    * as `sipral_certificate_check_domain` does, with `issuers` the certificates above it in
    * the chain the platform verified (ABI 1.11).
    *
-   * `issuers` is their DER, one certificate after another in any order, the anchor among
-   * them or not; the chain the server sent serves where the platform hands over no chain of
-   * its own, since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
+   * `issuers` is their DER, one certificate after another in any order, the anchor the chain
+   * ends at among them: the platform holds a `dNSName` to the anchor's name constraints and
+   * never a `sip:` URI, so an anchor left out lets an authority constrained to one domain
+   * vouch for any. Where the platform hands over no chain of its own, the certificates the
+   * server sent serve with every trusted authority that could have signed one of them added,
+   * since one more constrained authority can only refuse a `sip:` URI. A `sip:` URI
    * names the domain only while every `nameConstraints` extension among them allows the
    * host of each of the leaf's `sip:` URIs, read as the `dNSName` or address it stands for:
    * an authority constrained to `corp.example` vouches for `sip:pbx.corp.example`, never for

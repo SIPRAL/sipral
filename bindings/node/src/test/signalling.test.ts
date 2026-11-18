@@ -31,7 +31,19 @@ import {
   TlsTrust,
   sipDomainOf,
 } from '../index.js';
-import { Peer, SERVER_NAME, StreamServer, answer, certificateNaming, certificates, constrainedChain, header, kind, until } from './helpers.js';
+import {
+  Peer,
+  SERVER_NAME,
+  StreamServer,
+  answer,
+  certificateNaming,
+  certificates,
+  constrainedChain,
+  header,
+  kind,
+  rootConstrained,
+  until,
+} from './helpers.js';
 
 const made = certificates();
 const opened: Stack[] = [];
@@ -243,6 +255,41 @@ describe('a stack signalling over TLS', { skip: made === null ? 'no openssl comm
         tlsDomainRules: rules,
       });
       assert.ok(bob.connected, `rules ${rules} refused a sip: URI inside the intermediate's constraint`);
+    }
+  });
+
+  test('refuses a sip: URI the root it trusts may not name, whatever else the server sends', async () => {
+    // the root signs the server's certificate itself and is never sent; a look-alike of it is
+    for (const lookalike of [false, true]) {
+      const outside = rootConstrained(`DNS:pbx.corp.test,URI:sip:${SERVER_NAME}`, lookalike);
+      const inside = rootConstrained('URI:sip:pbx.corp.test', lookalike);
+      assert.ok(outside !== null && inside !== null);
+      const refusing = await server(outside);
+      const allowing = await server(inside);
+      for (const rules of [SipralDomainRules.Platform, SipralDomainRules.Rfc5922]) {
+        const alice = await Stack.open({
+          signalling: SipralTransport.Tls,
+          signallingServer: refusing.address,
+          tlsServerName: SERVER_NAME,
+          tlsTrust: TlsTrust.onlyAuthority(outside.root),
+          tlsDomainRules: rules,
+        });
+        opened.push(alice);
+        const event = await kind(alice, SipralEventKind.TransportFailed);
+        assert.equal(
+          event.fields.tls,
+          SipralTlsFailure.NameMismatch,
+          `look-alike ${lookalike}, rules ${rules}: ${String(event.fields.detail)}`,
+        );
+        const bob = await stack({
+          signalling: SipralTransport.Tls,
+          signallingServer: allowing.address,
+          tlsServerName: 'pbx.corp.test',
+          tlsTrust: TlsTrust.onlyAuthority(inside.root),
+          tlsDomainRules: rules,
+        });
+        assert.ok(bob.connected, `look-alike ${lookalike}, rules ${rules} refused a sip: URI inside the root's constraint`);
+      }
     }
   });
 

@@ -70,6 +70,11 @@ final class TurnConnection: @unchecked Sendable {
             let anchors = turn.trustedCertificates.compactMap {
                 SecCertificateCreateWithData(nil, Data($0) as CFData)
             }
+            // a root given that is not a certificate, PEM above all, is no relay: left out, it
+            // would leave the others, or the system's roots, trusted in its place
+            if anchors.count != turn.trustedCertificates.count {
+                unusable = true
+            }
             if !anchors.isEmpty {
                 // only the given roots, and the given name
                 sec_protocol_options_set_verify_block(security, { _, trust, complete in

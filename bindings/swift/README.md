@@ -816,7 +816,8 @@ this layer writes names the transport. TLS is Network.framework's, on Apple
 platforms only: the certificate is evaluated by `SecTrust` with the SSL
 policy for `tlsServerName` (the server's host when `nil`), under `tlsTrust`
 — `.platform` (the default), `.privateAuthority(der)` beside it, or
-`.onlyAuthority(der)` alone. Once the chain holds, the name is read by
+`.onlyAuthority(der)` alone; an authority that is not DER (a PEM text, say)
+is refused as `.untrusted`, never left out. Once the chain holds, the name is read by
 `tlsDomainRules`: `.platform` (the default) keeps `SecTrust`'s verdict and
 accepts a `sip:` URI in `subjectAltName` naming the domain besides, which
 `SecTrust` never reads (RFC 5922 §7.1); `.rfc5922` reads RFC 5922 alone and

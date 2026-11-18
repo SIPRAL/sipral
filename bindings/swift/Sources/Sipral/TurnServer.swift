@@ -13,8 +13,9 @@
 /// blocked, `.tls` (port 5349) where only one port is open or the server
 /// must be verified. The stack opens one connection per media socket. TLS
 /// checks `serverName` (default: the host of `address`) against the system
-/// roots, or only `trustedCertificates` (DER) when given. Checking cannot
-/// be turned off. `clientIdentity` is presented when the server asks for a
+/// roots, or only `trustedCertificates` (DER) when given; one of them that
+/// is not DER is no relay, as a refused connection is. Checking cannot be
+/// turned off. `clientIdentity` is presented when the server asks for a
 /// client certificate; one that cannot be used now is no relay for that
 /// call, as a refused connection is.
 ///

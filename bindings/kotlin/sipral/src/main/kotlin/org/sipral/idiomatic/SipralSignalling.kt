@@ -350,9 +350,15 @@ private class Checking(
         if (https == null && rules == SipralDomainRules.PLATFORM) {
             return
         }
-        // the authorities the server sent above its certificate, whose name
-        // constraints a sip: URI is held to; the path PKIX built is among them
-        val issuers = chain.drop(1).fold(ByteArray(0)) { all, certificate -> all + certificate.encoded }
+        // the authorities the server sent above its certificate, and every
+        // trusted one that could have signed one of them, whose name
+        // constraints a sip: URI is held to: the path PKIX built is among
+        // them, its anchor included, which the server never sends and whose
+        // constraints PKIX holds a dNSName to and never a URI
+        val anchors = trust.flatMap { it.acceptedIssuers.asList() }.filter { anchor ->
+            chain.any { it.issuerX500Principal == anchor.subjectX500Principal }
+        }
+        val issuers = (chain.drop(1) + anchors).fold(ByteArray(0)) { all, certificate -> all + certificate.encoded }
         try {
             Sipral.certificateCheckDomainInChain(
                 chain[0].encoded, issuers, serverName, rules.value.toLong(), if (https == null) 1L else 0L,

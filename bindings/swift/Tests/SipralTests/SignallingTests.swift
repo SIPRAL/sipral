@@ -231,6 +231,25 @@ final class SignallingTests: XCTestCase {
         XCTAssertTrue(failed.detail?.contains("pinned") == true, failed.detail ?? "")
     }
 
+    func testAnAuthorityThatIsNotDerIsRefusedRatherThanLeftOut() async throws {
+        let (identity, der) = try Self.certificate("good")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        // the PEM an administrator pastes, where DER is asked for: left out, it left the
+        // system's authorities trusted in its place
+        let pem = "-----BEGIN CERTIFICATE-----\n" + Data(der).base64EncodedString() + "\n-----END CERTIFICATE-----\n"
+        let given: [(String, TLSTrust)] = [
+            ("onlyAuthority", .onlyAuthority(Array(pem.utf8))), ("privateAuthority", .privateAuthority(Array(pem.utf8))),
+        ]
+        for (named, trust) in given {
+            let stack = try stack(registrar.address, trust: trust)
+            defer { stack.close() }
+            let failed = try await refusal(stack)
+            XCTAssertEqual(failed.tls, .untrusted, named)
+            XCTAssertTrue(failed.detail?.contains("DER") == true, "\(named): \(failed.detail ?? "")")
+        }
+    }
+
     /// Every line of `bindings/fixtures/pin-forms.txt`, the list each
     /// layer's parser is held to.
     func testEveryFormAnAdministratorCopiesIsRead(here: String = #filePath) throws {

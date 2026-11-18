@@ -25,7 +25,9 @@ use rustls::sign::CertifiedKey;
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
-use sipral_core::domain_certificate::{DomainIdentity, DomainRules, domain_identity_in_chain};
+use sipral_core::domain_certificate::{
+    DomainIdentity, DomainRules, domain_identity_in_chain, issued_by,
+};
 use sipral_core::endpoint::TransportErrorKind;
 use sipral_core::pin::CertificatePin;
 
@@ -313,14 +315,17 @@ fn chain_verifier(
         )
     };
     let mut store = RootCertStore::empty();
+    let mut anchors = Vec::new();
     if matches!(trust, Trust::Platform | Trust::PlatformAnd(_)) {
         store.add_parsable_certificates(platform.get().iter().cloned());
+        anchors.extend(platform.get().iter().cloned());
     }
     if let Trust::PlatformAnd(roots) | Trust::Only(roots) = trust {
         for root in roots {
             store
                 .add(root.clone())
                 .map_err(|error| refused(&format!("an authority was refused: {error}")))?;
+            anchors.push(root.clone());
         }
     }
     if store.is_empty() {
@@ -335,7 +340,11 @@ fn chain_verifier(
         .build()
         .map_err(|error| refused(&error.to_string()))?;
     Ok(match rules {
-        Some(rules) => Arc::new(SipDomainServer { chain, rules }),
+        Some(rules) => Arc::new(SipDomainServer {
+            chain,
+            anchors: anchors.into(),
+            rules,
+        }),
         None => chain,
     })
 }
@@ -367,11 +376,15 @@ impl ResolvesClientCert for Presenter {
 ///
 /// rustls checks the chain, the dates and revocation before the name, so a refusal for the name
 /// alone means everything else held: that is when a `sip:` URI naming the domain is still
-/// accepted, if every name constraint of the authorities the server sent allows it. Under [`DomainRules::Rfc5922`] a name the HTTPS rules matched is refused unless RFC
+/// accepted, if every name constraint of the authorities above it allows it: those the server
+/// sent and the trusted one the chain ends at. Under [`DomainRules::Rfc5922`] a name the HTTPS rules matched is refused unless RFC
 /// 5922 reads it too, a wildcard above all.
 #[derive(Debug)]
 struct SipDomainServer {
     chain: Arc<WebPkiServerVerifier>,
+    /// Every authority the chain may end at, as their certificates: the one it does end at is
+    /// never among those the server sends.
+    anchors: Arc<[CertificateDer<'static>]>,
     rules: DomainRules,
 }
 
@@ -403,10 +416,24 @@ impl ServerCertVerifier for SipDomainServer {
             ServerName::IpAddress(address) => IpAddr::from(address).to_string(),
             _ => return platform,
         };
-        // every certificate the server sent above its own, and the path webpki built is among
-        // them: one more constrained authority can only refuse a sip: URI, never accept one
-        let identity = domain_identity_in_chain(end_entity.as_ref(), intermediates, &domain)
-            .unwrap_or(DomainIdentity::Unnamed);
+        // every certificate the server sent above its own, and every trusted authority that could
+        // have signed one of them: the path webpki built is among them, its anchor included,
+        // whose name constraints webpki holds a dNSName to and never a URI. One more constrained
+        // authority can only refuse a sip: URI, never accept one
+        let sent: Vec<&[u8]> = intermediates.iter().map(AsRef::as_ref).collect();
+        let above = |authority: &&CertificateDer<'static>| {
+            issued_by(end_entity.as_ref(), authority)
+                || sent
+                    .iter()
+                    .any(|certificate| issued_by(certificate, authority))
+        };
+        let anchors = self.anchors.iter().filter(above).map(AsRef::as_ref);
+        let identity = domain_identity_in_chain(
+            end_entity.as_ref(),
+            sent.iter().copied().chain(anchors),
+            &domain,
+        )
+        .unwrap_or(DomainIdentity::Unnamed);
         if identity.accepted(self.rules, matched) {
             Ok(ServerCertVerified::assertion())
         } else if matched {

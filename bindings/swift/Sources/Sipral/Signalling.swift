@@ -17,8 +17,8 @@ import Security
 
 /// What a TLS connection to the SIP server trusts (`docs/22-tls.md`):
 /// `.platform` (the system store), `.privateAuthority` (a DER CA beside the
-/// system's) or `.onlyAuthority` (that CA alone). The name is always
-/// checked. `.pinnedCertificate` trusts one self-signed certificate by its
+/// system's) or `.onlyAuthority` (that CA alone); a CA that is not DER is
+/// refused as untrusted, never left out. The name is always checked. `.pinnedCertificate` trusts one self-signed certificate by its
 /// SHA-256 digest alone, ignoring authority, name and dates; `pinned(_:)`
 /// parses the text an administrator copies. Apple platforms only.
 public enum TLSTrust: Sendable {
@@ -226,8 +226,23 @@ final class SignallingConnection: @unchecked Sendable {
                 anchors = [SecCertificateCreateWithData(nil, Data(der) as CFData)].compactMap { $0 }
                 only = true
             }
+            // an authority given that is not a certificate, PEM above all, would leave no anchor
+            // set and the system's authorities trusted in its place
+            let unreadable: Bool
+            switch trust {
+            case .privateAuthority, .onlyAuthority: unreadable = anchors.isEmpty
+            case .platform, .pinnedCertificate: unreadable = false
+            }
             let verdict = self.verdict
             sec_protocol_options_set_verify_block(security, { [pin] _, trust, complete in
+                if unreadable {
+                    verdict.keep(SignallingRefusal(
+                        error: .connectionReset, tls: .untrusted,
+                        detail: "the authority given to trust is not a DER certificate"
+                    ))
+                    complete(false)
+                    return
+                }
                 let evaluated = sec_trust_copy_ref(trust).takeRetainedValue()
                 if let pin {
                     // the pin replaces the chain, the name and the dates

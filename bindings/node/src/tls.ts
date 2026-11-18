@@ -11,8 +11,9 @@
 // (`sipral_stack_transport_failed_with`), which it passes on to the
 // application as `TransportFailed`.
 
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { Socket, connect as connectTcp, isIP } from 'node:net';
+import * as nodeTls from 'node:tls';
 import {
   type ConnectionOptions,
   type DetailedPeerCertificate,
@@ -390,6 +391,32 @@ export function sipDomainOf(uri: string | null): string | null {
   return host === '' || isIP(host) !== 0 ? null : host;
 }
 
+/** Every certificate in `pems`, each a PEM text or buffer holding one or more; one that cannot be read is left out. */
+function authorities(pems: readonly (string | Buffer)[]): X509Certificate[] {
+  const found: X509Certificate[] = [];
+  for (const pem of pems) {
+    for (const block of pem.toString().match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []) {
+      try {
+        found.push(new X509Certificate(block));
+      } catch {
+        // OpenSSL could not have trusted it either
+      }
+    }
+  }
+  return found;
+}
+
+/** The authorities a connection made with `options` trusts: its own `ca`, or Node's default store. */
+function trustedBy(options: ConnectionOptions): readonly (string | Buffer)[] {
+  const ca = options.ca;
+  if (ca !== undefined) {
+    return Array.isArray(ca) ? ca : [ca as string | Buffer];
+  }
+  // the default store holds the system's too when Node is told to read them; before Node 22.15 the bundled one alone
+  const all = (nodeTls as { getCACertificates?: (type: 'default') => string[] }).getCACertificates;
+  return all === undefined ? rootCertificates : all('default');
+}
+
 /**
  * Whether a trusted `certificate` names `name`, the SIP domain: Node's own
  * check by the HTTPS rules, then RFC 5922's reading under `rules`, which
@@ -398,23 +425,41 @@ export function sipDomainOf(uri: string | null): string | null {
  * `SipralDomainRules.Rfc5922`, refuses a wildcard. The refusal Node raises,
  * or one that says why.
  */
-function domainNamed(sipral: Sipral, name: string, certificate: PeerCertificate, rules: number): Error | undefined {
+function domainNamed(
+  sipral: Sipral,
+  name: string,
+  certificate: PeerCertificate,
+  rules: number,
+  trusted: () => readonly (string | Buffer)[],
+): Error | undefined {
   const https = checkServerIdentity(name, certificate);
   if (https === undefined && rules === SipralDomainRules.Platform) {
     return undefined;
   }
   const [domain, length] = text(name);
   const raw = certificate.raw ?? Buffer.alloc(0);
-  // every authority above the leaf in the chain Node verified, the anchor
-  // included, whose name constraints a sip: URI is held to; Node hands the
-  // chain over with the certificate, and an anchor is its own issuer
+  // every authority above the leaf in the chain Node hands over with the
+  // certificate, whose name constraints a sip: URI is held to. That chain
+  // is put together from what the server sent, by name, and is not always
+  // the one OpenSSL verified: a server can send a certificate of its own
+  // under a trusted root's name. So every trusted authority that could have
+  // signed one of its certificates is added, the anchor OpenSSL ended at
+  // among them, whose constraints it holds a DNS name to and never a URI
   const issuers: Buffer[] = [];
+  const walked: Buffer[] = raw.length > 0 ? [raw] : [];
   let below = certificate as DetailedPeerCertificate;
   let above: DetailedPeerCertificate | undefined = below.issuerCertificate;
   while (above?.raw !== undefined && above.fingerprint256 !== below.fingerprint256) {
     issuers.push(above.raw);
+    walked.push(above.raw);
     below = above;
     above = above.issuerCertificate;
+  }
+  const signers = walked.map((der) => new X509Certificate(der));
+  for (const authority of authorities(trusted())) {
+    if (signers.some((signed) => signed.checkIssued(authority))) {
+      issuers.push(authority.raw);
+    }
   }
   const chain = Buffer.concat(issuers);
   const status = sipral.sipral_certificate_check_domain_in_chain(
@@ -498,7 +543,9 @@ export function openStream(host: string, port: number, options: ConnectOptions =
       const sipral = options.sipral;
       const rules = options.domainRules ?? SipralDomainRules.Platform;
       tlsOptions.checkServerIdentity = (_host: string, certificate: PeerCertificate) =>
-        sipral === undefined ? checkServerIdentity(name, certificate) : domainNamed(sipral, name, certificate, rules);
+        sipral === undefined
+          ? checkServerIdentity(name, certificate)
+          : domainNamed(sipral, name, certificate, rules, () => trustedBy(tlsOptions));
     }
     const began = Date.now();
     const secure: TLSSocket = connectTls(tlsOptions, () => {

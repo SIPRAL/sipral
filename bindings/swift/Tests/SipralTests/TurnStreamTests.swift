@@ -321,6 +321,24 @@ final class TurnStreamTests: XCTestCase {
         XCTAssertFalse(aliceCall.ended, "the call went ahead without a relay")
     }
 
+    func testARootThatIsNotDerIsNoRelayEvenBesideOneThatIs() async throws {
+        let (identity, certificate) = try Self.selfSigned()
+        let stun = try FakeStunServer()
+        defer { stun.stop() }
+        let server = try FakeTurnOverStream(credential: ("alice-turn", password), identity: identity)
+        defer { server.stop() }
+        let pem = "-----BEGIN CERTIFICATE-----\n" + Data(certificate).base64EncodedString() + "\n-----END CERTIFICATE-----\n"
+        let turn = TurnServer(
+            address: server.address, username: "alice-turn", password: password, transport: .tls,
+            serverName: Self.serverName, trustedCertificates: [certificate, Array(pem.utf8)]
+        )
+        let (relay, alice, bob, aliceCall, _) = try await call(through: turn, stun: stun)
+        defer { alice.close(); bob.close() }
+        XCTAssertEqual(relay.outcome, .failed)
+        XCTAssertTrue(server.allocations.isEmpty, "a relay was made trusting less than it was told to")
+        XCTAssertFalse(aliceCall.ended, "the call went ahead without a relay")
+    }
+
     func testACertificateNobodyVouchesForIsNoRelayAndTheCallGoesOn() async throws {
         let (identity, _) = try Self.selfSigned()
         let stun = try FakeStunServer()

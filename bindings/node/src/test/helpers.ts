@@ -373,6 +373,52 @@ export function constrainedChain(names: string): { cert: Buffer; key: Buffer; ro
   }
 }
 
+/**
+ * A server's certificate naming `names`, signed by a root that may name
+ * `corp.test` alone, made with the `openssl` command, or null without one.
+ * With `lookalike` the server sends beside it a certificate of its own
+ * making under the root's name, with no constraint, and its certificate
+ * carries no key identifier to tell the two apart: what a client following
+ * the chain the server sent takes for the root.
+ */
+export function rootConstrained(names: string, lookalike: boolean): { cert: Buffer; key: Buffer; root: Buffer } | null {
+  const directory = mkdtempSync(join(tmpdir(), 'sipral-tls-'));
+  const path = (file: string): string => join(directory, file);
+  try {
+    writeFileSync(
+      path('extensions.cnf'),
+      '[constrained]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n' +
+        'nameConstraints = critical, permitted;DNS:corp.test\nsubjectKeyIdentifier = hash\n' +
+        '[authority]\nbasicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n' +
+        '[server]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\n' +
+        `extendedKeyUsage = serverAuth\nsubjectAltName = ${names}\n`,
+    );
+    const signed = (file: string, section: string, by: string, subject: string): Buffer => {
+      execFileSync(
+        'openssl',
+        ['req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-subj', subject, '-keyout', path(`${file}.key`), '-out', path(`${file}.csr`)],
+        { stdio: 'ignore' },
+      );
+      const signer = file === by ? ['-signkey', path(`${file}.key`)] : ['-CA', path(`${by}.pem`), '-CAkey', path(`${by}.key`)];
+      execFileSync(
+        'openssl',
+        ['x509', '-req', '-in', path(`${file}.csr`), ...signer, '-set_serial', String(randomBytes(4).readUInt32BE() | 1),
+          '-extfile', path('extensions.cnf'), '-extensions', section, '-days', '1', '-out', path(`${file}.pem`)],
+        { stdio: 'ignore' },
+      );
+      return readFileSync(path(`${file}.pem`));
+    };
+    const root = signed('root', 'constrained', 'root', '/CN=Sipral Test Corp Root');
+    const server = signed('server', 'server', 'root', '/CN=pbx.corp.test');
+    const sent = lookalike ? Buffer.concat([server, signed('lookalike', 'authority', 'lookalike', '/CN=Sipral Test Corp Root')]) : server;
+    return { cert: sent, key: readFileSync(path('server.key')), root };
+  } catch {
+    return null;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** Self-signed certificates for {@link SERVER_NAME}, made with the `openssl` command, or null without one. */
 export function certificates(): { good: { cert: Buffer; key: Buffer }; expired: { cert: Buffer; key: Buffer } } | null {
   const directory = mkdtempSync(join(tmpdir(), 'sipral-tls-'));

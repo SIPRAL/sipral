@@ -26,8 +26,8 @@ use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, SRV};
 use hickory_proto::rr::{Name, RData, Record as DnsRecord, RecordType as DnsType};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
-    date_time_ymd,
+    BasicConstraints, CertificateParams, DnType, GeneralSubtree, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, NameConstraints, SanType, date_time_ymd,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -471,6 +471,90 @@ fn a_sip_uri_names_the_domain_and_rfc_5922_alone_refuses_a_wildcard() {
 }
 
 #[test]
+fn a_sip_uri_is_held_to_the_name_constraints_of_the_root_the_chain_ends_at() {
+    // a private root constrained to corp.example, as a customer's own authority is, which signs
+    // the server's certificate itself: it is never among what the server sends
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "Corp constrained root");
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.name_constraints = Some(NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName("corp.example".to_owned())],
+        excluded_subtrees: Vec::new(),
+    });
+    let root = params.self_signed(&key).unwrap();
+    let issuer = Issuer::from_params(&params, &key);
+    // a certificate of the server's own making under the root's name, with no constraint: sent
+    // beside its own, it is what a verifier reading only what was sent takes for the root
+    let mut lookalike = CertificateParams::new(Vec::<String>::new()).unwrap();
+    lookalike.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    lookalike
+        .distinguished_name
+        .push(DnType::CommonName, "Corp constrained root");
+    lookalike.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let lookalike = lookalike
+        .self_signed(&KeyPair::generate().unwrap())
+        .unwrap();
+    let serve = |names: Vec<SanType>, beside: Option<&CertificateDer<'static>>| {
+        let leaf_key = KeyPair::generate().unwrap();
+        let mut leaf = CertificateParams::new(Vec::<String>::new()).unwrap();
+        leaf.subject_alt_names = names;
+        let certificate = leaf.signed_by(&leaf_key, &issuer).unwrap();
+        let mut chain = vec![certificate.der().clone()];
+        chain.extend(beside.cloned());
+        tls_server(Serving {
+            chain,
+            key: leaf_key,
+            clients: None,
+            tls12_only: false,
+        })
+    };
+    let uri = |text: &str| SanType::URI(text.try_into().unwrap());
+    let dns = |text: &str| SanType::DnsName(text.try_into().unwrap());
+    for trust in [
+        Trust::Only(vec![root.der().clone()]),
+        Trust::PlatformAnd(vec![root.der().clone()]),
+    ] {
+        let mut config = NetworkConfig::default();
+        config.trust = trust.clone();
+        config.connect_timeout = Duration::from_secs(5);
+        let verdict = |server: SocketAddr, name: &str| {
+            dial(
+                &mut Network::new(config.clone()).unwrap(),
+                TransportProtocol::Tls,
+                server,
+                named(name),
+            )
+        };
+
+        for beside in [None, Some(lookalike.der())] {
+            // a name inside the constraint, which webpki checks, carrying a URI outside it,
+            // which nothing but this library reads
+            let outside = serve(
+                vec![dns("pbx.corp.example"), uri("sip:victim.example")],
+                beside,
+            );
+            match verdict(outside, "victim.example") {
+                Err(refused) => assert_eq!(refused.tls, TlsFailure::NameMismatch, "{refused}"),
+                Ok(_) => panic!(
+                    "{trust:?}, look-alike {}: a sip: URI outside its root's constraints was \
+                     accepted",
+                    beside.is_some()
+                ),
+            }
+
+            let inside = serve(vec![uri("sip:sip.corp.example")], beside);
+            verdict(inside, "sip.corp.example").unwrap_or_else(|refused| {
+                panic!("{trust:?}, look-alike {}: {refused}", beside.is_some())
+            });
+        }
+    }
+}
+
+#[test]
 fn a_pinned_certificate_is_the_whole_verdict() {
     let pki = Pki::new("Sipral test authority");
     // another name, and expired: a pin looks at neither
@@ -785,7 +869,11 @@ fn a_message_over_one_tls_record_followed_by_another_is_read_whole() {
     let mut network = network(Trust::Only(vec![pki.der.clone()]), None);
     dial(&mut network, TransportProtocol::Tls, server, named(NAME)).unwrap();
     network
-        .send(TransportId(7), server, b"OPTIONS sip:pbx.test SIP/2.0\r\n\r\n")
+        .send(
+            TransportId(7),
+            server,
+            b"OPTIONS sip:pbx.test SIP/2.0\r\n\r\n",
+        )
         .unwrap();
     let mut heard = Vec::new();
     let whole = until(&mut network, |happening| match happening {
