@@ -4195,7 +4195,9 @@ with both versions named.
   handed to the transport (`SIPRAL_HOOK_OUTGOING`) and just after it
   arrives, before it is read (`SIPRAL_HOOK_INCOMING`): `size`, `stack`,
   `direction`, `transport` (a `sipral_transport_t`), the far end as
-  `remote`/`remote_len`, and the message whole as `message`/`message_len`.
+  `remote`/`remote_len` (this end's own address for a message that came in
+  on the stack's own TCP, TLS or WebSocket transport, whose far end the
+  library is not told), and the message whole as `message`/`message_len`.
   `docs/03-core-signalling.md`, "A message hook", says where each direction
   runs and what a dropped or replaced message does.
 - It answers `SIPRAL_HOOK_KEEP` (0), `SIPRAL_HOOK_REPLACE` or

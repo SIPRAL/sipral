@@ -124,7 +124,8 @@ struct Hooked {
     bool outgoing;
     /** What it travels over; zero for one the ABI has no name for. */
     sipral_transport_t transport;
-    /** The far end, as `host:port`. */
+    /** The far end, as `host:port`; this end's address for a message that came in on the stack's own TCP, TLS or
+     * WebSocket transport, whose far end the library is not told. */
     std::string_view remote;
     /** The message, from its start line to the end of its body. */
     std::string_view message;

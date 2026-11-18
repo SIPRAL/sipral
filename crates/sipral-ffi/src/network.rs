@@ -267,7 +267,8 @@ entry! {
     /// component opened is closed, its media sockets with them, and the stack's events go to
     /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
     /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
-    /// was not running.
+    /// was not running; `SIPRAL_STATUS_BUSY` when another thread stayed inside the stack for half
+    /// a second, the component still running then, to be stopped again.
     ///
     /// # Safety
     ///

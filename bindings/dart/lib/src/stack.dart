@@ -200,7 +200,9 @@ final class SipralStack {
   /// after it arrives (`sipral_stack_message_hook`); null removes the hook.
   ///
   /// `hook(outgoing, message, remote)` gets true for a message on its way
-  /// out, the whole message, and the far end as `host:port`, and answers
+  /// out, the whole message, and the far end as `host:port` (this end's
+  /// address for a message that came in on the stack's own TCP or TLS
+  /// connection), and answers
   /// [SipralMessageVerdict.keep], [SipralMessageVerdict.replace]
   /// (`Content-Length` must match the body) or [SipralMessageVerdict.drop]:
   /// not sent, or not read. It runs inside the stack's lock, inside the call

@@ -1204,7 +1204,8 @@ public sealed partial class SipralStack : IDisposable
     /// it with <see langword="null"/>. <c>hook(outgoing, message, remote)</c>
     /// sees every SIP message just before it is sent (<c>outgoing</c> true)
     /// and just after it arrives, whole, with the far end as
-    /// <c>host:port</c>, and answers <see cref="SipralMessageVerdict.Keep"/>,
+    /// <c>host:port</c> (this end's address for a message that came in on
+    /// the stack's own TCP or TLS connection), and answers <see cref="SipralMessageVerdict.Keep"/>,
     /// <see cref="SipralMessageVerdict.Replace"/> or
     /// <see cref="SipralMessageVerdict.Drop"/>. It runs with the stack's lock
     /// held, on the thread inside the stack: it must not call back into this

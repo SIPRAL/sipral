@@ -150,6 +150,16 @@ class AMessageHook(unittest.IsolatedAsyncioTestCase):
         ended = await self.ended(stack)
         self.assertEqual(ended.fields["status_code"], 486)
 
+    async def test_an_empty_replacement_keeps_the_message(self) -> None:
+        # the library refuses an empty one: False is how a message is stopped
+        stack = await self.stack()
+        stack.set_message_hook(lambda _outgoing, _message, _remote: b"")
+        account = stack.add_account("sip:alice@example.com", registrar_address=self.pbx.address)
+        stack.place_call(account, "sip:bob@example.com")
+        ended = await self.ended(stack)
+        self.assertEqual(ended.fields["status_code"], 486)
+        self.assertTrue([m for m in self.pbx.received if m.startswith("INVITE ")])
+
 
 if __name__ == "__main__":
     unittest.main()

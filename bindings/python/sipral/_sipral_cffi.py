@@ -7624,7 +7624,9 @@ struct sipral_hooked_message {
      */
     sipral_transport_t transport;
     /**
-     * The far end, as `host:port`: where it goes, or where it came from.
+     * The far end, as `host:port`: where it goes, or where it came from. A message that came
+     * in on the stack's own TCP, TLS or WebSocket transport names this end's address
+     * instead, since the library is not told who is at the other end of that connection.
      */
     const char *remote;
     /**
@@ -9038,7 +9040,8 @@ sipral_status_t sipral_stack_message_hook(sipral_handle_t stack, sipral_message_
  *
  * The replacement belongs to the hook running on the calling thread, so it names no message:
  * `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
- * with a length.
+ * or empty. An empty message replaces nothing: a hook that wants one gone answers
+ * `SIPRAL_HOOK_DROP`.
  *
  * Safety
  *
@@ -12028,7 +12031,8 @@ sipral_status_t sipral_network_run(sipral_handle_t stack, uint64_t now_ms, uint3
  * component opened is closed, its media sockets with them, and the stack's events go to
  * the callback alone again. The stack is told nothing; a stack about to be destroyed needs
  * no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
- * was not running.
+ * was not running; `SIPRAL_STATUS_BUSY` when another thread stayed inside the stack for half
+ * a second, the component still running then, to be stopped again.
  *
  * Safety
  *

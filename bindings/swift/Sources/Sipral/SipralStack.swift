@@ -189,7 +189,9 @@ public final class SipralStack: @unchecked Sendable {
 
     /// Receives whether the message is on its way out, the whole message
     /// from its start line to the end of its body, and the far end as
-    /// `host:port`; answers what becomes of the message.
+    /// `host:port` (this end's address for a message that came in on the
+    /// stack's own TCP or TLS connection); answers what becomes of the
+    /// message.
     public typealias MessageHook = @Sendable (Bool, [UInt8], String) throws -> SipralHookVerdict
 
     /// Receives level, module, the redacted line, and how many lines a flood

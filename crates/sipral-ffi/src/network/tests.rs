@@ -1166,6 +1166,110 @@ fn media_socket(stack: SipralHandle) -> Result<String, (SipralStatus, String)> {
 }
 
 #[test]
+fn bytes_a_busy_stack_could_not_take_are_handed_in_first_next_time() {
+    let pki = pki();
+    let pin = pin_of(&pki);
+    let (rtp, offers, _) = far_end();
+    let (sip, heard) = sip_server(pki, rtp, offers);
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, None);
+    let alice = line_at(stack, "alice", sip, SipralTransport::Tls, Some(&pin));
+    register_at(stack, alice, origin, &hooked);
+    let transports = super::driver::stream_transports(stack);
+    let [transport] = transports[..] else {
+        panic!("one connection, not {transports:?}");
+    };
+
+    // an OPTIONS from the server, in two reads: the first while another thread stays inside the
+    // stack past the component's patience
+    let options = format!(
+        "OPTIONS sip:alice@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/TLS {sip};branch=z9hG4bK-held\r\n\
+         Max-Forwards: 70\r\nFrom: <sip:server@{DOMAIN}>;tag=held\r\nTo: <sip:alice@{DOMAIN}>\r\n\
+         Call-ID: held@{DOMAIN}\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n"
+    );
+    let (first, rest) = options.as_bytes().split_at(40);
+    let (holding, held) = channel();
+    let other = thread::spawn(move || {
+        with_stack(stack, |_| {
+            let _ = holding.send(());
+            thread::sleep(Duration::from_millis(900));
+            Ok(())
+        })
+    });
+    held.recv().unwrap();
+    assert_eq!(
+        super::driver::handed_in(stack, transport, first, now(origin)),
+        first.len(),
+        "the bytes the stack could not take were not kept"
+    );
+    other.join().unwrap().unwrap();
+    assert_eq!(
+        super::driver::handed_in(stack, transport, rest, now(origin)),
+        0
+    );
+    run_until(stack, origin, "the OPTIONS answered", || {
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, _)| method == "SIP/2.0")
+    });
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+#[test]
+fn a_media_socket_is_not_opened_into_no_buffer() {
+    let port = free_pair();
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, Some(port));
+    let mut needed = 0_usize;
+    assert_eq!(
+        unsafe {
+            sipral_network_media_open(
+                stack,
+                ptr::null_mut(),
+                SIPRAL_ADDRESS_BYTES,
+                &raw mut needed,
+            )
+        },
+        SipralStatus::InvalidArgument
+    );
+    // nothing was kept for an address nobody was told
+    assert_eq!(
+        media_socket(stack).unwrap(),
+        format!("127.0.0.1:{port}"),
+        "the range's one pair was taken by the refused open"
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+#[test]
+fn stopping_while_another_thread_is_in_the_stack_still_lets_its_events_go() {
+    let origin = Instant::now();
+    let mut hooked = Box::new(Hooked::default());
+    let stack = hooked_stack(&mut hooked, origin, None);
+    let (holding, held) = channel();
+    let other = thread::spawn(move || {
+        with_stack(stack, |_| {
+            let _ = holding.send(());
+            thread::sleep(Duration::from_millis(200));
+            Ok(())
+        })
+    });
+    held.recv().unwrap();
+    assert_eq!(unsafe { sipral_network_stop(stack) }, SipralStatus::Ok);
+    other.join().unwrap().unwrap();
+    let observed = with_stack(stack, |state| Ok(state.observer.is_some())).unwrap();
+    assert!(
+        !observed,
+        "the component still takes the events of a stack it was stopped on"
+    );
+    assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+}
+
+#[test]
 fn a_media_socket_closed_and_opened_again_at_once_gets_its_port_back() {
     let port = free_pair();
     let origin = Instant::now();

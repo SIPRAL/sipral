@@ -905,7 +905,8 @@ class SipralClient private constructor(
      * after it arrives (`sipral_stack_message_hook`; `docs/03-core-signalling.md`,
      * "A message hook"); null removes the hook. [hook] gets whether the
      * message is on its way out, the whole message, and the far end as
-     * `host:port`, and answers [SipralHookVerdict.Keep],
+     * `host:port` (this end's address for a message that came in on the
+     * stack's own TCP or TLS connection), and answers [SipralHookVerdict.Keep],
      * [SipralHookVerdict.Replace] (`Content-Length` must match the body) or
      * [SipralHookVerdict.Drop]; what it throws keeps the message as it is.
      * It runs inside the stack's lock, on the thread that is inside the

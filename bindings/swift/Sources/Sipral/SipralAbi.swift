@@ -3248,7 +3248,8 @@ public enum Sipral {
     ///
     /// The replacement belongs to the hook running on the calling thread, so it names no message:
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
-    /// with a length.
+    /// or empty. An empty message replaces nothing: a hook that wants one gone answers
+    /// `SIPRAL_HOOK_DROP`.
     ///
     /// Safety
     ///
@@ -7243,7 +7244,8 @@ public enum Sipral {
     /// component opened is closed, its media sockets with them, and the stack's events go to
     /// the callback alone again. The stack is told nothing; a stack about to be destroyed needs
     /// no stop, since `sipral_stack_destroy` does the same. `SIPRAL_STATUS_WRONG_STATE` when it
-    /// was not running.
+    /// was not running; `SIPRAL_STATUS_BUSY` when another thread stayed inside the stack for half
+    /// a second, the component still running then, to be stopped again.
     ///
     /// Safety
     ///

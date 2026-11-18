@@ -70,6 +70,10 @@ const IDLE: Duration = Duration::from_secs(1);
 /// How long what must reach the stack waits for it while another thread is inside it.
 const PATIENCE: Duration = Duration::from_millis(500);
 
+/// How much a connection's bytes the stack could not take yet may hold before the connection is
+/// given up: the reader's own backlog's size.
+const UNREAD_LIMIT: usize = 4 * 1024 * 1024;
+
 /// What the observer noted for the component, during a poll.
 enum Seen {
     Wanted {
@@ -106,6 +110,9 @@ struct Stream {
     bound: bool,
     /// What it is checked against, and so whose requests it carries.
     identity: StreamIdentity,
+    /// Bytes it carried that the stack could not take yet, another thread being inside it: handed
+    /// in first next time, since a stream with a hole in it cannot be read again.
+    unread: Vec<u8>,
 }
 
 /// Where a media socket stands with the stack's STUN client.
@@ -530,9 +537,10 @@ impl<T> Answered for Result<T, Fail> {
 
 /// `call` until the stack takes it: another thread inside the stack answers
 /// `SIPRAL_STATUS_BUSY`, and one whose clock ran ahead `SIPRAL_STATUS_CLOCK_BEHIND`, for half a
-/// second at most. What a connection carried is handed in so, never dropped, since a stream
-/// with a hole in it cannot be read again; so is what the stack is told only once, such as a
-/// connection lost, and what a connection is checked against.
+/// second at most. What a connection carried is handed in so, and what is still refused after it
+/// waits for the next turn ([`hand_in`]), since a stream with a hole in it cannot be read again;
+/// so is what the stack is told only once, such as a connection lost, and what a connection is
+/// checked against.
 fn patiently<T: Answered>(mut call: impl FnMut() -> T) -> T {
     let since = Instant::now();
     loop {
@@ -726,13 +734,26 @@ pub(super) fn stop(stack: SipralHandle) -> Result<(), Fail> {
         };
         networks.swap_remove(at).1
     };
-    // a stack destroyed meanwhile has no observer left to take
-    let _ = with_stack(stack, |state| {
-        state.observer = None;
-        Ok(())
+    // as patient as every other call the component makes: an observer left behind would go on
+    // taking the stack's events, with nothing to read them
+    let taken = patiently(|| {
+        with_stack(stack, |state| {
+            state.observer = None;
+            Ok(())
+        })
     });
-    drop(shared);
-    Ok(())
+    match taken {
+        // still busy: the component goes on running, and the caller asks again
+        Err(failure) if failure.status.wait_and_ask_again() => {
+            locked(&NETWORKS).push((stack, shared));
+            Err(failure)
+        }
+        // a stack destroyed meanwhile has no observer left to take
+        _ => {
+            drop(shared);
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn forget(stack: SipralHandle) {
@@ -1052,6 +1073,7 @@ fn open_stream(
                 destination,
                 bound: false,
                 identity,
+                unread: Vec::new(),
             },
         );
     }
@@ -1260,6 +1282,16 @@ fn farewells(shared: &Shared, driver: &mut Driver, clock: &Clock) {
 /// Hand everything that arrived to the stack, as an application would.
 fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
     let stack = shared.stack;
+    // what an earlier turn could not hand in goes first, whether more came or not
+    let waiting: Vec<u32> = locked(&shared.driver)
+        .streams
+        .iter()
+        .filter(|(_, stream)| !stream.unread.is_empty())
+        .map(|(transport, _)| *transport)
+        .collect();
+    for transport in waiting {
+        hand_in(shared, transport, &[], clock);
+    }
     for happening in arrived {
         let Some(happening) = relayed(shared, happening, clock) else {
             continue;
@@ -1288,16 +1320,7 @@ fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
                 };
             }
             Happening::StreamData { transport, data } => {
-                // a stream the stack could not read any more it has let go of itself
-                let _ = patiently(|| unsafe {
-                    sipral_stack_receive_stream(
-                        stack,
-                        transport.0,
-                        data.as_ptr(),
-                        data.len(),
-                        clock.now(),
-                    )
-                });
+                hand_in(shared, transport.0, &data, clock);
             }
             Happening::Connected {
                 transport,
@@ -1339,6 +1362,74 @@ fn feed(shared: &Shared, arrived: Vec<Happening>, clock: &Clock) {
             _ => {}
         }
     }
+}
+
+/// Hand the stack what `transport` carried, after whatever it carried before that the stack could
+/// not take yet. What it still cannot take, another thread staying inside it, waits for the next
+/// turn; past [`UNREAD_LIMIT`] the connection is given up and the stack told. A stream the stack
+/// could not read any more it has let go of itself.
+fn hand_in(shared: &Shared, transport: u32, data: &[u8], clock: &Clock) {
+    let mut bytes = locked(&shared.driver)
+        .streams
+        .get_mut(&transport)
+        .map(|stream| std::mem::take(&mut stream.unread))
+        .unwrap_or_default();
+    if bytes.is_empty() && data.is_empty() {
+        return;
+    }
+    bytes.extend_from_slice(data);
+    let status = patiently(|| unsafe {
+        sipral_stack_receive_stream(
+            shared.stack,
+            transport,
+            bytes.as_ptr(),
+            bytes.len(),
+            clock.now(),
+        )
+    });
+    if !status.wait_and_ask_again() {
+        return;
+    }
+    let mut driver = locked(&shared.driver);
+    let Some(stream) = driver.streams.get_mut(&transport) else {
+        return;
+    };
+    if bytes.len() <= UNREAD_LIMIT {
+        stream.unread = bytes;
+        return;
+    }
+    driver.streams.remove(&transport);
+    driver.network.close(TransportId(transport));
+    drop(driver);
+    let failure = Failure::new(
+        TransportErrorKind::Other,
+        TlsFailure::None,
+        "the connection was given up: the stack stayed busy while it carried more than it can \
+         hold unread",
+    );
+    report(shared.stack, transport, &failure, clock.now());
+}
+
+/// [`hand_in`], as a turn does, and how many of the connection's bytes are left unread after it.
+#[cfg(test)]
+pub(super) fn handed_in(stack: SipralHandle, transport: u32, data: &[u8], now_ms: u64) -> usize {
+    let Ok(shared) = find(stack) else {
+        return 0;
+    };
+    hand_in(&shared, transport, data, &Clock::new(now_ms));
+    locked(&shared.driver)
+        .streams
+        .get(&transport)
+        .map_or(0, |stream| stream.unread.len())
+}
+
+/// The transport numbers of the connections the component holds for `stack`.
+#[cfg(test)]
+pub(super) fn stream_transports(stack: SipralHandle) -> Vec<u32> {
+    find(stack).map_or_else(
+        |_| Vec::new(),
+        |shared| locked(&shared.driver).streams.keys().copied().collect(),
+    )
 }
 
 /// A packet on a media socket: the call's once its handle is attached; before, the STUN
@@ -1570,6 +1661,13 @@ pub(super) unsafe fn media_open(
                 "capacity is {capacity}, and a media socket is opened only into a buffer of \
                  SIPRAL_ADDRESS_BYTES ({SIPRAL_ADDRESS_BYTES}) or more"
             ),
+        ));
+    }
+    // before anything is opened: a socket whose address nobody is told could never be closed
+    if buffer.is_null() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "a media socket is opened only into a buffer that says where it is",
         ));
     }
     let shared = find(stack)?;

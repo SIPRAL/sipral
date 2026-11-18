@@ -304,7 +304,12 @@ added, the `Max-Forwards` it changed and without the `Expires` it took away.
   compact forms included, folded lines read as one), and writes
   `Content-Length` for the body when it puts the message back together.
 - A message replaced after the §18.1.1 size check is not measured again: a
-  hook that makes a request much larger over UDP is answerable for it.
+  hook that makes a request much larger over UDP is answerable for it. An
+  empty replacement is refused (`SIPRAL_STATUS_INVALID_ARGUMENT` in C) and
+  the message kept: dropping is what drops one.
+- The far end it is told is where a message goes or came from, except for
+  a message that came in on the stack's own TCP, TLS or WebSocket transport,
+  whose far end the endpoint is not told: that one names this end's address.
 
 In C the hook runs inside the stack's lock, like the screening policy, and a
 call back into the same stack from inside it is answered

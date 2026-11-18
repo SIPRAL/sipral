@@ -568,7 +568,9 @@ export class MessageVerdict {
 
 /**
  * A message hook: `outgoing` is true for a message on its way out, `message`
- * the whole message, `remote` the far end as `host:port`.
+ * the whole message, `remote` the far end as `host:port` (this end's
+ * address for a message that came in on the stack's own TCP or TLS
+ * connection).
  */
 export type MessageHook = (outgoing: boolean, message: Buffer, remote: string) => MessageVerdict;
 

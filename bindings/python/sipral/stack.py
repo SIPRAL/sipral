@@ -1366,7 +1366,8 @@ class Stack:
 
         ``hook(outgoing, message, remote)`` gets ``True`` for a message on
         its way out, the whole message as ``bytes``, and the far end as
-        ``host:port``. It returns ``None`` to let the message on as it is,
+        ``host:port`` (this end's address for a message that came in on the
+        stack's own TCP or TLS connection). It returns ``None`` to let the message on as it is,
         ``bytes`` to put in its place (``Content-Length`` must match the
         body), or ``False`` to stop it. It runs inside the stack's lock, on
         the thread that is inside the stack: it must not call back into this

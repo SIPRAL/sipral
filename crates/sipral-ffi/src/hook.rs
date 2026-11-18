@@ -36,7 +36,9 @@ record! {
         pub direction: u32,
         /// What it travels over, as a `SipralTransport`; zero for one this ABI has no name for.
         pub transport: Number<SipralTransport>,
-        /// The far end, as `host:port`: where it goes, or where it came from.
+        /// The far end, as `host:port`: where it goes, or where it came from. A message that came
+        /// in on the stack's own TCP, TLS or WebSocket transport names this end's address
+        /// instead, since the library is not told who is at the other end of that connection.
         pub remote: *const c_char,
         /// How many bytes of it.
         pub remote_len: usize,
@@ -151,23 +153,26 @@ entry! {
     ///
     /// The replacement belongs to the hook running on the calling thread, so it names no message:
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` when no hook is running on this thread, or `bytes` is null
-    /// with a length.
+    /// or empty. An empty message replaces nothing: a hook that wants one gone answers
+    /// `SIPRAL_HOOK_DROP`.
     ///
     /// # Safety
     ///
     /// Call it only from inside a [`SipralMessageHookCallback`]. `bytes` must point at `bytes_len`
     /// readable bytes.
     fn sipral_hooked_message_replace(bytes: *const u8, bytes_len: usize) {
-        if bytes.is_null() && bytes_len > 0 {
+        if bytes_len == 0 {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "an empty message replaces nothing; answer SIPRAL_HOOK_DROP to stop it",
+            ));
+        }
+        if bytes.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "bytes are needed"));
         }
-        let copied: Box<[u8]> = if bytes_len == 0 {
-            Box::default()
-        } else {
-            // Safety: the caller promises `bytes_len` readable bytes at `bytes`, checked non-null
-            // above.
-            unsafe { std::slice::from_raw_parts(bytes, bytes_len) }.into()
-        };
+        // Safety: the caller promises `bytes_len` readable bytes at `bytes`, checked non-null
+        // above.
+        let copied: Box<[u8]> = unsafe { std::slice::from_raw_parts(bytes, bytes_len) }.into();
         REPLACEMENT.with(|slot| {
             let mut slot = slot.borrow_mut();
             match &mut *slot {
@@ -371,6 +376,38 @@ Content-Length: 0\r\n\r\n"
         deliver(handle, &invitation("unchanged"), 1_000);
         poll(handle, 1_000);
         assert!(observed.kinds().contains(&SipralEventKind::IncomingCall));
+    }
+
+    /// Hands over an empty replacement, expects it refused, and answers REPLACE all the same.
+    unsafe extern "C" fn replace_with_empty(
+        _hooked: *const SipralHookedMessage,
+        _user_data: *mut c_void,
+    ) -> u32 {
+        let status = unsafe { sipral_hooked_message_replace(b"".as_ptr(), 0) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(last_error_text().contains("SIPRAL_HOOK_DROP"));
+        let status = unsafe { sipral_hooked_message_replace(std::ptr::null(), 0) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        SIPRAL_HOOK_REPLACE
+    }
+
+    #[test]
+    fn an_empty_replacement_is_refused_and_the_message_kept() {
+        let mut observed = Observed::default();
+        let handle = line(&mut observed);
+        install(handle, replace_with_empty, std::ptr::null_mut());
+        deliver(handle, &invitation("emptied"), 1_000);
+        poll(handle, 1_000);
+        assert!(
+            observed.kinds().contains(&SipralEventKind::IncomingCall),
+            "the INVITE was read as nothing"
+        );
+        let out = sent(handle);
+        assert!(
+            out.iter().all(|message| !message.is_empty()),
+            "an empty message was queued to be sent"
+        );
+        assert!(!out.is_empty(), "the INVITE was answered");
     }
 
     #[test]
