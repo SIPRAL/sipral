@@ -1351,8 +1351,14 @@ final class SipralStack {
   }
 
   /// Hang up live calls, wait briefly for the BYEs to go out, then destroy
-  /// the stack and close every socket. Idempotent.
-  Future<void> close() async {
+  /// the stack and close every socket. Idempotent: a close asked for while
+  /// one is under way is that one.
+  Future<void> close() => _closing ??= _close();
+
+  /// The close under way or done, once one was asked for.
+  Future<void>? _closing;
+
+  Future<void> _close() async {
     if (_closed) {
       return;
     }

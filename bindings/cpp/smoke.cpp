@@ -5,7 +5,8 @@
  * fatal) and run against the shared library: a refused stack is an Error
  * with its status, an account goes with its object, a call's INVITE passes a
  * message hook that adds a header, a hook that throws keeps the message
- * and has its exception come out of the next poll(), an account that is a
+ * and has its exception come out of the next poll(), a handler that throws
+ * on one call still hears the next, an account that is a
  * WebRTC line offers DTLS-SRTP on UDP/TLS/RTP/SAVPF, one that takes a
  * PBX's unasked mailbox state reads it, and a call that came in is rung with
  * 180 Ringing.
@@ -241,6 +242,39 @@ int main()
         expect(rang, "Call::ring() sent no 180 Ringing");
         incoming.reject(603);
     }
+
+    // a handler that throws on the first of two calls still hears the second, and poll() throws once
+    int heard = 0;
+    sipral::StackOptions throwing;
+    throwing.bind_address = "127.0.0.1:5995";
+    throwing.on_event = [&heard](const sipral::Event &event) {
+        if (event.kind() == SIPRAL_EVENT_KIND_INCOMING_CALL && ++heard == 1) {
+            throw std::runtime_error("a mistake in the application's handler");
+        }
+    };
+    sipral::Stack busy(std::move(throwing));
+    sipral::Account line_busy = busy.add_account(alice());
+    const std::string to_busy = "127.0.0.1:5995";
+    for (const char *tag : {"first", "second"}) {
+        // its own branch and Call-ID: another call, not a retransmission
+        std::string arriving = invite;
+        const std::string ring = "smoke-ring";
+        for (auto at = arriving.find(ring); at != std::string::npos; at = arriving.find(ring)) {
+            arriving.replace(at, ring.size(), std::string("smoke-") + tag);
+        }
+        expect(sipral_stack_receive_datagram(busy.handle(), SIPRAL_TRANSPORT_MAIN,
+                                             reinterpret_cast<const std::uint8_t *>(arriving.data()), arriving.size(),
+                                             pbx.data(), pbx.size(), to_busy.data(), to_busy.size(),
+                                             sipral::now_ms()) == SIPRAL_STATUS_OK,
+               "an INVITE was not taken in");
+    }
+    try {
+        busy.poll();
+        expect(false, "the handler's exception never came out of poll()");
+    } catch (const std::runtime_error &) {
+    }
+    expect(heard == 2, "an event after one a handler threw on was never delivered");
+    busy.poll();
 
     expect(sipral::advertised_address("0.0.0.0:0", "127.0.0.1:5999").rfind("127.0.0.1:", 0) == 0,
            "the way toward loopback is not loopback");

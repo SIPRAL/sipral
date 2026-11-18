@@ -30,8 +30,12 @@ would make it a second API to learn:
   given in `StackOptions::on_event`, on the thread inside `poll()` or `run()`;
   the message hook is a `std::function<sipral::Verdict(const sipral::Hooked &)>`
   (`03-core-signalling.md`, "A message hook"). An exception either throws is
-  never let into the library: the event is skipped, the message kept as it
-  was, and the first exception comes out of the next `poll()` or `run()`.
+  never let into the library: the message is kept as it was, the events after
+  the one that threw are delivered all the same, and the first exception comes
+  out of the next `poll()` or `run()`, after the call that ran the handler when
+  that was one of them. `set_message_hook` may be called from any thread,
+  asks again while another thread is inside the stack, and replaces the
+  function only once the library has taken the change.
 - **Time and seeds.** Every `now_ms` the C ABI asks for is read from
   `std::chrono::steady_clock`; a stack's two seeds come from
   `std::random_device`.
@@ -62,7 +66,8 @@ resumes and hangs up with no networking code and no handle freed by hand, and
 `-std=c++17 -Wall -Wextra -Wpedantic -Werror` and run against the release
 library: a refused stack is an `Error` with its status, an account goes with
 its object, an INVITE carries the header a hook added, a hook that throws
-keeps the message and its exception comes out of `poll()`, a call that came
+keeps the message and its exception comes out of `poll()`, a handler that
+throws on one call still hears the next, a call that came
 in is rung with 180 Ringing by `Call::ring()`, and a library
 without the networking component answers `start_network` with
 `SIPRAL_STATUS_NOT_SUPPORTED`. The lab program is compiled there too, and run

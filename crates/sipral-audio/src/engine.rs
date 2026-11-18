@@ -1098,9 +1098,11 @@ impl Engine {
         let spawned = std::thread::Builder::new()
             .name("sipral-audio-release".to_owned())
             .spawn(move || {
-                let deadline = Instant::now() + wait;
+                // with no deadline, this thread being nobody's: a release ahead of a preparation
+                // that outran the probe wait finds the unit held and does nothing, and the
+                // preparation then parks it, lowering other applications' sound until next call
                 for closed in &before {
-                    closed.wait(deadline.saturating_duration_since(Instant::now()));
+                    while !closed.wait(wait) {}
                 }
                 // taken here rather than tried on the stack's thread: a
                 // release skipped because a probe held the platform would

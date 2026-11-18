@@ -1975,6 +1975,37 @@ fn what_was_kept_for_the_next_open_is_let_go_of_once_no_call_needs_it() {
     );
 }
 
+/// A call that rings and goes while its preparation outlasts the probe wait,
+/// as a Bluetooth headset switching profile makes it: the release comes after
+/// the preparation, whatever it took, so what it kept is let go of. macOS's
+/// own release does nothing while a preparation holds the voice unit, which
+/// is then parked and goes on lowering other applications' sound.
+#[test]
+fn a_preparation_slower_than_the_probe_wait_is_still_let_go_of() {
+    let fake = a_desk();
+    fake.set_preparation(Some(Duration::from_millis(500)));
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.incoming(1);
+    std::thread::sleep(Duration::from_millis(20));
+    engine.detach(1);
+    let started = Instant::now();
+    while releases(&fake) < 1 || preparations(&fake) < 1 {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            fake.history()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        fake.history().last().map(String::as_str),
+        Some("released, 0 alive"),
+        "released before the preparation it was to let go of had finished: {:?}",
+        fake.history()
+    );
+}
+
 /// An engine let go of, the stack closed, leaves nothing kept behind.
 #[test]
 fn an_engine_dropped_lets_go_of_what_was_kept() {

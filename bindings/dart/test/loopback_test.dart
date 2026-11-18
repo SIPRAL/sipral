@@ -278,6 +278,41 @@ void main() {
     ]);
   });
 
+  test(
+    'closed twice at once with a call up, a stack is let go of once',
+    () async {
+      final fromAlice = alice.addAccount(
+        'sip:alice@sipral.invalid',
+        registrarAddress: bob.bindAddress,
+      );
+      bob.addAccount(
+        'sip:bob@sipral.invalid',
+        registrarAddress: alice.bindAddress,
+      );
+      final ringing = bob.events.firstWhere(
+        (event) => event.kind == SipralEventKind.incomingCall,
+      );
+      final call = await alice.placeCall(
+        fromAlice,
+        'sip:bob@${bob.bindAddress}',
+      );
+      final answered = await bob.answerCall(
+        await ringing.timeout(const Duration(seconds: 15)),
+      );
+      await call.confirmed(timeout: const Duration(seconds: 15));
+      await until(() => answered.media != null);
+      // the first waits for the BYE to go; the second comes in meanwhile, as from dispose() and a
+      // lifecycle handler both
+      await Future.wait([alice.close(), alice.close()]);
+      await alice.close();
+      expect(
+        () => alice.addAccount('sip:carol@sipral.invalid'),
+        throwsStateError,
+      );
+      answered.close();
+    },
+  );
+
   test('a call that is refused ends without being confirmed', () async {
     final fromAlice = alice.addAccount(
       'sip:alice@sipral.invalid',

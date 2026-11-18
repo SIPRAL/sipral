@@ -9,7 +9,8 @@
  * networking component stopped before its stack goes; a failed call into the
  * library is a sipral::Error carrying the status and the library's own
  * sentence; an event or hook handler is a std::function, and an exception it
- * throws never crosses into the library but comes out of the call that ran it.
+ * throws never crosses into the library but comes out of the next poll() or
+ * run(), the events after it delivered all the same.
  * Everything else in sipral.h stays reachable through each object's handle().
  * docs/27-cpp.md has the whole of it.
  */
@@ -22,10 +23,12 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include "sipral.h"
@@ -532,13 +535,25 @@ public:
     }
 
     /** See, change or drop every SIP message on its way out and in; an empty function removes the hook.
-     * It runs inside the stack's lock: it must not call into this stack. */
+     * It runs inside the stack's lock: it must not call into this stack. Safe from any thread, a hook
+     * running meanwhile included; while another thread stays inside the stack it is asked again, and
+     * what it throws leaves the hook that was there. */
     void set_message_hook(std::function<Verdict(const Hooked &)> hook)
     {
-        state_->hook = std::move(hook);
-        detail::check(sipral_stack_message_hook(state_->stack, state_->hook ? &Stack::ask : nullptr,
-                                                state_->hook ? state_.get() : nullptr),
-                      "sipral_stack_message_hook");
+        auto next = hook ? std::make_shared<const std::function<Verdict(const Hooked &)>>(std::move(hook)) : nullptr;
+        sipral_status_t status = SIPRAL_STATUS_BUSY;
+        for (int tries = 0; tries < 500; ++tries) {
+            status = sipral_stack_message_hook(state_->stack, next ? &Stack::ask : nullptr,
+                                               next ? state_.get() : nullptr);
+            if (status != SIPRAL_STATUS_BUSY) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        detail::check(status, "sipral_stack_message_hook");
+        // swapped once the library took the change, never while a running hook reads it
+        std::lock_guard<std::mutex> held(state_->hook_lock);
+        state_->hook = std::move(next);
     }
 
     Account add_account(const AccountOptions &options)
@@ -580,8 +595,11 @@ private:
         bool network = false;
         std::string bind_address;
         std::function<void(const Event &)> on_event;
-        std::function<Verdict(const Hooked &)> hook;
-        /** The first exception a handler threw, rethrown once the library has returned. */
+        /** The hook, read by whichever thread the stack runs on and replaced by any. */
+        std::shared_ptr<const std::function<Verdict(const Hooked &)>> hook;
+        std::mutex hook_lock;
+        /** The first exception a handler threw, rethrown once the library has returned; the
+         * events after it are delivered all the same. */
         std::exception_ptr thrown;
 
         void settle(sipral_status_t status, const char *call)
@@ -596,27 +614,35 @@ private:
     static void deliver(const sipral_event_t *event, void *user_data)
     {
         auto *state = static_cast<State *>(user_data);
-        if (event == nullptr || !state->on_event || state->thrown) {
+        if (event == nullptr || !state->on_event) {
             return;
         }
+        // the library hands each event over once: one after a throw is still the application's
         try {
             state->on_event(Event(*event));
         } catch (...) {
-            state->thrown = std::current_exception();
+            if (!state->thrown) {
+                state->thrown = std::current_exception();
+            }
         }
     }
 
     static std::uint32_t ask(const sipral_hooked_message_t *hooked, void *user_data)
     {
         auto *state = static_cast<State *>(user_data);
-        if (hooked == nullptr || !state->hook) {
+        std::shared_ptr<const std::function<Verdict(const Hooked &)>> hook;
+        {
+            std::lock_guard<std::mutex> held(state->hook_lock);
+            hook = state->hook;
+        }
+        if (hooked == nullptr || !hook) {
             return SIPRAL_HOOK_KEEP;
         }
         try {
             Hooked message{hooked->direction == SIPRAL_HOOK_OUTGOING, static_cast<sipral_transport_t>(hooked->transport),
                            std::string_view(hooked->remote, hooked->remote_len),
                            std::string_view(reinterpret_cast<const char *>(hooked->message), hooked->message_len)};
-            Verdict verdict = state->hook(message);
+            Verdict verdict = (*hook)(message);
             if (verdict.answer() == SIPRAL_HOOK_REPLACE) {
                 const std::string &bytes = verdict.replacement();
                 if (sipral_hooked_message_replace(reinterpret_cast<const std::uint8_t *>(bytes.data()), bytes.size()) !=

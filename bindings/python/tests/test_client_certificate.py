@@ -19,14 +19,23 @@ import asyncio
 import hashlib
 import os
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 
 from sipral import Stack, TlsClientCertificate, TlsTrust
 from sipral.enums import AudioMode, EventKind, RegistrationState, TlsFailure, Transport, TransportError
-from sipral.signalling import ClientCertificateUnusable, ClosedAfterHandshake, certificate_validity, classify
+from sipral.signalling import (
+    SETTLE_MOST_SECONDS,
+    ClientCertificateUnusable,
+    ClosedAfterHandshake,
+    certificate_validity,
+    classify,
+)
 
 from .test_signalling import _SERVER_NAME, _certificate, _header, _Registrar
 
@@ -307,6 +316,37 @@ class WhyItWasNotTaken(_Case):
         fields = await self.failure(self.registrar(ssl.TLSVersion.TLSv1_2), TlsClientCertificate(*self._stranger))
         self.assertEqual(fields["tls"], TlsFailure.CLIENT_CERTIFICATE_REFUSED, fields)
         self.assertEqual(fields["error"], TransportError.CONNECTION_RESET)
+
+    async def test_a_close_long_after_the_handshake_is_a_close_not_a_refusal(self) -> None:
+        # a server that took the connection, certificate and all, and goes away later
+        # without having answered: a restart, an idle reaper, a balancer draining
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(*self._server)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        address = f"127.0.0.1:{listener.getsockname()[1]}"
+
+        def serve() -> None:
+            conn, _ = listener.accept()
+            with context.wrap_socket(conn, server_side=True) as tls:
+                time.sleep(SETTLE_MOST_SECONDS + 1.5)
+                tls.unwrap()
+
+        threading.Thread(target=serve, daemon=True).start()
+        stack = Stack(
+            loop=asyncio.get_running_loop(),
+            audio=AudioMode.APPLICATION,
+            signalling=Transport.TLS,
+            signalling_server=address,
+            tls_server_name=_SERVER_NAME,
+            tls_trust=TlsTrust.only_authority(self._server[0]),
+            tls_client_certificate=TlsClientCertificate(*self._good),
+        )
+        self.addAsyncCleanup(asyncio.to_thread, stack.close)
+        event = await self.next_event(stack, EventKind.TRANSPORT_FAILED, seconds=SETTLE_MOST_SECONDS + 6)
+        self.assertNotEqual(event.fields["tls"], TlsFailure.CLIENT_CERTIFICATE_REFUSED, event.fields)
 
     async def test_an_expired_one_is_said_before_any_connection(self) -> None:
         registrar = self.registrar()

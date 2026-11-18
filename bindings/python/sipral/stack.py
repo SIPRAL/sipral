@@ -34,7 +34,16 @@ from .errors import call as _retry
 from .errors import SipralError, check
 from .locate import Resolver, advertised_address, lookup
 from .settings import Settings
-from .signalling import InviteLimit, TlsClientCertificate, TlsTrust, classify, connect, settle, settle_seconds
+from .signalling import (
+    SETTLE_MOST_SECONDS,
+    InviteLimit,
+    TlsClientCertificate,
+    TlsTrust,
+    classify,
+    connect,
+    settle,
+    settle_seconds,
+)
 
 __all__ = ["TRACE", "Stack", "features", "route_host"]
 
@@ -530,6 +539,8 @@ class Stack:
         self._link: socket.socket | None = None
         #: Whether the server has said anything on that connection yet.
         self._link_heard = False
+        #: When that connection was put in place, on the monotonic clock.
+        self._link_up_at = 0.0
         self._link_lock = threading.Lock()
         self._reconnecting = False
         self._server = parse_address(signalling_server) if self._streamed else None
@@ -2763,6 +2774,7 @@ class Stack:
         with self._link_lock:
             self._link = sock
             self._link_heard = False
+            self._link_up_at = time.monotonic()
         if early:
             self._link_heard = True
             self._feed_link(early)
@@ -2906,10 +2918,15 @@ class Stack:
             self._lose_link(*classify(failed, self._presents))
             return
         if not data:
-            if self._presents and not self._link_heard:
+            if (
+                self._presents
+                and not self._link_heard
+                and time.monotonic() - self._link_up_at <= SETTLE_MOST_SECONDS
+            ):
                 # Asterisk's way of refusing a certificate its authority did
                 # not sign: the handshake ends, then a clean close with no
-                # alert and no answer
+                # alert and no answer, within the time a verdict takes; one
+                # later is the server going away, whatever it was offered
                 self._lose_link(
                     lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET,
                     lib.SIPRAL_TLS_FAILURE_CLIENT_CERTIFICATE_REFUSED,
