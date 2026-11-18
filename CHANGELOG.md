@@ -17,6 +17,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 - **Headers on a placed call's INVITE from .NET and from Android's Telecom path.** `SipralStack.PlaceCall(..., headers:)` in .NET and `TelecomBridge.placeCall(account, target, headers)` on Android put header fields on the INVITE as written, checked as `sipral_call_config_t::headers` is, as Swift's `placeCall(headers:)` and `SipralClient.placeCall(headers = ...)` already did. A `SipCalls` of the application's own that cannot add them refuses with `NOT_SUPPORTED` rather than dropping them.
 
+### Fixed
+
+- **The networking component's TLS connections carry large messages and give up on a stalled handshake.** A message over 16 KiB followed at once by another, as a large NOTIFY can be, ended the connection with "received plaintext buffer full", and a message whose WebSocket frame went over 64 KiB failed to send; both now go through whole. `connect_timeout` bounds the whole TLS handshake, as documented, rather than each read of it, so a server that sends a byte now and then no longer holds the connection and every ask for another. A connection made just before its network was dropped is closed with it.
+
 ## [1.3.2] - 2026-11-16
 
 ### Fixed

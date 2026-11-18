@@ -726,6 +726,163 @@ fn bytes_after_a_close_notify_end_the_connection_and_never_hold_its_writer() {
     }
 }
 
+/// A TLS server on loopback for one connection which, once the client's first message is in,
+/// sends `messages` in a single write: one over 16 KiB is split across records, and a socket read
+/// can end inside one.
+fn pushing_tls_server(serving: Serving, messages: Vec<Vec<u8>>) -> SocketAddr {
+    let config = server_config(serving);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let Ok((mut tcp, _)) = listener.accept() else {
+            return;
+        };
+        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut server = ServerConnection::new(config).unwrap();
+        while server.is_handshaking() {
+            if server.complete_io(&mut tcp).is_err() {
+                return;
+            }
+        }
+        let mut buffer = [0_u8; 4096];
+        if rustls::Stream::new(&mut server, &mut tcp)
+            .read(&mut buffer)
+            .is_err()
+        {
+            return;
+        }
+        for message in &messages {
+            server.writer().write_all(message).unwrap();
+        }
+        let mut wire = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut wire).unwrap();
+        }
+        if tcp.write_all(&wire).is_err() {
+            return;
+        }
+        let mut rest = [0_u8; 64];
+        while matches!(tcp.read(&mut rest), Ok(read) if read > 0) {}
+    });
+    address
+}
+
+#[test]
+fn a_message_over_one_tls_record_followed_by_another_is_read_whole() {
+    let pki = Pki::new("Sipral test authority");
+    let (chain, key) = pki.leaf(&[NAME], false);
+    let first = vec![b'a'; 17_000];
+    let second = vec![b'b'; 5000];
+    let server = pushing_tls_server(
+        Serving {
+            chain,
+            key,
+            clients: None,
+            tls12_only: false,
+        },
+        vec![first.clone(), second.clone()],
+    );
+    let mut network = network(Trust::Only(vec![pki.der.clone()]), None);
+    dial(&mut network, TransportProtocol::Tls, server, named(NAME)).unwrap();
+    network
+        .send(TransportId(7), server, b"OPTIONS sip:pbx.test SIP/2.0\r\n\r\n")
+        .unwrap();
+    let mut heard = Vec::new();
+    let whole = until(&mut network, |happening| match happening {
+        Happening::StreamData { data, .. } => {
+            heard.extend_from_slice(&data);
+            (heard.len() >= first.len() + second.len()).then(|| heard.clone())
+        }
+        Happening::StreamFailed { failure, .. } => panic!("{failure:?}"),
+        Happening::StreamClosed { .. } => panic!("closed after {} bytes", heard.len()),
+        _ => None,
+    });
+    assert_eq!(whole, [first, second].concat());
+}
+
+#[test]
+fn a_payload_over_64_kib_goes_out_whole_over_tls() {
+    let pki = Pki::new("Sipral test authority");
+    let (chain, key) = pki.leaf(&[NAME], false);
+    let server = tls_server(Serving {
+        chain,
+        key,
+        clients: None,
+        tls12_only: false,
+    });
+    let mut network = network(Trust::Only(vec![pki.der.clone()]), None);
+    dial(&mut network, TransportProtocol::Tls, server, named(NAME)).unwrap();
+    let payload: Vec<u8> = (0..70_000_u32).map(|at| (at % 251) as u8).collect();
+    assert_eq!(echoed(&mut network, &payload), payload);
+}
+
+#[test]
+fn a_handshake_that_trickles_past_the_patience_is_given_up() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let Ok((mut tcp, _)) = listener.accept() else {
+            return;
+        };
+        let mut hello = [0_u8; 4096];
+        let _ = tcp.read(&mut hello);
+        // a handshake record 16 KiB long, a byte at a time: every read gets something, well
+        // inside the patience, and the handshake never ends
+        if tcp.write_all(&[0x16, 0x03, 0x03, 0x40, 0x00]).is_err() {
+            return;
+        }
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(200));
+            if tcp.write_all(&[0]).is_err() {
+                return;
+            }
+        }
+    });
+    let pki = Pki::new("Sipral test authority");
+    let mut config = NetworkConfig::default();
+    config.trust = Trust::Only(vec![pki.der.clone()]);
+    config.connect_timeout = Duration::from_secs(1);
+    let mut network = Network::new(config).unwrap();
+    let started = Instant::now();
+    let failure = dial(&mut network, TransportProtocol::Tls, server, named(NAME)).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the handshake went on for {:?}: {failure:?}",
+        started.elapsed()
+    );
+    assert_eq!(failure.error, TransportErrorKind::TimedOut, "{failure:?}");
+}
+
+#[test]
+fn a_connection_not_yet_taken_is_closed_with_the_network() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = listener.local_addr().unwrap();
+    let (ended, heard_end) = mpsc::channel();
+    thread::spawn(move || {
+        let Ok((mut tcp, _)) = listener.accept() else {
+            return;
+        };
+        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut buffer = [0_u8; 64];
+        let _ = ended.send(matches!(tcp.read(&mut buffer), Ok(0)));
+    });
+    let mut network = Network::new(NetworkConfig::default()).unwrap();
+    network.connect(
+        TransportId(7),
+        TransportProtocol::Tcp,
+        server,
+        StreamTarget::default(),
+    );
+    // connected, and its arrival waiting for a wait() that never comes
+    thread::sleep(Duration::from_millis(500));
+    drop(network);
+    assert_eq!(
+        heard_end.recv_timeout(Duration::from_secs(5)),
+        Ok(true),
+        "the server never saw the connection end"
+    );
+}
+
 #[test]
 fn datagrams_and_media_arrive_with_both_addresses() {
     let mut network = network(Trust::Platform, None);

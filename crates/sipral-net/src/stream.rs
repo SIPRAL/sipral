@@ -135,10 +135,21 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
             &format!("{what} could not start: {error}"),
         )
     })?;
-    tcp.set_read_timeout(Some(dial.patience))
-        .map_err(|error| Failure::of_io(&what, &error))?;
+    // the patience bounds the whole handshake, not each read: a server that sends a byte now and
+    // then would otherwise hold the connection, and every ask for another, for as long as it likes
+    let handshake = Instant::now();
     while session.is_handshaking() {
-        if let Err(error) = session.complete_io(&mut tcp) {
+        let left = dial.patience.saturating_sub(handshake.elapsed());
+        let read = if left.is_zero() {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the handshake took longer than the patience",
+            ))
+        } else {
+            tcp.set_read_timeout(Some(left))
+                .and_then(|()| handshake_step(&mut session, &mut tcp))
+        };
+        if let Err(error) = read {
             let learnt = Learnt {
                 presented,
                 asked: asked.load(Ordering::Acquire),
@@ -175,7 +186,24 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
     })
 }
 
-/// A handshake that `complete_io` gave up on: the TLS error rustls kept, or the socket's.
+/// One read of the handshake, with what the session owes the server before and after it.
+/// `complete_io` would read on until the handshake ends, past any deadline between its calls.
+fn handshake_step(session: &mut ClientConnection, tcp: &mut TcpStream) -> io::Result<()> {
+    flush_records(session, tcp)?;
+    if session.wants_read() {
+        if session.read_tls(tcp)? == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        if let Err(error) = session.process_new_packets() {
+            // the alert saying why, if it can still go
+            let _ = flush_records(session, tcp);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+    }
+    flush_records(session, tcp)
+}
+
+/// A handshake given up on: the TLS error rustls kept, or the socket's.
 fn handshake_failure(what: &str, error: &io::Error, learnt: Learnt) -> Failure {
     match error
         .get_ref()
@@ -313,8 +341,18 @@ impl Writer {
             None => self.tcp.write_all(payload),
             Some(ref tls) => {
                 let mut session = tls.lock().unwrap_or_else(PoisonError::into_inner);
-                session.writer().write_all(payload)?;
-                flush_records(&mut session, &mut self.tcp)
+                // rustls holds at most 64 KiB of records to send: each part it takes goes out
+                // before the next is given
+                let mut rest = payload;
+                while !rest.is_empty() {
+                    let taken = session.writer().write(rest)?;
+                    flush_records(&mut session, &mut self.tcp)?;
+                    if taken == 0 {
+                        return Err(io::ErrorKind::WriteZero.into());
+                    }
+                    rest = rest.get(taken..).unwrap_or_default();
+                }
+                Ok(())
             }
         }
     }
@@ -326,6 +364,15 @@ impl Writer {
             session.send_close_notify();
             let _ = flush_records(&mut session, &mut self.tcp);
         }
+        let _ = self.tcp.shutdown(Shutdown::Both);
+    }
+}
+
+impl Drop for Writer {
+    /// A writer let go of without [`Writer::close`], as one still waiting to be taken when its
+    /// network is dropped, ends its connection too: its reader holds a copy of the socket, which
+    /// would otherwise stay open for as long as the server says nothing.
+    fn drop(&mut self) {
         let _ = self.tcp.shutdown(Shutdown::Both);
     }
 }
@@ -364,6 +411,7 @@ impl Reader {
             };
             let mut session = tls.lock().unwrap_or_else(PoisonError::into_inner);
             let mut records = got;
+            let mut out = Vec::new();
             while !records.is_empty() {
                 match session.read_tls(&mut records) {
                     // a close_notify has been read: rustls takes nothing after it, and what
@@ -386,8 +434,14 @@ impl Reader {
                         self.learnt.asked,
                     )));
                 }
+                // taken out record by record: rustls reads no more records while it holds over
+                // 16 KiB of plaintext, which one large record and the start of the next can
+                match plaintext(&mut session, &mut out) {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(error) => return Err(Ended::Failed(Failure::of_io(what, &error))),
+                }
             }
-            let mut out = Vec::new();
             let closed = match plaintext(&mut session, &mut out) {
                 Ok(closed) => closed,
                 Err(error) => return Err(Ended::Failed(Failure::of_io(what, &error))),
