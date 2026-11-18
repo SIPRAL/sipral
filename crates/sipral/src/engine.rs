@@ -1986,7 +1986,20 @@ impl MediaEngine {
         // the new call inherits the transferred call's signalling security
         let keys_in_clear = sdes_in_clear(&catalog, &offer, agent.call_signalling_secure(call))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
+        // as `place` does: an offer that holds candidates back says so (RFC 8840 §5.1), and the
+        // candidates offered wait for the first INFO the dialog lets go
+        #[cfg(feature = "ice")]
+        let extra = {
+            let mut extra = extra;
+            extra.require_trickle_ice |= ice.as_ref().is_some_and(|local| local.trickle().full());
+            extra
+        };
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
+        #[cfg(feature = "ice")]
+        if let Some(local) = ice.as_ref().filter(|local| local.trickles()) {
+            let body = local.frag(stream_mid(&offer).as_deref());
+            agent.trickle_ice(new, Arc::from(body), now).ok();
+        }
         self.keep(new, handed, now);
         self.calls.insert(
             new,

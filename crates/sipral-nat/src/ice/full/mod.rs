@@ -1189,6 +1189,8 @@ impl IceAgent {
             self.awaiting.clear();
         }
         self.local = local;
+        // the end of candidates was the old session's (RFC 8838 §13)
+        self.local_ended = false;
         self.pairs.clear();
         self.tried.clear();
         self.valid.clear();

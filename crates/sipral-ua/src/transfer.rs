@@ -250,8 +250,10 @@ impl UserAgent {
     /// `call`: the second half of [`UserAgent::consult`].
     ///
     /// # Errors
-    /// [`UaError::NoSuchCall`] for either handle, and what
-    /// [`UserAgent::consulting_account`] refuses.
+    /// [`UaError::NoSuchCall`] for either handle, what
+    /// [`UserAgent::consulting_account`] refuses, and
+    /// [`UaError::WrongState`] when `placed` is `call` itself, or already
+    /// consults or is consulted for another call.
     pub fn bind_consultation(
         &mut self,
         call: CallHandle,
@@ -259,6 +261,9 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         self.consulting_account(call)?;
         let second = self.calls.get_mut(&placed).ok_or(UaError::NoSuchCall)?;
+        if placed == call || second.consulting.is_some() || second.consulting_for.is_some() {
+            return Err(UaError::WrongState(second.state));
+        }
         second.consulting_for = Some(call);
         if let Some(first) = self.calls.get_mut(&call) {
             first.consulting = Some(placed);
@@ -505,6 +510,9 @@ impl UserAgent {
             placed = placed.to_address(transport, remote);
         }
         placed = placed.forks(extra.forks);
+        if extra.require_trickle_ice {
+            placed = placed.require_trickle_ice();
+        }
         for &(name, value) in extra.headers {
             placed = placed.header(name, value);
         }

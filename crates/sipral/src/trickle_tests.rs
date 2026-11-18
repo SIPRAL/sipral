@@ -330,3 +330,72 @@ fn a_webrtc_line_that_trickles_tags_its_stream_once() {
     assert_eq!(tags(&offer), 1, "{offer}");
     assert_eq!(tags(&answer), 1, "{answer}");
 }
+
+/// The far end's 180 to `invite`, listing the package, from what the INVITE says.
+fn ringing_with_the_package(invite: &str) -> Vec<u8> {
+    let field = |name: &str| {
+        invite
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} in:\n{invite}"))
+    };
+    format!(
+        "SIP/2.0 180 Ringing\r\n{}\r\n{}\r\n{};tag=carol\r\n{}\r\n{}\r\n\
+Contact: <sip:carol@192.0.2.3>\r\nRecv-Info: trickle-ice\r\nContent-Length: 0\r\n\r\n",
+        field("Via:"),
+        field("From:"),
+        field("To:"),
+        field("Call-ID:"),
+        field("CSeq:"),
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_call_placed_for_a_transfer_under_full_trickle_requires_it_as_a_placed_one_does() {
+    let (mut pair, call, transferee) = trickling(IceTrickle::Full, IceTrickle::Full);
+    pair.caller
+        .agent
+        .transfer(call, &crate::tests::uri("sip:carol@example.com"), pair.now)
+        .expect("the REFER goes");
+    pair.settle();
+    pair.callee
+        .engine
+        .accept_transfer(
+            &mut pair.callee.agent,
+            transferee,
+            "192.0.2.2:40010".parse().expect("an address"),
+            crate::OutgoingExtras::default(),
+            pair.now,
+        )
+        .expect("the transfer is taken");
+    let written = pair.callee.outbound();
+    let invite = written
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .find(|text| text.starts_with("INVITE sip:carol@example.com"))
+        .expect("the call the REFER asked for is placed");
+    let require = invite
+        .lines()
+        .find(|line| line.starts_with("Require:"))
+        .unwrap_or_default();
+    assert!(
+        require.contains("trickle-ice"),
+        "an offer that holds candidates back went without Require: trickle-ice:\n{invite}"
+    );
+
+    // the candidates offered go in the first INFO the dialog lets out (RFC 8840 §4.3.2)
+    pair.callee.deliver(
+        &ringing_with_the_package(&invite),
+        "192.0.2.3:5060".parse().expect("an address"),
+        pair.now,
+    );
+    let info = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .find(|text| text.starts_with("INFO "))
+        .expect("no INFO carried the candidates offered");
+    assert!(info.contains("a=candidate:"), "{info}");
+}

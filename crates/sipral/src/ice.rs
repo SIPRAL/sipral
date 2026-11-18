@@ -183,8 +183,9 @@ pub enum IceTrickle {
     /// which on a SIP trunk or a PBX line is every peer.
     #[cfg(feature = "ice")]
     Half,
-    /// Full trickle: the offer goes as soon as the call is placed, with the candidates known then,
-    /// and `Require: trickle-ice` (RFC 8840 §5.1); the rest follow with
+    /// Full trickle: the offer goes as soon as the call is placed, a call a transfer places among
+    /// them, with the candidates known then, and `Require: trickle-ice` (RFC 8840 §5.1); the rest
+    /// follow with
     /// [`MediaEngine::trickle_public_address`](crate::MediaEngine::trickle_public_address),
     /// [`MediaEngine::trickle_relay`](crate::MediaEngine::trickle_relay) and
     /// [`MediaEngine::end_of_candidates`](crate::MediaEngine::end_of_candidates). The call is up

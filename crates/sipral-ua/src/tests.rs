@@ -10785,6 +10785,35 @@ fn one_consultation_at_a_time() {
 }
 
 #[test]
+fn a_call_is_bound_as_neither_its_own_consultation_nor_one_already_bound() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (other, _) = call_up(&mut agent, id, t0);
+    assert_eq!(
+        agent.bind_consultation(first, first),
+        Err(UaError::WrongState(CallState::Confirmed))
+    );
+    let (second, _) = consulted(&mut agent, first, t0);
+
+    // the second leg of one transfer is no other call's second leg
+    assert_eq!(
+        agent.bind_consultation(other, second),
+        Err(UaError::WrongState(CallState::Consulting))
+    );
+    // nor is a call that is consulting already
+    let (third, _) = call_up(&mut agent, id, t0);
+    assert_eq!(
+        agent.bind_consultation(third, first),
+        Err(UaError::WrongState(CallState::Confirmed))
+    );
+    agent
+        .transfer_to(first, second, t0)
+        .expect("the first call still hands over to its own consultation");
+}
+
+#[test]
 fn a_consultation_call_cannot_consult_in_its_turn() {
     // a chain of them names no transfer at all: the second leg would be both
     // the call being handed over and the one it is handed to

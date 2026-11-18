@@ -38,7 +38,10 @@
 //! one is in flight replaces any that was waiting: the next INFO carries the
 //! newest, and nothing is lost. A 469 means the far end stopped taking the
 //! package, and nothing more is sent; any other failure is a transaction's
-//! only (RFC 6086 §4.2.1), and the next body tries again.
+//! only (RFC 6086 §4.2.1): the newest body waiting goes next, or, with none
+//! waiting, the one that failed goes again, twice at most, since it may be
+//! the last and carry the end of candidates. A 481 says the dialog is gone,
+//! and nothing goes again.
 //!
 //! **Receiving.** An INFO naming the package, on a call that announced it, is
 //! answered 200 and handed up as [`UaEvent::TrickleIce`]; one whose body is
@@ -89,6 +92,12 @@ const BAD_INFO_PACKAGE: StatusCode = match StatusCode::new(469) {
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
+/// How many times a failed INFO's body goes again before it is given up.
+/// Each body repeats every candidate before it (RFC 8840 §4.4), so sending
+/// one again is safe, and the last carries the end of candidates, which
+/// nothing after it would.
+const RESENDS: u8 = 2;
+
 /// What one call knows about trickling.
 ///
 /// Five facts learned at different moments from different messages, each
@@ -108,6 +117,11 @@ pub(crate) struct Trickle {
     pub(crate) asked: bool,
     /// The INFO in flight.
     pub(crate) in_flight: Option<AnyTransactionId>,
+    /// The body of the INFO in flight, sent again if it fails and nothing
+    /// newer waits.
+    pub(crate) sending_now: Option<Arc<[u8]>>,
+    /// How many times in a row a failed body went again.
+    pub(crate) resent: u8,
     /// The newest body, waiting for its turn.
     pub(crate) next: Option<Arc<[u8]>>,
     /// The far end answered 469: it takes no more.
@@ -205,6 +219,7 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
         held.trickle.next = Some(body);
+        held.trickle.resent = 0;
         let sent = self.send_trickle(call, now);
         self.drain(now);
         sent
@@ -255,6 +270,7 @@ impl UserAgent {
         self.remember_request(call, id, Method::Info);
         if let Some(held) = self.calls.get_mut(&call) {
             held.trickle.in_flight = Some(id);
+            held.trickle.sending_now = Some(body);
         }
         Ok(())
     }
@@ -274,13 +290,22 @@ impl UserAgent {
             return;
         }
         held.trickle.in_flight = None;
+        let failed = held.trickle.sending_now.take();
         if status == BAD_INFO_PACKAGE {
             held.trickle.refused = true;
             held.trickle.next = None;
             return;
         }
-        // the next body, if one came meanwhile; a refusal of this one was
-        // the transaction's only (RFC 6086 §4.2.1)
+        // a refusal was the transaction's only (RFC 6086 §4.2.1): with nothing
+        // newer waiting, the body goes again, unless the dialog is gone
+        if !status.is_success()
+            && status != StatusCode::CALL_DOES_NOT_EXIST
+            && held.trickle.next.is_none()
+            && held.trickle.resent < RESENDS
+        {
+            held.trickle.next = failed;
+            held.trickle.resent += 1;
+        }
         self.send_trickle(call, now).ok();
     }
 

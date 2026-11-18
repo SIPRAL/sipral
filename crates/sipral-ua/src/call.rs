@@ -337,6 +337,9 @@ pub struct OutgoingExtras<'a> {
     pub forks: ForkPolicy,
     /// As [`OutgoingCall::header`], already parsed into fields.
     pub headers: &'a [(HeaderName<'a>, &'a [u8])],
+    /// As [`OutgoingCall::require_trickle_ice`]: the offer holds candidates
+    /// back.
+    pub require_trickle_ice: bool,
 }
 
 /// Everything one call is doing.

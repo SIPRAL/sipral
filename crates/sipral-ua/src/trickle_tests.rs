@@ -525,11 +525,80 @@ fn a_refused_info_lets_the_next_body_go() {
     events(&mut agent);
     agent.trickle_ice(call, frag(1), t0).expect("sent");
     let info = infos(&transmits(&mut agent)).pop().expect("an INFO");
-    // the answer to a request inside the dialog this end opened
+    // the answer to a request inside the dialog this end opened; a newer
+    // body waiting goes in place of the one refused
+    agent.trickle_ice(call, frag(2), t0).expect("held");
+    assert!(infos(&transmits(&mut agent)).is_empty(), "one at a time");
     let refused = reply(&info, 500, "Server Internal Error", "");
     deliver(&mut agent, &refused, t0);
-    agent.trickle_ice(call, frag(2), t0).expect("sent");
     let next = infos(&transmits(&mut agent));
     assert_eq!(next.len(), 1, "a refusal is the transaction's only");
     assert_eq!(body_of(&next[0]), frag(2).to_vec());
+}
+
+#[test]
+fn a_last_info_that_failed_goes_again_twice_at_most() {
+    let t0 = Instant::now();
+    let (mut agent, call, invite) = placed(&trickling_call(), t0);
+    deliver(
+        &mut agent,
+        &heard(&invite, 200, "OK", Some(TRICKLING_ANSWER), "trickle-ice"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    // the last body, as the one carrying the end of candidates is
+    agent.trickle_ice(call, frag(1), t0).expect("sent");
+    let mut info = infos(&transmits(&mut agent)).pop().expect("an INFO");
+    for again in 0..2 {
+        deliver(
+            &mut agent,
+            &reply(&info, 503, "Service Unavailable", ""),
+            t0,
+        );
+        info = infos(&transmits(&mut agent))
+            .pop()
+            .unwrap_or_else(|| panic!("the failed body did not go again, try {again}"));
+        assert_eq!(body_of(&info), frag(1).to_vec());
+    }
+    deliver(
+        &mut agent,
+        &reply(&info, 503, "Service Unavailable", ""),
+        t0,
+    );
+    assert!(
+        infos(&transmits(&mut agent)).is_empty(),
+        "given up after two"
+    );
+
+    // a body handed in afterwards is tried afresh
+    agent.trickle_ice(call, frag(2), t0).expect("sent");
+    let info = infos(&transmits(&mut agent)).pop().expect("an INFO");
+    deliver(
+        &mut agent,
+        &reply(&info, 500, "Server Internal Error", ""),
+        t0,
+    );
+    assert_eq!(infos(&transmits(&mut agent)).len(), 1, "and goes again");
+}
+
+#[test]
+fn an_info_whose_dialog_is_gone_is_not_sent_again() {
+    let t0 = Instant::now();
+    let (mut agent, call, invite) = placed(&trickling_call(), t0);
+    deliver(
+        &mut agent,
+        &heard(&invite, 200, "OK", Some(TRICKLING_ANSWER), "trickle-ice"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent.trickle_ice(call, frag(1), t0).expect("sent");
+    let info = infos(&transmits(&mut agent)).pop().expect("an INFO");
+    deliver(
+        &mut agent,
+        &reply(&info, 481, "Call/Transaction Does Not Exist", ""),
+        t0,
+    );
+    assert!(infos(&transmits(&mut agent)).is_empty());
 }

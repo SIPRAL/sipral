@@ -2253,6 +2253,40 @@ fn a_candidate_the_caller_learns_late_is_taken_only_while_the_session_trickles()
     );
 }
 
+#[test]
+fn a_restarted_session_trickles_again() {
+    // the end of candidates is one ICE session's (RFC 8838 §13), and a restart starts another
+    let server = Some(address(STUN_SERVER));
+    let (mut agent, stream, _, now) = trickling(Role::Controlling, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    agent.end_of_candidates();
+    assert!(!agent.may_trickle(stream));
+
+    agent.restart(credentials("Anew")).expect("new credentials");
+    let mut renewed = trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]);
+    renewed.ufrag = "Bnew".to_owned();
+    renewed.pwd = credentials("Bnew").pwd().to_owned();
+    agent
+        .set_remote(stream, &renewed, now)
+        .expect("the restarted answer");
+    assert!(agent.may_trickle(stream), "the new session trickles");
+    agent
+        .add_server_reflexive(
+            stream,
+            ComponentId::RTP,
+            address(LOCAL),
+            address("192.0.2.1:40003"),
+            server,
+        )
+        .expect("a candidate learned on the new path is trickled");
+}
+
 /// A trickling agent asking the STUN server, answered with `mapped` once
 /// `ended` has or has not said this end's last candidate; the events that
 /// answer raised.
