@@ -3760,6 +3760,32 @@ final class SipralCallConfig extends ffi.Struct {
   /// Zero, as `reserved`.
   @ffi.Uint32()
   external int reserved14;
+
+  /// The URI this call's `From` names, with the account's display name, in place of the
+  /// account's address of record, UTF-8, not NUL-terminated; null for the account's own.
+  /// For a line whose carrier reads the calling number from `From` alone: only `From`
+  /// changes, the account still authenticates as itself, and a call signed under
+  /// STIR/SHAKEN names the account's own `orig`. Under privacy `From` is anonymous anyway,
+  /// and this is what `P-Asserted-Identity` asserts to a trusted peer. Not a URI is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Added in ABI 1.15.
+  external ffi.Pointer<ffi.Char> caller;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int callerLen;
+
+  /// This call's privacy (RFC 3323) in place of the account's
+  /// (`sipral_account_config_t::privacy`): zero for the account's, `SIPRAL_PRIVACY_*` bits
+  /// to place this call anonymously as an account with those bits does, or
+  /// `SIPRAL_PRIVACY_NONE` alone to place it identified from an account that withholds its
+  /// number. `SIPRAL_PRIVACY_NONE` beside another bit, or an unknown bit, is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Added in ABI 1.15.
+  @ffi.Uint32()
+  external int privacy;
+
+  /// Zero, as `reserved`.
+  @ffi.Uint32()
+  external int reserved115;
 }
 
 /// One codec this build contains.
@@ -7070,7 +7096,7 @@ final class Sipral {
 
   /// The ABI's minor version, raised by anything the header gains. Rules:
   /// Versioning section of `docs/08-ffi.md`.
-  static const int abiVersionMinor = 14;
+  static const int abiVersionMinor = 15;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7356,7 +7382,7 @@ final class Sipral {
         'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 136, 128, 136],
         'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
         'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 536, 304, 312],
-        'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 168, 100, 100],
+        'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 192, 116, 116],
         'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
         'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],
         'sipral_path_candidate_t': [ffi.sizeOf<SipralPathCandidate>(), 88, 60, 64],
@@ -9432,7 +9458,11 @@ final class Sipral {
   ///
   /// When recovery is waiting for it, the next rung runs at once instead of
   /// waiting out the back-off. Otherwise the account is still repointed and
-  /// the next REGISTER uses it.
+  /// the next REGISTER uses it. A REGISTER its server's lookup released
+  /// while the old `contact` could not reach the address found goes now:
+  /// it waits two seconds after `SIPRAL_EVENT_KIND_LOCATED` for this call,
+  /// for a socket bound on every interface whose route is known only then,
+  /// and then fails as `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT`.
   ///
   /// Safety
   ///

@@ -59,6 +59,7 @@ use sipral_core::msg::{HostRef, StatusCode, Uri};
 use sipral_core::transaction::AnyTransactionId;
 
 use crate::account::AccountId;
+use crate::advertise::check_contact;
 use crate::agent::UserAgent;
 use crate::error::UaError;
 use crate::event::{RegistrationState, UaEvent};
@@ -70,6 +71,13 @@ pub const MIN_TTL: Duration = Duration::from_secs(60);
 
 /// The longest.
 pub const MAX_TTL: Duration = Duration::from_hours(24);
+
+/// How long a REGISTER released by a lookup waits for a `Contact` the server
+/// found can reach. A socket bound on every interface has no route to
+/// advertise before the server's address is known, so its `Contact` names
+/// loopback until the application, told by [`UaEvent::Located`], names the
+/// route toward that address with [`UserAgent::rebind`].
+pub const CONTACT_WAIT: Duration = Duration::from_secs(2);
 
 /// What is kept for one located account.
 #[derive(Debug, Default)]
@@ -86,6 +94,9 @@ struct Location {
     /// A REGISTER waiting for an answer, and whether it takes the binding
     /// away.
     waiting: Option<bool>,
+    /// The answer came while the `Contact` could not reach the address found:
+    /// `waiting` waits until then for [`UserAgent::rebind`].
+    contact_due: Option<Instant>,
     /// Lookups that failed in a row.
     failures: u32,
 }
@@ -227,6 +238,10 @@ impl UserAgent {
             return false;
         }
         let location = self.locations.held.entry(account).or_default();
+        // a REGISTER asked for now supersedes one held for its Contact
+        if location.contact_due.take().is_some() {
+            location.waiting = None;
+        }
         if location.at < location.targets.len() {
             return false;
         }
@@ -392,19 +407,53 @@ impl UserAgent {
         self.locations.held.remove(&account);
     }
 
-    /// When a located address is next due to be looked up again.
+    /// When a located address is next due to be looked up again, or a
+    /// REGISTER held for its `Contact` stops waiting.
     pub(crate) fn location_deadline(&self) -> Option<Instant> {
         self.locations
             .held
             .values()
-            .filter(|location| location.lookup.is_none())
-            .filter_map(|location| location.again)
+            .filter_map(|location| {
+                let again = location.again.filter(|_| location.lookup.is_none());
+                match (again, location.contact_due) {
+                    (Some(again), Some(due)) => Some(again.min(due)),
+                    (again, due) => again.or(due),
+                }
+            })
             .min()
     }
 
+    /// Send the REGISTER held for `account`'s `Contact`, if one is: the
+    /// application named it again, or the wait is over. A `Contact` still
+    /// unreachable gives up as any REGISTER would.
+    pub(crate) fn release_held_register(&mut self, account: AccountId, now: Instant) {
+        let Some(location) = self.locations.held.get_mut(&account) else {
+            return;
+        };
+        if location.contact_due.take().is_none() {
+            return;
+        }
+        let Some(unregistering) = location.waiting.take() else {
+            return;
+        };
+        if let Err(error) = self.send_register(account, unregistering, now) {
+            self.register_unsent(account, &error, now);
+        }
+    }
+
     /// Look again whatever has come due, keeping the address in hand while
-    /// the lookup runs.
+    /// the lookup runs, and stop holding a REGISTER whose wait is over.
     pub(crate) fn fire_locations(&mut self, now: Instant) {
+        let held: Vec<AccountId> = self
+            .locations
+            .held
+            .iter()
+            .filter(|(_, location)| location.contact_due.is_some_and(|at| at <= now))
+            .map(|(account, _)| *account)
+            .collect();
+        for account in held {
+            self.release_held_register(account, now);
+        }
         let due: Vec<AccountId> = self
             .locations
             .held
@@ -533,11 +582,18 @@ impl UserAgent {
         };
         config.remote = address;
         config.located = true;
-        let waiting = location.waiting.take();
+        if location.waiting.is_some() && check_contact(&config.contact, address).is_err() {
+            location.contact_due = Some(now + CONTACT_WAIT);
+        }
+        let held = location.contact_due.is_some();
+        let waiting = location.waiting.take_if(|_| !held);
         self.events.push_back(UaEvent::Located {
             account,
             targets: self.located_targets(account),
         });
+        if held {
+            return;
+        }
         match waiting {
             Some(unregistering) => {
                 if let Err(error) = self.send_register(account, unregistering, now) {

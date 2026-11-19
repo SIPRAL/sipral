@@ -829,7 +829,9 @@ Split in two, so that the part worth testing needs no Android:
   `TelecomBridge.placeFailed`: a placed call that only vanished from `calls`
   would say nothing about why. `placeCall(account, target, headers)` puts
   the headers on the INVITE that goes once the framework allows the call,
-  as `SipralClient.placeCall(..., headers = ...)` does. An attended
+  as `SipralClient.placeCall(..., headers = ...)` does, and its `ice` and
+  `iceTrickle` choose the call's ICE in place of the client's, for this
+  call and a consultation from it. An attended
   transfer is `consult(id, target)`,
   which holds the call and asks the framework for a second one on the same
   account, placed from the first (`SipCalls.consult`) and tied to it in
@@ -954,7 +956,9 @@ puts it in the caller's name.
 A phone's lifecycle (`docs/15-mobile.md`, "Lifecycle on Android"):
 `client.suspending()`, `resumed()`, `interfaceLost()`,
 `nameResolutionLost()` and `coldStart()`; `account.freeze()`,
-`thaw(snapshot, asleepMs)`, `timeToReadyMs` and `pushEcho`; and over them
+`thaw(snapshot, asleepMs)`, `timeToReadyMs` and `pushEcho` (any other field
+of the registrar's 2xx is `event.header(name)` on the `REGISTRATION_CHANGED`
+that reports the account registered); and over them
 `SipralLifecycle`, which writes every accepted registration down in a
 `SipralSnapshotStore` and suspends and resumes the client, and
 `wakeForPush(client, account, bridge, lifecycle, key, caller)`, the cold

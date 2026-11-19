@@ -52,6 +52,7 @@ import {
   SIPRAL_INVITE_LIMIT_EVERY_MS,
   SIPRAL_INVITE_LIMIT_VOICE_AGENT_BURST,
   SIPRAL_INVITE_LIMIT_VOICE_AGENT_EVERY_MS,
+  SIPRAL_PRIVACY_NONE,
   SIPRAL_STATE_TEXT_MAX,
   SIPRAL_TRANSPORT_MAIN,
   type Pointer,
@@ -353,7 +354,7 @@ export interface AccountOptions {
   /** A `SipralSessionTimer` value. */
   sessionTimer?: number;
   sessionIntervalSeconds?: number;
-  /** `SipralPrivacy` bits every call it places asks for. */
+  /** `SIPRAL_PRIVACY_*` bits every call it places asks for. */
   privacy?: number;
   /** The addresses whose `P-Asserted-Identity` it believes. */
   trustedPeers?: readonly string[];
@@ -424,6 +425,18 @@ export interface CallOptions {
   headers?: HeaderFields;
   /** Keep every fork that answers, rather than the first. */
   keepAllForks?: boolean;
+  /**
+   * Placing a call, the URI its `From` names in place of the account's
+   * address of record, for a carrier that reads the calling number from
+   * `From` alone.
+   */
+  caller?: string;
+  /**
+   * Placing a call, its `SIPRAL_PRIVACY_*` bits in place of the account's:
+   * `SIPRAL_PRIVACY_ID` withholds the number, `0` shows it from an account
+   * that withholds it.
+   */
+  privacy?: number;
 }
 
 /** What a stack emits. */
@@ -912,7 +925,10 @@ export class Stack extends EventEmitter<StackEvents> {
    * `codecs` chooses which codecs this call takes; `text`, `feedback` and
    * `focus` are as {@link placeCall} takes them.
    */
-  async answerCall(incoming: StackEvent, options: Omit<CallOptions, 'destination' | 'followRedirects'> = {}): Promise<Call> {
+  async answerCall(
+    incoming: StackEvent,
+    options: Omit<CallOptions, 'destination' | 'followRedirects' | 'caller' | 'privacy'> = {},
+  ): Promise<Call> {
     this.ensureOpen();
     if (incoming.kind !== SipralEventKind.IncomingCall) {
       throw new TypeError('sipral: answerCall takes an IncomingCall event');
@@ -2046,6 +2062,8 @@ export class Stack extends EventEmitter<StackEvents> {
         mediaAddress,
         textAddress: textSocket === null ? undefined : formatAddress(textSocket.address().address, textSocket.address().port),
         feedback: options.feedback === true ? true : undefined,
+        // zero is the account's to the library; a call shown says so
+        privacy: options.privacy === 0 ? SIPRAL_PRIVACY_NONE : options.privacy,
       },
       { headers: fields.array, headers_len: fields.count },
     );

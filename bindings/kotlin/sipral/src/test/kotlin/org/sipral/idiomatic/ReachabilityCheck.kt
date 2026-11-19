@@ -41,7 +41,7 @@ private fun header(name: String, message: String): String? =
 
 /** A registrar on a loopback UDP port: every REGISTER answered 200, every
  * datagram kept as text. */
-internal class DatagramRegistrar(host: String = "127.0.0.1") : AutoCloseable {
+internal class DatagramRegistrar(host: String = "127.0.0.1", private val extra: List<String> = emptyList()) : AutoCloseable {
     private val udp = DatagramSocket(0, InetAddress.getByName(host)).apply { soTimeout = 50 }
     @Volatile private var stopped = false
     val port = udp.localPort
@@ -74,6 +74,7 @@ internal class DatagramRegistrar(host: String = "127.0.0.1") : AutoCloseable {
                 lines += if (name == "To") "To: $value;tag=registrar" else "$name: $value"
             }
             lines += "Contact: ${header("Contact", message)};expires=3600"
+            lines += extra
             lines += "Content-Length: 0"
             val out = (lines.joinToString("\r\n") + "\r\n\r\n").toByteArray(Charsets.UTF_8)
             udp.send(DatagramPacket(out, out.size, packet.socketAddress))
@@ -153,6 +154,27 @@ private suspend fun theAddressAClientAdvertisesIsTheRouteTowardItsServer(): Stri
         }
     }
     return "a client that names no address advertises the route toward its server, and loopback to loopback"
+}
+
+/** A field a registrar or push proxy adds to its 2xx is read off the
+ * `REGISTRATION_CHANGED` that reports the account registered. */
+private suspend fun aRegistrarsOwnFieldIsReadOffTheRegistration(): String {
+    DatagramRegistrar(extra = listOf("X-Push-Wake: open-only", "x-push-wake: yes")).use { registrar ->
+        application().use { client ->
+            val account = client.addAccount("sip:alice@example.com", registrar.address, registrar = "sip:example.com")
+            val (_, done) = client.events.awaitNext(
+                timeoutMs = 10_000,
+                matches = {
+                    it.kind == SipralEventKind.REGISTRATION_CHANGED.value.toLong() && it.account == account.handle &&
+                        it.payload.registration.state.toInt() == SipralRegistrationState.REGISTERED.value
+                },
+            ) { account.register() }
+            assertEquals("open-only", done.header("x-push-wake"))
+            assertEquals(listOf("open-only", "yes"), done.headers("X-Push-Wake"))
+            assertEquals(null, done.header("X-Absent"))
+        }
+    }
+    return "a registrar's own field read off the registration, every line of it in order"
 }
 
 private suspend fun aServerNamedByAUriIsLocated(): String {
@@ -299,10 +321,9 @@ private suspend fun theClientsNewOptionsReachTheLibrary(): String {
 
 /**
  * A server named by a URI that resolves to an address off loopback: the
- * REGISTER the location releases leaves with the loopback address the
- * account had while it had no server, which the stack refuses toward a
- * server elsewhere; once the account is pointed at its route, the
- * registration is sent again from there, and arrives naming that route.
+ * account names loopback while it has no server, so the REGISTER the
+ * location releases waits for the account to be pointed at its route, and
+ * leaves once, naming that route, with no failure reported on the way.
  * Needs an IPv4 address of this machine other than loopback to stand in for
  * "elsewhere", and says so when there is none.
  */
@@ -327,8 +348,9 @@ private suspend fun aServerOffLoopbackIsRegisteredAtOnceLocated(): String {
             val account = client.addAccount(
                 "sip:alice@pbx.sipral.test", registrar = "sip:pbx.sipral.test", serverUri = "sip:pbx.sipral.test",
             )
-            account.register()
-            registered(account)
+            // waits for the first outcome: one failed in passing would end it
+            account.registerAndWait()
+            assertEquals(1, registrar.registers.size, "one REGISTER, the first")
             val contact = header("Contact", registrar.registers.last()) ?: ""
             assertTrue(contact.contains("@$here:"), contact)
         }
@@ -338,6 +360,7 @@ private suspend fun aServerOffLoopbackIsRegisteredAtOnceLocated(): String {
 
 internal suspend fun reachabilityChecks(): String = listOf(
     theAddressAClientAdvertisesIsTheRouteTowardItsServer(),
+    aRegistrarsOwnFieldIsReadOffTheRegistration(),
     aServerNamedByAUriIsLocated(),
     aServerOffLoopbackIsRegisteredAtOnceLocated(),
     anAccountKeepsItsFlowOpen(),

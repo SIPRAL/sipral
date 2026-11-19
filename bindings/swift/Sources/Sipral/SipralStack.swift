@@ -1645,6 +1645,13 @@ public final class SipralStack: @unchecked Sendable {
     /// peer refuses; `focus` marks a conference focus (RFC 4579).
     /// `followRedirects` follows a 3xx (RFC 3261 §8.1.3.4); off, the 3xx
     /// ends the call and its `Contact` is the application's to act on.
+    ///
+    /// `caller` is the URI this call's `From` names in place of the
+    /// account's address of record (`sipral_call_config_t::caller`), for a
+    /// carrier that reads the calling number from `From` alone. `privacy`
+    /// replaces the account's for this call: `[.id]` withholds the number,
+    /// `[]` shows it from an account that withholds it, `nil` keeps the
+    /// account's.
     public func placeCall(
         account: Account,
         target: String,
@@ -1659,12 +1666,15 @@ public final class SipralStack: @unchecked Sendable {
         feedback: Bool = false,
         focus: Bool = false,
         followRedirects: Bool = false,
-        iceTrickle: SipralIceTrickle? = nil
+        iceTrickle: SipralIceTrickle? = nil,
+        caller: String? = nil,
+        privacy: Privacy? = nil
     ) throws -> Call {
         try place(
             account: account, target: target, mediaHost: mediaHost, mediaPort: mediaPort, destination: destination,
             srtp: srtp, ice: ice, headers: headers, codecs: codecs, text: text, feedback: feedback, focus: focus,
-            followRedirects: followRedirects, iceTrickle: iceTrickle, consulting: nil
+            followRedirects: followRedirects, iceTrickle: iceTrickle, caller: caller, privacy: privacy,
+            consulting: nil
         )
     }
 
@@ -1685,6 +1695,8 @@ public final class SipralStack: @unchecked Sendable {
         focus: Bool,
         followRedirects: Bool,
         iceTrickle: SipralIceTrickle?,
+        caller: String? = nil,
+        privacy: Privacy? = nil,
         consulting: SipralHandle?
     ) throws -> Call {
         let mediaHost = self.mediaHost(mediaHost, account: account, destination: destination)
@@ -1703,7 +1715,7 @@ public final class SipralStack: @unchecked Sendable {
             try mapMediaSocket(mediaSocket)
             let now = nowMs()
             callHandle = try CStrings.with(
-                [target, mediaSocket.localAddress, destination, codecs, textSocket?.localAddress]
+                [target, mediaSocket.localAddress, destination, codecs, textSocket?.localAddress, caller]
             ) { parts in
                 var config = sipral_call_config_t.sized()
                 config.target = parts[0].pointer
@@ -1724,6 +1736,9 @@ public final class SipralStack: @unchecked Sendable {
                 config.feedback = feedback ? SipralToggle.on.rawValue : 0
                 config.focus = focus ? 1 : 0
                 config.follow_redirects = followRedirects ? 1 : 0
+                config.caller = parts[5].pointer
+                config.caller_len = parts[5].count
+                config.privacy = privacy.map { $0.isEmpty ? Privacy.none.rawValue : $0.rawValue } ?? 0
                 return try retryingBusy {
                     if let consulting {
                         return try Sipral.callConsult(

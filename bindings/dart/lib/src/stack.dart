@@ -1197,6 +1197,12 @@ final class SipralStack {
   /// registrar address as next hop. [codecs] (`'PCMA,PCMU'`) replaces the
   /// stack's offer and order. [followRedirects] follows a 3xx's targets (RFC
   /// 3261 §8.1.3.4); otherwise a 3xx ends the call with its status.
+  ///
+  /// [caller] is the URI this call's `From` names in place of the account's
+  /// address of record, for a carrier that reads the calling number from
+  /// `From` alone. [privacy] is this call's `Sipral.privacy*` bits in place of
+  /// the account's: `Sipral.privacyId` withholds the number, `0` shows it
+  /// from an account that withholds it, null keeps the account's.
   Future<SipralCall> placeCall(
     SipralAccount account,
     String target, {
@@ -1204,6 +1210,8 @@ final class SipralStack {
     String? destination,
     String? codecs,
     bool followRedirects = false,
+    String? caller,
+    int? privacy,
   }) async {
     _ensureOpen();
     final media = await RawDatagramSocket.bind(
@@ -1219,6 +1227,7 @@ final class SipralStack {
         final mediaText = _text(arena, mediaAddress);
         final destinationText = _text(arena, destination);
         final codecsText = _text(arena, codecs);
+        final callerText = _text(arena, caller);
         config.ref
           ..size = ffi.sizeOf<SipralCallConfig>()
           ..target = targetText.$1
@@ -1229,7 +1238,11 @@ final class SipralStack {
           ..destinationLen = destinationText.$2
           ..codecs = codecsText.$1
           ..codecsLen = codecsText.$2
-          ..followRedirects = followRedirects ? 1 : 0;
+          ..followRedirects = followRedirects ? 1 : 0
+          ..caller = callerText.$1
+          ..callerLen = callerText.$2
+          // zero is the account's to the library; a call shown says so
+          ..privacy = privacy == 0 ? Sipral.privacyNone : (privacy ?? 0);
         final out = arena<SipralHandle>();
         _checkNow(
           _sipral,

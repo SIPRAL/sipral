@@ -138,6 +138,25 @@ record! {
         pub ice_trickle: Number<SipralIceTrickle>,
         /// Zero, as `reserved`.
         pub reserved_1_4: u32,
+        /// The URI this call's `From` names, with the account's display name, in place of the
+        /// account's address of record, UTF-8, not NUL-terminated; null for the account's own.
+        /// For a line whose carrier reads the calling number from `From` alone: only `From`
+        /// changes, the account still authenticates as itself, and a call signed under
+        /// STIR/SHAKEN names the account's own `orig`. Under privacy `From` is anonymous anyway,
+        /// and this is what `P-Asserted-Identity` asserts to a trusted peer. Not a URI is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Added in ABI 1.15.
+        pub caller: *const c_char,
+        /// How many bytes of it.
+        pub caller_len: usize,
+        /// This call's privacy (RFC 3323) in place of the account's
+        /// (`sipral_account_config_t::privacy`): zero for the account's, `SIPRAL_PRIVACY_*` bits
+        /// to place this call anonymously as an account with those bits does, or
+        /// `SIPRAL_PRIVACY_NONE` alone to place it identified from an account that withholds its
+        /// number. `SIPRAL_PRIVACY_NONE` beside another bit, or an unknown bit, is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`. Added in ABI 1.15.
+        pub privacy: u32,
+        /// Zero, as `reserved`.
+        pub reserved_1_15: u32,
     }
 }
 
@@ -457,6 +476,23 @@ unsafe fn text_address(
     }?))
 }
 
+/// A call's own privacy, from `sipral_call_config_t::privacy`: `None` for the account's.
+fn call_privacy(bits: u32) -> Result<Option<sipral_ua::Privacy>, Fail> {
+    use crate::identity::SIPRAL_PRIVACY_NONE;
+    match bits {
+        0 => Ok(None),
+        SIPRAL_PRIVACY_NONE => Ok(Some(sipral_ua::Privacy::default())),
+        _ if bits & SIPRAL_PRIVACY_NONE != 0 => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "privacy is {bits:#x}: SIPRAL_PRIVACY_NONE places the call identified, and goes \
+                 alone"
+            ),
+        )),
+        _ => crate::identity::privacy_of(bits).map(Some),
+    }
+}
+
 /// Whether the configuration says this end is a conference focus.
 fn focus_of(config: &SipralCallConfig) -> Result<bool, Fail> {
     match config.focus {
@@ -615,6 +651,18 @@ unsafe fn outgoing_from(
     }
     if let Some(ref named) = state.user_agent {
         outgoing = outgoing.header(HeaderName::UserAgent, named);
+    }
+    if let Some(caller) = unsafe { text(config.caller, config.caller_len, "caller") }? {
+        let uri = Uri::parse_str(caller).map_err(|error| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("caller is {caller:?}, which is not a URI: {error}"),
+            )
+        })?;
+        outgoing = outgoing.caller(uri);
+    }
+    if let Some(privacy) = call_privacy(config.privacy)? {
+        outgoing = outgoing.privacy(privacy);
     }
     let asked = unsafe {
         supplied(
@@ -2140,6 +2188,10 @@ a=recvonly\r\n";
             reserved: 0,
             ice_trickle: 0,
             reserved_1_4: 0,
+            caller: ptr::null(),
+            caller_len: 0,
+            privacy: 0,
+            reserved_1_15: 0,
         }
     }
 
@@ -2202,6 +2254,7 @@ a=recvonly\r\n";
             reserved: 0,
             ice_trickle: 0,
             reserved_1_4: 0,
+            ..call_config()
         }
     }
 
@@ -5113,6 +5166,60 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let invite = one(handle);
         assert_eq!(field(&invite, HeaderName::SessionExpires), b"");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// ABI 1.15: a call's own `caller` and `privacy`, in place of its account's.
+    #[test]
+    fn a_call_from_c_names_its_own_caller_and_its_own_privacy() {
+        use crate::identity::{SIPRAL_PRIVACY_ID, SIPRAL_PRIVACY_NONE};
+        let mut observed = Observed::default();
+        let (handle, account) = tuned_line(&mut observed, |config| {
+            config.privacy = SIPRAL_PRIVACY_ID;
+        });
+        let (caller, caller_len) = as_text("sip:+40215550100@example.com");
+        let shown = SipralCallConfig {
+            caller,
+            caller_len,
+            privacy: SIPRAL_PRIVACY_NONE,
+            ..call_config()
+        };
+        let (status, _) = place(handle, account, &shown, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        assert!(
+            field(&invite, HeaderName::From).starts_with(b"<sip:+40215550100@example.com>"),
+            "{}",
+            String::from_utf8_lossy(&field(&invite, HeaderName::From))
+        );
+        assert_eq!(field(&invite, HeaderName::Extension("Privacy")), b"");
+
+        let (status, _) = place(handle, account, &call_config(), 1_100);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        assert!(
+            field(&invite, HeaderName::From).starts_with(b"\"Anonymous\""),
+            "the account's own"
+        );
+
+        for (privacy, caller) in [
+            (
+                SIPRAL_PRIVACY_NONE | SIPRAL_PRIVACY_ID,
+                "sip:bob@example.com",
+            ),
+            (1 << 9, "sip:bob@example.com"),
+            (0, "not a uri"),
+        ] {
+            let (caller, caller_len) = as_text(caller);
+            let refused = SipralCallConfig {
+                caller,
+                caller_len,
+                privacy,
+                ..call_config()
+            };
+            let (status, _) = place(handle, account, &refused, 1_200);
+            assert_eq!(status, SipralStatus::InvalidArgument, "{privacy:#x}");
+        }
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

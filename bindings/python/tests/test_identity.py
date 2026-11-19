@@ -313,6 +313,28 @@ class AnAccountSaysWhatItAsksFor(_WithAFarEnd):
             "the trusted peer is still told who is calling",
         )
 
+    async def test_a_call_names_its_own_caller_and_shows_the_number_its_account_withholds(
+        self,
+    ) -> None:
+        stack = self.stack()
+        account = stack.add_account(
+            "sip:alice@sipral.invalid", registrar_address=self.far.address, privacy=Privacy.ID
+        )
+        shown = stack.place_call(
+            account,
+            f"sip:bob@{self.far.address}",
+            caller="sip:+40215550100@sipral.invalid",
+            privacy=0,
+        )
+        self.addAsyncCleanup(asyncio.to_thread, shown.close)
+        invite = await self.far.receive("INVITE ")
+        self.assertTrue(_header("From", invite).startswith("<sip:+40215550100@sipral.invalid>"))
+        self.assertIsNone(_header("Privacy", invite))
+        withheld = stack.place_call(account, f"sip:bob@{self.far.address}")
+        self.addAsyncCleanup(asyncio.to_thread, withheld.close)
+        invite = await self.far.receive("INVITE ")
+        self.assertIn("anonymous@anonymous.invalid", _header("From", invite))
+
     async def test_an_option_out_of_range_is_refused(self) -> None:
         stack = self.stack()
         for options in (

@@ -1088,6 +1088,8 @@ class Stack:
         codecs: str | None = None,
         headers=None,
         follow_redirects: bool = False,
+        caller: str | None = None,
+        privacy: int | None = None,
     ) -> Call:
         """Place a call, this stack running its audio.
 
@@ -1114,6 +1116,13 @@ class Stack:
         on the INVITE. ``follow_redirects`` follows a 3xx's targets (RFC 3261
         §8.1.3.4); otherwise a 3xx ends the call and its `Contact` is the
         application's to act on.
+
+        ``caller`` is the URI this call's `From` names in place of the
+        account's address of record (`sipral_call_config_t::caller`), for a
+        carrier that reads the calling number from `From` alone. ``privacy``
+        is this call's ``SIPRAL_PRIVACY_*`` bits in place of the account's:
+        ``SIPRAL_PRIVACY_ID`` withholds the number, ``0`` shows it from an
+        account that withholds it, ``None`` keeps the account's.
 
         ``media_host`` defaults to the route toward ``destination`` or the
         account's server.
@@ -1151,6 +1160,14 @@ class Stack:
         config.feedback = lib.SIPRAL_TOGGLE_ON if feedback else lib.SIPRAL_TOGGLE_DEFAULT
         config.focus = 1 if focus else 0
         config.follow_redirects = 1 if follow_redirects else 0
+        caller_buf = None
+        if caller is not None:
+            caller_bytes = caller.encode("utf-8")
+            caller_buf = ffi.new("char[]", caller_bytes)
+            config.caller = caller_buf
+            config.caller_len = len(caller_bytes)
+        if privacy is not None:
+            config.privacy = privacy or lib.SIPRAL_PRIVACY_NONE
         codecs_buf = None
         if codecs is not None:
             codecs_bytes = codecs.encode("utf-8")

@@ -6,11 +6,12 @@
 // digits over, hung up from one side and ended on both.
 
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:sipral/sipral.dart';
-import 'package:sipral/sipral_abi.dart' show SipralCodec, SipralEvent;
+import 'package:sipral/sipral_abi.dart' show Sipral, SipralCodec, SipralEvent;
 import 'package:test/test.dart';
 
 /// Poll [probe] every 20 ms until it holds, or fail after [within].
@@ -337,6 +338,47 @@ void main() {
     await answered.whenEnded(timeout: const Duration(seconds: 15));
     answered.close();
   });
+
+  test(
+    'a call names its own caller, or withholds its number, by itself',
+    () async {
+      final from = <String>[];
+      bob.onRawEvent = (SipralEvent event) {
+        if (event.kind == SipralEventKind.incomingCall) {
+          final call = event.payload.call;
+          from.add(
+            String.fromCharCodes(call.fromUri.asTypedList(call.fromUriLen)),
+          );
+        }
+      };
+      final fromAlice = alice.addAccount(
+        'sip:alice@sipral.invalid',
+        registrarAddress: bob.bindAddress,
+      );
+      bob.addAccount(
+        'sip:bob@sipral.invalid',
+        registrarAddress: alice.bindAddress,
+      );
+      final shown = await alice.placeCall(
+        fromAlice,
+        'sip:bob@${bob.bindAddress}',
+        caller: 'sip:+40215550100@sipral.invalid',
+      );
+      await until(() => from.length == 1);
+      final withheld = await alice.placeCall(
+        fromAlice,
+        'sip:bob@${bob.bindAddress}',
+        privacy: Sipral.privacyId,
+      );
+      await until(() => from.length == 2);
+      expect(from, [
+        'sip:+40215550100@sipral.invalid',
+        'sip:anonymous@anonymous.invalid',
+      ]);
+      shown.close();
+      withheld.close();
+    },
+  );
 
   test('a call that is refused ends without being confirmed', () async {
     final fromAlice = alice.addAccount(

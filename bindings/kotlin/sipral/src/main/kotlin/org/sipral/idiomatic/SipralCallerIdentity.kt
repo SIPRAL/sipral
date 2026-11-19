@@ -41,8 +41,9 @@ enum class SipralPrivacy(val bit: Long) {
     /** Fail the call rather than go without the privacy asked for. */
     CRITICAL(Sipral.PRIVACY_CRITICAL),
 
-    /** No privacy, stated. Read only: an account asks for none with an
-     * empty set. */
+    /** No privacy, stated. An account asks for none with an empty set; a
+     * call placed with an empty set, or this, is shown from an account that
+     * withholds its number. */
     NONE(Sipral.PRIVACY_NONE),
     ;
 
@@ -50,6 +51,14 @@ enum class SipralPrivacy(val bit: Long) {
         fun of(bits: Long): Set<SipralPrivacy> = entries.filter { bits and it.bit != 0L }.toSet()
 
         internal fun bits(of: Set<SipralPrivacy>): Long = of.fold(0L) { bits, one -> bits or one.bit }
+
+        /** `sipral_call_config_t::privacy` for a call: null keeps the
+         * account's, an empty set is [NONE]. */
+        internal fun forCall(of: Set<SipralPrivacy>?): Long = when {
+            of == null -> 0L
+            of.isEmpty() -> NONE.bit
+            else -> bits(of)
+        }
     }
 }
 

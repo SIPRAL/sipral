@@ -81,16 +81,28 @@ class IdiomaticSipCalls(
 
     override fun place(account: Long, target: String): Long = place(account, target, emptyList())
 
-    override fun place(account: Long, target: String, headers: List<SipralHeader>): Long {
-        val call = client.placeCall(account(account), target, mediaHost = mediaHost, headers = headers)
+    override fun place(account: Long, target: String, headers: List<SipralHeader>): Long =
+        place(account, target, SipCallChoices(headers = headers))
+
+    override fun place(account: Long, target: String, choices: SipCallChoices): Long {
+        val call = client.placeCall(
+            account(account), target, mediaHost = mediaHost, headers = choices.headers, ice = choices.ice,
+            iceTrickle = choices.iceTrickle, caller = choices.caller, privacy = choices.privacy,
+        )
         calls[call.handle] = call
         return call.handle
     }
 
     /** [SipralCall.consult] from [call]'s [SipralCall], on [account]. */
-    override fun consult(call: Long, account: Long, target: String): Long {
+    override fun consult(call: Long, account: Long, target: String): Long =
+        consult(call, account, target, SipCallChoices())
+
+    override fun consult(call: Long, account: Long, target: String, choices: SipCallChoices): Long {
         val held = known(call)
-        val consultation = held.consult(target, account(account), mediaHost = mediaHost)
+        val consultation = held.consult(
+            target, account(account), mediaHost = mediaHost, ice = choices.ice, iceTrickle = choices.iceTrickle,
+            caller = choices.caller, privacy = choices.privacy,
+        )
         calls[consultation.handle] = consultation
         return consultation.handle
     }

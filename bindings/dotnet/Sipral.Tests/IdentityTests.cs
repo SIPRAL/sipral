@@ -274,6 +274,35 @@ public sealed class IdentityTests : IDisposable
     }
 
     [Fact]
+    public async Task ACallNamesItsOwnCallerAndShowsTheNumberItsAccountWithholds()
+    {
+        var account = _stack.AddAccount(
+            "sip:alice@sipral.invalid", registrarAddress: FarAddress, privacy: global::Sipral.Sipral.PrivacyId);
+        var call = _stack.PlaceCall(account, $"sip:bob@{FarAddress}",
+            options: new SipralCallOptions { Caller = "sip:+40215550100@sipral.invalid", Privacy = 0 });
+        try
+        {
+            var invite = await ReceiveAsync("INVITE ");
+            Assert.StartsWith("<sip:+40215550100@sipral.invalid>", Header("From", invite));
+            Assert.Null(Header("Privacy", invite));
+        }
+        finally
+        {
+            call.Close();
+        }
+        var withheld = _stack.PlaceCall(account, $"sip:bob@{FarAddress}");
+        try
+        {
+            var invite = await ReceiveAsync("INVITE ");
+            Assert.Contains("anonymous@anonymous.invalid", Header("From", invite));
+        }
+        finally
+        {
+            withheld.Close();
+        }
+    }
+
+    [Fact]
     public void AnAccountOptionOutOfRangeIsRefused()
     {
         var shortTimer = Assert.Throws<SipralException>(() => _stack.AddAccount(

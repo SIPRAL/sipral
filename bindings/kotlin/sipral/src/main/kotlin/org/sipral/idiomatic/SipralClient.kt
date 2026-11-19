@@ -715,19 +715,9 @@ class SipralClient private constructor(
                 continue
             }
             try {
-                // The REGISTER the location released left before this ran,
-                // naming the address the account had while it had no server; a
-                // loopback one is refused at once toward a server elsewhere, and
-                // nothing would send another: sent again, a registration or a
-                // withdrawal, from the address just chosen.
-                if (account.reach(advertiseToward(target), target) &&
-                    account.registrationState == SipralRegistrationState.FAILED
-                ) {
-                    when {
-                        account.wantsRegistration -> account.register()
-                        account.withdrawing -> account.unregister()
-                    }
-                }
+                // a REGISTER the location released while the Contact still
+                // named loopback waits for this, and goes with the route found
+                account.reach(advertiseToward(target), target)
             } catch (_: SipralException) {
                 // the account was removed meanwhile
             }
@@ -1250,6 +1240,13 @@ class SipralClient private constructor(
      * end as a conference focus (`isfocus`, RFC 4579). [followRedirects]
      * follows a 3xx's targets (RFC 3261 §8.1.3.4); otherwise a 3xx ends the
      * call and its `Contact` is the application's to act on.
+     *
+     * [caller] is the URI this call's `From` names in place of the account's
+     * address of record (`sipral_call_config_t::caller`), for a carrier that
+     * reads the calling number from `From` alone. [privacy] replaces the
+     * account's for this call: `setOf(SipralPrivacy.ID)` withholds the
+     * number, an empty set shows it from an account that withholds it, null
+     * keeps the account's.
      */
     fun placeCall(
         account: SipralAccount,
@@ -1266,9 +1263,11 @@ class SipralClient private constructor(
         focus: Boolean = false,
         followRedirects: Boolean = false,
         iceTrickle: SipralIceTrickle? = null,
+        caller: String? = null,
+        privacy: Set<SipralPrivacy>? = null,
     ): SipralCall = place(
         account, target, mediaHost, mediaPort, destination, srtp, ice, headers, codecs, text, feedback, focus,
-        followRedirects, iceTrickle, consulting = null,
+        followRedirects, iceTrickle, consulting = null, caller = caller, privacy = privacy,
     )
 
     /** [placeCall], or with [consulting] the consultation leg of that call
@@ -1289,6 +1288,8 @@ class SipralClient private constructor(
         followRedirects: Boolean,
         iceTrickle: SipralIceTrickle?,
         consulting: Long?,
+        caller: String? = null,
+        privacy: Set<SipralPrivacy>? = null,
     ): SipralCall {
         val mediaHost = mediaHostFor(mediaHost, account, destination)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
@@ -1312,6 +1313,8 @@ class SipralClient private constructor(
             feedback = if (feedback) SipralToggle.ON.value.toLong() else 0L,
             focus = if (focus) 1L else 0L,
             followRedirects = if (followRedirects) 1L else 0L,
+            caller = caller,
+            privacy = SipralPrivacy.forCall(privacy),
         )
         val callHandle = try {
             mapMediaSocket(mediaSocket, mediaAddress)

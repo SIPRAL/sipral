@@ -34,13 +34,14 @@ public sealed class ReachabilityTests
     /// datagram.</summary>
     internal sealed class Registrar : IDisposable
     {
-        private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
+        private readonly UdpClient _udp;
         private readonly ConcurrentQueue<string> _received = new();
         private readonly Thread _thread;
         private volatile bool _stopped;
 
-        public Registrar()
+        public Registrar(IPAddress? on = null)
         {
+            _udp = new UdpClient(new IPEndPoint(on ?? IPAddress.Loopback, 0));
             _udp.Client.ReceiveTimeout = 50;
             Port = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
             _thread = new Thread(Serve) { IsBackground = true };
@@ -295,6 +296,46 @@ public sealed class ReachabilityTests
         await Registered(account);
         Assert.Equal($"127.0.0.1:{registrar.Port}", account.RegistrarAddress);
         Assert.Contains("Srv _sip._udp.pbx.sipral.test", asked);
+    }
+
+    /// <summary>A stack bound on every interface has no route before the
+    /// name is found, so the account starts with a loopback Contact; the
+    /// REGISTER the lookup releases goes with the route toward the address
+    /// found, and no failure is reported on the way.</summary>
+    [Fact]
+    public async Task ANamedServerOffThisMachineIsRegisteredWithFromTheRouteTowardIt()
+    {
+        var route = SipralStack.RouteHost("192.0.2.1:5060");
+        if (route == "127.0.0.1")
+        {
+            return;
+        }
+        using var registrar = new Registrar(IPAddress.Any);
+        using var stack = Stack((name, record) => (record, name) switch
+        {
+            (SipralDnsRecordType.A, "pbx.sipral.test") => new SipralLookup(SipralDnsAnswer.Records, new[] { $"300 {route}" }),
+            _ => SipralLookup.Nothing,
+        });
+        var account = stack.AddAccount("sip:alice@pbx.sipral.test", registrar: "sip:pbx.sipral.test",
+            serverUri: $"sip:pbx.sipral.test:{registrar.Port}");
+        var states = new List<SipralRegistrationState>();
+        using var cancel = new CancellationTokenSource(Timeout);
+        account.Register();
+        await foreach (var args in stack.Events.WithCancellation(cancel.Token))
+        {
+            if (args.Kind == SipralEventKind.RegistrationChanged && args.Registration is { } registration)
+            {
+                states.Add(registration.State);
+                if (registration.State is SipralRegistrationState.Registered or SipralRegistrationState.Failed)
+                {
+                    break;
+                }
+            }
+        }
+        Assert.Equal(SipralRegistrationState.Registered, states.Last());
+        Assert.DoesNotContain(SipralRegistrationState.Failed, states);
+        Assert.Single(registrar.Registers);
+        Assert.Contains($"@{route}:", Header("Contact", registrar.Registers[0]));
     }
 
     [Fact]

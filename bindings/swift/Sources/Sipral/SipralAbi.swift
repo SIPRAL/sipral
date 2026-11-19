@@ -2564,7 +2564,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by anything the header gains. Rules:
     /// Versioning section of `docs/08-ffi.md`.
-    public static let abiVersionMinor: UInt32 = 14
+    public static let abiVersionMinor: UInt32 = 15
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2904,7 +2904,7 @@ public enum Sipral {
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
         ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 536, 304, 312),
-        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 168, 100, 100),
+        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 192, 116, 116),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
         ("sipral_path_candidate_t", MemoryLayout<sipral_path_candidate_t>.size, 88, 60, 64),
@@ -5617,7 +5617,11 @@ public enum Sipral {
     ///
     /// When recovery is waiting for it, the next rung runs at once instead of
     /// waiting out the back-off. Otherwise the account is still repointed and
-    /// the next REGISTER uses it.
+    /// the next REGISTER uses it. A REGISTER its server's lookup released
+    /// while the old `contact` could not reach the address found goes now:
+    /// it waits two seconds after `SIPRAL_EVENT_KIND_LOCATED` for this call,
+    /// for a socket bound on every interface whose route is known only then,
+    /// and then fails as `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT`.
     ///
     /// Safety
     ///

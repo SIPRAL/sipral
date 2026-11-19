@@ -392,6 +392,65 @@ fn an_account_that_withholds_its_identity_says_who_it_is_only_to_a_trusted_peer(
     );
 }
 
+/// A call's own privacy and `From` take the place of the account's, for that
+/// call only: withheld from an account that shows its number, shown from one
+/// that withholds it, and another number of the line's in `From`.
+#[test]
+fn a_call_withholds_or_shows_its_number_and_names_another_caller_by_itself() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let shown = agent.add_account(account().display_name("Alice").trust(registrar().ip()));
+    let withheld = agent.add_account(account().display_name("Alice").privacy(Privacy::withheld()));
+    let other = uri("sip:+40215550100@example.com");
+
+    agent
+        .call(
+            shown,
+            &outgoing()
+                .privacy(Privacy::withheld())
+                .caller(other.clone()),
+            t0,
+        )
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(text(&invite, HeaderName::From).starts_with("\"Anonymous\""));
+    assert_eq!(text(&invite, HeaderName::Extension("Privacy")), "id");
+    assert_eq!(
+        text(&invite, HeaderName::Extension("P-Asserted-Identity")),
+        "\"Alice\" <sip:+40215550100@example.com>",
+        "the trusted peer is told the number the call is from"
+    );
+
+    agent
+        .call(shown, &outgoing().caller(other), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(
+        text(&invite, HeaderName::From).split(";tag=").next(),
+        Some("\"Alice\" <sip:+40215550100@example.com>")
+    );
+    assert_eq!(text(&invite, HeaderName::Extension("Privacy")), "");
+
+    agent
+        .call(withheld, &outgoing().privacy(Privacy::default()), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(
+        text(&invite, HeaderName::From).split(";tag=").next(),
+        Some("\"Alice\" <sip:alice@example.com>")
+    );
+    assert_eq!(text(&invite, HeaderName::Extension("Privacy")), "");
+
+    agent
+        .call(withheld, &outgoing(), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(
+        text(&invite, HeaderName::From).starts_with("\"Anonymous\""),
+        "the account's own privacy is untouched"
+    );
+}
+
 /// RFC 3325 §6: a UA sends an identity field "only ... to proxy servers in a
 /// Trust Domain". An account that named one keeps the application's own
 /// fields off a call going anywhere else; one that named none made no claim

@@ -149,7 +149,8 @@ Answer fails, and the INVITE, if it comes, is declined with 603.
 Its `tokenChanged` hands over the token, which `SipralPush.apnsVoip(token:teamId:bundleId:)`
 turns into RFC 8599's `pn-provider`, `pn-prid` and `pn-param` for
 `SipralStack.addAccount(push:)`; `Account.pushEcho()` reads what the
-registrar said back. A push proxy that needs RFC 5626's `+sip.instance` on
+registrar said back, and `event.header(_:)` any other field of the 2xx on
+the `.registrationChanged` that reports the account registered. A push proxy that needs RFC 5626's `+sip.instance` on
 the binding gets it from `addAccount(instanceId:)`, and fields of its own on
 every REGISTER from `addAccount(headers:)` (below). `PushKitBridge.matchIncomingCall` takes every stack
 event: it returns the push shown for an `incomingCall`, to be resolved with

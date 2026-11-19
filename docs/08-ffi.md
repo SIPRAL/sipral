@@ -4663,3 +4663,40 @@ under `PushKitBridge.handle(push:stack:)` and
 callId, target)`, under `TelecomBridge.pushArrivedOnEveryAccount` and
 `wakeForPush(client, accounts, ...)`; Node `Stack.announce(caller, callId,
 target)`. The other layers announce nothing, on one account or several.
+
+## What ABI 1.15 added
+
+### A call's own caller and privacy
+
+Four members at the end of `sipral_call_config_t`, after `reserved_1_4`: no
+entry point, event kind or status code. Every pin stays where it was.
+
+`caller` and `caller_len` name the URI the call's `From` carries, with the
+account's display name, in place of the account's address of record: a line
+whose carrier reads the calling number from `From` alone calls from another
+number it holds. Only `From` changes: the account still authenticates as
+itself, and a call signed under STIR/SHAKEN names the account's own `orig`.
+Under privacy `From` is anonymous anyway, and `caller` is what
+`P-Asserted-Identity` asserts to a trusted peer. `privacy` is the call's
+`SIPRAL_PRIVACY_*` bits in place of `sipral_account_config_t::privacy`: zero
+keeps the account's, bits withhold the number on this call as an account
+with them does, and `SIPRAL_PRIVACY_NONE` alone shows it from an account that
+withholds it. `SIPRAL_PRIVACY_NONE` beside another bit, an unknown bit, or a
+`caller` that is no URI is `SIPRAL_STATUS_INVALID_ARGUMENT`. Both are read by
+`sipral_call_place`, `sipral_call_consult` and `sipral_call_accept_transfer`.
+`reserved_1_15` is zero.
+
+A binding printed at 1.14 sends the shorter struct, which a 1.15 library
+reads as zero for all four. One printed at 1.15 is refused by a 1.14 library,
+with both versions named.
+
+**In the layers.** Swift `placeCall(caller:privacy:)`, `[]` showing the
+number; Kotlin `placeCall(caller, privacy)` and `SipralCall.consult`, an
+empty set showing it, and on Android `TelecomBridge.placeCall(caller,
+privacy)` through `SipCallChoices`; .NET `SipralCallOptions.Caller` and
+`Privacy`; Python `place_call(caller=, privacy=)`; Node `CallOptions.caller`
+and `privacy`, with the `SIPRAL_PRIVACY_*` constants now exported; Dart
+`placeCall(caller:, privacy:)`. In each, zero or an empty set shows the
+number and nothing keeps the account's. C++'s `Account::place_call` takes a
+target and a media address only, as before; a call with options of its own
+fills `sipral_call_config_t` itself.

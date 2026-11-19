@@ -380,7 +380,11 @@ entry! {
     ///
     /// When recovery is waiting for it, the next rung runs at once instead of
     /// waiting out the back-off. Otherwise the account is still repointed and
-    /// the next REGISTER uses it.
+    /// the next REGISTER uses it. A REGISTER its server's lookup released
+    /// while the old `contact` could not reach the address found goes now:
+    /// it waits two seconds after `SIPRAL_EVENT_KIND_LOCATED` for this call,
+    /// for a socket bound on every interface whose route is known only then,
+    /// and then fails as `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT`.
     ///
     /// # Safety
     ///

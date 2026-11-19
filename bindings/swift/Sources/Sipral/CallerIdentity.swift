@@ -21,7 +21,8 @@ public struct Privacy: OptionSet, Sendable, Hashable {
     public static let id = Privacy(rawValue: Sipral.privacyId)
     /// Fail the call rather than go without the privacy asked for.
     public static let critical = Privacy(rawValue: Sipral.privacyCritical)
-    /// No privacy, stated. Read only: an account asks for none with `[]`.
+    /// No privacy, stated. An account asks for none with `[]`; a call placed
+    /// with `[]` or this is shown from an account that withholds its number.
     public static let none = Privacy(rawValue: Sipral.privacyNone)
 }
 

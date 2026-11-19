@@ -691,4 +691,16 @@ public sealed record SipralCallOptions(bool Text = false, bool Feedback = false,
     /// 8840), overriding the stack's <c>iceTrickle</c>; <c>0</c> keeps the
     /// stack's. <c>docs/06-nat.md</c>, "Trickle ICE".</summary>
     public SipralIceTrickle IceTrickle { get; init; }
+
+    /// <summary>The URI this call's <c>From</c> names in place of the
+    /// account's address of record (<c>sipral_call_config_t::caller</c>), for
+    /// a carrier that reads the calling number from <c>From</c> alone; null
+    /// keeps the account's. Placing only.</summary>
+    public string? Caller { get; init; }
+
+    /// <summary>This call's <c>Sipral.Privacy*</c> bits in place of the
+    /// account's: <c>Sipral.PrivacyId</c> withholds the number, <c>0</c>
+    /// shows it from an account that withholds it, null keeps the account's.
+    /// Placing only.</summary>
+    public uint? Privacy { get; init; }
 }

@@ -271,7 +271,7 @@ _Static_assert(offsetof(sipral_account_config_t, subscription_retry_max_seconds)
 _Static_assert(offsetof(sipral_account_config_t, reserved_1_13) == SIPRAL_LAYOUT(532, 300, 308), "sipral_account_config_t::reserved_1_13");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
-_Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(168, 100, 100), "sipral_call_config_t");
+_Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(192, 116, 116), "sipral_call_config_t");
 _Static_assert(offsetof(sipral_call_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_call_config_t::size");
 _Static_assert(offsetof(sipral_call_config_t, target) == SIPRAL_LAYOUT(8, 4, 4), "sipral_call_config_t::target");
 _Static_assert(offsetof(sipral_call_config_t, target_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_call_config_t::target_len");
@@ -297,6 +297,10 @@ _Static_assert(offsetof(sipral_call_config_t, follow_redirects) == SIPRAL_LAYOUT
 _Static_assert(offsetof(sipral_call_config_t, reserved) == SIPRAL_LAYOUT(156, 88, 88), "sipral_call_config_t::reserved");
 _Static_assert(offsetof(sipral_call_config_t, ice_trickle) == SIPRAL_LAYOUT(160, 92, 92), "sipral_call_config_t::ice_trickle");
 _Static_assert(offsetof(sipral_call_config_t, reserved_1_4) == SIPRAL_LAYOUT(164, 96, 96), "sipral_call_config_t::reserved_1_4");
+_Static_assert(offsetof(sipral_call_config_t, caller) == SIPRAL_LAYOUT(168, 100, 100), "sipral_call_config_t::caller");
+_Static_assert(offsetof(sipral_call_config_t, caller_len) == SIPRAL_LAYOUT(176, 104, 104), "sipral_call_config_t::caller_len");
+_Static_assert(offsetof(sipral_call_config_t, privacy) == SIPRAL_LAYOUT(184, 108, 108), "sipral_call_config_t::privacy");
+_Static_assert(offsetof(sipral_call_config_t, reserved_1_15) == SIPRAL_LAYOUT(188, 112, 112), "sipral_call_config_t::reserved_1_15");
 _Static_assert(offsetof(sipral_call_config_t, focus) + sizeof(((sipral_call_config_t *)0)->focus) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t is pinned through focus");
 
 _Static_assert(sizeof(sipral_codec_info_t) == SIPRAL_LAYOUT(32, 28, 28), "sipral_codec_info_t");

@@ -2979,7 +2979,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1network_1test(JNIEnv *env, jobject s
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jlongArray call, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jbyteArray configCaller, jlong configPrivacy, jlong configReserved115, jlongArray call, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -3020,6 +3020,12 @@ Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlon
     config_value.reserved = (uint32_t)configReserved;
     config_value.ice_trickle = (sipral_ice_trickle_t)configIceTrickle;
     config_value.reserved_1_4 = (uint32_t)configReserved14;
+    jbyte *configCaller_data = configCaller ? (*env)->GetByteArrayElements(env, configCaller, NULL) : NULL;
+    jsize configCaller_size = configCaller ? (*env)->GetArrayLength(env, configCaller) : 0;
+    config_value.caller = (const char *)configCaller_data;
+    config_value.caller_len = (size_t)configCaller_size;
+    config_value.privacy = (uint32_t)configPrivacy;
+    config_value.reserved_1_15 = (uint32_t)configReserved115;
     sipral_handle_t call_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -3054,6 +3060,9 @@ Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlon
     if (configTextAddress) {
         (*env)->ReleaseByteArrayElements(env, configTextAddress, configTextAddress_data, JNI_ABORT);
     }
+    if (configCaller) {
+        (*env)->ReleaseByteArrayElements(env, configCaller, configCaller_data, JNI_ABORT);
+    }
     if (ready) {
         {
             jlong slot = (jlong)call_value;
@@ -3078,7 +3087,7 @@ Java_org_sipral_SipralNative_sipral_1call_1ring(JNIEnv *env, jobject self, jlong
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jbyteArray configCaller, jlong configPrivacy, jlong configReserved115, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -3119,6 +3128,12 @@ Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self
     config_value.reserved = (uint32_t)configReserved;
     config_value.ice_trickle = (sipral_ice_trickle_t)configIceTrickle;
     config_value.reserved_1_4 = (uint32_t)configReserved14;
+    jbyte *configCaller_data = configCaller ? (*env)->GetByteArrayElements(env, configCaller, NULL) : NULL;
+    jsize configCaller_size = configCaller ? (*env)->GetArrayLength(env, configCaller) : 0;
+    config_value.caller = (const char *)configCaller_data;
+    config_value.caller_len = (size_t)configCaller_size;
+    config_value.privacy = (uint32_t)configPrivacy;
+    config_value.reserved_1_15 = (uint32_t)configReserved115;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
     sipral_header_t *configHeaders_array = NULL;
@@ -3152,6 +3167,9 @@ Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self
     if (configTextAddress) {
         (*env)->ReleaseByteArrayElements(env, configTextAddress, configTextAddress_data, JNI_ABORT);
     }
+    if (configCaller) {
+        (*env)->ReleaseByteArrayElements(env, configCaller, configCaller_data, JNI_ABORT);
+    }
     return (jint)status;
 }
 
@@ -3184,7 +3202,7 @@ Java_org_sipral_SipralNative_sipral_1call_1answer_1media(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1answer_1with(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1answer_1with(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jbyteArray configCaller, jlong configPrivacy, jlong configReserved115, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -3225,6 +3243,12 @@ Java_org_sipral_SipralNative_sipral_1call_1answer_1with(JNIEnv *env, jobject sel
     config_value.reserved = (uint32_t)configReserved;
     config_value.ice_trickle = (sipral_ice_trickle_t)configIceTrickle;
     config_value.reserved_1_4 = (uint32_t)configReserved14;
+    jbyte *configCaller_data = configCaller ? (*env)->GetByteArrayElements(env, configCaller, NULL) : NULL;
+    jsize configCaller_size = configCaller ? (*env)->GetArrayLength(env, configCaller) : 0;
+    config_value.caller = (const char *)configCaller_data;
+    config_value.caller_len = (size_t)configCaller_size;
+    config_value.privacy = (uint32_t)configPrivacy;
+    config_value.reserved_1_15 = (uint32_t)configReserved115;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
     sipral_header_t *configHeaders_array = NULL;
@@ -3257,6 +3281,9 @@ Java_org_sipral_SipralNative_sipral_1call_1answer_1with(JNIEnv *env, jobject sel
     }
     if (configTextAddress) {
         (*env)->ReleaseByteArrayElements(env, configTextAddress, configTextAddress_data, JNI_ABORT);
+    }
+    if (configCaller) {
+        (*env)->ReleaseByteArrayElements(env, configCaller, configCaller_data, JNI_ABORT);
     }
     return (jint)status;
 }
@@ -3496,7 +3523,7 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer(JNIEnv *env, jobject self, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jlongArray consultation, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jbyteArray configCaller, jlong configPrivacy, jlong configReserved115, jlongArray consultation, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -3537,6 +3564,12 @@ Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jl
     config_value.reserved = (uint32_t)configReserved;
     config_value.ice_trickle = (sipral_ice_trickle_t)configIceTrickle;
     config_value.reserved_1_4 = (uint32_t)configReserved14;
+    jbyte *configCaller_data = configCaller ? (*env)->GetByteArrayElements(env, configCaller, NULL) : NULL;
+    jsize configCaller_size = configCaller ? (*env)->GetArrayLength(env, configCaller) : 0;
+    config_value.caller = (const char *)configCaller_data;
+    config_value.caller_len = (size_t)configCaller_size;
+    config_value.privacy = (uint32_t)configPrivacy;
+    config_value.reserved_1_15 = (uint32_t)configReserved115;
     sipral_handle_t consultation_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -3571,6 +3604,9 @@ Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jl
     if (configTextAddress) {
         (*env)->ReleaseByteArrayElements(env, configTextAddress, configTextAddress_data, JNI_ABORT);
     }
+    if (configCaller) {
+        (*env)->ReleaseByteArrayElements(env, configCaller, configCaller_data, JNI_ABORT);
+    }
     if (ready) {
         {
             jlong slot = (jlong)consultation_value;
@@ -3590,7 +3626,7 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer_1to(JNIEnv *env, jobject sel
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jlongArray placed, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jbyteArray configCodecs, jlong configIce, jbyteArray configTextAddress, jlong configFeedback, jlong configFocus, jlong configFollowRedirects, jlong configReserved, jlong configIceTrickle, jlong configReserved14, jbyteArray configCaller, jlong configPrivacy, jlong configReserved115, jlongArray placed, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -3631,6 +3667,12 @@ Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject
     config_value.reserved = (uint32_t)configReserved;
     config_value.ice_trickle = (sipral_ice_trickle_t)configIceTrickle;
     config_value.reserved_1_4 = (uint32_t)configReserved14;
+    jbyte *configCaller_data = configCaller ? (*env)->GetByteArrayElements(env, configCaller, NULL) : NULL;
+    jsize configCaller_size = configCaller ? (*env)->GetArrayLength(env, configCaller) : 0;
+    config_value.caller = (const char *)configCaller_data;
+    config_value.caller_len = (size_t)configCaller_size;
+    config_value.privacy = (uint32_t)configPrivacy;
+    config_value.reserved_1_15 = (uint32_t)configReserved115;
     sipral_handle_t placed_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -3664,6 +3706,9 @@ Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject
     }
     if (configTextAddress) {
         (*env)->ReleaseByteArrayElements(env, configTextAddress, configTextAddress_data, JNI_ABORT);
+    }
+    if (configCaller) {
+        (*env)->ReleaseByteArrayElements(env, configCaller, configCaller_data, JNI_ABORT);
     }
     if (ready) {
         {

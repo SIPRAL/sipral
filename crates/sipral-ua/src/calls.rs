@@ -103,12 +103,12 @@ impl UserAgent {
             crate::advertise::check_description(&offered, remote)?;
         }
         let asked = config.session_interval;
-        let from = config.caller_value();
+        let from = config.caller_value(outgoing);
         let mut call = Call::outgoing(
             account,
             outgoing.forks,
             outgoing.destination,
-            anonymous(&outgoing.extra) || config.privacy.requested(),
+            anonymous(&outgoing.extra) || config.privacy_for(outgoing).requested(),
             from,
             config.contact_value(),
         );
@@ -159,8 +159,8 @@ impl UserAgent {
             .destination
             .or_else(|| config.destination())
             .ok_or(UaError::NotLocated)?;
-        let from = config.caller_value();
-        let identifying = identifying_fields(config, &outgoing.extra, remote);
+        let from = config.caller_value(outgoing);
+        let identifying = identifying_fields(config, outgoing, remote);
         // read fresh on every attempt: RFC 5627 §4.4 forbids a GRUU whose
         // registration is gone
         let (call_id, cseq, asked, signed, request_uri) = {
@@ -1305,18 +1305,28 @@ impl Identifying {
 /// account's `Privacy`, its identity asserted only toward a trusted peer
 /// (§7), and the application's identity fields kept off a request leaving the
 /// trust domain (§6). No trusted peer named means no trust domain.
-fn identifying_fields(config: &Account, extra: &[Extra], remote: SocketAddr) -> Identifying {
+fn identifying_fields(
+    config: &Account,
+    outgoing: &OutgoingCall,
+    remote: SocketAddr,
+) -> Identifying {
     let trusted = config.trusts(remote.ip());
-    let wrote = |name: &[u8]| extra.iter().any(|one| one.name.eq_ignore_ascii_case(name));
+    let wrote = |name: &[u8]| {
+        outgoing
+            .extra
+            .iter()
+            .any(|one| one.name.eq_ignore_ascii_case(name))
+    };
     let mut added = Vec::new();
-    if config.privacy.requested() {
+    let privacy = config.privacy_for(outgoing);
+    if privacy.requested() {
         if !wrote(b"Privacy")
-            && let Some(value) = config.privacy.to_value()
+            && let Some(value) = privacy.to_value()
         {
             added.push((PRIVACY, value.into_boxed_slice()));
         }
         if trusted && !wrote(b"P-Asserted-Identity") && !wrote(b"P-Preferred-Identity") {
-            added.push((ASSERTED, config.sender_value()));
+            added.push((ASSERTED, config.identity_for(outgoing)));
         }
     }
     Identifying {

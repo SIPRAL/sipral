@@ -93,16 +93,15 @@ public sealed class Account
 
     internal void Located(string target) => RegistrarAddress = target;
 
-    // Whether the account was pointed somewhere new.
-    internal bool Reach(string advertised, string remote)
+    // Pointed at remote, reached at advertised, unless it is there already.
+    internal void Reach(string advertised, string remote)
     {
         if (advertised == Advertised)
         {
-            return false;
+            return;
         }
         Rebind(remote, DefaultContact(Aor, advertised, ContactParametersOf(_stack, StreamProtocol)));
         Advertised = advertised;
-        return true;
     }
 
     // Always rebinds: the stack moved even if the route did not.
@@ -350,17 +349,12 @@ public sealed class Account
     /// accounts register again when a TCP/TLS stack reconnects.</summary>
     public bool WantsRegistration { get; private set; }
 
-    // Unregister asked for and Register not since: a withdrawal a location
-    // still has to carry.
-    internal bool Withdrawing { get; private set; }
-
     /// <summary><c>sipral_account_register</c>. Refused by an account with
     /// no registrar. While a TCP/TLS connection is down, the request is kept
     /// and sent on reconnect.</summary>
     public void Register()
     {
         WantsRegistration = true;
-        Withdrawing = false;
         try
         {
             SipralErrors.Call(() => NativeMethods.sipral_account_register(_stack.Handle, Handle, _stack.NowMs), "sipral_account_register");
@@ -409,7 +403,6 @@ public sealed class Account
             () => NativeMethods.sipral_account_thaw(_stack.Handle, Handle, snapshot, (nuint)snapshot.Length, asleepMs, _stack.NowMs),
             "sipral_account_thaw");
         WantsRegistration = true;
-        Withdrawing = false;
     }
 
     /// <summary><c>sipral_account_set_access_token</c>: set or replace the
@@ -456,7 +449,6 @@ public sealed class Account
     public void Unregister()
     {
         WantsRegistration = false;
-        Withdrawing = true;
         SipralErrors.Call(() => NativeMethods.sipral_account_unregister(_stack.Handle, Handle, _stack.NowMs), "sipral_account_unregister");
     }
 

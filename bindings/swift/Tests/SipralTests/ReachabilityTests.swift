@@ -24,9 +24,9 @@ final class DatagramRegistrar: @unchecked Sendable {
     let address: String
     var port: UInt16 { UDPSocket.parse(address).port }
 
-    init(featureCaps: String? = nil) throws {
+    init(featureCaps: String? = nil, host: String = "127.0.0.1") throws {
         self.featureCaps = featureCaps
-        socket = try UDPSocket(host: "127.0.0.1", port: 0)
+        socket = try UDPSocket(host: host, port: 0)
         address = socket.localAddress
         Thread { [weak self] in self?.serve() }.start()
     }
@@ -86,11 +86,12 @@ enum FakeRegistrarHeader {
 /// and the diagnostic trace.
 final class ReachabilityTests: XCTestCase {
     private func next(
-        _ kind: SipralEventKind, on events: AsyncStream<SipralEvent>, seconds: Double = 5
+        _ kind: SipralEventKind, on events: AsyncStream<SipralEvent>, seconds: Double = 5,
+        matching: @escaping @Sendable (SipralEvent) -> Bool = { _ in true }
     ) async throws -> SipralEvent {
         try await withThrowingTaskGroup(of: SipralEvent?.self) { group in
             group.addTask {
-                for await event in events where event.kind == kind { return event }
+                for await event in events where event.kind == kind && matching(event) { return event }
                 return nil
             }
             group.addTask {
@@ -143,6 +144,24 @@ final class ReachabilityTests: XCTestCase {
         XCTAssertTrue(contact.contains("@127.0.0.1:\(UDPSocket.parse(stack.bindAddress).port)"), contact)
     }
 
+    /// A field a registrar or push proxy adds to its 2xx is read off the
+    /// `.registrationChanged` that reports the account registered.
+    func testARegistrarsOwnFieldIsReadOffTheRegistration() async throws {
+        let registrar = try DatagramRegistrar(featureCaps: "*;+sip.pns=\"apns\"")
+        defer { registrar.stop() }
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let events = stack.events()
+        let account = try stack.addAccount(
+            aor: "sip:alice@example.com", registrarAddress: registrar.address, registrar: "sip:example.com"
+        )
+        try account.register()
+        let event = try await next(.registrationChanged, on: events) { $0.registrationData?.state == .registered }
+        XCTAssertEqual(event.header("feature-caps"), "*;+sip.pns=\"apns\"")
+        XCTAssertEqual(event.headers("Feature-Caps").count, 1)
+        XCTAssertNil(event.header("X-Absent"))
+    }
+
     func testAnAccountOnTheNetworkIsReachedAtTheRouteTowardItsServer() throws {
         let remote = "192.0.2.1:5060"
         let route = SipralStack.routeHost(toward: remote)
@@ -180,6 +199,27 @@ final class ReachabilityTests: XCTestCase {
         let answered = try bob.answerCall(incoming)
         defer { answered.close() }
         XCTAssertTrue(answered.mediaAddress.hasPrefix("127.0.0.1:"), answered.mediaAddress)
+    }
+
+    /// A call's own `caller` and `privacy`, read by the far end off `From`.
+    func testACallNamesItsOwnCallerOrWithholdsItsNumber() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let toBob = try alice.addAccount(aor: "sip:alice@example.com", registrarAddress: bob.bindAddress)
+        _ = try bob.addAccount(aor: "sip:bob@example.com", registrarAddress: alice.bindAddress)
+        let bobEvents = bob.events()
+
+        let shown = try alice.placeCall(account: toBob, target: "sip:bob@example.com", caller: "sip:+40215550100@example.com")
+        defer { shown.close() }
+        let first = try await next(.incomingCall, on: bobEvents)
+        XCTAssertEqual(first.callData?.fromUri, "sip:+40215550100@example.com")
+
+        let hidden = try alice.placeCall(account: toBob, target: "sip:bob@example.com", privacy: [.id])
+        defer { hidden.close() }
+        let second = try await next(.incomingCall, on: bobEvents)
+        XCTAssertEqual(second.callData?.fromUri, "sip:anonymous@anonymous.invalid")
+        XCTAssertEqual(FakeRegistrarHeader.header("Privacy", String(decoding: second.message ?? [], as: UTF8.self)), "id")
     }
 
     // MARK: - a server named by a URI
@@ -227,6 +267,32 @@ final class ReachabilityTests: XCTestCase {
         try await registered(account)
         XCTAssertEqual(account.registrarAddress, "127.0.0.1:\(port)")
         XCTAssertTrue(asked.all.contains("srv _sip._udp.pbx.sipral.test"), asked.all.description)
+    }
+
+    /// A stack bound on every interface has no route before the name is
+    /// found, so the account starts with a loopback `Contact`; the REGISTER
+    /// the lookup releases goes with the route toward the address found.
+    func testANamedServerOffThisMachineIsRegisteredWithFromTheRouteTowardIt() async throws {
+        let route = SipralStack.routeHost(toward: "192.0.2.1:5060")
+        try XCTSkipIf(route == "127.0.0.1", "this machine has no route off itself")
+        let registrar = try DatagramRegistrar(host: "0.0.0.0")
+        defer { registrar.stop() }
+        let port = registrar.port
+        let stack = try SipralStack(audio: .application, resolver: { name, record in
+            record == .a && name == "pbx.sipral.test"
+                ? DnsLookupAnswer(answer: .records, records: ["300 \(route)"])
+                : .nothing
+        })
+        defer { stack.close() }
+        let account = try stack.addAccount(
+            aor: "sip:alice@pbx.sipral.test", serverUri: "sip:pbx.sipral.test:\(port)", registrar: "sip:pbx.sipral.test"
+        )
+        XCTAssertTrue(account.contact.contains("@127.0.0.1:"), "no route yet: \(account.contact)")
+        try account.register()
+        try await registered(account)
+        let contact = FakeRegistrarHeader.header("Contact", registrar.registers.first ?? "") ?? ""
+        XCTAssertTrue(contact.contains("@\(route):"), contact)
+        XCTAssertEqual(UDPSocket.parse(stack.bindAddress).host, route, "and the stack's Via with it")
     }
 
     func testANameWithNoAddressIsALocateFailureThatSaysWhy() async throws {

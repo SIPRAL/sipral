@@ -640,27 +640,29 @@ mod tests {
     #[test]
     fn a_full_block_costs_in_proportion_to_its_size_not_to_its_square() {
         use std::time::{Duration, Instant};
-        let fastest = |block: &[u8]| {
+        let fastest = |block: &[u8], times: usize| {
             (0..5)
                 .map(|_| {
                     let start = Instant::now();
-                    let parsed = Extensions::parse(block);
-                    let took = start.elapsed();
-                    assert!(parsed.is_ok());
-                    took
+                    for _ in 0..times {
+                        assert!(Extensions::parse(block).is_ok());
+                    }
+                    start.elapsed()
                 })
                 .min()
                 .unwrap_or(Duration::MAX)
         };
-        let small = fastest(&distinct(1023));
-        let large = fastest(&distinct(16_383));
-        // sixteen times the extensions: roughly sixteen times the work when
-        // duplicates are found in one pass over the sorted types, roughly 256
-        // when each extension is looked for among all those before it. The
-        // fastest of five runs, so a descheduled run does not decide it.
+        let small = fastest(&distinct(1023), 16);
+        let large = fastest(&distinct(16_383), 1);
+        // sixteen small blocks hold as many extensions as one large one: about
+        // the same work when duplicates are found in one pass over the sorted
+        // types, sixteen times as much in the large block when each extension
+        // is looked for among all those before it. Both runs take about as
+        // long, so a loaded machine slows both alike, and the fastest of five
+        // keeps a descheduled run from deciding it.
         assert!(
-            large < small * 64,
-            "1023 extensions in {small:?}, 16383 in {large:?}"
+            large < small * 4,
+            "16 blocks of 1023 extensions in {small:?}, one of 16383 in {large:?}"
         );
     }
 

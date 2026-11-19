@@ -979,6 +979,7 @@ public sealed partial class SipralStack : IDisposable
         var mediaAddressBytes = Encoding.UTF8.GetBytes(mediaAddress);
         var destinationBytes = destination is null ? null : Encoding.UTF8.GetBytes(destination);
         var codecsBytes = options?.Codecs is { } codecs ? Encoding.UTF8.GetBytes(codecs) : null;
+        var callerBytes = options?.Caller is { } caller ? Encoding.UTF8.GetBytes(caller) : null;
 
         ulong callHandle = 0;
         using (var targetPin = Pin(targetBytes))
@@ -986,6 +987,7 @@ public sealed partial class SipralStack : IDisposable
         using (var destPin = Pin(destinationBytes))
         using (var textPin = Pin(textAddressBytes))
         using (var codecsPin = Pin(codecsBytes))
+        using (var callerPin = Pin(callerBytes))
         using (var headersArray = new SipralHeaderArray(headers?.ToArray()))
         {
             var config = SipralCallConfig.Sized();
@@ -1006,6 +1008,14 @@ public sealed partial class SipralStack : IDisposable
             config.Focus = options is { Focus: true } ? 1u : 0u;
             config.FollowRedirects = options is { FollowRedirects: true } ? 1u : 0u;
             config.IceTrickle = (uint)(options?.IceTrickle ?? 0);
+            config.Caller = callerPin.Pointer;
+            config.CallerLen = (nuint)(callerBytes?.Length ?? 0);
+            config.Privacy = options?.Privacy switch
+            {
+                null => 0u,
+                0u => Sipral.PrivacyNone,
+                { } bits => bits,
+            };
             config.Codecs = codecsPin.Pointer;
             config.CodecsLen = (nuint)(codecsBytes?.Length ?? 0);
             config.Headers = headersArray.Address;

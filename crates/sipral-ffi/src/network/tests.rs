@@ -853,8 +853,13 @@ fn hooked_stack(hooked: &mut Hooked, origin: Instant, ports: Option<u32>) -> Sip
 
 /// An even port on loopback, below the system's ephemeral range, free with the odd one above it.
 fn free_pair() -> u32 {
+    // the tests run side by side and a pair found free is not held, so each
+    // search starts past the pair the one before it gave
+    static GIVEN: AtomicUsize = AtomicUsize::new(0);
     let first = 20_000 + (std::process::id() % 5_000) * 2;
-    (first..40_000)
+    let skip = u32::try_from(GIVEN.fetch_add(1, Ordering::Relaxed) * 16).unwrap();
+    (first + skip..40_000)
+        .chain(20_000..first + skip)
         .step_by(2)
         .find(|port| {
             let port = u16::try_from(*port).unwrap();

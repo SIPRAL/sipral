@@ -16,6 +16,7 @@ import { after, afterEach, beforeEach, describe, test } from 'node:test';
 
 import {
   type Call,
+  SIPRAL_PRIVACY_ID,
   SipralCallEndReason,
   SipralCallState,
   SipralDtmf,
@@ -90,6 +91,31 @@ describe('a redirect', () => {
     const followed = kept(await alice.placeCall(line, `sip:bob@${bob.bindAddress}`, { followRedirects: true }))[0];
     const taken = kept(await answered)[0];
     await Promise.all([followed.confirmed(), taken.confirmed()]);
+  });
+});
+
+describe("a call's own caller and privacy", () => {
+  test('name another number in From, or withhold the number, for that call only', async () => {
+    const alice = await open();
+    const bob = await open();
+    const line = alice.addAccount('sip:alice@sipral.invalid', { registrarAddress: bob.bindAddress });
+    bob.addAccount('sip:bob@sipral.invalid', { registrarAddress: alice.bindAddress });
+    const invites: string[] = [];
+    bob.on('event', (event) => {
+      if (event.kind === SipralEventKind.IncomingCall) {
+        invites.push((event.message as Buffer).toString('utf8'));
+        bob.rejectCall(event);
+      }
+    });
+
+    kept(await alice.placeCall(line, `sip:bob@${bob.bindAddress}`, { caller: 'sip:+40215550100@sipral.invalid' }));
+    await until(() => invites.length === 1);
+    assert.match(messageHeaders(Buffer.from(invites[0] ?? ''), 'From')[0] ?? '', /^<sip:\+40215550100@sipral\.invalid>/);
+
+    kept(await alice.placeCall(line, `sip:bob@${bob.bindAddress}`, { privacy: SIPRAL_PRIVACY_ID }));
+    await until(() => invites.length === 2);
+    assert.match(messageHeaders(Buffer.from(invites[1] ?? ''), 'From')[0] ?? '', /anonymous@anonymous\.invalid/);
+    assert.deepEqual(messageHeaders(Buffer.from(invites[1] ?? ''), 'Privacy'), ['id']);
   });
 });
 

@@ -11,8 +11,11 @@ package org.sipral.telecom
 
 import org.sipral.SipralException
 import org.sipral.SipralHeader
+import org.sipral.SipralIce
+import org.sipral.SipralIceTrickle
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
+import org.sipral.idiomatic.SipralPrivacy
 
 /**
  * What [TelecomBridge] asks of the telecom framework.
@@ -91,6 +94,21 @@ enum class TelecomDisconnect {
 }
 
 /**
+ * What an outgoing call chose for itself, each in place of the client's or
+ * the account's when set ([org.sipral.idiomatic.SipralClient.placeCall]):
+ * [headers] on its INVITE as written, its [ice] and [iceTrickle], the
+ * [caller] URI its `From` names, and its [privacy] (an empty set shows the
+ * number from an account that withholds it). The defaults choose nothing.
+ */
+data class SipCallChoices(
+    val headers: List<SipralHeader> = emptyList(),
+    val ice: SipralIce? = null,
+    val iceTrickle: SipralIceTrickle? = null,
+    val caller: String? = null,
+    val privacy: Set<SipralPrivacy>? = null,
+)
+
+/**
  * The SIP half, by handle. [IdiomaticSipCalls] implements it over
  * [org.sipral.idiomatic.SipralClient]; a test implements it with a
  * recorder.
@@ -135,10 +153,29 @@ interface SipCalls {
             throw SipralException(SipralStatus.NOT_SUPPORTED, "this SIP side does not add headers to an INVITE")
         }
 
+    /** [place], with what the call chose for itself ([SipCallChoices]). A
+     * SIP side that cannot honour a choice refuses with `NOT_SUPPORTED`;
+     * headers alone go to the [place] above. */
+    fun place(account: Long, target: String, choices: SipCallChoices): Long =
+        if (choices.copy(headers = emptyList()) == SipCallChoices()) {
+            place(account, target, choices.headers)
+        } else {
+            throw SipralException(SipralStatus.NOT_SUPPORTED, "this SIP side does not choose ICE or identity per call")
+        }
+
     /** The consultation leg of an attended transfer from [call]: a call to
      * [target] on [account], which [call] is on; the new call's handle. A
      * SIP side with nothing more to it places an ordinary call. */
     fun consult(call: Long, account: Long, target: String): Long = place(account, target)
+
+    /** [consult], with the consultation's [choices] as [place] takes them
+     * (no headers: they were the first call's). */
+    fun consult(call: Long, account: Long, target: String, choices: SipCallChoices): Long =
+        if (choices == SipCallChoices()) {
+            consult(call, account, target)
+        } else {
+            throw SipralException(SipralStatus.NOT_SUPPORTED, "this SIP side does not choose ICE or identity per call")
+        }
 
     /** `sipral_call_transfer_to`: [call]'s far end is asked to take over
      * [other] (RFC 3891). Progress arrives as `TRANSFER_PROGRESS` and

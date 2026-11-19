@@ -197,6 +197,26 @@ private suspend fun anAnonymousAccountWithholdsItsNumber(): String {
     return "an anonymous account withheld its number and asserted it to a trusted peer"
 }
 
+/** A call's own `caller` and `privacy`, in place of its account's. */
+private suspend fun aCallChoosesItsOwnCallerAndPrivacy(): String {
+    pair(alicePrivacy = setOf(SipralPrivacy.ID)).use { pair ->
+        val (shown, first) = pair.bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 10_000) {
+            pair.alice.placeCall(
+                pair.aliceAccount, "sip:bob@${pair.bob.bindAddress}", caller = "sip:+40215550100@sipral.invalid",
+                privacy = emptySet(),
+            )
+        }
+        shown.use {
+            assertEquals("sip:+40215550100@sipral.invalid", first.payload.call.fromUri?.toString(Charsets.UTF_8))
+        }
+        val (withheld, second) = ring(pair)
+        withheld.use {
+            assertEquals("sip:anonymous@anonymous.invalid", second.payload.call.fromUri?.toString(Charsets.UTF_8))
+        }
+    }
+    return "a call from an anonymous account showed another number of its own, and the next one withheld it"
+}
+
 private suspend fun howACallAskedToBeAnswered(): String {
     pair().use { pair ->
         val (placed, incoming) = ring(
@@ -452,6 +472,7 @@ internal suspend fun signallingChecks(): String = listOf(
     aRingingCallIsSentElsewhere(),
     anAssertedIdentityIsReadOnlyFromATrustedPeer(),
     anAnonymousAccountWithholdsItsNumber(),
+    aCallChoosesItsOwnCallerAndPrivacy(),
     howACallAskedToBeAnswered(),
     aSessionTimerIsAskedForAndOneTooShortRefused(),
     theSuiteASecuredCallRunsHasAName(),

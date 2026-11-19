@@ -75,6 +75,31 @@ public struct SipralEvent: Sendable {
     public internal(set) var networkTestData: NetworkTestEventData? = nil
 }
 
+extension SipralEvent {
+    /// Every line of header field `name` in `message`, in order
+    /// (`sipral_message_header`); compact and long forms match, ignoring
+    /// case. Empty when the event carries no message or the message no such
+    /// field. On `.registrationChanged` to `.registered` the message is the
+    /// registrar's whole 2xx, so a field the registrar or a push proxy added
+    /// to it is read here.
+    public func headers(_ name: String) -> [String] {
+        guard let message, let count = try? Sipral.messageHeaderCount(message: message, name: name) else {
+            return []
+        }
+        return (0..<count).compactMap { index in
+            guard let (offset, length) = try? Sipral.messageHeader(message: message, name: name, index: index) else {
+                return nil
+            }
+            return String(decoding: message[offset..<(offset + length)], as: UTF8.self)
+        }
+    }
+
+    /// The first line of header field `name` in `message`, or `nil`.
+    public func header(_ name: String) -> String? {
+        headers(name).first
+    }
+}
+
 /// What `SipralEventKind.networkTest` carries: each part's result and the
 /// verdict, the worst of the parts tested.
 public struct NetworkTestEventData: Sendable {

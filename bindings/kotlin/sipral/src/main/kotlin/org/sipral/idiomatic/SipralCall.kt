@@ -30,6 +30,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralHeader
 import org.sipral.SipralIce
+import org.sipral.SipralIceTrickle
 import org.sipral.SipralProgressConfig
 import org.sipral.SipralProgressEvent
 import org.sipral.SipralStatus
@@ -420,7 +421,9 @@ class SipralCall internal constructor(
      * [account] names the line when this layer does not know it, for a call
      * answered by handle alone; the stack places from the call's own.
      * `WRONG_STATE` when neither is known, when this call is not up, or when
-     * it already has a consultation or is one.
+     * it already has a consultation or is one. [ice], [iceTrickle],
+     * [caller] and [privacy] are the consultation's own, as
+     * [SipralClient.placeCall] takes them.
      */
     fun consult(
         target: String,
@@ -431,12 +434,16 @@ class SipralCall internal constructor(
         ice: SipralIce? = null,
         headers: List<SipralHeader> = emptyList(),
         codecs: String? = null,
+        iceTrickle: SipralIceTrickle? = null,
+        caller: String? = null,
+        privacy: Set<SipralPrivacy>? = null,
     ): SipralCall {
         val from = account ?: this.account
             ?: throw SipralException(SipralStatus.WRONG_STATE, "the account this call belongs to is not known; name one")
         return client.place(
             from, target, mediaHost, 0, destination, srtp, ice, headers, codecs, text = false, feedback = false,
-            focus = false, followRedirects = false, iceTrickle = null, consulting = handle,
+            focus = false, followRedirects = false, iceTrickle = iceTrickle, consulting = handle, caller = caller,
+            privacy = privacy,
         )
     }
 

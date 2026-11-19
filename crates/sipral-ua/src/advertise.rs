@@ -177,12 +177,13 @@ mod tests {
     }
 
     use crate::event::{RegistrationFailure, UaEvent};
+    use crate::locate::CONTACT_WAIT;
     use crate::tests::{
         OFFER, account, agent, deliver, events, incoming_invite, registrar, transmits,
     };
-    use crate::{Account, OutgoingCall, TransportId};
+    use crate::{Account, OutgoingCall, TransportId, UserAgent};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     const ON_LOOPBACK: &[u8] = b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\n\
 t=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
@@ -231,18 +232,79 @@ t=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
             .register(id, t0)
             .expect("waits for nothing: a numeric host");
         assert!(transmits(&mut agent).is_empty());
-        let failed = events(&mut agent)
-            .into_iter()
-            .find_map(|event| match event {
-                UaEvent::RegistrationFailed {
-                    reason, retry_in, ..
-                } => Some((reason, retry_in)),
-                _ => None,
-            });
+        assert_eq!(failure(&mut agent), None, "it waits for a rebind first");
+        assert!(
+            agent
+                .poll_timeout()
+                .is_some_and(|at| at <= t0 + CONTACT_WAIT),
+            "the wait is on the clock"
+        );
+        agent.handle_timeout(t0 + CONTACT_WAIT.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(failure(&mut agent), None, "not yet");
+        agent.handle_timeout(t0 + CONTACT_WAIT);
+        assert!(transmits(&mut agent).is_empty());
         assert_eq!(
-            failed,
+            failure(&mut agent),
             Some((RegistrationFailure::UnreachableContact, None))
         );
+    }
+
+    /// A socket bound on every interface learns its route only from the
+    /// address found: the REGISTER waits for the `Contact` named on it.
+    #[test]
+    fn a_register_released_by_a_lookup_goes_with_the_contact_named_once_the_server_is_known() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(Account::located(
+            uri("sip:alice@example.com"),
+            uri("sip:192.0.2.9"),
+            uri("sip:alice@127.0.0.1"),
+            TransportId(1),
+        ));
+        agent.register(id, t0).expect("a numeric host");
+        assert!(transmits(&mut agent).is_empty());
+        let located = events(&mut agent)
+            .into_iter()
+            .find_map(|event| match event {
+                UaEvent::Located { targets, .. } => targets.first().copied(),
+                _ => None,
+            })
+            .expect("the server was located");
+
+        let later = t0 + CONTACT_WAIT / 2;
+        agent
+            .rebind(
+                id,
+                TransportId(1),
+                located,
+                &uri("sip:alice@192.0.2.1:5060"),
+                later,
+            )
+            .expect("the account exists");
+        let sent = transmits(&mut agent);
+        assert_eq!(sent.len(), 1, "the REGISTER went");
+        assert!(
+            sent[0]
+                .windows(b"192.0.2.1:5060".len())
+                .any(|part| part == b"192.0.2.1:5060"),
+            "with the Contact just named"
+        );
+        assert_eq!(failure(&mut agent), None);
+        agent.handle_timeout(t0 + CONTACT_WAIT);
+        assert!(
+            transmits(&mut agent).iter().all(|again| *again == sent[0]),
+            "only that REGISTER retransmitted: nothing held any more"
+        );
+        assert_eq!(failure(&mut agent), None);
+    }
+
+    fn failure(agent: &mut UserAgent) -> Option<(RegistrationFailure, Option<Duration>)> {
+        events(agent).into_iter().find_map(|event| match event {
+            UaEvent::RegistrationFailed {
+                reason, retry_in, ..
+            } => Some((reason, retry_in)),
+            _ => None,
+        })
     }
 
     #[test]

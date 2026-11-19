@@ -79,16 +79,15 @@ class SipralAccount internal constructor(
 
     /** `sipral_account_rebind` toward [remote], reached at [advertised]
      * (`host:port`), unless its `Contact` names that already. */
-    internal fun reach(advertised: String, remote: String): Boolean {
+    internal fun reach(advertised: String, remote: String) {
         val next = client.defaultContact(aor, advertised, streamProtocol)
         if (next == contact) {
-            return false
+            return
         }
         retryBusy {
             Sipral.accountRebind(client.handle, handle, /* SIPRAL_TRANSPORT_MAIN */ 0, remote, next, client.nowMs())
         }
         contact = next
-        return true
     }
 
     /**
@@ -237,12 +236,6 @@ class SipralAccount internal constructor(
     var wantsRegistration: Boolean = false
         private set
 
-    /** [unregister] asked for and [register] not since: a withdrawal a
-     * location may still have to carry. */
-    @Volatile
-    internal var withdrawing: Boolean = false
-        private set
-
     /**
      * `sipral_account_set_access_token`: the OAuth 2.0 access token the server
      * asked for (RFC 8898), replacing any previous one; null removes it. The
@@ -263,7 +256,6 @@ class SipralAccount internal constructor(
      */
     fun register() {
         wantsRegistration = true
-        withdrawing = false
         try {
             retryBusy { Sipral.accountRegister(client.handle, handle, client.nowMs()) }
         } catch (refused: SipralException) {
@@ -283,7 +275,6 @@ class SipralAccount internal constructor(
      */
     fun unregister() {
         wantsRegistration = false
-        withdrawing = true
         retryBusy { Sipral.accountUnregister(client.handle, handle, client.nowMs()) }
     }
 
@@ -394,7 +385,6 @@ class SipralAccount internal constructor(
         require(asleepMs >= 0) { "asleepMs is a duration" }
         retryBusy { Sipral.accountThaw(client.handle, handle, snapshot, asleepMs, client.nowMs()) }
         wantsRegistration = true
-        withdrawing = false
     }
 
     /**

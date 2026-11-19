@@ -29,10 +29,13 @@ import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralHeader
+import org.sipral.SipralIce
+import org.sipral.SipralIceTrickle
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralPrivacy
 
 fun main() {
     val said = try {
@@ -192,16 +195,29 @@ internal class FakeSip(val log: Log) : SipCalls {
     override fun reject(call: Long, code: Long) = log.add("reject $call $code")
     override fun place(account: Long, target: String): Long = place(account, target, emptyList())
 
-    override fun place(account: Long, target: String, headers: List<SipralHeader>): Long {
-        log.add("place $account $target" + headers.joinToString("") { " ${it.name}: ${it.value}" })
+    override fun place(account: Long, target: String, headers: List<SipralHeader>): Long =
+        place(account, target, SipCallChoices(headers = headers))
+
+    override fun place(account: Long, target: String, choices: SipCallChoices): Long {
+        log.add("place $account $target" + choices.headers.joinToString("") { " ${it.name}: ${it.value}" } + chosen(choices))
         placeRefusal?.let { throw it }
         return nextCall++
     }
 
-    override fun consult(call: Long, account: Long, target: String): Long {
-        log.add("consult $call $account $target")
+    override fun consult(call: Long, account: Long, target: String): Long = consult(call, account, target, SipCallChoices())
+
+    override fun consult(call: Long, account: Long, target: String, choices: SipCallChoices): Long {
+        log.add("consult $call $account $target" + chosen(choices))
         return nextCall++
     }
+
+    private fun chosen(choices: SipCallChoices): String =
+        listOfNotNull(
+            choices.ice?.let { " ice=$it" },
+            choices.iceTrickle?.let { " trickle=$it" },
+            choices.caller?.let { " caller=$it" },
+            choices.privacy?.let { " privacy=${it.joinToString("+")}" },
+        ).joinToString("")
 
     override fun transferTo(call: Long, other: Long) = log.add("transfer $call $other")
     override fun hangup(call: Long) = log.add("hangup $call")
@@ -854,6 +870,33 @@ private fun consultSequences(): String {
         ran++
     }
 
+    // ICE, the caller and the privacy asked for on a call go on its INVITE,
+    // and on the consultation placed from it, but not its headers; a call
+    // that asked for none leaves the stack's and the account's.
+    Rig().run {
+        val id = bridge.placeCall(
+            ACCOUNT, "sip:bob@example.invalid", headers = listOf(SipralHeader("Alert-Info", "<urn:alert:service:normal>")),
+            ice = SipralIce.OFFERED, iceTrickle = SipralIceTrickle.HALF, caller = "sip:+40215550100@example.invalid",
+            privacy = setOf(SipralPrivacy.ID),
+        )
+        platform.create(id)
+        val chosen = " ice=OFFERED trickle=HALF caller=sip:+40215550100@example.invalid privacy=ID"
+        assertEquals(
+            1,
+            log.count("place $ACCOUNT sip:bob@example.invalid Alert-Info: <urn:alert:service:normal>$chosen"),
+            log.snapshot().toString(),
+        )
+        bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = bridge.callHandleOf(id)))
+        val held = bridge.callHandleOf(id)
+        val consultation = bridge.consult(id, CAROL)
+        platform.create(consultation)
+        assertEquals(1, log.count("consult $held $ACCOUNT $CAROL$chosen"), log.snapshot().toString())
+        val plain = bridge.placeCall(ACCOUNT, "sip:dave@example.invalid")
+        platform.create(plain)
+        assertEquals(1, log.count("place $ACCOUNT sip:dave@example.invalid"), log.snapshot().toString())
+        ran++
+    }
+
     // A transfer that succeeds: the party consulted hangs the consultation
     // up, the stack the first call, and nothing is taken off hold. The first
     // call leaves the framework as ended here, by the transfer.
@@ -919,7 +962,8 @@ private fun consultSequences(): String {
     }
 
     return "$ran attended-transfer sequences against the fakes (consult and cancel, transferred, " +
-        "the consultation ending mid-transfer, refused and retried, the first call ending first)"
+        "the consultation ending mid-transfer, refused and retried, the first call ending first, " +
+        "a call's ICE, caller and privacy carried to its consultation and its headers not)"
 }
 
 // The real thing, with only the telecom framework faked

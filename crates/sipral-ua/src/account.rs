@@ -18,6 +18,7 @@ use sipral_core::endpoint::{TransportId, TransportProtocol};
 use sipral_core::msg::{HeaderName, Uri};
 use sipral_core::pin::CertificatePin;
 
+use crate::call::OutgoingCall;
 use crate::identity::{ANONYMOUS_FROM, Privacy};
 
 pub(crate) const DEFAULT_EXPIRES: Duration = Duration::from_hours(1);
@@ -596,12 +597,24 @@ impl Account {
         self.trusted.contains(&address)
     }
 
+    /// The privacy a call placed from this account asks for: its own, or
+    /// the account's.
+    pub(crate) fn privacy_for(&self, outgoing: &OutgoingCall) -> Privacy {
+        outgoing.privacy.unwrap_or(self.privacy)
+    }
+
+    /// Who a call placed from this account says it is: the URI it names in
+    /// place of the address of record, with the display name.
+    pub(crate) fn identity_for(&self, outgoing: &OutgoingCall) -> Box<[u8]> {
+        self.sender_named(outgoing.caller.as_ref().unwrap_or(&self.aor))
+    }
+
     /// `From` for a call, anonymous when privacy is asked (RFC 3323 §4.1.1.3).
-    pub(crate) fn caller_value(&self) -> Box<[u8]> {
-        if self.privacy.requested() {
+    pub(crate) fn caller_value(&self, outgoing: &OutgoingCall) -> Box<[u8]> {
+        if self.privacy_for(outgoing).requested() {
             Box::from(ANONYMOUS_FROM)
         } else {
-            self.sender_value()
+            self.identity_for(outgoing)
         }
     }
 
@@ -753,7 +766,13 @@ impl Account {
     /// `From`, with the display name when there is one. The tag is the
     /// endpoint's to add (§8.1.1.3).
     pub(crate) fn sender_value(&self) -> Box<[u8]> {
-        let mut out = Vec::with_capacity(self.aor.as_bytes().len() + 32);
+        self.sender_named(&self.aor)
+    }
+
+    /// [`Account::sender_value`], naming `uri` in place of the address of
+    /// record.
+    fn sender_named(&self, uri: &Uri) -> Box<[u8]> {
+        let mut out = Vec::with_capacity(uri.as_bytes().len() + 32);
         if let Some(ref name) = self.display_name {
             out.push(b'"');
             for byte in name.as_bytes() {
@@ -766,7 +785,7 @@ impl Account {
             out.extend_from_slice(b"\" ");
         }
         out.push(b'<');
-        out.extend_from_slice(self.aor.as_bytes());
+        out.extend_from_slice(uri.as_bytes());
         out.push(b'>');
         out.into_boxed_slice()
     }

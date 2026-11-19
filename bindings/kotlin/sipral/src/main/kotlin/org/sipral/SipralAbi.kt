@@ -6179,6 +6179,29 @@ class SipralCallConfig(
      * Zero, as `reserved`.
      */
     val reserved14: Long = 0,
+    /**
+     * The URI this call's `From` names, with the account's display name, in place of the
+     * account's address of record, UTF-8, not NUL-terminated; null for the account's own.
+     * For a line whose carrier reads the calling number from `From` alone: only `From`
+     * changes, the account still authenticates as itself, and a call signed under
+     * STIR/SHAKEN names the account's own `orig`. Under privacy `From` is anonymous anyway,
+     * and this is what `P-Asserted-Identity` asserts to a trusted peer. Not a URI is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`. Added in ABI 1.15.
+     */
+    val caller: String? = null,
+    /**
+     * This call's privacy (RFC 3323) in place of the account's
+     * (`sipral_account_config_t::privacy`): zero for the account's, `SIPRAL_PRIVACY_*` bits
+     * to place this call anonymously as an account with those bits does, or
+     * `SIPRAL_PRIVACY_NONE` alone to place it identified from an account that withholds its
+     * number. `SIPRAL_PRIVACY_NONE` beside another bit, or an unknown bit, is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`. Added in ABI 1.15.
+     */
+    val privacy: Long = 0,
+    /**
+     * Zero, as `reserved`.
+     */
+    val reserved115: Long = 0,
 )
 
 /**
@@ -9163,7 +9186,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 14)
+        agree(1, 15)
     }
 
     /**
@@ -9218,12 +9241,12 @@ internal object SipralNative {
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
     external fun sipral_account_set_access_token(stack: Long, account: Long, token: ByteArray): Int
     external fun sipral_stack_network_test(stack: Long, configAccount: Long, configProbeSocket: ByteArray?, configEchoCall: Long, configEchoMs: Long, configTimeoutMs: Long, nowMs: Long, test: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, configCaller: ByteArray?, configPrivacy: Long, configReserved115: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, nowMs: Long): Int
+    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, configCaller: ByteArray?, configPrivacy: Long, configReserved115: Long, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
-    external fun sipral_call_answer_with(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, nowMs: Long): Int
+    external fun sipral_call_answer_with(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, configCaller: ByteArray?, configPrivacy: Long, configReserved115: Long, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_hangup(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_set_headers(stack: Long, call: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
@@ -9242,9 +9265,9 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, configCaller: ByteArray?, configPrivacy: Long, configReserved115: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, configFollowRedirects: Long, configReserved: Long, configIceTrickle: Long, configReserved14: Long, configCaller: ByteArray?, configPrivacy: Long, configReserved115: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_accept_transfer_placed(stack: Long, call: Long, placed: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
@@ -9412,7 +9435,7 @@ object Sipral {
      * The ABI's minor version, raised by anything the header gains. Rules:
      * Versioning section of `docs/08-ffi.md`.
      */
-    const val ABI_VERSION_MINOR: Long = 14
+    const val ABI_VERSION_MINOR: Long = 15
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9811,7 +9834,7 @@ object Sipral {
         "sipral_stack_settings_t" to intArrayOf(136, 128, 136),
         "sipral_header_t" to intArrayOf(32, 16, 16),
         "sipral_account_config_t" to intArrayOf(536, 304, 312),
-        "sipral_call_config_t" to intArrayOf(168, 100, 100),
+        "sipral_call_config_t" to intArrayOf(192, 116, 116),
         "sipral_codec_info_t" to intArrayOf(32, 28, 28),
         "sipral_codec_candidate_t" to intArrayOf(24, 20, 20),
         "sipral_path_candidate_t" to intArrayOf(88, 60, 64),
@@ -10725,8 +10748,9 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
+        val configCaller = config.caller?.toByteArray(Charsets.UTF_8)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, configCaller, config.privacy, config.reserved115, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -10775,7 +10799,8 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, nowMs))
+        val configCaller = config.caller?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, configCaller, config.privacy, config.reserved115, nowMs))
     }
 
     /**
@@ -10826,7 +10851,8 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_answer_with(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, nowMs))
+        val configCaller = config.caller?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_answer_with(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, configCaller, config.privacy, config.reserved115, nowMs))
     }
 
     /**
@@ -11181,8 +11207,9 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
+        val configCaller = config.caller?.toByteArray(Charsets.UTF_8)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, configCaller, config.privacy, config.reserved115, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -11228,8 +11255,9 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val configTextAddress = config.textAddress?.toByteArray(Charsets.UTF_8)
+        val configCaller = config.caller?.toByteArray(Charsets.UTF_8)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, configTextAddress, config.feedback, config.focus, config.followRedirects, config.reserved, config.iceTrickle, config.reserved14, configCaller, config.privacy, config.reserved115, placedSlot, nowMs))
         return placedSlot[0]
     }
 
@@ -12420,7 +12448,11 @@ object Sipral {
      *
      * When recovery is waiting for it, the next rung runs at once instead of
      * waiting out the back-off. Otherwise the account is still repointed and
-     * the next REGISTER uses it.
+     * the next REGISTER uses it. A REGISTER its server's lookup released
+     * while the old `contact` could not reach the address found goes now:
+     * it waits two seconds after `SIPRAL_EVENT_KIND_LOCATED` for this call,
+     * for a socket bound on every interface whose route is known only then,
+     * and then fails as `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT`.
      *
      * Safety
      *

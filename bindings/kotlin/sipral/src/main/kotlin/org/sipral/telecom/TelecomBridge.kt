@@ -25,6 +25,9 @@ import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralHeader
 import org.sipral.SipralException
+import org.sipral.SipralIce
+import org.sipral.SipralIceTrickle
+import org.sipral.idiomatic.SipralPrivacy
 import org.sipral.SipralStatus
 import org.sipral.idiomatic.SipralAnnounced
 
@@ -120,8 +123,8 @@ class TelecomBridge(
         var everyAccount = false
         var connection: TelecomConnection? = null
 
-        /** An outgoing call's headers for its INVITE. */
-        var headers: List<SipralHeader> = emptyList()
+        /** What an outgoing call chose for its INVITE. */
+        var choices = SipCallChoices()
 
         /** The push named nobody and the INVITE since has: the connection is
          * told who is calling, now or once it is created. */
@@ -331,10 +334,21 @@ class TelecomBridge(
 
     /** Ask the framework for a call to [target] on [account]; the INVITE
      * goes out once it has created the connection, with [headers] on it as
-     * written ([SipCalls.place]). */
-    fun placeCall(account: Long, target: String, headers: List<SipralHeader> = emptyList()): String = settle {
+     * written, and [ice], [iceTrickle], [caller] and [privacy] in place of
+     * the client's or the account's when given ([SipCallChoices],
+     * [SipCalls.place]). A consultation from this call ([consult]) takes the
+     * same, but not the headers. */
+    fun placeCall(
+        account: Long,
+        target: String,
+        headers: List<SipralHeader> = emptyList(),
+        ice: SipralIce? = null,
+        iceTrickle: SipralIceTrickle? = null,
+        caller: String? = null,
+        privacy: Set<SipralPrivacy>? = null,
+    ): String = settle {
         val entry = Entry(newId(), TelecomDirection.OUTGOING, account, target, null, TelecomPhase.REQUESTED)
-        entry.headers = headers
+        entry.choices = SipCallChoices(headers, ice, iceTrickle, caller, privacy)
         entries[entry.id] = entry
         entry.awaitingConnection = true
         try {
@@ -372,6 +386,7 @@ class TelecomBridge(
         holdEntry(held)
         val entry = Entry(newId(), TelecomDirection.OUTGOING, held.account, target, null, TelecomPhase.REQUESTED)
         entry.consultFor = held.id
+        entry.choices = held.choices.copy(headers = emptyList())
         held.consultation = entry.id
         entries[entry.id] = entry
         entry.awaitingConnection = true
@@ -486,9 +501,9 @@ class TelecomBridge(
             val held = entry.consultFor?.let { entries[it] }?.takeIf { it.call != 0L && !it.closedForTelecom }
             val handle = try {
                 if (held != null) {
-                    sip.consult(held.call, entry.account, entry.caller)
+                    sip.consult(held.call, entry.account, entry.caller, entry.choices)
                 } else {
-                    sip.place(entry.account, entry.caller, entry.headers)
+                    sip.place(entry.account, entry.caller, entry.choices)
                 }
             } catch (refused: Exception) {
                 val reason = refused.message ?: refused.toString()

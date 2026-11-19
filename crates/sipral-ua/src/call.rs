@@ -22,6 +22,7 @@ use sipral_core::transaction::{
 };
 
 use crate::account::{AccountId, Extra};
+use crate::identity::Privacy;
 use crate::redirect::Redirection;
 use crate::reliable::Unacknowledged;
 use crate::session::Session;
@@ -195,6 +196,10 @@ pub struct OutgoingCall {
     pub(crate) follow_redirects: bool,
     /// `Require: trickle-ice` ([`OutgoingCall::require_trickle_ice`]).
     pub(crate) trickle_required: bool,
+    /// The `From` URI in place of the account's ([`OutgoingCall::caller`]).
+    pub(crate) caller: Option<Uri>,
+    /// The privacy in place of the account's ([`OutgoingCall::privacy`]).
+    pub(crate) privacy: Option<Privacy>,
 }
 
 impl OutgoingCall {
@@ -216,7 +221,32 @@ impl OutgoingCall {
             metadata: None,
             follow_redirects: false,
             trickle_required: false,
+            caller: None,
+            privacy: None,
         }
+    }
+
+    /// Name `caller` in this call's `From`, with the account's display name,
+    /// in place of its address of record: a line whose carrier reads the
+    /// calling number from `From` alone, calling from another number it
+    /// holds. Only the `From` changes: the account still authenticates as
+    /// itself, and a call signed under STIR/SHAKEN still names the account's
+    /// own `orig`. Under privacy the `From` is anonymous whatever this says,
+    /// and `caller` is what `P-Asserted-Identity` asserts to a trusted peer.
+    #[must_use]
+    pub fn caller(mut self, caller: Uri) -> Self {
+        self.caller = Some(caller);
+        self
+    }
+
+    /// Place this call with `privacy` in place of its account's (RFC 3323):
+    /// [`Privacy::withheld`] withholds the number on this call only, and
+    /// `Privacy::default()` places it identified even from an account that
+    /// withholds it.
+    #[must_use]
+    pub const fn privacy(mut self, privacy: Privacy) -> Self {
+        self.privacy = Some(privacy);
+        self
     }
 
     /// Place it assuming the far end takes trickle ICE: the INVITE carries

@@ -546,7 +546,10 @@ impl UserAgent {
     /// yet goes on waiting for that one: the REGISTER held for it goes when
     /// it is bound, with this `contact`.
     ///
-    /// If a want-rung is waiting, the next rung is climbed at once.
+    /// If a want-rung is waiting, the next rung is climbed at once. A
+    /// REGISTER held because its server was located while the old `Contact`
+    /// could not reach it ([`CONTACT_WAIT`](crate::locate::CONTACT_WAIT))
+    /// goes now, with this `contact`.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -567,6 +570,7 @@ impl UserAgent {
         config.remote = remote;
         config.contact = contact.clone();
         self.keep_own_flow(account, transport, moved);
+        self.release_held_register(account, now);
         if matches!(
             self.life.last(),
             Some(Rung::WantTransport | Rung::WantAddress)

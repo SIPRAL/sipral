@@ -224,7 +224,10 @@ the token in hex and the topic as `TEAMID.bundle.voip`, RFC 8599 §10), and
 `Account.pushEcho()` reads the answer; `addAccount(instanceId:)` puts RFC
 5626's `+sip.instance` on every REGISTER's `Contact`, which a push proxy may
 require of a binding, and `addAccount(headers:)` adds the application's own
-fields to every REGISTER. `PushKitAdapter` reports a call to
+fields to every REGISTER. A field the push proxy adds to its 2xx in return is
+read off the `.registrationChanged` that reports the account registered, whose
+`message` is that whole 2xx: `event.header(_:)` and `event.headers(_:)` in
+Swift, `SipralEvent.header(name)` and `headers(name)` in Kotlin. `PushKitAdapter` reports a call to
 CallKit for every VoIP push the system says must be, which iOS requires of an application that wants
 to keep receiving them: one whose payload names no caller is expected on the
 account alone ("The matching rule"), and one the decoder could not read, or
