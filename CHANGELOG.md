@@ -21,6 +21,8 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 - **Android: ICE on a call placed through Telecom.** `TelecomBridge.placeCall(account, target, headers, ice, iceTrickle)` chooses the call's ICE in place of the client's, as `SipralClient.placeCall` and Swift's `placeCall(ice:)` already did, and a consultation from the call takes the same. `SipCalls.place` and `SipCalls.consult` take it in a `SipCallChoices`; a `SipCalls` of the application's own that cannot choose refuses with `NOT_SUPPORTED`. `SipralCall.consult` gains `iceTrickle`.
 
+- **Swift: an IPv4-only operator from a network with IPv6 only.** On such a network, as Apple reviews applications on, the Swift package's sockets bound every IPv4 address only and reached no IPv4 server. They now bind both families: an IPv4 peer IPv4 has no route to is reached inside the NAT64 prefix the network's DNS64 reveals for `ipv4only.arpa` (RFC 7050, RFC 6052), one received from inside it is reported as the IPv4 address it carries, and the stack names itself `192.0.0.4` (`Nat64.hostAddress`, RFC 7335) there, as Android's 464XLAT client does, so the library keeps working in IPv4. `UDPSocket` also binds an IPv6 address given to it, and an IPv6 peer's address is written `[v6]:port`.
+
 - **Headers on a placed call's INVITE from .NET and from Android's Telecom path.** `SipralStack.PlaceCall(..., headers:)` in .NET and `TelecomBridge.placeCall(account, target, headers)` on Android put header fields on the INVITE as written, checked as `sipral_call_config_t::headers` is, as Swift's `placeCall(headers:)` and `SipralClient.placeCall(headers = ...)` already did. A `SipCalls` of the application's own that cannot add them refuses with `NOT_SUPPORTED` rather than dropping them.
 
 ### Fixed

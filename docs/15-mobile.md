@@ -1720,6 +1720,35 @@ behind drops its own oldest items (past 4096 events or digits, and past 50
 frames — one second at 20 ms — unless it asks for another number) and
 never slows the others.
 
+### A network with IPv6 only
+
+A phone on a network with IPv6 only reaches an IPv4-only operator through
+the network's NAT64; Apple reviews applications on such a network. The
+library keeps working in IPv4 there, and the Swift package translates at
+its sockets:
+
+- The stack's socket, and every media socket with no `bindHost`, binds
+  every address of both families. An IPv4 peer is sent to as before; when
+  IPv4 has no route from here, the datagram goes to the peer's address
+  inside the network's NAT64 prefix, and one received from inside the
+  prefix is reported from the IPv4 address it carries (RFC 6052).
+- The prefix is asked of the network's DNS64 server, as the answer for
+  `ipv4only.arpa` reveals it (RFC 7050), only when IPv4 has no route to a
+  server; the answer is kept a minute and forgotten on `networkChanged`.
+- There the stack names itself `192.0.0.4` (`Nat64.hostAddress`), from the
+  range RFC 7335 keeps for this and the address Android's 464XLAT client
+  takes. The operator sees a client behind a NAT, as behind any other: its
+  answers follow the source of the requests (`rport`) and, without STUN,
+  media follows the source of the packets. With `stunServer`, the address
+  STUN reports through the NAT64 is the IPv4 one the operator can reach.
+- SIP over TCP or TLS goes through Network.framework, which reaches an
+  IPv4 address through the NAT64 itself; a connection made that way is
+  named `192.0.0.4` too.
+
+On Android the system does the same below the application: 464XLAT gives
+the phone an IPv4 address on such a network, and the Kotlin layer needs
+nothing of its own.
+
 ## C4 — the device taken away and given back
 
 `C4` is the device taken away and given back mid-call: by an incoming

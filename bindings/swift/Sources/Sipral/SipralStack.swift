@@ -2226,6 +2226,9 @@ public final class SipralStack: @unchecked Sendable {
             let previous = stateQueue.sync { network }
             let picksRoutes = routes && signalling == .udp
             let moves = next.link != .down && (next.address != previous.address || next.interface != previous.interface)
+            if moves {
+                Nat64.forget()
+            }
             var rebound: String?
             if moves, signalling != .udp {
                 let host = next.address ?? UDPSocket.parse(bindAddress).host

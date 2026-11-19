@@ -229,12 +229,26 @@ extension SipralStack {
     }
 
     /// This machine's address on the route toward `peer`, or `127.0.0.1`
-    /// when there is no peer, it is a name, or nothing routes to it.
+    /// when there is no peer, it is a name, or nothing routes to it. An IPv4
+    /// peer with no route from here, on a network whose DNS64 reveals a
+    /// NAT64 prefix, is reached through it: `Nat64.hostAddress`.
     public static func routeHost(toward peer: String?) -> String {
         guard let peer, isAddress(peer) else { return "127.0.0.1" }
-        let wildcard = peer.hasPrefix("[") ? "[::]:0" : "0.0.0.0:0"
-        guard let advertised = try? advertisedAddress(bound: wildcard, peer: peer) else { return "127.0.0.1" }
-        return UDPSocket.parse(advertised).host
+        let v6 = peer.hasPrefix("[")
+        let advertised = (try? advertisedAddress(bound: v6 ? "[::]:0" : "0.0.0.0:0", peer: peer))
+            .map { UDPSocket.parse($0).host }
+        if v6 || advertised.map({ !unroutable($0, toward: peer) }) == true {
+            return advertised ?? "127.0.0.1"
+        }
+        return Nat64.discover().isEmpty ? advertised ?? "127.0.0.1" : Nat64.hostAddress
+    }
+
+    /// Whether `host`, the route toward the IPv4 `peer`, is one a stack
+    /// cannot be reached at from there: loopback or link-local toward a
+    /// peer that is neither, as a machine with no IPv4 route gets.
+    static func unroutable(_ host: String, toward peer: String) -> Bool {
+        let local = { (address: String) in address.hasPrefix("127.") || address.hasPrefix("169.254.") }
+        return local(host) && !local(UDPSocket.parse(peer).host)
     }
 
     /// Whether `text` is `host:port` with an IP address for its host.

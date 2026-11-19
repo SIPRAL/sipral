@@ -384,7 +384,7 @@ final class SignallingConnection: @unchecked Sendable {
                 error: .other, tls: .none, detail: "the connection to \(server) never named its local address"
             )
         }
-        local = named
+        local = Self.named(named, toward: host)
         if case .hostPort(let remoteHost, let remotePort) = connection.endpoint {
             remote = "\(Self.text(remoteHost)):\(remotePort.rawValue)"
         }
@@ -627,10 +627,28 @@ final class SignallingConnection: @unchecked Sendable {
         }
     }
 
+    /// `local`, the address a connection to `server` was made from, as the
+    /// stack should name it: one to an IPv4 server made from IPv6 went
+    /// through the network's NAT64, so this machine is `Nat64.hostAddress`
+    /// there.
+    static func named(_ local: String, toward server: String) -> String {
+        var v4 = in_addr()
+        guard local.hasPrefix("["), inet_pton(AF_INET, server, &v4) == 1 else { return local }
+        return "\(Nat64.hostAddress):\(UDPSocket.parse(local).port)"
+    }
+
     private static func text(_ host: NWEndpoint.Host) -> String {
         switch host {
         case .ipv4(let address): return "\(address)".components(separatedBy: "%")[0]
-        case .ipv6(let address): return "\(address)".components(separatedBy: "%")[0]
+        case .ipv6(let address):
+            let octets = [UInt8](address.rawValue)
+            if octets[0..<10].allSatisfy({ $0 == 0 }), octets[10] == 0xff, octets[11] == 0xff {
+                return octets[12..<16].map(String.init).joined(separator: ".")
+            }
+            if let v4 = Nat64.extracted(octets) {
+                return v4.map(String.init).joined(separator: ".")
+            }
+            return "[\(Nat64Prefix.text(of: octets))]"
         case .name(let name, _): return name
         @unknown default: return "\(host)"
         }

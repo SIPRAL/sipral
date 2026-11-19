@@ -65,18 +65,21 @@ final class FailedSocketTests: XCTestCase {
         close(ends[1])
     }
 
-    /// This process's UDP descriptor bound to `port`.
+    /// This process's UDP descriptor bound to `port`, of either family (a
+    /// stack with no bind host binds both).
     private static func datagramDescriptor(on port: UInt16) -> Int32? {
         for fd in Int32(0)..<Int32(4096) {
             var kind: Int32 = 0
             var kindLength = socklen_t(MemoryLayout<Int32>.size)
             guard getsockopt(fd, SOL_SOCKET, SO_TYPE, &kind, &kindLength) == 0, kind == SOCK_DGRAM else { continue }
-            var address = sockaddr_in()
-            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            var address = sockaddr_in6()
+            var length = socklen_t(MemoryLayout<sockaddr_in6>.size)
             let named = withUnsafeMutablePointer(to: &address) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
             }
-            if named == 0, address.sin_family == sa_family_t(AF_INET), UInt16(bigEndian: address.sin_port) == port {
+            // sin_port and sin6_port sit at the same place
+            let family = Int32(address.sin6_family)
+            if named == 0, family == AF_INET || family == AF_INET6, UInt16(bigEndian: address.sin6_port) == port {
                 return fd
             }
         }
