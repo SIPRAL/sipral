@@ -110,10 +110,13 @@ private suspend fun aCallShownToSomebodyRingsTheCaller(): String {
     pair().use { pair ->
         val (placed, incoming) = ring(pair)
         placed.use {
-            val (_, progress) = placed.events.awaitNext(SipralEventKind.CALL_PROGRESS, timeoutMs = 10_000) {
-                pair.bob.ringCall(incoming)
-            }
-            assertEquals(180L, progress.payload.call.statusCode)
+            // the 100 Trying may still be on its way when the wait begins: only a 180 answers it
+            placed.events.awaitNext(
+                timeoutMs = 10_000,
+                matches = {
+                    it.kind == SipralEventKind.CALL_PROGRESS.value.toLong() && it.payload.call.statusCode == 180L
+                },
+            ) { pair.bob.ringCall(incoming) }
             pair.bob.rejectCall(incoming, 603)
         }
     }

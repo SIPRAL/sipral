@@ -313,6 +313,31 @@ void main() {
     },
   );
 
+  // The caller's MEDIA_STARTED and the CALL_ENDED its close makes come in one
+  // batch: by the time the first is delivered, the call's media is gone.
+  test('a stack closed as soon as its call is confirmed throws nothing '
+      'for the media it never had', () async {
+    final fromAlice = alice.addAccount(
+      'sip:alice@sipral.invalid',
+      registrarAddress: bob.bindAddress,
+    );
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: alice.bindAddress,
+    );
+    final ringing = bob.events.firstWhere(
+      (event) => event.kind == SipralEventKind.incomingCall,
+    );
+    final call = await alice.placeCall(fromAlice, 'sip:bob@${bob.bindAddress}');
+    final answered = await bob.answerCall(
+      await ringing.timeout(const Duration(seconds: 15)),
+    );
+    await call.confirmed(timeout: const Duration(seconds: 15));
+    await alice.close();
+    await answered.whenEnded(timeout: const Duration(seconds: 15));
+    answered.close();
+  });
+
   test('a call that is refused ends without being confirmed', () async {
     final fromAlice = alice.addAccount(
       'sip:alice@sipral.invalid',

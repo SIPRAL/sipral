@@ -2058,6 +2058,76 @@ fn peer_generation() -> (String, String) {
     (peer.ufrag().to_owned(), peer.pwd().to_owned())
 }
 
+#[test]
+fn a_failed_pair_discarded_to_make_room_is_not_formed_and_checked_again() {
+    // RFC 8838 §10, item 6: a pair formed late discards a Failed one to make
+    // room; the next candidate the peer trickles must not pair the same two
+    // candidates again, only for the new pair to be checked and fail again
+    let (mut agent, stream, mut ids, now) = trickling(
+        Role::Controlling,
+        IceConfig {
+            max_pairs: 1,
+            ..config(false, false)
+        },
+    );
+    let (ufrag, pwd) = peer_generation();
+    agent
+        .set_remote(
+            stream,
+            &trickling_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    ids.feed(&mut agent);
+    agent.handle_timeout(now);
+    let (_, id) = requests(&drain(&mut agent))[0];
+    let answer = response(id, Class::Success, |builder| {
+        builder
+            .add_xor_address(AttributeType::XOR_MAPPED_ADDRESS, address(LOCAL))
+            .expect("mapped");
+    });
+    // answered from where the check was not sent: the pair fails
+    agent.handle_datagram(address(LOCAL), address("198.51.100.99:6000"), &answer, now);
+    assert_eq!(agent.pairs[0].state, PairState::Failed);
+
+    let towards = |agent: &IceAgent, remote: &str| {
+        agent
+            .pairs
+            .iter()
+            .filter(|pair| {
+                agent
+                    .remotes
+                    .get(pair.remote)
+                    .is_some_and(|candidate| candidate.candidate.address == address(remote))
+            })
+            .count()
+    };
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host("198.51.100.21:6000", PEER_PRIORITY - 10, "2")],
+            false,
+            now,
+        )
+        .expect("trickled");
+    assert_eq!(towards(&agent, PEER), 0, "the failed pair made room");
+    agent
+        .trickle_remote(
+            stream,
+            (&ufrag, &pwd),
+            &[host("198.51.100.22:6000", PEER_PRIORITY - 20, "3")],
+            false,
+            now,
+        )
+        .expect("trickled");
+    assert_eq!(
+        towards(&agent, PEER),
+        0,
+        "the pair that failed was formed again"
+    );
+}
+
 /// Run the agent's checks for a while, answering every one sent to an
 /// address in `answering` as the peer would, and return every request sent.
 fn checks_answered(

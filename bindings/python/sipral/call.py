@@ -92,13 +92,23 @@ class Call:
             # The socket becomes `Media`'s; the stack stops reading it first
             # so the two never race on one fd.
             self.stack._release_stun_socket(self._media_address)
-            self.media = Media(
-                self.stack,
-                self.handle,
-                self._media_socket,
-                pumped=self.stack.audio_mode == AudioMode.DEVICE,
-                text_socket=self._text_socket,
-            )
+            try:
+                self.media = Media(
+                    self.stack,
+                    self.handle,
+                    self._media_socket,
+                    pumped=self.stack.audio_mode == AudioMode.DEVICE,
+                    text_socket=self._text_socket,
+                )
+            except SipralError as gone:
+                # The call ended before this event was delivered (hung up as
+                # soon as it was answered, or the stack closed just after):
+                # the library has let its media go, so there is none to start.
+                if gone.status not in (
+                    lib.SIPRAL_STATUS_WRONG_STATE,
+                    lib.SIPRAL_STATUS_STALE_HANDLE,
+                ):
+                    raise
 
         if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_SECURED:
             # A suite newer than this binding is still secured.

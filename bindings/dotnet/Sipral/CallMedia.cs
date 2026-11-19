@@ -108,7 +108,17 @@ public sealed class CallMedia : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_media(stack.Handle, callHandle, out media), "sipral_call_media");
         _handle.SetValue(media);
 
-        var info = Info();
+        SipralMediaSnapshot info;
+        try
+        {
+            info = Info();
+        }
+        catch (SipralException)
+        {
+            // the call ended between the two; nothing else would let it go
+            _handle.Dispose();
+            throw;
+        }
         SampleRate = info.SampleRate;
         FrameSamples = info.FrameSamples;
         _frameSeconds = Math.Max(info.FrameMs, 1) / 1000.0;

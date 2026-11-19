@@ -11,12 +11,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use sipral_core::domain_certificate::DomainRules;
@@ -25,7 +25,7 @@ use sipral_core::pin::CertificatePin;
 
 use crate::failure::{Failure, TlsFailure};
 use crate::resolver::Resolver;
-use crate::stream::{Dial, Ended, Reader, TlsDial, Writer, connect};
+use crate::stream::{Connection, Dial, Ended, Reader, TlsDial, Writer, connect};
 use crate::trust::{ClientCertificate, PlatformRoots, Trust};
 
 /// The largest datagram read.
@@ -213,7 +213,7 @@ enum Arrival {
     Plain(Happening),
     Connected {
         serial: u64,
-        writer: Writer,
+        line: Line,
         happening: Happening,
     },
     Stream {
@@ -252,9 +252,95 @@ impl MediaSender {
     }
 }
 
+/// One open connection's writing half, shared by the network and its senders.
+#[derive(Clone)]
+struct Line {
+    writer: Arc<Mutex<Writer>>,
+    /// The same socket, to shut down while a write holds `writer`: a write the server does not
+    /// take keeps the lock for the connection's whole patience.
+    shutter: Arc<TcpStream>,
+}
+
+impl Line {
+    fn new(writer: Writer) -> io::Result<Self> {
+        Ok(Self {
+            shutter: Arc::new(writer.shutter()?),
+            writer: Arc::new(Mutex::new(writer)),
+        })
+    }
+
+    /// Write one message whole, after anything another thread is writing.
+    fn send(&self, payload: &[u8]) -> io::Result<()> {
+        let mut writer = locked(&self.writer);
+        let sent = writer.send(payload);
+        if sent.is_err() {
+            // what was cut short leaves part of a message on the wire, which nothing after it
+            // can follow; and a timed-out write is no end the reader would hear by itself
+            writer.close();
+        }
+        sent
+    }
+
+    /// Write one message whole, waiting at most `limit` for another thread's write to end and
+    /// as long again for each write of this one. A connection that keeps either waiting is
+    /// closed, and the other writer let go.
+    fn send_within(&self, payload: &[u8], limit: Duration) -> io::Result<()> {
+        let since = Instant::now();
+        let mut writer = loop {
+            match self.writer.try_lock() {
+                Ok(writer) => break writer,
+                Err(TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) if since.elapsed() < limit => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    self.shut();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another write on the connection has not ended",
+                    ));
+                }
+            }
+        };
+        let sent = writer.send_within(payload, limit);
+        if sent.is_err() {
+            writer.close();
+        }
+        sent
+    }
+
+    /// Close the connection, which also ends its reader, without waiting for a write under way:
+    /// shut down under it, that write fails at once and its thread closes what is left.
+    fn close(&self) {
+        match self.writer.try_lock() {
+            Ok(mut writer) => writer.close(),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().close(),
+            Err(TryLockError::WouldBlock) => self.shut(),
+        }
+    }
+
+    fn shut(&self) {
+        let _ = self.shutter.shutdown(Shutdown::Both);
+    }
+}
+
+/// A connection made, taken apart: this end, what the server sent while it settled, the half
+/// that writes and the half that reads.
+fn opened(
+    mut connection: Connection,
+    what: &str,
+) -> Result<(SocketAddr, Vec<u8>, Line, Reader), Failure> {
+    let local = connection.local;
+    let early = std::mem::take(&mut connection.early);
+    let (writer, reader) = connection.split();
+    let line = Line::new(writer)
+        .map_err(|error| Failure::of_io(&format!("{what}, no second handle:"), &error))?;
+    Ok((local, early, line, reader))
+}
+
 /// Writes on one connection, from any thread ([`Network::stream_sender`]).
 #[derive(Clone)]
-pub struct StreamSender(Arc<Mutex<Writer>>);
+pub struct StreamSender(Line);
 
 impl fmt::Debug for StreamSender {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -270,14 +356,18 @@ impl StreamSender {
     /// reader hears it end, and [`Happening::StreamFailed`] or [`Happening::StreamClosed`] says
     /// so.
     pub fn send(&self, payload: &[u8]) -> io::Result<()> {
-        let mut writer = locked(&self.0);
-        let sent = writer.send(payload);
-        if sent.is_err() {
-            // what was cut short leaves part of a message on the wire, which nothing after it
-            // can follow; and a timed-out write is no end the reader would hear by itself
-            writer.close();
-        }
-        sent
+        self.0.send(payload)
+    }
+
+    /// [`StreamSender::send`] for a thread that must not wait long, an audio thread's above
+    /// all: another thread's write is waited for at most `limit`, and each write of this one as
+    /// long, rather than the connection's patience.
+    ///
+    /// # Errors
+    /// As [`StreamSender::send`]; [`io::ErrorKind::TimedOut`] when another write held the
+    /// connection past `limit`, which is then closed.
+    pub fn send_within(&self, payload: &[u8], limit: Duration) -> io::Result<()> {
+        self.0.send_within(payload, limit)
     }
 }
 
@@ -362,7 +452,7 @@ pub struct Network {
     postbox: Sender<Arrival>,
     backlog: Arc<Backlog>,
     datagrams: HashMap<TransportId, Datagram>,
-    streams: HashMap<TransportId, (u64, Arc<Mutex<Writer>>)>,
+    streams: HashMap<TransportId, (u64, Line)>,
     /// Connections being made, by serial.
     connecting: HashMap<TransportId, u64>,
     /// Serials closed while their connection was being made.
@@ -385,8 +475,8 @@ impl fmt::Debug for Network {
 
 impl Drop for Network {
     fn drop(&mut self) {
-        for (_, (_, writer)) in self.streams.drain() {
-            locked(&writer).close();
+        for (_, (_, line)) in self.streams.drain() {
+            line.close();
         }
         self.backlog.close();
     }
@@ -644,27 +734,25 @@ impl Network {
                         patience,
                     })
                 });
-                let mut connection = match made {
-                    Ok(connection) => connection,
-                    Err(failure) => {
-                        let _ = postbox.send(Arrival::Stream {
-                            serial,
-                            happening: Happening::ConnectFailed {
-                                transport,
-                                protocol,
-                                remote,
-                                failure,
-                            },
-                        });
-                        return;
-                    }
-                };
-                let local = connection.local;
-                let early = std::mem::take(&mut connection.early);
-                let (writer, reader) = connection.split();
+                let (local, early, line, reader) =
+                    match made.and_then(|connection| opened(connection, &what)) {
+                        Ok(opened) => opened,
+                        Err(failure) => {
+                            let _ = postbox.send(Arrival::Stream {
+                                serial,
+                                happening: Happening::ConnectFailed {
+                                    transport,
+                                    protocol,
+                                    remote,
+                                    failure,
+                                },
+                            });
+                            return;
+                        }
+                    };
                 let up = Arrival::Connected {
                     serial,
-                    writer,
+                    line,
                     happening: Happening::Connected {
                         transport,
                         protocol,
@@ -695,8 +783,8 @@ impl Network {
             self.abandoned.insert(serial);
             return true;
         }
-        if let Some((_, writer)) = self.streams.remove(&transport) {
-            locked(&writer).close();
+        if let Some((_, line)) = self.streams.remove(&transport) {
+            line.close();
             return true;
         }
         self.datagrams.remove(&transport).is_some()
@@ -709,7 +797,7 @@ impl Network {
     pub fn stream_sender(&self, transport: TransportId) -> Option<StreamSender> {
         self.streams
             .get(&transport)
-            .map(|(_, writer)| StreamSender(Arc::clone(writer)))
+            .map(|(_, line)| StreamSender(line.clone()))
     }
 
     /// Write one message on `transport`: to `destination` on a datagram socket, on the connection
@@ -726,23 +814,53 @@ impl Network {
         destination: SocketAddr,
         payload: &[u8],
     ) -> Result<(), Failure> {
+        self.write(transport, destination, payload, None)
+    }
+
+    /// [`Network::send`] for a connection whose stall must not hold the caller, a TURN relay's
+    /// written to from the thread that also carries signalling: a write under way on another
+    /// thread ([`StreamSender::send_within`]) is waited for at most `limit`, and each write of
+    /// this one as long, rather than the connection's patience.
+    ///
+    /// # Errors
+    /// As [`Network::send`]; a connection that kept either waiting past `limit` is closed.
+    pub fn send_within(
+        &mut self,
+        transport: TransportId,
+        destination: SocketAddr,
+        payload: &[u8],
+        limit: Duration,
+    ) -> Result<(), Failure> {
+        self.write(transport, destination, payload, Some(limit))
+    }
+
+    fn write(
+        &mut self,
+        transport: TransportId,
+        destination: SocketAddr,
+        payload: &[u8],
+        limit: Option<Duration>,
+    ) -> Result<(), Failure> {
         if let Some(datagram) = self.datagrams.get(&transport) {
             let _ = datagram.socket.send_to(payload, destination);
             return Ok(());
         }
-        let Some((_, writer)) = self.streams.get(&transport) else {
+        let Some((_, line)) = self.streams.get(&transport) else {
             return Err(Failure::new(
                 TransportErrorKind::Closed,
                 TlsFailure::None,
                 &format!("nothing is open as transport {}", transport.0),
             ));
         };
-        let sent = locked(writer).send(payload);
+        let sent = match limit {
+            None => line.send(payload),
+            Some(limit) => line.send_within(payload, limit),
+        };
         match sent {
             Ok(()) => Ok(()),
             Err(error) => {
-                if let Some((_, writer)) = self.streams.remove(&transport) {
-                    locked(&writer).close();
+                if let Some((_, line)) = self.streams.remove(&transport) {
+                    line.close();
                 }
                 Err(Failure::of_io(
                     &format!("the connection to {destination}"),
@@ -796,19 +914,18 @@ impl Network {
             Arrival::Plain(happening) => Some(happening),
             Arrival::Connected {
                 serial,
-                mut writer,
+                line,
                 happening,
             } => {
                 let transport = transport_of(&happening)?;
                 if self.abandoned.remove(&serial)
                     || self.connecting.get(&transport) != Some(&serial)
                 {
-                    writer.close();
+                    line.close();
                     return None;
                 }
                 self.connecting.remove(&transport);
-                self.streams
-                    .insert(transport, (serial, Arc::new(Mutex::new(writer))));
+                self.streams.insert(transport, (serial, line));
                 Some(happening)
             }
             Arrival::Stream { serial, happening } => {

@@ -17,12 +17,20 @@ import java.net.NoRouteToHostException
 import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.cert.CertPathBuilder
 import java.security.cert.CertPathBuilderException
 import java.security.cert.CertPathValidatorException
 import java.security.cert.CertificateException
 import java.security.cert.CertificateExpiredException
 import java.security.cert.CertificateNotYetValidException
+import java.security.cert.CertStore
+import java.security.cert.CollectionCertStoreParameters
+import java.security.cert.PKIXBuilderParameters
+import java.security.cert.PKIXCertPathBuilderResult
+import java.security.cert.TrustAnchor
+import java.security.cert.X509CertSelector
 import java.security.cert.X509Certificate
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -306,6 +314,42 @@ private class PinChecking(private val digest: ByteArray) : X509ExtendedTrustMana
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 }
 
+/**
+ * The authorities above [chain]'s leaf whose name constraints a `sip:` URI
+ * is held to: the path PKIX validated is among them, its anchor included,
+ * which the server never sends and whose constraints PKIX holds a `dNSName`
+ * to and never a URI. When the certificates the server sent reach a trusted
+ * authority, they and every one of [accepted] that could have signed one of
+ * them; when they stop short, because the JVM fetched a missing intermediate
+ * itself (`com.sun.security.enableAIAcaIssuers`), the path PKIX builds again
+ * from them, its anchor included; null when there is none to read.
+ */
+internal fun authoritiesAbove(chain: Array<X509Certificate>, accepted: List<X509Certificate>): List<X509Certificate>? {
+    val top = chain.last()
+    val reached = top.issuerX500Principal == top.subjectX500Principal ||
+        accepted.any { it.subjectX500Principal == top.issuerX500Principal }
+    if (reached) {
+        return chain.drop(1) + accepted.filter { anchor ->
+            chain.any { it.issuerX500Principal == anchor.subjectX500Principal }
+        }
+    }
+    return try {
+        val parameters = PKIXBuilderParameters(
+            accepted.map { TrustAnchor(it, null) }.toSet(),
+            X509CertSelector().apply { certificate = chain[0] },
+        ).apply {
+            // revocation is the trust manager's to check, and it has
+            isRevocationEnabled = false
+            addCertStore(CertStore.getInstance("Collection", CollectionCertStoreParameters(chain.asList())))
+        }
+        val built = CertPathBuilder.getInstance("PKIX").build(parameters) as PKIXCertPathBuilderResult
+        built.certPath.certificates.drop(1).filterIsInstance<X509Certificate>() +
+            listOfNotNull(built.trustAnchor.trustedCert)
+    } catch (_: GeneralSecurityException) {
+        null
+    }
+}
+
 /** A trusted certificate naming another server, which `SSLSocket` reports
  * with the same exception type as an untrusted one. */
 private class NameMismatch(cause: CertificateException) : CertificateException(cause.message, cause)
@@ -321,7 +365,7 @@ private class NameMismatch(cause: CertificateException) : CertificateException(c
  * constraints of the authorities above it
  * (`sipral_certificate_check_domain_in_chain`).
  */
-private class Checking(
+internal class Checking(
     private val trust: List<X509ExtendedTrustManager>,
     private val serverName: String,
     private val rules: SipralDomainRules,
@@ -350,15 +394,14 @@ private class Checking(
         if (https == null && rules == SipralDomainRules.PLATFORM) {
             return
         }
-        // the authorities the server sent above its certificate, and every
-        // trusted one that could have signed one of them, whose name
-        // constraints a sip: URI is held to: the path PKIX built is among
-        // them, its anchor included, which the server never sends and whose
-        // constraints PKIX holds a dNSName to and never a URI
-        val anchors = trust.flatMap { it.acceptedIssuers.asList() }.filter { anchor ->
-            chain.any { it.issuerX500Principal == anchor.subjectX500Principal }
-        }
-        val issuers = (chain.drop(1) + anchors).fold(ByteArray(0)) { all, certificate -> all + certificate.encoded }
+        val above = authoritiesAbove(chain, trust.flatMap { it.acceptedIssuers.asList() })
+            ?: throw NameMismatch(
+                https ?: CertificateException(
+                    "the chain from the server's certificate to a trusted authority could not be read, " +
+                        "so a sip: URI in it cannot be held to the authorities' name constraints",
+                ),
+            )
+        val issuers = above.fold(ByteArray(0)) { all, certificate -> all + certificate.encoded }
         try {
             Sipral.certificateCheckDomainInChain(
                 chain[0].encoded, issuers, serverName, rules.value.toLong(), if (https == null) 1L else 0L,

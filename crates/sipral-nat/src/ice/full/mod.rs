@@ -783,6 +783,9 @@ pub struct IceAgent {
     relays: Vec<Allocation>,
     gathering_until: Option<Instant>,
     pairs: Vec<Pair>,
+    /// The pairs discarded Failed to make room for later ones (RFC 8838 §10), as (stream,
+    /// local, remote): formed again, they would only be checked and fail again.
+    failed_away: Vec<(usize, usize, usize)>,
     /// Every pair the checklists took in, and how each one ended.
     tried: Vec<report::Tried>,
     next_pair: u32,
@@ -846,6 +849,7 @@ impl IceAgent {
             relays: Vec::new(),
             gathering_until: None,
             pairs: Vec::new(),
+            failed_away: Vec::new(),
             tried: Vec::new(),
             next_pair: 0,
             learned: 0,
@@ -1192,6 +1196,7 @@ impl IceAgent {
         // the end of candidates was the old session's (RFC 8838 §13)
         self.local_ended = false;
         self.pairs.clear();
+        self.failed_away.clear();
         self.tried.clear();
         self.valid.clear();
         self.remotes.clear();

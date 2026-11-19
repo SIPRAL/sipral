@@ -34,7 +34,8 @@ final class SipralCall {
   bool _closed = false;
 
   /// The call's media, from `SipralEventKind.mediaStarted` until the call
-  /// is closed; null before and after.
+  /// is closed; null before and after, and throughout for a call that ended
+  /// before its `mediaStarted` was delivered.
   SipralMedia? get media => _media;
   SipralMedia? _media;
 
@@ -137,7 +138,7 @@ final class SipralCall {
     switch (event.kind) {
       case SipralEventKind.mediaStarted:
         if (_media == null && !_closed) {
-          _media = SipralMedia._(this, _mediaSocket);
+          _media = SipralMedia._of(this, _mediaSocket);
         }
       case SipralEventKind.callConfirmed:
         if (!_confirmed.isCompleted) {

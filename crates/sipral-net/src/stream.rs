@@ -68,6 +68,8 @@ pub(crate) struct Connection {
     closed: bool,
     pub(crate) local: SocketAddr,
     reader: TcpStream,
+    /// How long one write waits for the server to take it.
+    patience: Duration,
 }
 
 /// What a reader saw end its connection.
@@ -121,6 +123,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
             closed: false,
             local,
             reader,
+            patience: dial.patience,
         });
     };
     let Prepared {
@@ -183,6 +186,7 @@ pub(crate) fn connect(dial: &Dial<'_>) -> Result<Connection, Failure> {
         closed,
         local,
         reader,
+        patience: dial.patience,
     })
 }
 
@@ -316,6 +320,7 @@ impl Connection {
             Writer {
                 tcp: self.writer,
                 tls: self.tls.clone(),
+                patience: self.patience,
             },
             Reader {
                 tcp: self.reader,
@@ -332,9 +337,26 @@ impl Connection {
 pub(crate) struct Writer {
     tcp: TcpStream,
     tls: Option<Arc<Mutex<ClientConnection>>>,
+    patience: Duration,
 }
 
 impl Writer {
+    /// Another handle on the socket, to shut it down while a write holds this one.
+    pub(crate) fn shutter(&self) -> io::Result<TcpStream> {
+        self.tcp.try_clone()
+    }
+
+    /// Write one message whole, each write waiting at most `limit` for the server to take it
+    /// rather than the connection's patience.
+    pub(crate) fn send_within(&mut self, payload: &[u8], limit: Duration) -> io::Result<()> {
+        // a zero timeout is refused by the socket: the shortest it keeps is a millisecond
+        self.tcp
+            .set_write_timeout(Some(limit.min(self.patience).max(Duration::from_millis(1))))?;
+        let sent = self.send(payload);
+        self.tcp.set_write_timeout(Some(self.patience))?;
+        sent
+    }
+
     /// Write one message whole.
     pub(crate) fn send(&mut self, payload: &[u8]) -> io::Result<()> {
         match self.tls {

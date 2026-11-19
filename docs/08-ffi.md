@@ -4489,8 +4489,8 @@ reasoning.
 1.8 check now calls this one with the chain its platform gives: Swift the
 chain `SecTrust` built, the anchor included; Kotlin and the JVM jar the
 `X509Certificate[]` the server sent; .NET the elements of the `X509Chain`
-that was built; Python `SSLSocket.get_verified_chain()` from 3.13 on, the
-leaf alone before it; Node.js the issuer certificates of the verified peer
+that was built; Python the chain OpenSSL verified, from 3.10 on (on 3.9 a
+`sip:` URI names no server); Node.js the issuer certificates of the verified peer
 certificate. Each layer's tests serve, on loopback, a certificate that names
 the domain only by a `sip:` URI under an intermediate constrained to
 `corp.test`, which is refused as a name mismatch under either rules, and one

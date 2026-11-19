@@ -93,6 +93,30 @@ describe('a redirect', () => {
   });
 });
 
+describe('a media start delivered after its call ended', () => {
+  // its CallEnded read in the same poll: hung up as soon as answered, or the
+  // stack closed just after; the library has let the media go already
+  test('starts no media and throws nothing', async () => {
+    const alice = await open();
+    const bob = await open();
+    const line = alice.addAccount('sip:alice@sipral.invalid', { registrarAddress: bob.bindAddress });
+    bob.addAccount('sip:bob@sipral.invalid', { registrarAddress: alice.bindAddress });
+    bob.on('event', (event) => {
+      if (event.kind === SipralEventKind.IncomingCall) {
+        bob.rejectCall(event);
+      }
+    });
+
+    const refused = kept(await alice.placeCall(line, `sip:bob@${bob.bindAddress}`))[0];
+    const ended = await refused.next((event) => event.kind === SipralEventKind.CallEnded);
+    const late: typeof ended = Object.assign(Object.create(Object.getPrototypeOf(ended)), ended, {
+      kind: SipralEventKind.MediaStarted,
+    });
+    refused.deliver(late);
+    assert.equal(refused.media, null);
+  });
+});
+
 describe('an attended transfer', () => {
   test('refers the held party to a second call, which it would replace', async () => {
     const alice = await open();

@@ -132,9 +132,10 @@ Security framework built. A layer that runs its own TLS hands
 anchor included: Swift the chain `SecTrust` built; Kotlin and the JVM jar the
 `X509Certificate[]` the server sent and every accepted issuer of its trust
 managers that could have signed one of them; .NET the elements of the
-`X509Chain` built; Python the verified chain
-`SSLSocket.get_verified_chain` returns from 3.13 on, and the leaf alone
-before it, which holds a `sip:` URI to no constraint; Node.js the issuer
+`X509Chain` built; Python the chain OpenSSL verified, which
+`SSLSocket.get_verified_chain` returns from 3.13 on and the object the
+`ssl` module wraps from 3.10, while on 3.9, which reads no chain, a `sip:`
+URI names no server and only a DNS name or address does; Node.js the issuer
 certificates of the peer certificate and every trusted authority that could
 have signed one of them, since Node links that chain from what the server
 sent and a server can send a certificate under a trusted root's name. Each

@@ -232,7 +232,14 @@ export class Media extends EventEmitter<{ frame: [Int16Array] }> {
     const out = new BigUint64Array(1);
     check(sipral, 'sipral_call_media', sipral.sipral_call_media(call.stack.handle, call.handle, out));
     this.handle = handle(out[0] ?? 0n);
-    const info = this.refreshFrame();
+    let info: MediaInfo;
+    try {
+      info = this.refreshFrame();
+    } catch (gone) {
+      // the call ended between the two; nothing else would let it go
+      sipral.sipral_media_release(this.handle);
+      throw gone;
+    }
     this.frameMs = Math.max(info.frameMs, 1);
     this.socket.on('message', this.onDatagram);
     this.textSocket?.on('message', this.onText);

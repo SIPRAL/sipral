@@ -212,7 +212,10 @@ socket's own (RFC 8656 §3.1). The component opens it when
 RTCP and the goodbye, a frame `sipral_network_media_capture` encodes included
 — and closes it when the stack says `SIPRAL_TURN_STREAM_CLOSE`, after what was
 queued for it. A connection that cannot be made, or breaks, is
-`sipral_stack_turn_closed`, which costs the socket its relay. Over TLS the
+`sipral_stack_turn_closed`, which costs the socket its relay; so is one whose
+server takes nothing written on it for 250 ms, since the loop that writes there
+also carries signalling and the audio thread writes there too, and neither may
+wait out the connection's patience. Over TLS the
 TURN server is not a SIP server and its certificate names a host, so it is
 checked as HTTPS checks one, by trust members of its own:
 

@@ -166,6 +166,11 @@ internal class FakeSip(val log: Log) : SipCalls {
         return answer
     }
 
+    /** Each account's address of record, for [accountsAddressedAs]. */
+    var addresses: Map<Long, String> = emptyMap()
+
+    override fun accountsAddressedAs(target: String): Set<Long> = addresses.filterValues { it == target }.keys
+
     override fun announceOnEveryAccount(target: String?, caller: String?, callId: String?): SipralAnnounced {
         log.add("announce every ${target ?: "-"} ${caller ?: "anybody"}")
         val answer = nextAnnounce
@@ -313,6 +318,19 @@ private fun fakeSequences(): String {
         assertEquals(2, log.count("report"), "the matched INVITE was reported again: ${log.snapshot()}")
         assertEquals(931, bridge.callHandleOf(id))
         assertEquals(ACCOUNT + 1, bridge.calls.value.single { it.id == id }.account)
+        ran++
+    }
+
+    // A push for every account naming the second one's address finds the
+    // same caller already ringing on the first: that call is not the one the
+    // push is for, so it keeps its own screen and the push gets another.
+    Rig().run {
+        sip.addresses = mapOf(ACCOUNT to "sip:100@example.invalid", ACCOUNT + 1 to "sip:205@example.invalid")
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 940, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val ringing = bridge.calls.value.single().id
+        val id = bridge.pushArrivedOnEveryAccount("sip:alice@example.invalid", target = "sip:205@example.invalid")
+        assertNotEquals(ringing, id, "the push took a call ringing on an account it did not name")
+        assertEquals(2, log.count("report"), log.snapshot().toString())
         ran++
     }
 

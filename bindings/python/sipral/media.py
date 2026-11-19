@@ -77,7 +77,12 @@ class Media:
         )
         self.handle = int(out_media[0])
 
-        info = self.info()
+        try:
+            info = self.info()
+        except SipralError:
+            # the call ended between the two; nothing else would let it go
+            lib.sipral_media_release(self.handle)
+            raise
         self.sample_rate = info["sample_rate"]
         self.frame_samples = info["frame_samples"]
         self._frame_seconds = max(info["frame_ms"], 1) / 1000.0

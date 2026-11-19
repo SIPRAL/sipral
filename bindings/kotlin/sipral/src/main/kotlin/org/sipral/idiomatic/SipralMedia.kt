@@ -100,7 +100,13 @@ class SipralMedia internal constructor(
      */
     val handle: Long = retryBusy { Sipral.callMedia(client.handle, callHandle) }
 
-    private val negotiated: SipralMediaInfo = Sipral.mediaInfo(handle)
+    private val negotiated: SipralMediaInfo = try {
+        Sipral.mediaInfo(handle)
+    } catch (gone: SipralException) {
+        // the call ended between the two; nothing else would let it go
+        Sipral.mediaRelease(handle)
+        throw gone
+    }
 
     /** Held for one frame's playback and capture, and while [setAppRate]
      * changes the frame length. */

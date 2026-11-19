@@ -508,6 +508,42 @@ private suspend fun aSipUriTheIntermediateMayNotNameIsRefused(directory: File): 
     return "a sip: URI the intermediate may not name is refused, and one it may is trusted"
 }
 
+/** A trust manager that takes any chain and names [anchor] as its one
+ * authority: PKIX as it answers once it fetched a missing intermediate
+ * itself (`com.sun.security.enableAIAcaIssuers`), with the path it built
+ * nowhere in the chain the server sent. */
+private class TakesAnyChain(private val anchor: X509Certificate) : javax.net.ssl.X509ExtendedTrustManager() {
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket?) = Unit
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, engine: javax.net.ssl.SSLEngine?) = Unit
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) = Unit
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket?) = Unit
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, engine: javax.net.ssl.SSLEngine?) = Unit
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
+    override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf(anchor)
+}
+
+/** A chain that stops short of a trusted authority, its intermediate left
+ * out by the server and fetched by the JVM, cannot be read for the name
+ * constraints above a `sip:` URI: the URI then names no server, while the
+ * whole chain is still read. */
+private fun aChainThatStopsShortHoldsNoSipUri(directory: File): String {
+    val (outside, root) = constrained(directory, "short", "uri:sip:$SERVER_NAME")
+    val leaf = outside.certificate
+    val middle = outside.store.getCertificate("middle") as X509Certificate
+    val whole = authoritiesAbove(arrayOf(leaf, middle), listOf(root))
+    assertEquals(listOf(middle, root), whole, "the whole chain and its anchor")
+    for (rules in SipralDomainRules.entries) {
+        val checking = Checking(listOf(TakesAnyChain(root)), SERVER_NAME, rules)
+        assertFailsWith<java.security.cert.CertificateException>("$rules took a sip: URI above which nothing was read") {
+            checking.checkServerTrusted(arrayOf(leaf), "EC", null as Socket?)
+        }
+        assertFailsWith<java.security.cert.CertificateException>("$rules took a sip: URI the intermediate may not name") {
+            checking.checkServerTrusted(arrayOf(leaf, middle), "EC", null as Socket?)
+        }
+    }
+    return "a chain that stops short of a trusted authority holds no sip: URI"
+}
+
 /**
  * A registrar's credential signed by a root that may name `corp.test` and
  * the names under it alone, made with keytool in [directory], with [names]
@@ -1202,6 +1238,7 @@ internal suspend fun tlsSignallingChecks(): String {
             aSipUriNamesTheDomainAndRfc5922AloneRefusesAWildcard(directory),
             aSipUriTheIntermediateMayNotNameIsRefused(directory),
             aSipUriTheRootMayNotNameIsRefused(directory),
+            aChainThatStopsShortHoldsNoSipUri(directory),
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
             aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),

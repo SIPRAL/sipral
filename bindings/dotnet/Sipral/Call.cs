@@ -112,7 +112,16 @@ public sealed class Call : IDisposable
                 // no media to start, only a socket already gone.
                 if (Volatile.Read(ref _disposed) == 0 && Media is null)
                 {
-                    Media = new CallMedia(_stack, Handle, _mediaSocket, pumped: _stack.AudioMode == SipralAudio.Device, textSocket: _textSocket);
+                    try
+                    {
+                        Media = new CallMedia(_stack, Handle, _mediaSocket, pumped: _stack.AudioMode == SipralAudio.Device, textSocket: _textSocket);
+                    }
+                    catch (SipralException gone) when (gone.Status is SipralStatus.WrongState or SipralStatus.StaleHandle)
+                    {
+                        // The call ended before this event was delivered (hung up
+                        // as soon as it was answered, or the stack closed just
+                        // after): its media is let go already, none to start.
+                    }
                 }
             }
         }

@@ -241,9 +241,9 @@ class TelecomBridge(
      * of the INVITE the proxy holds, when the push carried it and an account
      * has it. Each account it is expected on has its binding refreshed. The
      * call's [TelecomCall.account] is zero until its INVITE arrives, and then
-     * the account it came to; a call already ringing unannounced on any
-     * account is taken as this one, as [pushArrived] takes one on its
-     * account.
+     * the account it came to; a call already ringing unannounced on an
+     * account it is expected on is taken as this one, as [pushArrived] takes
+     * one on its account ([SipCalls.accountsAddressedAs]).
      */
     fun pushArrivedOnEveryAccount(
         caller: String?,
@@ -257,8 +257,15 @@ class TelecomBridge(
         val announce = {
             if (account == null) sip.announceOnEveryAccount(target, caller, callId) else sip.announce(account, caller, callId)
         }
+        // the accounts the call is expected on, as the library picks them: the one named, those
+        // the push's target addresses, or every one when it addresses none or this side cannot tell
+        val expectedOn: Set<Long>? = when {
+            account != null -> setOf(account)
+            target == null -> null
+            else -> sip.accountsAddressedAs(target)?.takeIf { it.isNotEmpty() }
+        }
         val existing = entries.values.firstOrNull {
-            it.direction == TelecomDirection.INCOMING && (account == null || it.account == account) && it.call != 0L &&
+            it.direction == TelecomDirection.INCOMING && (expectedOn == null || it.account in expectedOn) && it.call != 0L &&
                 !it.announced && !it.closedForTelecom && it.phase == TelecomPhase.RINGING &&
                 (caller == null || sameCaller(caller, it.caller))
         }

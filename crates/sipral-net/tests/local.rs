@@ -718,6 +718,115 @@ fn a_plain_tcp_write_the_server_never_reads_gives_up_and_the_connection_ends() {
     drop(keep);
 }
 
+/// A server that accepts one connection and never reads it, held until the returned sender is
+/// dropped; and a network connected to it as transport 7, whose writes wait `patience`.
+fn never_reading(patience: Duration) -> (Network, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = listener.local_addr().unwrap();
+    let (keep, kept) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let held = listener.accept();
+        let _ = kept.recv();
+        drop(held);
+    });
+    let mut config = NetworkConfig::default();
+    config.connect_timeout = patience;
+    let mut network = Network::new(config).unwrap();
+    dial(
+        &mut network,
+        TransportProtocol::Tcp,
+        server,
+        StreamTarget::default(),
+    )
+    .unwrap();
+    (network, keep)
+}
+
+/// Another thread writing on transport 7 until a write stops returning; what it ended with
+/// arrives on the receiver.
+fn writing_until_stuck(network: &Network) -> mpsc::Receiver<ErrorKind> {
+    let sender = network.stream_sender(TransportId(7)).unwrap();
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let chunk = vec![0_u8; 64 * 1024];
+        let refused = loop {
+            if let Err(error) = sender.send(&chunk) {
+                break error;
+            }
+        };
+        let _ = done.send(refused.kind());
+    });
+    finished
+}
+
+#[test]
+fn a_close_does_not_wait_for_a_write_the_server_never_takes() {
+    let (mut network, keep) = never_reading(Duration::from_secs(20));
+    let finished = writing_until_stuck(&network);
+    // the buffers fill within this, and the writer stays in its write for the patience
+    thread::sleep(Duration::from_secs(1));
+    let started = Instant::now();
+    assert!(network.close(TransportId(7)));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the close waited {:?} for the write under way",
+        started.elapsed()
+    );
+    assert!(
+        finished.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "the write under way went on after the close"
+    );
+    drop(keep);
+}
+
+#[test]
+fn a_write_within_a_limit_gives_up_on_a_server_that_takes_nothing() {
+    let (mut network, keep) = never_reading(Duration::from_secs(20));
+    let to = "127.0.0.1:9".parse().unwrap();
+    let finished = writing_until_stuck(&network);
+    thread::sleep(Duration::from_secs(1));
+    // another thread is inside its write: this one waits the limit for it, not the patience
+    let started = Instant::now();
+    let refused = network.send_within(
+        TransportId(7),
+        to,
+        &[0_u8; 1024],
+        Duration::from_millis(200),
+    );
+    assert!(refused.is_err(), "a write behind a stuck one went through");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the write waited {:?} behind one the server never took",
+        started.elapsed()
+    );
+    // the failed write is the report: the connection is closed with it
+    assert!(
+        finished.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "the stuck write went on after its connection was given up"
+    );
+    drop(keep);
+
+    // alone on its connection, a write waits the limit for the server, not the patience
+    let (mut network, keep) = never_reading(Duration::from_secs(20));
+    let started = Instant::now();
+    let refused = network.send_within(
+        TransportId(7),
+        to,
+        &vec![0_u8; 64 << 20],
+        Duration::from_millis(200),
+    );
+    assert!(
+        refused.is_err(),
+        "64 MiB went into a server that reads nothing"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the write waited {:?} for a server that took nothing",
+        started.elapsed()
+    );
+    drop(keep);
+}
+
 #[test]
 fn a_connection_closed_while_it_was_being_made_is_never_reported() {
     let pki = Pki::new("Sipral test authority");

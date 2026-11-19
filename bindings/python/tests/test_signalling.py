@@ -29,6 +29,7 @@ from sipral import InviteLimit, Stack, TlsTrust
 from sipral._sipral_cffi import lib
 from sipral.errors import SipralError
 from sipral.errors import call as retry_busy
+from sipral.signalling import NameRefused, check_name
 from sipral.enums import (
     AudioMode,
     DnsAnswer,
@@ -446,7 +447,7 @@ class ATlsRefusalSaysWhy(_OverAConnection):
             self.assertTrue(stack.connected, f"rules {rules} refused a sip: URI naming the domain")
 
     @unittest.skipUnless(
-        hasattr(ssl.SSLSocket, "get_verified_chain"), "the ssl module hands over no verified chain before 3.13"
+        hasattr(ssl._ssl._SSLSocket, "get_verified_chain"), "the ssl module reads no verified chain before 3.10"
     )
     async def test_a_sip_uri_the_intermediate_may_not_name_is_refused(self) -> None:
         # held to the name constraints of the intermediate above it, which
@@ -645,6 +646,38 @@ class AConnectionLostIsMadeAgain(_OverAConnection):
         self.assertTrue(again, "no REGISTER on a second connection")
         self.assertNotEqual(stack.bind_address, first, "a new connection, from a new port")
         self.assertIn(stack.bind_address, _header("Contact", again[0]), "the Contact moved with it")
+
+
+class _Unchained:
+    """A connection as Python 3.9 shows it: the leaf, and no chain to read."""
+
+    def __init__(self, certificate: str, names: tuple[tuple[str, str], ...]) -> None:
+        with open(certificate, encoding="ascii") as pem:
+            self._leaf = ssl.PEM_cert_to_DER_cert(pem.read())
+        self._names = names
+
+    def getpeercert(self, binary_form: bool = False):
+        return self._leaf if binary_form else {"subjectAltName": self._names}
+
+
+class WithoutAChainToRead(unittest.TestCase):
+    """Where the ssl module reads no verified chain (Python 3.9), a ``sip:``
+    URI cannot be held to the name constraints of the authorities above it,
+    and names no server; a DNS name, which OpenSSL held to them, still does."""
+
+    def setUp(self) -> None:
+        self._scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self._scratch.cleanup)
+
+    def test_a_sip_uri_is_refused_and_a_dns_name_taken(self) -> None:
+        by_uri = _certificate(self._scratch.name, "uri", names=f"URI:sip:{_SERVER_NAME}")
+        by_dns = _certificate(self._scratch.name, "dns", names=f"DNS:{_SERVER_NAME}")
+        if by_uri is None or by_dns is None:
+            self.skipTest("no openssl command to make the certificates with")
+        for rules in (lib.SIPRAL_DOMAIN_RULES_PLATFORM, lib.SIPRAL_DOMAIN_RULES_RFC5922):
+            with self.assertRaises(NameRefused, msg=f"rules {rules}"):
+                check_name(_Unchained(by_uri[0], (("URI", f"sip:{_SERVER_NAME}"),)), _SERVER_NAME, rules, False)
+            check_name(_Unchained(by_dns[0], (("DNS", _SERVER_NAME),)), _SERVER_NAME, rules, False)
 
 
 class AClockBehindIsRetriedLikeABusy(unittest.TestCase):

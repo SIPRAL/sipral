@@ -138,7 +138,14 @@ public final class Media: @unchecked Sendable {
         self.textSocket = textSocket
         self.handle = try retryingBusy { try Sipral.callMedia(stack: stack.handle, call: callHandle) }
 
-        let info = try Sipral.mediaInfo(media: handle)
+        let info: sipral_media_info_t
+        do {
+            info = try Sipral.mediaInfo(media: handle)
+        } catch {
+            // the call ended between the two; nothing else would let it go
+            try? Sipral.mediaRelease(media: handle)
+            throw error
+        }
         self._sampleRate = Int(info.sample_rate)
         self._frameSamples = info.frame_samples
         self.frameSeconds = Double(max(info.frame_ms, 1)) / 1000.0

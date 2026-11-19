@@ -370,12 +370,12 @@ class NameRefused(ssl.SSLCertVerificationError):
         self.verify_message = sentence
 
 
-def https_names(certificate: dict, name: str) -> bool:
+def https_names(certificate: dict, name: str, wildcards: bool = True) -> bool:
     """Whether a verified certificate (``getpeercert()``) names ``name`` by
     the rules HTTPS uses, as OpenSSL's own check reads them: a DNS name equal
     to it without regard to case, a leading ``*.`` standing for one whole
-    label under at least two more; an IP address against an IP address
-    entry. The ``commonName`` is not read."""
+    label under at least two more (unless ``wildcards`` is false); an IP
+    address against an IP address entry. The ``commonName`` is not read."""
     try:
         address = ipaddress.ip_address(name.strip("[]"))
     except ValueError:
@@ -393,9 +393,21 @@ def https_names(certificate: dict, name: str) -> bool:
             if pattern == wanted:
                 return True
             label, _, rest = wanted.partition(".")
-            if pattern.startswith("*.") and pattern.count(".") >= 2 and label and rest == pattern[2:]:
+            if wildcards and pattern.startswith("*.") and pattern.count(".") >= 2 and label and rest == pattern[2:]:
                 return True
     return False
+
+
+def verified_chain(sock: ssl.SSLSocket) -> list[bytes] | None:
+    """The chain OpenSSL verified, leaf first and trust anchor last, in DER:
+    the ssl module's own from Python 3.13 on, the same list from the object
+    it wraps from 3.10; `None` on Python 3.9, which reads none."""
+    if hasattr(sock, "get_verified_chain"):
+        return list(sock.get_verified_chain())
+    inner = getattr(sock, "_sslobj", None)
+    if inner is None or not hasattr(inner, "get_verified_chain"):
+        return None
+    return [certificate.public_bytes(ssl._ssl.ENCODING_DER) for certificate in inner.get_verified_chain()]
 
 
 def check_name(sock: ssl.SSLSocket, server_name: str, rules: int, matched_already: bool) -> None:
@@ -408,13 +420,21 @@ def check_name(sock: ssl.SSLSocket, server_name: str, rules: int, matched_alread
     ``matched_already`` says OpenSSL checked the name itself and it held.
     Raises :class:`NameRefused`."""
     leaf = sock.getpeercert(binary_form=True) or b""
-    matched = matched_already or https_names(sock.getpeercert() or {}, server_name)
+    certificate = sock.getpeercert() or {}
+    matched = matched_already or https_names(certificate, server_name)
     if matched and rules == lib.SIPRAL_DOMAIN_RULES_PLATFORM:
         return
-    # the verified chain is the ssl module's from Python 3.13 on; before it
-    # there is none to read, and the leaf is read alone, its sip: URI held to
-    # no authority's name constraints
-    verified = sock.get_verified_chain() if hasattr(sock, "get_verified_chain") else [leaf]
+    verified = verified_chain(sock)
+    if verified is None:
+        # Python 3.9 reads no chain, so a sip: URI could be held to no
+        # authority's name constraints: only a DNS name or address that
+        # OpenSSL itself held to them names the server here
+        if not https_names(certificate, server_name, wildcards=rules == lib.SIPRAL_DOMAIN_RULES_PLATFORM):
+            raise NameRefused(
+                f"no DNS name in the server's certificate is {server_name}, and a sip: URI is read only "
+                "from Python 3.10, where the chain its authorities constrain can be read"
+            )
+        verified = [leaf]
     issuers = b"".join(verified[1:])
     domain = server_name.encode("utf-8")
     status = lib.sipral_certificate_check_domain_in_chain(

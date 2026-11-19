@@ -11677,6 +11677,12 @@ public static partial class Sipral
     /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media. Written only on
     /// `SIPRAL_STATUS_OK`.
     ///
+    /// A call that ended in the same poll as its media started (hung up as
+    /// soon as it was answered, or the stack shut just after) has both events
+    /// queued and its handle retired before either is read: asked from that
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED`, this answers
+    /// `SIPRAL_STATUS_STALE_HANDLE`, and there is no media to start.
+    ///
     /// The handle outlives the call: after the call ends or the stack is
     /// destroyed, media entry points answer `SIPRAL_STATUS_WRONG_STATE`. Hold,
     /// resume and codec changes keep it valid. Each handle is released once with

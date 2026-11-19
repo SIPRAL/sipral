@@ -9,7 +9,17 @@ import { EventEmitter, on } from 'node:events';
 import koffi from 'koffi';
 
 import type { MediaStatistics, StackEvent } from './events.js';
-import { check, checkNow, config, copyText, formatAddress, parseAddress, text, within } from './internal.js';
+import {
+  check,
+  checkNow,
+  config,
+  copyText,
+  formatAddress,
+  parseAddress,
+  SipralError,
+  text,
+  within,
+} from './internal.js';
 import { Media } from './media.js';
 import { SipralCallState, SipralDtmf, SipralEventKind, SipralStatus, SipralTransport } from './sipral_abi.js';
 import type { CallOptions, Stack } from './stack.js';
@@ -749,7 +759,20 @@ export class Call extends EventEmitter<CallEvents> {
           // from here the socket is the media's to read: the stack stops
           // handing what arrives on it to STUN first
           this.stack.releaseStunSocket(this.address);
-          this.mediaStream = new Media(this, this.socket, this.textSocket, this.stack.deviceMode);
+          try {
+            this.mediaStream = new Media(this, this.socket, this.textSocket, this.stack.deviceMode);
+          } catch (gone) {
+            // The call ended before this event was delivered (hung up as soon
+            // as it was answered, or the stack closed just after): its media
+            // is let go already, so there is none to start.
+            if (
+              gone instanceof SipralError &&
+              (gone.status === SipralStatus.WrongState || gone.status === SipralStatus.StaleHandle)
+            ) {
+              break;
+            }
+            throw gone;
+          }
           this.emit('media', this.mediaStream);
         }
         break;

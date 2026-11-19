@@ -230,6 +230,51 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         Assert.Null(aliceCall.Media);
     }
 
+    /// <summary>A MediaStarted delivered after its call ended, still open
+    /// (its CallEnded read in the same poll: hung up as soon as answered, or
+    /// the stack disposed just after), finds the media let go already. The
+    /// call keeps none and the poll thread gets no exception.</summary>
+    [Fact]
+    public async Task AMediaStartedForACallAlreadyEndedStartsNothing()
+    {
+        var aliceAccount = _alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: _bob.BindAddress);
+        _bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: _alice.BindAddress);
+        var aliceCall = _alice.PlaceCall(aliceAccount, $"sip:bob@{_bob.BindAddress}");
+        try
+        {
+            var incoming = await FirstMatchingAsync(_bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
+            _bob.RejectCall(incoming);
+            var deadline = DateTime.UtcNow + Timeout;
+            while (!aliceCall.Ended && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+            Assert.True(aliceCall.Ended);
+
+            var evt = global::Sipral.SipralEvent.Sized();
+            evt.Kind = SipralEventKind.MediaStarted;
+            evt.Call = aliceCall.Handle;
+            var raw = Marshal.AllocHGlobal(Marshal.SizeOf<global::Sipral.SipralEvent>());
+            SipralEventArgs late;
+            try
+            {
+                Marshal.StructureToPtr(evt, raw, false);
+                late = SipralEventArgs.Decode(raw);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(raw);
+            }
+
+            aliceCall.Deliver(late);
+            Assert.Null(aliceCall.Media);
+        }
+        finally
+        {
+            aliceCall.Close();
+        }
+    }
+
     /// <summary>The final statistics record is kept and served after the
     /// library answers <c>WRONG_STATE</c>.</summary>
     [Fact]

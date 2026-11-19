@@ -59,6 +59,10 @@ class IdiomaticSipCalls(
     override fun announceOnEveryAccount(target: String?, caller: String?, callId: String?): SipralAnnounced =
         client.announce(caller, callId, target)
 
+    // user and host, as the library compares an address of record with a push's target
+    override fun accountsAddressedAs(target: String): Set<Long> =
+        accounts.values.filter { sameCaller(target, it.aor) }.map { it.handle }.toSet()
+
     override fun forgetAnnouncement(announcement: Long) {
         client.forgetAnnouncement(announcement)
     }

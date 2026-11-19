@@ -10,6 +10,7 @@ proxy: place, answer, exchange audio, send a DTMF digit, read statistics.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 import unittest
 
@@ -317,6 +318,38 @@ class ACallsOwnCodecs(unittest.IsolatedAsyncioTestCase):
     async def test_a_call_answered_with_pcma_negotiates_it_when_offered_both(self) -> None:
         codecs = await self._codec_of_a_call("PCMA,PCMU", "PCMU", None, "PCMA,PCMU")
         self.assertEqual(codecs, (lib.SIPRAL_CODEC_PCMA, lib.SIPRAL_CODEC_PCMA))
+
+
+class AMediaStartLateForItsCall(unittest.IsolatedAsyncioTestCase):
+    """A MEDIA_STARTED delivered after its call ended (the CALL_ENDED read in
+    the same poll, the stack closed as soon as the call was answered) finds
+    the media let go already: the call keeps none and the poll thread gets no
+    exception."""
+
+    async def test_a_call_already_ended_starts_no_media_and_throws_nothing(self) -> None:
+        loop = asyncio.get_running_loop()
+        alice = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        bob = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        self.addCleanup(bob.close)
+        self.addCleanup(alice.close)
+        account = alice.add_account("sip:alice@sipral.invalid", registrar_address=bob.bind_address)
+        bob.add_account("sip:bob@sipral.invalid", registrar_address=alice.bind_address)
+
+        call = alice.place_call(account, f"sip:bob@{bob.bind_address}")
+        self.addCleanup(call.close)
+        while True:
+            event = await asyncio.wait_for(bob.events.get(), timeout=10)
+            if event.kind == EventKind.INCOMING_CALL:
+                bob.reject_call(event)
+                break
+        ended = None
+        while ended is None:
+            event = await asyncio.wait_for(call.events.get(), timeout=10)
+            if event.kind == EventKind.CALL_ENDED:
+                ended = event
+
+        call.deliver(dataclasses.replace(ended, kind=lib.SIPRAL_EVENT_KIND_MEDIA_STARTED))
+        self.assertIsNone(call.media)
 
 
 if __name__ == "__main__":

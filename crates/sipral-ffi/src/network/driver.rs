@@ -74,6 +74,13 @@ const PATIENCE: Duration = Duration::from_millis(500);
 /// given up: the reader's own backlog's size.
 const UNREAD_LIMIT: usize = 4 * 1024 * 1024;
 
+/// How long a write on a TURN connection waits for the server to take it, or for another
+/// thread's write to end, before the connection is given up. The loop that writes there also
+/// carries signalling, and the other writer is an audio thread: neither may wait out the
+/// connection's whole patience. A connection whose server took nothing for this long holds the
+/// media back far longer than a call can bear.
+const RELAY_WRITE_LIMIT: Duration = Duration::from_millis(250);
+
 /// What the observer noted for the component, during a poll.
 enum Seen {
     Wanted {
@@ -1203,7 +1210,7 @@ fn send_from(shared: &Shared, driver: &mut Driver, leaving: Leaving, clock: &Clo
     };
     if driver
         .network
-        .send(TransportId(id), leaving.to, payload)
+        .send_within(TransportId(id), leaving.to, payload, RELAY_WRITE_LIMIT)
         .is_err()
     {
         lose_relay(shared, driver, id, clock);
@@ -1816,7 +1823,7 @@ pub(super) unsafe fn media_capture(
         if let Some(relay) = relay {
             // a connection that will not take it is heard ending by its reader, which tells the
             // stack
-            let _ = relay.send(payload);
+            let _ = relay.send_within(payload, RELAY_WRITE_LIMIT);
         }
     }
     Ok(())

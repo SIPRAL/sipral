@@ -77,23 +77,61 @@ final class SipralMediaStatistics {
 /// Each frame tick plays the far end's audio into [frames] and sends one
 /// frame of what [sendAudio] queued, or silence.
 final class SipralMedia {
-  SipralMedia._(this.call, this._socket) {
+  /// The media of [call], or null when the call ended before its
+  /// `mediaStarted` was delivered: its `callEnded` came in the same batch
+  /// (hung up as soon as it was answered, or closed just after), and the
+  /// library has let its media go already.
+  static SipralMedia? _of(SipralCall call, RawDatagramSocket socket) {
     final sipral = call.stack._sipral;
-    using((arena) {
+    final minted = using((arena) {
       final out = arena<SipralHandle>();
-      _check(
-        sipral,
-        'sipral_call_media',
-        sipral.callMedia(call.stack.handle, call.handle, out),
-      );
-      handle = out.value;
+      final status = sipral.callMedia(call.stack.handle, call.handle, out);
+      if (_gone(status)) {
+        return null;
+      }
+      _check(sipral, 'sipral_call_media', status);
+      final handle = out.value;
       final info = arena<SipralMediaInfo>();
       info.ref.size = ffi.sizeOf<SipralMediaInfo>();
-      _check(sipral, 'sipral_media_info', sipral.mediaInfo(handle, info));
-      _sampleRate = info.ref.sampleRate;
-      _frameSamples = info.ref.frameSamples;
-      frameMs = max(info.ref.frameMs, 1);
+      final read = sipral.mediaInfo(handle, info);
+      if (read != SipralStatus.ok) {
+        sipral.mediaRelease(handle);
+        if (_gone(read)) {
+          return null;
+        }
+        _check(sipral, 'sipral_media_info', read);
+      }
+      return (
+        handle: handle,
+        sampleRate: info.ref.sampleRate,
+        frameSamples: info.ref.frameSamples,
+        frameMs: max(info.ref.frameMs, 1),
+      );
     });
+    if (minted == null) {
+      return null;
+    }
+    return SipralMedia._(
+      call,
+      socket,
+      minted.handle,
+      minted.sampleRate,
+      minted.frameSamples,
+      minted.frameMs,
+    );
+  }
+
+  static bool _gone(int status) =>
+      status == SipralStatus.wrongState || status == SipralStatus.staleHandle;
+
+  SipralMedia._(
+    this.call,
+    this._socket,
+    this.handle,
+    this._sampleRate,
+    this._frameSamples,
+    this.frameMs,
+  ) {
     _playback = calloc<ffi.Int16>(frameSamples);
     _capture = calloc<ffi.Int16>(frameSamples);
     _reading = _socket.listen((event) {
@@ -109,19 +147,19 @@ final class SipralMedia {
   final SipralCall call;
 
   /// The media handle.
-  late final int handle;
+  final int handle;
 
   /// The rate of the PCM in [frames] and [sendAudio], in hertz: the
   /// codec's, or the one [setAppRate] chose.
   int get sampleRate => _sampleRate;
-  late int _sampleRate;
+  int _sampleRate;
 
   /// How many samples one frame is, at [sampleRate].
   int get frameSamples => _frameSamples;
-  late int _frameSamples;
+  int _frameSamples;
 
   /// How long one frame is, in milliseconds.
-  late final int frameMs;
+  final int frameMs;
 
   final RawDatagramSocket _socket;
   late final StreamSubscription<RawSocketEvent> _reading;

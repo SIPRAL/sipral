@@ -135,7 +135,10 @@ impl IceAgent {
         }
         formed.sort_by_key(|pair| core::cmp::Reverse(pair.0));
         prune_sorted(&mut formed, |pair| (pair.1, pair.2));
-        formed.retain(|pair| self.pair_between(stream, pair.1, pair.2).is_none());
+        formed.retain(|pair| {
+            self.pair_between(stream, pair.1, pair.2).is_none()
+                && !self.failed_away.contains(&(stream, pair.1, pair.2))
+        });
 
         let first = self.next_pair;
         for (priority, local, remote, component) in formed {
@@ -194,7 +197,9 @@ impl IceAgent {
                 else {
                     break;
                 };
-                self.pairs.remove(lowest);
+                let gone = self.pairs.remove(lowest);
+                self.failed_away
+                    .push((gone.stream, gone.local, gone.remote));
             }
         }
         let sizes: Vec<usize> = (0..self.streams.len())
